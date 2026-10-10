@@ -2,7 +2,7 @@
 
 use std::collections::BTreeMap;
 
-use devo_protocol::{ProviderInfo, ProviderModelInfo, ProviderModelVariant};
+use devo_protocol::{ProviderInfo, ProviderModelInfo, ProviderModelOrigin, ProviderModelVariant};
 
 use super::{AppConfigLoader, AppConfigStore};
 use crate::{
@@ -70,6 +70,17 @@ impl AppConfigStore {
             .any(|connected_id| connected_id == &provider_id)
         {
             anyhow::bail!("provider {provider_id} is not a user Connection");
+        }
+
+        let editable = self.load_editable_provider_catalog()?;
+        let model = editable
+            .providers
+            .get(&provider_id)
+            .and_then(|provider| provider.models.get(&model_id));
+        if model.and_then(|model| model.origin) != Some(ProviderModelOrigin::User) {
+            anyhow::bail!(
+                "catalog model {provider_id}/{model_id} is read-only; only manually added models can be removed"
+            );
         }
 
         let connection_path = self.user_provider_config_file();
@@ -208,7 +219,25 @@ impl AppConfigStore {
         {
             let entry = config.providers.entry(provider_id.clone()).or_default();
             apply_provider_info(entry, &provider, credential.clone());
-            for (model_id, model_info) in provider.models {
+            for (model_id, mut model_info) in provider.models {
+                let existing = entry
+                    .models
+                    .get(&model_id)
+                    .or_else(|| entry.model_overrides.get(&model_id));
+                model_info.origin = if existing.and_then(|model| model.origin)
+                    == Some(ProviderModelOrigin::Remote)
+                    || model_info.origin == Some(ProviderModelOrigin::Remote)
+                {
+                    Some(ProviderModelOrigin::Remote)
+                } else if builtin_baseline
+                    .is_some_and(|baseline| baseline.models.contains_key(&model_id))
+                {
+                    None
+                } else if let Some(existing) = existing {
+                    existing.origin
+                } else {
+                    Some(ProviderModelOrigin::User)
+                };
                 entry
                     .models
                     .insert(model_id, provider_model_config_from_info(model_info));
@@ -393,6 +422,7 @@ fn apply_provider_info(
 
 fn provider_model_config_from_info(info: ProviderModelInfo) -> ProviderModelConfig {
     ProviderModelConfig {
+        origin: info.origin,
         name: info.name,
         family: info.family,
         release_date: info.release_date,
@@ -502,6 +532,7 @@ fn provider_model_info_from_config(config: &ProviderModelConfig) -> ProviderMode
             .is_some_and(|map| !map.is_empty())
         || !matches!(capability, devo_protocol::ReasoningCapability::Unsupported);
     ProviderModelInfo {
+        origin: config.origin,
         name: config.name.clone(),
         family: config.family.clone(),
         release_date: config.release_date.clone(),

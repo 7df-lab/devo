@@ -364,6 +364,7 @@ fn model_from_models_dev(
     existing: Option<&ProviderModelConfig>,
 ) -> ProviderModelConfig {
     let mut model = existing.cloned().unwrap_or_default();
+    model.origin = Some(devo_protocol::ProviderModelOrigin::Remote);
 
     if let Some(name) = remote.get("name").and_then(Value::as_str) {
         model.name = Some(name.to_string());
@@ -561,6 +562,25 @@ mod tests {
         );
         fs::remove_file(remote_catalog_api_path(dir.path())).expect("remove fixture dump");
         assert!(!cache_is_fresh(dir.path(), source, 24));
+    }
+
+    #[test]
+    fn remote_model_ownership_survives_user_overrides() {
+        let mut model = model_from_models_dev(&json!({"name": "Remote"}), /*existing*/ None);
+        model.apply_overlay(ProviderModelConfig {
+            origin: Some(devo_protocol::ProviderModelOrigin::User),
+            enabled: Some(false),
+            ..ProviderModelConfig::default()
+        });
+        assert_eq!(
+            model,
+            ProviderModelConfig {
+                origin: Some(devo_protocol::ProviderModelOrigin::Remote),
+                name: Some("Remote".to_string()),
+                enabled: Some(false),
+                ..ProviderModelConfig::default()
+            }
+        );
     }
 
     #[test]

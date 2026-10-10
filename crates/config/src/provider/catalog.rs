@@ -121,6 +121,9 @@ pub struct ProviderConfigEntry {
 /// description field is needed in the persisted format.
 #[derive(Debug, Clone, Default, PartialEq, Serialize, Deserialize)]
 pub struct ProviderModelConfig {
+    /// Persisted ownership; missing provenance is conservatively read-only.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub origin: Option<devo_protocol::ProviderModelOrigin>,
     /// Optional display name shown in model pickers.
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub name: Option<String>,
@@ -701,6 +704,13 @@ impl ProviderModelConfig {
     /// model-settings object. Absent fields preserve the existing catalog
     /// value, matching the normal provider catalog merge semantics.
     pub fn apply_overlay(&mut self, overlay: Self) {
+        // A user override must never turn a remote directory entry into an
+        // independently removable model.
+        if self.origin != Some(devo_protocol::ProviderModelOrigin::Remote)
+            && overlay.origin.is_some()
+        {
+            self.origin = overlay.origin;
+        }
         macro_rules! replace_some {
             ($field:ident) => {
                 if overlay.$field.is_some() {

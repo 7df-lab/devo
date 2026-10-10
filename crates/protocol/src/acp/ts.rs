@@ -335,6 +335,7 @@ export type SubscriptionUnsubscribeParams = { subscriptionId: SubscriptionId, };
     push_decl::<ProviderWireApi>(&cfg, &mut output);
     push_decl::<InputModality>(&cfg, &mut output);
     push_decl::<ProviderModelVariant>(&cfg, &mut output);
+    push_decl::<ProviderModelOrigin>(&cfg, &mut output);
     push_decl::<ProviderModelInfo>(&cfg, &mut output);
     push_decl::<ProviderInfo>(&cfg, &mut output);
     push_decl::<ModelCatalogEntry>(&cfg, &mut output);

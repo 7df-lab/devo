@@ -454,6 +454,7 @@ fn connection_models_can_be_listed_and_removed_without_affecting_the_provider() 
         BTreeMap::from([(
             "custom-model".to_string(),
             ProviderModelInfo {
+                origin: Some(devo_protocol::ProviderModelOrigin::User),
                 name: Some("Custom model".to_string()),
                 web_search: Some(serde_json::json!({"mode": "disabled"})),
                 web_fetch: Some(serde_json::json!({"mode": "provider"})),

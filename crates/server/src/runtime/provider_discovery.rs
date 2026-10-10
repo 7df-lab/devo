@@ -144,10 +144,11 @@ impl ServerRuntime {
         // entries that 404 on chat completions).
         let mut next_models = BTreeMap::new();
         for (model_id, discovered_model) in discovered {
-            let model = match provider.models.remove(&model_id) {
+            let mut model = match provider.models.remove(&model_id) {
                 Some(existing) => merge_discovered_model(existing, discovered_model),
                 None => discovered_model,
             };
+            model.origin = Some(devo_protocol::ProviderModelOrigin::Remote);
             next_models.insert(model_id, model);
         }
         provider.models = next_models;

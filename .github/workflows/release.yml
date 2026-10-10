@@ -170,14 +170,14 @@ jobs:
         if: matrix.package_cli
         shell: bash
         run: |
-          staging=devo-${{ github.ref_name }}-${{ matrix.target }}
+          staging=devo-tui-${{ github.ref_name }}-${{ matrix.target }}
           bun scripts/runtime/bundle.ts "${{ matrix.target }}" "$staging" "$DEVO_DESKTOP_RUNTIME_RG_BIN" "target/${{ matrix.target }}/release"
           echo "STAGING=$staging" >> "$GITHUB_ENV"
 
       - name: Verify private runtimes outside the checkout
         shell: bash
         run: |
-          bun scripts/runtime/smoke.ts "devo-${{ github.ref_name }}-${{ matrix.target }}"
+          bun scripts/runtime/smoke.ts "devo-tui-${{ github.ref_name }}-${{ matrix.target }}"
 
       - name: Create tar.gz archive (Linux/macOS)
         if: matrix.package_cli && runner.os != 'Windows'
@@ -193,8 +193,8 @@ jobs:
       - uses: actions/upload-artifact@v4
         if: matrix.package_cli
         with:
-          name: devo-${{ github.ref_name }}-${{ matrix.target }}
-          path: devo-${{ github.ref_name }}-${{ matrix.target }}.*
+          name: devo-tui-${{ github.ref_name }}-${{ matrix.target }}
+          path: devo-tui-${{ github.ref_name }}-${{ matrix.target }}.*
 
       # ── Desktop package (reuses the binary compiled above) ────────────────
       - name: Install desktop dependencies
@@ -210,7 +210,7 @@ jobs:
       - name: Stage desktop runtime from release binary
         if: matrix.package_desktop
         working-directory: apps/desktop
-        run: bun scripts/prepare-runtime.ts --target ${{ matrix.target }} --bundle-dir ../../devo-${{ github.ref_name }}-${{ matrix.target }}
+        run: bun scripts/prepare-runtime.ts --target ${{ matrix.target }} --bundle-dir ../../devo-tui-${{ github.ref_name }}-${{ matrix.target }}
 
       - name: Package desktop with electron-builder
         if: matrix.package_desktop
@@ -262,6 +262,8 @@ jobs:
           ## Install
 
           Packages include private Node and Python runtimes, the compiled TUI, locked Python dependencies, and ripgrep. No system Node.js, Python, npm, pip, or Rust installation is required. Keep the extracted archive together.
+
+          Terminal archives use the `devo-tui-` prefix; graphical installers use `devo-desktop-`. The terminal command remains `devo`.
 
           For offline installation, transfer the complete archive and use its included installer with `--offline` (Unix) or `-Offline` (Windows). Cloud inference still requires connectivity; use a compatible preloaded local or LAN model for disconnected use.
 

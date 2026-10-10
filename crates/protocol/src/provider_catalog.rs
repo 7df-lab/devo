@@ -38,6 +38,15 @@ pub struct ProviderModelVariant {
     pub headers: BTreeMap<String, String>,
 }
 
+/// Ownership of a model entry. Remote entries cannot be removed by clients;
+/// user entries are manually added models. Missing provenance is read-only.
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize, Deserialize, JsonSchema, TS)]
+#[serde(rename_all = "camelCase")]
+pub enum ProviderModelOrigin {
+    Remote,
+    User,
+}
+
 /// One model entry in a provider's directory.
 ///
 /// The containing `models` map supplies the model id. No second slug, name,
@@ -45,6 +54,9 @@ pub struct ProviderModelVariant {
 #[derive(Debug, Clone, Default, PartialEq, Serialize, Deserialize, JsonSchema, TS)]
 #[serde(rename_all = "camelCase")]
 pub struct ProviderModelInfo {
+    /// Persisted ownership, independent of connection state and user overrides.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub origin: Option<ProviderModelOrigin>,
     #[serde(
         default,
         alias = "display_name",

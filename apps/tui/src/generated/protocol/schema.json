@@ -91802,6 +91802,17 @@
               ]
             },
             "options": true,
+            "origin": {
+              "description": "Persisted ownership, independent of connection state and user overrides.",
+              "anyOf": [
+                {
+                  "$ref": "#/definitions/ProviderModelOrigin"
+                },
+                {
+                  "type": "null"
+                }
+              ]
+            },
             "priority": {
               "type": [
                 "integer",
@@ -91909,6 +91920,14 @@
               ]
             }
           }
+        },
+        "ProviderModelOrigin": {
+          "description": "Ownership of a model entry. Remote entries cannot be removed by clients; user entries are manually added models. Missing provenance is read-only.",
+          "type": "string",
+          "enum": [
+            "remote",
+            "user"
+          ]
         },
         "ProviderModelVariant": {
           "description": "A named model variant, such as a provider's fast or high-reasoning mode.\n\n`request`, `options`, and `headers` are deliberately open-ended so a provider integration can add capabilities without a protocol migration.",
@@ -92352,6 +92371,17 @@
               ]
             },
             "options": true,
+            "origin": {
+              "description": "Persisted ownership, independent of connection state and user overrides.",
+              "anyOf": [
+                {
+                  "$ref": "#/definitions/ProviderModelOrigin"
+                },
+                {
+                  "type": "null"
+                }
+              ]
+            },
             "priority": {
               "type": [
                 "integer",
@@ -92459,6 +92489,14 @@
               ]
             }
           }
+        },
+        "ProviderModelOrigin": {
+          "description": "Ownership of a model entry. Remote entries cannot be removed by clients; user entries are manually added models. Missing provenance is read-only.",
+          "type": "string",
+          "enum": [
+            "remote",
+            "user"
+          ]
         },
         "ProviderModelVariant": {
           "description": "A named model variant, such as a provider's fast or high-reasoning mode.\n\n`request`, `options`, and `headers` are deliberately open-ended so a provider integration can add capabilities without a protocol migration.",
@@ -92923,6 +92961,17 @@
               ]
             },
             "options": true,
+            "origin": {
+              "description": "Persisted ownership, independent of connection state and user overrides.",
+              "anyOf": [
+                {
+                  "$ref": "#/definitions/ProviderModelOrigin"
+                },
+                {
+                  "type": "null"
+                }
+              ]
+            },
             "priority": {
               "type": [
                 "integer",
@@ -93030,6 +93079,14 @@
               ]
             }
           }
+        },
+        "ProviderModelOrigin": {
+          "description": "Ownership of a model entry. Remote entries cannot be removed by clients; user entries are manually added models. Missing provenance is read-only.",
+          "type": "string",
+          "enum": [
+            "remote",
+            "user"
+          ]
         },
         "ProviderModelVariant": {
           "description": "A named model variant, such as a provider's fast or high-reasoning mode.\n\n`request`, `options`, and `headers` are deliberately open-ended so a provider integration can add capabilities without a protocol migration.",
@@ -93451,6 +93508,17 @@
               ]
             },
             "options": true,
+            "origin": {
+              "description": "Persisted ownership, independent of connection state and user overrides.",
+              "anyOf": [
+                {
+                  "$ref": "#/definitions/ProviderModelOrigin"
+                },
+                {
+                  "type": "null"
+                }
+              ]
+            },
             "priority": {
               "type": [
                 "integer",
@@ -93558,6 +93626,14 @@
               ]
             }
           }
+        },
+        "ProviderModelOrigin": {
+          "description": "Ownership of a model entry. Remote entries cannot be removed by clients; user entries are manually added models. Missing provenance is read-only.",
+          "type": "string",
+          "enum": [
+            "remote",
+            "user"
+          ]
         },
         "ProviderModelVariant": {
           "description": "A named model variant, such as a provider's fast or high-reasoning mode.\n\n`request`, `options`, and `headers` are deliberately open-ended so a provider integration can add capabilities without a protocol migration.",
@@ -93978,6 +94054,17 @@
               ]
             },
             "options": true,
+            "origin": {
+              "description": "Persisted ownership, independent of connection state and user overrides.",
+              "anyOf": [
+                {
+                  "$ref": "#/definitions/ProviderModelOrigin"
+                },
+                {
+                  "type": "null"
+                }
+              ]
+            },
             "priority": {
               "type": [
                 "integer",
@@ -94085,6 +94172,14 @@
               ]
             }
           }
+        },
+        "ProviderModelOrigin": {
+          "description": "Ownership of a model entry. Remote entries cannot be removed by clients; user entries are manually added models. Missing provenance is read-only.",
+          "type": "string",
+          "enum": [
+            "remote",
+            "user"
+          ]
         },
         "ProviderModelVariant": {
           "description": "A named model variant, such as a provider's fast or high-reasoning mode.\n\n`request`, `options`, and `headers` are deliberately open-ended so a provider integration can add capabilities without a protocol migration.",

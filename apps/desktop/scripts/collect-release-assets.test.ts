@@ -88,3 +88,19 @@ test("release collection rejects assets that disagree with update checksums", as
 		await rm(fixture.root, { recursive: true, force: true });
 	}
 });
+
+test("release collection includes devo-tui archives in SHA256SUMS", async () => {
+	const fixture = await makeArtifacts();
+	try {
+		const name = "devo-tui-v0.2.0-x86_64-unknown-linux-musl.tar.gz";
+		const content = Buffer.from("terminal bundle");
+		await writeFile(join(fixture.input, name), content);
+		const result = await collect(fixture.input, fixture.output);
+		expect(result).toEqual({ exitCode: 0, stdout: "Collected 5 assets and 1 merged update manifests for v0.2.0\n", stderr: "" });
+		expect(await readFile(join(fixture.output, name))).toEqual(content);
+		const checksums = (await readFile(join(fixture.output, "SHA256SUMS.txt"), "utf8")).trim().split("\n");
+		expect(checksums.filter(line => line.endsWith(`  ${name}`))).toEqual([`${createHash("sha256").update(content).digest("hex")}  ${name}`]);
+	} finally {
+		await rm(fixture.root, { recursive: true, force: true });
+	}
+});
