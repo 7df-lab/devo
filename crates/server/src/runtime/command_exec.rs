@@ -63,7 +63,7 @@ pub(super) struct CompletedTaskRecord {
 }
 
 /// Live-or-terminal snapshot of one facade process task.
-#[derive(Clone)]
+#[derive(Clone, Debug, PartialEq, Eq)]
 pub(super) struct TaskProcessSnapshot {
     pub(super) process_id: String,
     pub(super) session_id: Option<SessionId>,
@@ -125,22 +125,21 @@ impl CommandExecManager {
         }
     }
 
-    fn process_running_state(process: Option<&UnifiedExecProcess>) -> (bool, Option<i32>) {
-        process
-            .map(|process| {
-                let exit_code = process.exit_code();
-                (exit_code.is_none() && process.is_running(), exit_code)
-            })
-            .unwrap_or((false, None))
-    }
-
-    async fn snapshot_for_key(
-        &self,
-        key: &CommandExecKey,
-        store_process_id: i32,
-    ) -> TaskProcessSnapshot {
-        let process = self.store.get(store_process_id).await;
-        let (is_running, exit_code) = Self::process_running_state(process.as_deref());
+    async fn snapshot_for_key(&self, key: &CommandExecKey) -> TaskProcessSnapshot {
+        // OS exit can precede the output pump. Only the retained record marks
+        // completion, so terminal snapshots always include the drained tail.
+        if let Some(record) = self.completed.lock().await.iter().find(|record| {
+            record.session_id == key.session_id && record.process_id == key.process_id
+        }) {
+            return TaskProcessSnapshot {
+                process_id: record.process_id.clone(),
+                session_id: record.session_id,
+                command: record.command.clone(),
+                is_running: false,
+                exit_code: record.exit_code,
+                tail: record.tail.clone(),
+            };
+        }
         let command = {
             let sessions = self.sessions.lock().await;
             sessions
@@ -159,8 +158,8 @@ impl CommandExecManager {
             process_id: key.process_id.clone(),
             session_id: key.session_id,
             command,
-            is_running,
-            exit_code,
+            is_running: true,
+            exit_code: None,
             tail,
         }
     }
@@ -176,12 +175,12 @@ impl CommandExecManager {
         let live = {
             let sessions = self.sessions.lock().await;
             sessions
-                .iter()
-                .find(|(key, _)| key.process_id == process_id)
-                .map(|(key, session)| (key.clone(), session.store_process_id))
+                .keys()
+                .find(|key| key.process_id == process_id)
+                .cloned()
         };
-        if let Some((key, store_process_id)) = live {
-            return Some(self.snapshot_for_key(&key, store_process_id).await);
+        if let Some(key) = live {
+            return Some(self.snapshot_for_key(&key).await);
         }
         let completed = self.completed.lock().await;
         completed
@@ -203,20 +202,24 @@ impl CommandExecManager {
         session_id: SessionId,
     ) -> Vec<TaskProcessSnapshot> {
         let mut snapshots = Vec::new();
-        let keys: Vec<(CommandExecKey, i32)> = {
+        let keys: Vec<CommandExecKey> = {
             let sessions = self.sessions.lock().await;
             sessions
-                .iter()
-                .filter(|(key, _)| key.session_id == Some(session_id))
-                .map(|(key, session)| (key.clone(), session.store_process_id))
+                .keys()
+                .filter(|key| key.session_id == Some(session_id))
+                .cloned()
                 .collect()
         };
-        for (key, store_process_id) in keys {
-            snapshots.push(self.snapshot_for_key(&key, store_process_id).await);
+        for key in keys {
+            snapshots.push(self.snapshot_for_key(&key).await);
         }
         let completed = self.completed.lock().await;
         for record in completed.iter() {
-            if record.session_id == Some(session_id) {
+            if record.session_id == Some(session_id)
+                && !snapshots
+                    .iter()
+                    .any(|snapshot| snapshot.process_id == record.process_id)
+            {
                 snapshots.push(TaskProcessSnapshot {
                     process_id: record.process_id.clone(),
                     session_id: record.session_id,
@@ -471,7 +474,7 @@ impl CommandExecManager {
                     _ = tokio::time::sleep(EXIT_POLL_INTERVAL) => {}
                 }
 
-                if process.exit_code().is_some() {
+                if !process.is_running() && process.exit_code().is_some() {
                     break;
                 }
             }
@@ -486,15 +489,6 @@ impl CommandExecManager {
                     .await;
             }
 
-            let notification = ServerNotification::CommandExecExited {
-                // boundary: UnifiedExecProcess key stores legacy SessionId only
-                session_id: key.session_id,
-                process_id: key.process_id.clone(),
-                exit_code: process.exit_code(),
-            };
-            runtime
-                .emit_notification_to_connection(key.connection_id, notification)
-                .await;
             let command = {
                 let sessions = manager.sessions.lock().await;
                 sessions
@@ -525,6 +519,15 @@ impl CommandExecManager {
                     completed.pop_front();
                 }
             }
+            let notification = ServerNotification::CommandExecExited {
+                // boundary: UnifiedExecProcess key stores legacy SessionId only
+                session_id: key.session_id,
+                process_id: key.process_id.clone(),
+                exit_code: process.exit_code(),
+            };
+            runtime
+                .emit_notification_to_connection(key.connection_id, notification)
+                .await;
             if let Some(session_id) = key.session_id {
                 runtime
                     .persist_shell_background_task(
@@ -1317,3 +1320,7 @@ fn background_task_item_from_snapshot(
         parent_id: None,
     }
 }
+
+#[cfg(test)]
+#[path = "command_exec_tests.rs"]
+mod tests;

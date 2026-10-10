@@ -1,0 +1,90 @@
+import { expect, test } from "bun:test";
+import { createHash } from "node:crypto";
+import { mkdir, mkdtemp, readFile, readdir, rm, writeFile } from "node:fs/promises";
+import { tmpdir } from "node:os";
+import { join } from "node:path";
+
+async function makeArtifacts() {
+	const root = await mkdtemp(join(tmpdir(), "devo-release-assets-"));
+	const input = join(root, "artifacts");
+	const output = join(root, "release-assets");
+	const files = [];
+	for (const arch of ["x64", "arm64"]) {
+		const directory = join(input, `desktop-mac-${arch}`);
+		await mkdir(directory, { recursive: true });
+		const content = Buffer.from(`installer-${arch}`);
+		const file = {
+			url: `devo-desktop-0.2.0-mac-${arch}.zip`,
+			sha512: createHash("sha512").update(content).digest("base64"),
+			size: content.length,
+		};
+		files.push(file);
+		await writeFile(join(directory, file.url), content);
+		await writeFile(join(directory, `${file.url}.blockmap`), "blockmap");
+		await writeFile(join(directory, "builder-debug.yml"), "debug: true\n");
+		await writeFile(
+			join(directory, "latest-mac.yml"),
+			Bun.YAML.stringify({
+				version: "0.2.0",
+				files: [file],
+				path: file.url,
+				sha512: file.sha512,
+			}),
+		);
+	}
+	return { root, input, output, files };
+}
+
+async function collect(input: string, output: string) {
+	const child = Bun.spawn({
+		cmd: [process.execPath, join(import.meta.dir, "collect-release-assets.ts"), input, output, "v0.2.0"],
+		stdout: "pipe",
+		stderr: "pipe",
+	});
+	const [exitCode, stdout, stderr] = await Promise.all([
+		child.exited,
+		new Response(child.stdout).text(),
+		new Response(child.stderr).text(),
+	]);
+	return { exitCode, stdout, stderr };
+}
+
+test("release collection preserves both Mac architectures and blockmaps without debug files", async () => {
+	const fixture = await makeArtifacts();
+	try {
+		const result = await collect(fixture.input, fixture.output);
+		expect(result).toEqual({
+			exitCode: 0,
+			stdout: "Collected 4 assets and 1 merged update manifests for v0.2.0\n",
+			stderr: "",
+		});
+		expect({
+			assets: (await readdir(fixture.output)).sort(),
+			manifest: Bun.YAML.parse(await readFile(join(fixture.output, "latest-mac.yml"), "utf8")),
+		}).toEqual({
+			assets: [...fixture.files.flatMap(file => [file.url, `${file.url}.blockmap`]), "latest-mac.yml"].sort(),
+			manifest: {
+				version: "0.2.0",
+				files: fixture.files,
+				path: fixture.files[0].url,
+				sha512: fixture.files[0].sha512,
+			},
+		});
+	} finally {
+		await rm(fixture.root, { recursive: true, force: true });
+	}
+});
+
+test("release collection rejects assets that disagree with update checksums", async () => {
+	const fixture = await makeArtifacts();
+	try {
+		await writeFile(join(fixture.input, "desktop-mac-arm64", fixture.files[1].url), "installer-ARM64");
+		const result = await collect(fixture.input, fixture.output);
+		expect({
+			exitCode: result.exitCode,
+			checksumError: result.stderr.includes(`Update asset checksum mismatch: ${fixture.files[1].url}`),
+		}).toEqual({ exitCode: 1, checksumError: true });
+	} finally {
+		await rm(fixture.root, { recursive: true, force: true });
+	}
+});

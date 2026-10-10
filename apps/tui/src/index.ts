@@ -54,7 +54,7 @@ export async function main(): Promise<void> {
 
   await conn.initialize({
     name: "devo-tui",
-    version: process.env.DEVO_VERSION || "0.1.39",
+    version: process.env.DEVO_VERSION || "0.2.0",
   });
 
   const resumeSessionId = String(process.env.DEVO_RESUME_SESSION_ID ?? "").trim();
