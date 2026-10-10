@@ -1,5 +1,7 @@
 //! Session-scoped REPL process and execute/interrupt/shutdown.
 
+#[cfg(test)]
+mod inflight_wait_tests;
 mod session_event_pump;
 
 use std::path::{Path, PathBuf};
@@ -304,6 +306,11 @@ impl InFlightCell {
 
     /// Wait up to `budget` for the cell to finish.
     pub async fn wait_for(&self, budget: Duration) -> Result<CellWaitOutcome, ReplError> {
+        // Register before inspecting terminal state: notify_waiters does not
+        // retain a permit when completion races with an unregistered waiter.
+        let notified = self.done.notified();
+        tokio::pin!(notified);
+        notified.as_mut().enable();
         if let Some(outcome) = self.try_take_done().await? {
             return Ok(CellWaitOutcome::Done(outcome));
         }
@@ -313,7 +320,7 @@ impl InFlightCell {
             });
         }
         tokio::select! {
-            () = self.done.notified() => {}
+            () = &mut notified => {}
             () = tokio::time::sleep(budget) => {
                 if let Some(outcome) = self.try_take_done().await? {
                     return Ok(CellWaitOutcome::Done(outcome));
@@ -335,10 +342,13 @@ impl InFlightCell {
     /// Wait until the cell reaches `done` (or collector error).
     pub async fn wait_until_done(self) -> Result<CellOutput, ReplError> {
         loop {
+            let notified = self.done.notified();
+            tokio::pin!(notified);
+            notified.as_mut().enable();
             if let Some(outcome) = self.try_take_done().await? {
                 return Ok(outcome);
             }
-            self.done.notified().await;
+            notified.await;
         }
     }
 

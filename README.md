@@ -28,6 +28,13 @@ Jupyter notebook, and does not require the third-party IPython package.
 Imports, variables, and intermediate results remain available across calls
 within a session.
 
+The regular function tool is `ipython`; file operations and shell commands run
+through that workspace. Provider-hosted tools such as `web_search` appear
+separately, so their list does not describe all the agent's capabilities.
+On Windows, shell commands require Git for Windows. Devo detects Git Bash from
+its installer registration or standard installation folders, including custom
+drives. Set `DEVO_BASH_SHELL` to an absolute shell path for other installations.
+
 That changes how it works compared with one-off commands or a fixed menu of
 tools:
 
@@ -63,6 +70,11 @@ does not give a child agent broader access than its approved environment.
 
 Prefer a graphical workspace? Install the [Desktop app](#desktop-app), then
 connect a model provider in its setup flow.
+
+While the TUI is working, **Enter** steers the current turn at its next model
+request boundary. **Alt+Enter** explicitly queues a separate follow-up turn.
+Steering does not interrupt a tool or model request already in progress;
+press **Escape** to interrupt it.
 
 ## Features
 

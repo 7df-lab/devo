@@ -414,7 +414,13 @@ pub(crate) fn resolve_kernel_fence(
     if collaboration_mode == devo_protocol::CollaborationMode::Build {
         writable_roots.push(cwd.to_path_buf());
     }
-    writable_roots.extend(devo_sandbox::temp_writable_paths());
+    // Unix's base profile grants shared scratch roots too: retain them here
+    // so the Plan overlap check sees every writable root in the actual fence.
+    // Windows session kernels instead use owned scratch below the artifact
+    // root, avoiding recursive ACL propagation across large shared temp trees.
+    if session_dir.is_none() || !cfg!(windows) {
+        writable_roots.extend(devo_sandbox::temp_writable_paths());
+    }
     if let Some(dir) = session_dir {
         writable_roots.push(dir.to_path_buf());
     }
@@ -626,6 +632,7 @@ pub async fn ensure_kernel_with_restore_state(
             )));
         }
     }
+    let startup_started = std::time::Instant::now();
     let mut config = devo_kernel::KernelSessionConfig {
         cwd: cwd.to_path_buf(),
         ..Default::default()
@@ -645,6 +652,20 @@ pub async fn ensure_kernel_with_restore_state(
     // PYTHONPATH before the fence derives its interpreter read roots.
     ensure_kernel_dill(&mut config);
     config.extra_env.extend(harness_kernel_env(session_dir));
+    if let Some(dir) = session_dir {
+        let temp = dir.join("tmp");
+        std::fs::create_dir_all(&temp).map_err(|error| {
+            ToolCallError::InternalError(format!(
+                "Cannot create Python kernel temporary directory {}: {error}",
+                temp.display()
+            ))
+        })?;
+        for key in ["TEMP", "TMP", "TMPDIR"] {
+            config
+                .extra_env
+                .push((key.to_string(), temp.to_string_lossy().into_owned()));
+        }
+    }
 
     // OS fence (design doc §5, P0): request the `rlm-kernel` sandbox profile
     // for the kernel. The kernel crate owns the explicit-downgrade path when
@@ -680,6 +701,7 @@ pub async fn ensure_kernel_with_restore_state(
     }
     config.workspace_access = access;
 
+    let prepare_ms = startup_started.elapsed().as_millis() as u64;
     let spawn_started = std::time::Instant::now();
     let kernel = devo_kernel::KernelSession::spawn(config)
         .await
@@ -700,6 +722,7 @@ pub async fn ensure_kernel_with_restore_state(
 
     // Revive prior namespace before skill bootstrap so bootstrap overwrites
     // live handles (rlm, skills) on top of restored user bindings.
+    let restore_started = std::time::Instant::now();
     let mut namespace_state = KernelNamespaceRestoreState::Fresh;
     if let Some(dir) = session_dir {
         let dill = kernel_namespace_snapshot_path(dir);
@@ -735,6 +758,8 @@ pub async fn ensure_kernel_with_restore_state(
     // the live kernel (the runtime PYTHONPATHs system skills
     // `src/` dirs plus in-tree `rlm_skills` stubs). Callable skills with `run`
     // are wrapped so `await attach_image(...)` calls `run`.
+    let restore_ms = restore_started.elapsed().as_millis() as u64;
+    let bootstrap_started = std::time::Instant::now();
     let bootstrap = concat!(
         "import asyncio\n",
         "import rlm\n",
@@ -787,10 +812,13 @@ pub async fn ensure_kernel_with_restore_state(
     if let Err(error) = kernel.execute(bootstrap).await {
         tracing::warn!(%error, "RLM skill bootstrap import failed");
     }
-    tracing::debug!(
+    tracing::info!(
         cwd = %cwd.display(),
-        ensure_kernel_total_ms = spawn_started.elapsed().as_millis() as u64,
-        "RLM kernel ready (spawn + restore + skill bootstrap)"
+        prepare_ms,
+        restore_ms,
+        bootstrap_ms = bootstrap_started.elapsed().as_millis() as u64,
+        ensure_kernel_total_ms = startup_started.elapsed().as_millis() as u64,
+        "RLM kernel ready (prepare + spawn + restore + skill bootstrap)"
     );
 
     Ok((kernel, Some(namespace_state)))
@@ -831,10 +859,16 @@ async fn persist_kernel_namespace_snapshot(
             // result payload carried by stdout — include it, stderr alone has
             // hid the real cause before.
             let stdout = out.stdout.trim();
-            let detail = if stdout.is_empty() {
-                out.stderr.trim().to_string()
-            } else {
+            let detail: String = if !stdout.is_empty() {
                 stdout.chars().take(300).collect()
+            } else if !out.stderr.trim().is_empty() {
+                out.stderr.trim().chars().take(300).collect()
+            } else {
+                out.error_value
+                    .unwrap_or_default()
+                    .chars()
+                    .take(300)
+                    .collect()
             };
             tracing::warn!(
                 path = %dill.display(),
@@ -968,3 +1002,7 @@ fn resolve_runtime_pythonpath() -> Option<std::path::PathBuf> {
     }
     devo_kernel::default_runtime_pythonpath(std::path::Path::new("."))
 }
+
+#[cfg(test)]
+#[path = "kernel_startup_tests.rs"]
+mod kernel_startup_tests;
