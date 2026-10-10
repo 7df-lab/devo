@@ -6,7 +6,7 @@
  * `{ kind: "sessionsByCwd", cwd }` plus roster-relevant notifications.
  */
 
-import { measureAsync } from "../lib/coding-agent/src/core/timings.js";
+import { measureAsync } from "@earendil-works/pi-coding-agent/timings";
 
 export type NativeRosterClient = {
   request(method: string, params: unknown): Promise<unknown>;

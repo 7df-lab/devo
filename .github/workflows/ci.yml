@@ -95,6 +95,26 @@ jobs:
       - run: bun run test
       - run: bunx tsc --noEmit
 
+  tui:
+    name: TUI tests (${{ matrix.os }})
+    runs-on: ${{ matrix.os }}
+    strategy:
+      matrix:
+        os: [ubuntu-latest, windows-latest]
+    defaults:
+      run:
+        working-directory: apps/tui
+    steps:
+      - uses: actions/checkout@v4
+      - uses: actions/setup-node@v4
+        with:
+          node-version: "24"
+          cache: npm
+          cache-dependency-path: apps/tui/package-lock.json
+      - run: npm ci --ignore-scripts --no-audit --no-fund
+      - run: npm test
+      - run: node --import tsx --test lib/coding-agent/src/modes/interactive/interactive-mode-model-candidates.test.ts lib/coding-agent/src/modes/interactive/interactive-mode-session-ancillary.test.ts
+
   check:
     name: Check
     runs-on: ubuntu-latest

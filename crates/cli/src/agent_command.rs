@@ -102,7 +102,6 @@ pub(crate) const DEVO_RESUME_SESSION_ID_ENV: &str = "DEVO_RESUME_SESSION_ID";
 pub(crate) fn launch_interactive_mode_client(
     resume_session_id: Option<&SessionId>,
     dangerously_skip_permissions: bool,
-    onboarding_only: bool,
     log_level: Option<&str>,
 ) -> Result<()> {
     if !std::io::stdout().is_terminal() {
@@ -156,11 +155,6 @@ pub(crate) fn launch_interactive_mode_client(
     } else {
         command.env_remove("DEVO_CLI_FULL_ACCESS");
     }
-    if onboarding_only {
-        command.env("DEVO_CLI_ONBOARDING_ONLY", "1");
-    } else {
-        command.env_remove("DEVO_CLI_ONBOARDING_ONLY");
-    }
     if let Some(level) = log_level {
         command.env("DEVO_CLI_LOG_LEVEL", level);
     } else {
@@ -182,11 +176,8 @@ pub(crate) fn launch_interactive_mode_client(
 
 /// Runs the interactive product TUI (Devo InteractiveMode on Native).
 ///
-/// Legacy `crates/tui` has been removed. The CLI forwards explicit onboarding
-/// and full-access requests to the Native-backed InteractiveMode client.
+/// Full-access requests are forwarded to the Native-backed InteractiveMode client.
 pub(crate) async fn run_agent(
-    force_onboarding: bool,
-    exit_after_onboarding: bool,
     log_level: Option<&str>,
     initial_session_id: Option<SessionId>,
     dangerously_skip_permissions: bool,
@@ -198,17 +189,12 @@ pub(crate) async fn run_agent(
             .as_deref(),
         "starting InteractiveMode (product TUI)"
     );
-    let onboarding_only = force_onboarding && exit_after_onboarding;
     launch_interactive_mode_client(
         initial_session_id.as_ref(),
         dangerously_skip_permissions,
-        onboarding_only,
         log_level,
     )?;
-    Ok(AppExit {
-        onboarding_completed: onboarding_only,
-        ..AppExit::default()
-    })
+    Ok(AppExit::default())
 }
 
 #[cfg(test)]

@@ -210,35 +210,6 @@ pub async fn run_server_process(
         );
     }
 
-    // Refresh models.dev cache (or local dump) before building the catalog.
-    {
-        let early_store =
-            AppConfigStore::load(resolver.user_config_dir(), /*workspace_root*/ None);
-        if let Ok(store) = early_store {
-            let catalog_cfg = store.effective_config().catalog.clone();
-            match devo_core::refresh_remote_catalog(&resolver.user_config_dir(), &catalog_cfg).await
-            {
-                devo_core::CatalogRefreshOutcome::Updated { providers, models } => {
-                    tracing::info!(
-                        providers,
-                        models,
-                        "refreshed models.dev provider catalog cache"
-                    );
-                }
-                devo_core::CatalogRefreshOutcome::CacheFresh
-                | devo_core::CatalogRefreshOutcome::SkippedOffline
-                | devo_core::CatalogRefreshOutcome::SkippedStartupDisabled => {}
-                devo_core::CatalogRefreshOutcome::Failed { stage, message } => {
-                    tracing::warn!(
-                        ?stage,
-                        error = %message,
-                        "models.dev catalog refresh failed; using embedded/cache catalog"
-                    );
-                }
-            }
-        }
-    }
-
     // Migrate legacy auth.json envelope → provider-keyed AuthStorage shape.
     let auth_path = resolver
         .user_config_dir()
@@ -338,6 +309,17 @@ pub async fn run_server_process(
         ServerRuntimeDependencies::new(process_context, db),
         args.protocols.clone(),
     );
+    // Serve cached/embedded models immediately; network updates never delay startup.
+    {
+        let runtime = runtime.clone();
+        let catalog = config.catalog.clone();
+        tokio::spawn(async move {
+            let outcome = runtime.refresh_remote_catalog(&catalog).await;
+            if let devo_core::CatalogRefreshOutcome::Failed { stage, message } = outcome {
+                tracing::warn!(?stage, error = %message, "catalog refresh failed; retaining cached models");
+            }
+        });
+    }
     runtime
         .run_global_hook(
             devo_core::HookEvent::Setup,

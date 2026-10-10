@@ -5,7 +5,7 @@
  * toolCall + toolResult pairs so InteractiveMode rebuilds tool rows on resume.
  */
 
-import { IPYTHON_STATE_RESTORED_CUSTOM_TYPE } from "../../lib/coding-agent/src/core/messages.js";
+import { IPYTHON_STATE_RESTORED_CUSTOM_TYPE } from "@earendil-works/pi-coding-agent/messages";
 import {
   bashResultFromCommandExecution,
   displayToolName,

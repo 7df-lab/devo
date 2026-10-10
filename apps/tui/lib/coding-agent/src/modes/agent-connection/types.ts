@@ -679,6 +679,8 @@ export interface AgentConnection {
 	getCommands(): Promise<AgentConnectionSlashCommand[]>;
 	getResourceSnapshot(): Promise<AgentConnectionResourceSnapshot>;
 	getModelCatalog(): Promise<AgentConnectionModelCatalog>;
+	/** Refresh remote directories in the background; retain the cached catalog on failure. */
+	refreshModelCatalog?(): Promise<AgentConnectionModelCatalog>;
 	getAvailableModels(): Promise<AgentConnectionModel[]>;
 	getSessionStats(): Promise<SessionStats>;
 	getContextTree(): Promise<ContextTreeNode>;

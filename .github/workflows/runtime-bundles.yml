@@ -53,3 +53,5 @@ jobs:
         run: bun scripts/runtime/bundle.ts "${{ matrix.target }}" runtime-test-bundle "fixture-bin/rg${{ matrix.ext }}" fixture-bin
       - name: Relocate and exercise private Node/Python without system runtimes or network
         run: bun scripts/runtime/smoke.ts runtime-test-bundle
+      - name: Build and verify shared runtime installation
+        run: bun scripts/runtime/shared-smoke.ts runtime-test-bundle

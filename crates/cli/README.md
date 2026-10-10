@@ -4,7 +4,7 @@
 provider, TUI, server, safety, MCP, and task crates behind the `devo` command.
 
 Running `devo` with no subcommand starts the interactive agent UI. The crate
-also owns the top-level command dispatch for onboarding, session resume,
+also owns the top-level command dispatch for session resume,
 single-prompt execution, diagnostics, upgrades, and the hidden runtime server
 entry point.
 
@@ -16,9 +16,11 @@ serve both the normal CLI and alias-based helper entry points such as
 
 ```sh
 devo                         # start the interactive agent UI
-devo onboard                 # configure a model provider
 devo resume <session-id>     # resume a saved session
 devo prompt "Explain this"   # run one non-interactive prompt
 devo doctor                  # check configuration and connectivity
 devo upgrade                 # install the latest released version
 ```
+
+First-run provider setup opens automatically. Use `/login` to connect another
+provider and `/model` to choose a model.

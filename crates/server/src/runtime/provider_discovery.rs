@@ -56,6 +56,13 @@ impl ServerRuntime {
                 .map(|ids| ids.contains(&provider_id))
                 .unwrap_or(false);
             let config = store.effective_config();
+            if config.catalog.offline {
+                return self.error_response(
+                    request_id,
+                    ProtocolErrorCode::PolicyDenied,
+                    "provider discovery is disabled by catalog.offline",
+                );
+            }
             let home = store.user_config_dir().to_path_buf();
             let live_catalog = PresetModelCatalog::load_from_provider_config_with_home(
                 &config.provider_catalog,

@@ -47,7 +47,7 @@ for (const relativePath of paths) {
 		const group = manifests.get(name) ?? [];
 		group.push(manifest);
 		manifests.set(name, group);
-	} else if (/\.(AppImage|blockmap|deb|dmg|exe|rpm|tar\.gz|zip)$/.test(name)) {
+	} else if (/\.(AppImage|blockmap|deb|dmg|exe|rpm|tar\.gz|zip)$/.test(name) || /^devo-tui-v[^/]+\.install\.txt$/.test(name)) {
 		if (assets.has(name)) throw new Error(`Duplicate release asset: ${name}`);
 		assets.set(name, source);
 	}
@@ -103,11 +103,23 @@ for (const [name, group] of manifests) {
 }
 
 const sha256Lines: string[] = [];
+const sha256 = new Map<string, string>();
 for (const name of (await readdir(outputDir)).sort()) {
 	if (name === "SHA256SUMS.txt") continue;
 	const hash = createHash("sha256");
 	for await (const chunk of createReadStream(join(outputDir, name))) hash.update(chunk);
-	sha256Lines.push(`${hash.digest("hex")}  ${name}`);
+	const digest = hash.digest("hex");
+	sha256.set(name, digest);
+	sha256Lines.push(`${digest}  ${name}`);
+}
+for (const name of assets.keys()) {
+	if (!name.endsWith(".install.txt")) continue;
+	const lines = (await readFile(join(outputDir, name), "utf8")).trimEnd().split("\n");
+	if (lines.length !== 4 || lines[0] !== "devo-install-v1" || !name.startsWith(`devo-tui-v${version}-`)) throw new Error(`Invalid runtime installation index: ${name}`);
+	for (const [i, kind] of ["app", "node", "python"].entries()) {
+		const parts = lines[i + 1].split(" ");
+		if (parts.length !== 3 || parts[0] !== kind || !/^[a-f0-9]{64}$/.test(parts[1]) || sha256.get(parts[2]) !== parts[1]) throw new Error(`Runtime pack checksum or asset missing: ${name} (${kind})`);
+	}
 }
 await writeFile(join(outputDir, "SHA256SUMS.txt"), sha256Lines.join("\n") + "\n");
 

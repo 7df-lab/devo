@@ -42,6 +42,9 @@ Options:
 Environment:
     VERSION                 Same as --version
     DEVO_INSTALL_DIR        Same as --install-dir
+    DEVO_RUNTIME_CACHE      Shared private runtime cache (default: XDG cache/devo/runtimes)
+    DEVO_RELEASE_BASE_URL   Release mirror/CDN base, followed by /<version>/<asset>
+    DEVO_RUNTIME_BASE_URL   Optional runtime CDN base, followed by /<runtime-asset>
     DEVO_SKIP_RG_INSTALL=1 Skip installing the ripgrep sidecar
 
 Examples:
@@ -220,13 +223,6 @@ resolve_latest_ripgrep_version() {
     fi
 
     printf '%s\n' "$latest"
-}
-
-release_exists() {
-    version_tag="$1"
-
-    http_status="$(curl -sSL -o /dev/null -w '%{http_code}' "https://github.com/${REPO}/releases/tag/${version_tag}" || true)"
-    [ "$http_status" = "200" ]
 }
 
 path_contains() {
@@ -460,8 +456,23 @@ find_extracted_rg_binary() {
 }
 
 bundle_complete() {
-    for component in runtime/manifest.json runtime/node/bin/node runtime/python/bin/python3 runtime/python-site/dill/__init__.py runtime/python-site/rlm/repl.py tui/src/index.js rg devo; do
+    for component in runtime/manifest.json runtime/python-site/dill/__init__.py runtime/python-site/rlm/repl.py tui/src/index.js rg devo; do
         [ -f "$1/$component" ] || return 1
+    done
+    for kind in node python; do
+        runtime_root="$1/runtime/$kind"
+        if [ -f "$1/runtime/$kind.path" ]; then
+            runtime_root="$(cat "$1/runtime/$kind.path")"
+            case "$runtime_root" in /*) ;; *) return 1 ;; esac
+        fi
+        case "$kind" in node) binary="bin/node" ;; python) binary="bin/python3" ;; esac
+        [ -x "$runtime_root/$binary" ] || return 1
+        if [ -f "$1/runtime/$kind.path" ]; then
+            cache_entry="$(dirname "$(dirname "$runtime_root")")"
+            [ -f "$cache_entry/.complete" ] && [ -f "$cache_entry/.binary.sha256" ] || return 1
+            [ "$(cat "$cache_entry/.complete")" = "$(basename "$cache_entry")" ] || return 1
+            [ "$(sha256_file "$runtime_root/$binary")" = "$(cat "$cache_entry/.binary.sha256")" ] || return 1
+        fi
     done
 }
 
@@ -509,21 +520,103 @@ install_from_binary() {
     fi
 }
 
+sha256_file() {
+    if command -v sha256sum >/dev/null 2>&1; then
+        sha256sum "$1" | awk '{print $1}'
+    elif command -v shasum >/dev/null 2>&1; then
+        shasum -a 256 "$1" | awk '{print $1}'
+    else
+        die "SHA-256 verification requires sha256sum or shasum."
+    fi
+}
+
 verify_archive_checksum() {
     archive_file="$1"
     checksum_file="$2"
     asset_name="$3"
     expected_checksum="$(awk -v name="$asset_name" '$2 == name { print $1; exit }' "$checksum_file")"
     [ "${#expected_checksum}" -eq 64 ] || die "Missing SHA-256 for $asset_name"
-    if command -v sha256sum >/dev/null 2>&1; then
-        actual_checksum="$(sha256sum "$archive_file" | awk '{print $1}')"
-    elif command -v shasum >/dev/null 2>&1; then
-        actual_checksum="$(shasum -a 256 "$archive_file" | awk '{print $1}')"
-    else
-        die "SHA-256 verification requires sha256sum or shasum."
-    fi
+    actual_checksum="$(sha256_file "$archive_file")"
     [ "$expected_checksum" = "$actual_checksum" ] || die "Release archive SHA-256 verification failed: $asset_name"
 }
+
+cached_runtime() (
+    kind="$1"; digest="$2"; asset="$3"; base_url="${DEVO_RUNTIME_BASE_URL:-$4}"
+    base_url="${base_url%/}"
+    cache="${DEVO_RUNTIME_CACHE:-${XDG_CACHE_HOME:-$HOME/.cache}/devo/runtimes}"
+    mkdir -p "$cache"
+    cache="$(cd "$cache" && pwd -P)"
+    destination="$cache/$digest"
+    lock="$cache/$digest.lock"
+    attempts=0
+    while ! mkdir "$lock" 2>/dev/null; do
+        attempts=$((attempts + 1))
+        [ "$attempts" -lt 300 ] || die "Timed out waiting for runtime cache lock: $lock"
+        if [ -f "$lock/pid" ]; then
+            owner="$(cat "$lock/pid")"
+            case "$owner" in ''|*[!0-9]*) ;; *)
+                if ! kill -0 "$owner" 2>/dev/null; then rm -f "$lock/pid"; rmdir "$lock" 2>/dev/null || true; fi ;;
+            esac
+        fi
+        sleep 1
+    done
+    stage=""
+    trap 'if [ -n "$stage" ]; then rm -rf "$stage"; fi; rm -f "$lock/pid"; rmdir "$lock"' EXIT
+    trap 'exit 1' INT TERM
+    printf '%s\n' "$$" > "$lock/pid"
+    case "$kind" in node) executable="bin/node" ;; python) executable="bin/python3" ;; esac
+    binary="$destination/runtime/$kind/$executable"
+    if [ -f "$destination/.complete" ] && [ "$(cat "$destination/.complete")" = "$digest" ] && [ -x "$binary" ] && [ -f "$destination/.binary.sha256" ]; then
+        if [ "$(sha256_file "$binary")" = "$(cat "$destination/.binary.sha256")" ]; then
+            printf 'Using cached %s runtime.\n' "$kind" >&2
+            printf '%s\n' "$destination/runtime/$kind"
+            exit 0
+        fi
+    fi
+    stage="$(mktemp -d "$cache/.stage.XXXXXX")"
+    printf 'Downloading %s runtime ...\n' "$kind" >&2
+    curl -fL --retry 3 --connect-timeout 20 "$base_url/$asset" -o "$stage/pack.tar.gz"
+    [ "$(sha256_file "$stage/pack.tar.gz")" = "$digest" ] || die "Runtime SHA-256 verification failed: $asset"
+    tar -xzf "$stage/pack.tar.gz" -C "$stage"
+    rm "$stage/pack.tar.gz"
+    [ -x "$stage/runtime/$kind/$executable" ] || die "Incomplete $kind runtime pack"
+    sha256_file "$stage/runtime/$kind/$executable" > "$stage/.binary.sha256"
+    printf '%s\n' "$digest" > "$stage/.complete"
+    if [ -e "$destination" ]; then mv "$destination" "$(mktemp -d "$cache/.damaged.XXXXXX")/previous"; fi
+    mv "$stage" "$destination"
+    stage=""
+    printf '%s\n' "$destination/runtime/$kind"
+)
+
+install_online_packs() (
+    index="$1"; base_url="$2"; work="$3"
+    awk 'NR==1 {if ($0!="devo-install-v1") exit 1; next}
+         NR>1 {if (NF!=3 || $1!=(NR==2?"app":NR==3?"node":"python") || length($2)!=64 || $2!~/^[a-f0-9]+$/ || $3!~/^[a-zA-Z0-9_.-]+[.]tar[.]gz$/) exit 1}
+         END {if (NR!=4) exit 1}' "$index" || die "Invalid runtime installation index"
+    # Download independent runtimes concurrently; collect both results before
+    # installing so no partial application becomes visible after a failure.
+    read -r _ node_digest node_asset <<EOF
+$(sed -n '3p' "$index")
+EOF
+    read -r _ python_digest python_asset <<EOF
+$(sed -n '4p' "$index")
+EOF
+    cached_runtime node "$node_digest" "$node_asset" "$base_url" > "$work/node-root" & node_pid=$!
+    cached_runtime python "$python_digest" "$python_asset" "$base_url" > "$work/python-root" & python_pid=$!
+    failed=0
+    wait "$node_pid" || failed=1
+    wait "$python_pid" || failed=1
+    [ "$failed" -eq 0 ] || die "Runtime installation failed; existing application was preserved."
+    read -r _ app_digest app_asset <<EOF
+$(sed -n '2p' "$index")
+EOF
+    curl -fL --retry 3 --connect-timeout 20 "$base_url/$app_asset" -o "$work/app.tar.gz"
+    [ "$(sha256_file "$work/app.tar.gz")" = "$app_digest" ] || die "App SHA-256 verification failed"
+    mkdir "$work/app"
+    tar -xzf "$work/app.tar.gz" -C "$work/app"
+    for kind in node python; do cp "$work/$kind-root" "$work/app/runtime/$kind.path"; done
+    install_bundle "$work/app"
+)
 
 download_and_install() {
     target="$1"
@@ -534,7 +627,8 @@ download_and_install() {
     require_command find "Error: 'find' is required but not installed."
 
     archive_name="${APP}-tui-${version_tag}-${target}.tar.gz"
-    archive_url="https://github.com/${REPO}/releases/download/${version_tag}/${archive_name}"
+    release_origin="${DEVO_RELEASE_BASE_URL:-https://github.com/${REPO}/releases/download}"
+    base_url="${release_origin%/}/${version_tag}"
 
     print_message info ""
     print_message info "${MUTED}Installing ${NC}${APP} ${MUTED}version: ${NC}${version_tag}"
@@ -543,14 +637,24 @@ download_and_install() {
     tmp_dir="$(mktemp -d "${TMPDIR:-/tmp}/${APP}-install.XXXXXX")"
     trap 'rm -rf "$tmp_dir"' EXIT INT TERM
 
-    curl -fL --progress-bar "$archive_url" -o "$tmp_dir/$archive_name"
-    curl -fsSL "https://github.com/${REPO}/releases/download/${version_tag}/SHA256SUMS.txt" -o "$tmp_dir/SHA256SUMS.txt"
-    verify_archive_checksum "$tmp_dir/$archive_name" "$tmp_dir/SHA256SUMS.txt" "$archive_name"
-    tar -xzf "$tmp_dir/$archive_name" -C "$tmp_dir"
-
-    extracted_binary="$(find_extracted_binary "$tmp_dir")"
-
-    install_bundle "$(dirname "$extracted_binary")"
+    curl -fsSL --retry 3 "$base_url/SHA256SUMS.txt" -o "$tmp_dir/SHA256SUMS.txt"
+    index_name="devo-tui-${version_tag}-${target}.install.txt"
+    status="$(curl -sSL --retry 3 --connect-timeout 20 -o "$tmp_dir/$index_name" -w '%{http_code}' "$base_url/$index_name")"
+    case "$status" in
+        200)
+            verify_archive_checksum "$tmp_dir/$index_name" "$tmp_dir/SHA256SUMS.txt" "$index_name"
+            install_online_packs "$tmp_dir/$index_name" "$base_url" "$tmp_dir"
+            ;;
+        404)
+            # Compatibility with releases created before runtime packs.
+            curl -fL --retry 3 --progress-bar "$base_url/$archive_name" -o "$tmp_dir/$archive_name"
+            verify_archive_checksum "$tmp_dir/$archive_name" "$tmp_dir/SHA256SUMS.txt" "$archive_name"
+            tar -xzf "$tmp_dir/$archive_name" -C "$tmp_dir"
+            extracted_binary="$(find_extracted_binary "$tmp_dir")"
+            install_bundle "$(dirname "$extracted_binary")"
+            ;;
+        *) die "Failed to fetch runtime installation index (HTTP $status)" ;;
+    esac
 
     rm -rf "$tmp_dir"
     trap - EXIT INT TERM
@@ -634,7 +738,7 @@ install_offline_devo() {
         return
     fi
 
-    archive_path="$(find_offline_file "$asset_dir" "${APP}-tui-*-${target}.tar.gz" || true)"
+    archive_path="$(find_offline_file "$asset_dir" "${APP}-tui-v*-${target}.tar.gz" || true)"
     if [ -z "$archive_path" ]; then
         die "Offline devo asset not found. Place ${APP}-tui-*-${target}.tar.gz or ${APP} next to install.sh."
     fi
@@ -737,9 +841,6 @@ main() {
             version_tag="$(resolve_latest_version)"
         else
             version_tag="$(normalize_version "$requested_version")"
-            if ! release_exists "$version_tag"; then
-                die "Release ${version_tag} not found. See https://github.com/${REPO}/releases"
-            fi
         fi
 
         print_version_transition "$version_tag"
@@ -761,7 +862,7 @@ main() {
     print_message info "${MUTED}${APP} is ready.${NC}"
     print_message info ""
     print_message info "  cd <project>    ${MUTED}# open your workspace${NC}"
-    print_message info "  devo onboard    ${MUTED}# first-run setup${NC}"
+    print_message info "  devo            ${MUTED}# first-run setup${NC}"
     print_message info ""
     print_message info "${MUTED}Docs: ${NC}https://github.com/${REPO}#readme"
 }

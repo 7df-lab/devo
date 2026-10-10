@@ -179,6 +179,10 @@ jobs:
         run: |
           bun scripts/runtime/smoke.ts "devo-tui-${{ github.ref_name }}-${{ matrix.target }}"
 
+      - name: Create online app and cached runtime packs
+        shell: bash
+        run: bun scripts/runtime/packs.ts "${{ env.STAGING }}" online-assets
+
       - name: Create tar.gz archive (Linux/macOS)
         if: matrix.package_cli && runner.os != 'Windows'
         run: tar czf "${{ env.STAGING }}.tar.gz" "${{ env.STAGING }}"
@@ -195,6 +199,12 @@ jobs:
         with:
           name: devo-tui-${{ github.ref_name }}-${{ matrix.target }}
           path: devo-tui-${{ github.ref_name }}-${{ matrix.target }}.*
+
+      - uses: actions/upload-artifact@v4
+        if: matrix.package_cli
+        with:
+          name: devo-online-${{ matrix.target }}
+          path: online-assets/*
 
       # ── Desktop package (reuses the binary compiled above) ────────────────
       - name: Install desktop dependencies
@@ -261,7 +271,7 @@ jobs:
           cat > release-notes.md <<'NOTES'
           ## Install
 
-          Packages include private Node and Python runtimes, the compiled TUI, locked Python dependencies, and ripgrep. No system Node.js, Python, npm, pip, or Rust installation is required. Keep the extracted archive together.
+          The online installer downloads the app and caches checksum-pinned private Node/Python runtime packs for reuse across upgrades. No system Node.js, Python, npm, pip, or Rust installation is required. Complete terminal archives remain self-contained and portable; keep their extracted files together.
 
           Terminal archives use the `devo-tui-` prefix; graphical installers use `devo-desktop-`. The terminal command remains `devo`.
 

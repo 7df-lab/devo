@@ -5,6 +5,7 @@
  * is projected inside this adapter (see native-to-pi/events.ts).
  */
 
+import { ModelCatalogRefresh } from "./model-catalog-refresh.js";
 import { randomUUID } from "node:crypto";
 import fs from "node:fs";
 import os from "node:os";
@@ -36,7 +37,7 @@ import type {
 import type { ThinkingLevel } from "@earendil-works/pi-agent-core";
 import type { ContextTreeNode } from "../lib/coding-agent/src/core/context-tree.js";
 import type { BashResult } from "../lib/coding-agent/src/core/bash-executor.js";
-import { measureAsync } from "../lib/coding-agent/src/core/timings.js";
+import { measureAsync } from "@earendil-works/pi-coding-agent/timings";
 import { StdioJsonRpc, type JsonRpcId } from "./stdio-jsonrpc.js";
 import {
   abortUiSessionEvents,
@@ -272,6 +273,7 @@ export class NativeAgentConnection implements AgentConnection {
    * ever answer it). Flushed when the first listener registers.
    */
   private deferredReverseEmits: Array<() => void> = [];
+  private readonly modelCatalogRefresh: ModelCatalogRefresh;
   private disposed = false;
   private trafficLog: NativeTrafficLog | undefined;
   private idleWaiters = new Set<() => void>();
@@ -292,6 +294,7 @@ export class NativeAgentConnection implements AgentConnection {
         this.trafficLog?.record(classifyNativeTrafficLine("server-to-tui", line));
       },
     );
+    this.modelCatalogRefresh = new ModelCatalogRefresh(this.rpc);
     this.cwd = options.cwd ?? process.cwd();
     this.nativeApiVersion = options.nativeApiVersion ?? DEFAULT_NATIVE_API_VERSION;
 
@@ -1305,6 +1308,11 @@ export class NativeAgentConnection implements AgentConnection {
   async getModelCatalog(): Promise<AgentConnectionModelCatalog> {
     const { models, configuredProviders } = await this.loadModelCatalog();
     return { models, configuredProviders };
+  }
+
+  async refreshModelCatalog(): Promise<AgentConnectionModelCatalog> {
+    await this.modelCatalogRefresh.refresh();
+    return this.getModelCatalog();
   }
 
   async getAvailableModels(): Promise<AgentConnectionModel[]> {

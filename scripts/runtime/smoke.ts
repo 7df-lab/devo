@@ -9,7 +9,14 @@ export function smokeBundle(bundle: string): void {
   const arch = manifest.target.startsWith("aarch64-") ? "arm64" : "x64";
   const pythonRelative = platform === "win32" ? "runtime/python/python.exe" : "runtime/python/bin/python3";
   const nodeRelative = platform === "win32" ? "runtime/node/node.exe" : "runtime/node/bin/node";
-  for (const name of [pythonRelative, nodeRelative, "tui/src/index.js", "runtime/python-site/rlm/repl.py", "runtime/python-site/sitecustomize.py", "runtime/python-site/dill/__init__.py"]) {
+  const runtimePath = (root: string, kind: string, relative: string) => {
+    const reference = join(root, `runtime/${kind}.path`);
+    return existsSync(reference) ? join(readFileSync(reference, "utf8").replace(/[\r\n]+$/, ""), platform === "win32" ? `${kind}.exe` : kind === "node" ? "bin/node" : "bin/python3") : join(root, relative);
+  };
+  for (const path of [runtimePath(bundle, "python", pythonRelative), runtimePath(bundle, "node", nodeRelative)]) {
+    if (!existsSync(path)) throw new Error(`Incomplete runtime: ${path}`);
+  }
+  for (const name of ["tui/src/index.js", "runtime/python-site/rlm/repl.py", "runtime/python-site/sitecustomize.py", "runtime/python-site/dill/__init__.py"]) {
     if (!existsSync(join(bundle, name))) throw new Error(`Incomplete bundle: ${name}`);
   }
   if (platform !== process.platform || arch !== process.arch) {
@@ -26,8 +33,8 @@ export function smokeBundle(bundle: string): void {
     delete env.PYTHONHOME;
     delete env.NODE_PATH;
     delete env.NODE_OPTIONS;
-    const python = join(installed, pythonRelative);
-    const node = join(installed, nodeRelative);
+    const python = runtimePath(installed, "python", pythonRelative);
+    const node = runtimePath(installed, "node", nodeRelative);
     const moduleProbe = `
       import { createRequire } from 'node:module';
       import { pathToFileURL } from 'node:url';

@@ -79,19 +79,13 @@ export async function main(): Promise<void> {
   });
 
   try {
-    const onboardingOnly = process.env.DEVO_CLI_ONBOARDING_ONLY === "1";
-    const result = await Promise.race([
+    await Promise.race([
       runInteractiveHost({
         connection: conn,
         cwd,
-        forceOnboarding: onboardingOnly,
-        exitAfterOnboarding: onboardingOnly,
       }),
       onChildExit,
     ]);
-    if (onboardingOnly && !result?.onboardingCompleted) {
-      throw new Error("Provider onboarding was not completed.");
-    }
   } finally {
     await conn.dispose().catch(() => {});
     // Close our stdio session without killing the singleton server process.
