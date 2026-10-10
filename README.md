@@ -47,11 +47,11 @@ does not give a child agent broader access than its approved environment.
 ## Quick start
 
 1. [Install Devo](#installation) for your platform.
-2. Choose a working directory and run onboarding:
+2. Choose a working directory and start Devo (provider setup opens automatically):
 
    ```bash
    cd /path/to/your/workspace
-   devo onboard
+   devo
    ```
 
 3. Start or resume a terminal session:
@@ -88,6 +88,25 @@ to check for updates; the saved catalog remains available offline. Catalog provi
 and remotely fetched models cannot be deleted. You can disconnect a provider,
 change model preferences, or remove models you added manually.
 
+In the TUI, `/model` shows the saved catalog immediately and checks for updates
+in the background at startup and while the picker is open. The public catalog
+is refreshed at most once per hour by default; connected Codex accounts also
+refresh their authenticated model directory. Search and selection stay in place.
+Failed updates keep the last complete catalog, and never switch your active model.
+
+To change the public catalog refresh interval or use an offline catalog, add to
+`~/.devo/config.toml` (Windows: `%USERPROFILE%\.devo\config.toml`):
+
+```toml
+[catalog]
+refresh_interval_hours = 1
+# offline = true
+# source = "/path/to/models.dev-api.json"
+```
+
+`offline = true` prevents catalog and provider-discovery network requests.
+Local catalog files can still be refreshed, and the bundled catalog is always available.
+
 Model requests go to the endpoint you configure. For local model traffic,
 choose a compatible local endpoint.
 
@@ -121,9 +140,37 @@ The installer includes the Rust backend, compiled TUI, private Node.js 24 and
 Python 3.13 runtimes, locked Python dependencies, and ripgrep. No system Node.js,
 Python, npm, pip, Bun, or Rust installation is needed.
 
-Keep the complete installation directory together. Copying only `devo.exe` or
-`devo` is insufficient in v0.2.0. Portable use is supported: extract the complete
-CLI archive and run its `devo` executable from any working directory.
+Online installers download the smaller app package and cache checksum-pinned
+Node/Python runtimes separately. Upgrades reuse unchanged runtimes without
+downloading or extracting them again. No package manager runs during installation.
+The cache defaults to `%LOCALAPPDATA%\devo\runtimes` on Windows and
+`${XDG_CACHE_HOME:-~/.cache}/devo/runtimes` on Unix. Set `DEVO_RUNTIME_CACHE` before
+installing to choose another persistent directory. Keep this cache while the
+installation uses it; the app's `runtime/*.path` files reference it. Re-running
+the installer repairs missing runtimes. Old runtime packs remain available to
+running terminals and older installations; they are not automatically deleted.
+
+For portable/offline use, download the **complete** `devo-tui-` archive, extract
+it together, and run its `devo` executable from any working directory. Copying
+only `devo.exe` or `devo` is insufficient. Files named `devo-tui-app-` and
+`devo-runtime-` are online installer components, not standalone portable bundles.
+
+For a release mirror or CDN, set `DEVO_RELEASE_BASE_URL` to an HTTPS base URL
+that serves `/<version>/<asset>` with the original asset names, installation
+index and `SHA256SUMS.txt`. A pinned `VERSION=v0.2.0` also avoids GitHub version
+lookups, so a reachable mirror can serve installs without GitHub access.
+The default origin is GitHub Releases. Runtime
+asset names contain their SHA-256; keep them immutable and use long CDN cache
+lifetimes. The installer verifies the index and every downloaded archive before
+installation. Configure the mirror before running the installer; no CDN service
+or third-party credentials are required by Devo.
+
+To serve only the shared Node/Python packs from a separate CDN, set
+`DEVO_RUNTIME_BASE_URL=https://your-cdn.example/runtimes`. This serves
+`/<runtime-asset-name>` directly, without a release-version directory, so
+unchanged runtimes keep the same CDN URL across releases. The app and verified
+installation index still come from `DEVO_RELEASE_BASE_URL` (or GitHub Releases).
+Both mirror variables are optional; the normal install commands work as shown.
 
 Terminal archives use the `devo-tui-` prefix, for example
 `devo-tui-v0.2.0-x86_64-pc-windows-msvc.zip`. Graphical installers use the
@@ -185,7 +232,7 @@ private runtimes and Python dependencies before starting a session.
 
 ## Configuration
 
-`devo onboard` is the simplest way to connect a provider. In the Desktop app,
+`devo` is the simplest way to connect a provider. In the Desktop app,
 use the provider setup flow. Provider/model connections and API credentials are
 stored separately: built-in provider connections use `providers.json`, custom
 providers use `custom-providers.json`, the default model is selected in

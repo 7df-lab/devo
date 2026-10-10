@@ -129,7 +129,7 @@ pub(crate) async fn run_doctor() -> Result<()> {
                     "missing".yellow(),
                     provider_path.display()
                 );
-                println!("  Run `devo onboard` to create it.");
+                println!("  Run `devo` to create it.");
                 all_ok = false;
             }
         }

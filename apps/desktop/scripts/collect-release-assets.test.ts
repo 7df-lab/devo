@@ -75,6 +75,30 @@ test("release collection preserves both Mac architectures and blockmaps without 
 	}
 });
 
+test("release collection retains online installation indexes and verifies every referenced pack", async () => {
+	const fixture = await makeArtifacts();
+	try {
+		const directory = join(fixture.input, "online");
+		await mkdir(directory);
+		const entries = [];
+		for (const kind of ["app", "node", "python"]) {
+			const name = `devo-${kind}.tar.gz`;
+			const content = Buffer.from(kind);
+			await writeFile(join(directory, name), content);
+			entries.push(`${kind} ${createHash("sha256").update(content).digest("hex")} ${name}`);
+		}
+		const name = "devo-tui-v0.2.0-x86_64-pc-windows-msvc.install.txt";
+		await writeFile(join(directory, name), ["devo-install-v1", ...entries, ""].join("\n"));
+		const result = await collect(fixture.input, fixture.output);
+		expect({ exit: result.exitCode, stderr: result.stderr, index: await readFile(join(fixture.output, name), "utf8") }).toEqual({ exit: 0, stderr: "", index: ["devo-install-v1", ...entries, ""].join("\n") });
+		await writeFile(join(directory, "devo-node.tar.gz"), "damaged");
+		const corrupt = await collect(fixture.input, fixture.output);
+		expect({ failed: corrupt.exitCode !== 0, checksumFailure: corrupt.stderr.includes("Runtime pack checksum or asset missing") }).toEqual({ failed: true, checksumFailure: true });
+	} finally {
+		await rm(fixture.root, { recursive: true, force: true });
+	}
+});
+
 test("release collection rejects assets that disagree with update checksums", async () => {
 	const fixture = await makeArtifacts();
 	try {

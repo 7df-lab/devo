@@ -1943,7 +1943,10 @@ fn notification_matches_method(value: &serde_json::Value, method: &str) -> bool 
 async fn wait_for_turn_completed(
     notifications_rx: &mut mpsc::Receiver<serde_json::Value>,
 ) -> Result<()> {
-    timeout(Duration::from_secs(5), async {
+    // These turns include real Python startup, namespace snapshots and automatic
+    // compaction while the persistence cases run concurrently. Five seconds is
+    // too short on shared CI runners; this remains a bounded lifecycle wait.
+    timeout(Duration::from_secs(30), async {
         while let Some(value) = notifications_rx.recv().await {
             let value = legacy_event_from_acp_notification(value);
             if value.get("method") == Some(&serde_json::json!("turn/completed")) {

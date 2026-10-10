@@ -175,7 +175,7 @@ fn default_catalog_refresh_on_startup() -> bool {
 }
 
 fn default_catalog_refresh_interval_hours() -> u64 {
-    24
+    1
 }
 
 /// Selects the model used for summary generation.

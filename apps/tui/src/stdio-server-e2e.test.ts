@@ -90,7 +90,8 @@ test("real stdio server: boot, subscribe kind, schedule, export", async (t) => {
     ]);
   } finally {
     if (timeoutHandle) clearTimeout(timeoutHandle);
-    if (!child.killed) child.kill();
-    rmSync(home, { recursive: true, force: true });
+    if (child.exitCode === null && !child.killed) child.kill();
+    await onExit;
+    rmSync(home, { recursive: true, force: true, maxRetries: 10, retryDelay: 100 });
   }
 });

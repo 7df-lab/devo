@@ -28,8 +28,7 @@ test("Devo splash header uses DEVO wordmark logo and title", () => {
   assert.doesNotMatch(lines, /prime agent/);
   assert.doesNotMatch(lines, /▗▄▄█▀/); // prime butterfly top row
   assert.match(lines, /██████╗/);
-  assert.match(lines, /v0\.1\.39/);
-  assert.doesNotMatch(lines, /v0\.1\.0/);
+  assert.ok(lines.includes(`v${DEVO_TUI_VERSION}`));
   assert.match(lines, /deepseek-v4-flash/);
 });
 

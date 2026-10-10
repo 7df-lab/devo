@@ -16,6 +16,8 @@ param(
 )
 
 $ErrorActionPreference = "Stop"
+# Load ZipFile on Windows PowerShell 5.1 as well as PowerShell 7.
+Add-Type -AssemblyName System.IO.Compression.FileSystem
 $Repo = "7df-lab/devo"
 $RipgrepRepo = "BurntSushi/ripgrep"
 
@@ -313,7 +315,7 @@ function Install-RipgrepSidecar {
 
     $rgZipPath = Join-Path $rgTmpDir "ripgrep.zip"
     Invoke-WebRequest -Uri $rgArchiveUrl -OutFile $rgZipPath
-    Expand-Archive -Path $rgZipPath -DestinationPath $rgTmpDir -Force
+    [IO.Compression.ZipFile]::ExtractToDirectory($rgZipPath, $rgTmpDir)
 
     $rgExe = Get-ChildItem -Recurse -Filter "rg.exe" -Path $rgTmpDir | Select-Object -First 1
     if (-not $rgExe) {
@@ -346,10 +348,160 @@ function Get-FirstMatchingFile {
 
 function Test-DevoBundle {
     param([string]$Directory)
-    foreach ($name in @("runtime\manifest.json", "runtime\node\node.exe", "runtime\python\python.exe", "runtime\python-site\dill\__init__.py", "runtime\python-site\rlm\repl.py", "tui\src\index.js", "rg.exe", "devo.exe")) {
+    foreach ($name in @("runtime\manifest.json", "runtime\python-site\dill\__init__.py", "runtime\python-site\rlm\repl.py", "tui\src\index.js", "rg.exe", "devo.exe")) {
         if (-not (Test-Path -LiteralPath (Join-Path $Directory $name) -PathType Leaf)) { return $false }
     }
+    foreach ($kind in @("node", "python")) {
+        $runtimeRoot = Join-Path $Directory "runtime\$kind"
+        $reference = Join-Path $Directory "runtime\$kind.path"
+        if (Test-Path -LiteralPath $reference) {
+            $runtimeRoot = [IO.File]::ReadAllText($reference).TrimEnd([char[]]"`r`n")
+            if (-not [IO.Path]::IsPathRooted($runtimeRoot)) { return $false }
+        }
+        if (-not (Test-Path -LiteralPath (Join-Path $runtimeRoot "$kind.exe") -PathType Leaf)) { return $false }
+        if (Test-Path -LiteralPath $reference) {
+            $entry = Split-Path (Split-Path $runtimeRoot -Parent) -Parent
+            $complete = Join-Path $entry ".complete"
+            $binaryHash = Join-Path $entry ".binary.sha256"
+            if (-not (Test-Path -LiteralPath $complete) -or -not (Test-Path -LiteralPath $binaryHash)) { return $false }
+            if ([IO.File]::ReadAllText($complete).Trim() -ne (Split-Path $entry -Leaf) -or (Get-FileHash -LiteralPath (Join-Path $runtimeRoot "$kind.exe") -Algorithm SHA256).Hash -ine [IO.File]::ReadAllText($binaryHash).Trim()) { return $false }
+        }
+    }
     try { return (Get-Content -LiteralPath (Join-Path $Directory "runtime\manifest.json") -Raw | ConvertFrom-Json).schema -eq 1 } catch { return $false }
+}
+
+function Receive-DevoAsset {
+    param([string]$Url, [string]$Destination)
+    for ($attempt = 0; $attempt -lt 3; $attempt++) {
+        try {
+            Invoke-WebRequest -UseBasicParsing -Uri $Url -OutFile $Destination
+            return
+        } catch {
+            if ($attempt -eq 2 -or ($_.Exception.Response -and [int]$_.Exception.Response.StatusCode -eq 404)) { throw }
+            Start-Sleep -Seconds ($attempt + 1)
+        }
+    }
+}
+
+function Get-CachedDevoRuntime {
+    param([string]$Kind, [string]$Digest, [string]$Asset, [string]$BaseUrl)
+    $cache = if ($env:DEVO_RUNTIME_CACHE) { $env:DEVO_RUNTIME_CACHE } else { Join-Path $env:LOCALAPPDATA "devo\runtimes" }
+    $cache = [IO.Path]::GetFullPath($cache)
+    New-Item -ItemType Directory -Force -Path $cache | Out-Null
+    $destination = Join-Path $cache $Digest
+    $lockPath = Join-Path $cache "$Digest.lock"
+    $lock = $null
+    $deadline = [DateTime]::UtcNow.AddMinutes(5)
+    while (-not $lock) {
+        try { $lock = [IO.File]::Open($lockPath, 'OpenOrCreate', 'ReadWrite', 'None') } catch [IO.IOException] {
+            if ([DateTime]::UtcNow -gt $deadline) { throw "Timed out waiting for runtime cache lock: $lockPath" }
+            Start-Sleep -Milliseconds 200
+        }
+    }
+    $stage = Join-Path $cache (".stage-" + [guid]::NewGuid().ToString("N"))
+    try {
+        $binary = Join-Path $destination "runtime\$Kind\$Kind.exe"
+        $complete = Join-Path $destination ".complete"
+        $binaryHash = Join-Path $destination ".binary.sha256"
+        if ((Test-Path -LiteralPath $complete) -and (Test-Path -LiteralPath $binary) -and (Test-Path -LiteralPath $binaryHash)) {
+            if ([IO.File]::ReadAllText($complete).Trim() -eq $Digest -and (Get-FileHash -LiteralPath $binary -Algorithm SHA256).Hash -ieq [IO.File]::ReadAllText($binaryHash).Trim()) {
+                Write-Host "Using cached $Kind runtime."
+                return (Join-Path $destination "runtime\$Kind")
+            }
+        }
+        New-Item -ItemType Directory -Path $stage | Out-Null
+        $archive = Join-Path $stage "pack.tar.gz"
+        Write-Host "Downloading $Kind runtime ..."
+        Receive-DevoAsset -Url "$BaseUrl/$Asset" -Destination $archive
+        if ((Get-FileHash -LiteralPath $archive -Algorithm SHA256).Hash -ine $Digest) { throw "Runtime SHA-256 verification failed: $Asset" }
+        & "$env:SystemRoot\System32\tar.exe" -xzf $archive -C $stage
+        if ($LASTEXITCODE -ne 0) { throw "Failed to extract $Asset" }
+        Remove-Item -LiteralPath $archive
+        $extractedBinary = Join-Path $stage "runtime\$Kind\$Kind.exe"
+        if (-not (Test-Path -LiteralPath $extractedBinary -PathType Leaf)) { throw "Incomplete $Kind runtime pack" }
+        [IO.File]::WriteAllText((Join-Path $stage ".binary.sha256"), (Get-FileHash -LiteralPath $extractedBinary -Algorithm SHA256).Hash)
+        [IO.File]::WriteAllText((Join-Path $stage ".complete"), $Digest)
+        if (Test-Path -LiteralPath $destination) {
+            # Preserve any in-use damaged tree; never delete or change a runtime
+            # belonging to a running terminal while repairing its replacement.
+            Move-Item -LiteralPath $destination -Destination (Join-Path $cache (".damaged-" + [guid]::NewGuid().ToString("N")))
+        }
+        Move-Item -LiteralPath $stage -Destination $destination
+        return (Join-Path $destination "runtime\$Kind")
+    } finally {
+        if ([IO.Path]::GetFullPath($stage).StartsWith($cache + [IO.Path]::DirectorySeparatorChar) -and (Test-Path -LiteralPath $stage)) { Remove-Item -LiteralPath $stage -Recurse -ErrorAction SilentlyContinue }
+        $lock.Dispose()
+    }
+}
+
+function Install-DevoOnline {
+    param([string]$Target, [string]$ResolvedVersion, [string]$InstallDir, [string]$TempRoot)
+    $origin = if ($env:DEVO_RELEASE_BASE_URL) { $env:DEVO_RELEASE_BASE_URL.TrimEnd('/') } else { "https://github.com/$Repo/releases/download" }
+    $baseUrl = "$origin/$ResolvedVersion"
+    $indexName = "devo-tui-${ResolvedVersion}-${Target}.install.txt"
+    $index = Join-Path $TempRoot $indexName
+    $checksums = Join-Path $TempRoot "SHA256SUMS.txt"
+    Receive-DevoAsset -Url "$baseUrl/SHA256SUMS.txt" -Destination $checksums
+    $hasPacks = $true
+    try { Receive-DevoAsset -Url "$baseUrl/$indexName" -Destination $index } catch {
+        if ($_.Exception.Response -and [int]$_.Exception.Response.StatusCode -eq 404) { $hasPacks = $false } else { throw }
+    }
+    $extracted = Join-Path $TempRoot "app"
+    New-Item -ItemType Directory -Path $extracted | Out-Null
+    if ($hasPacks) {
+        Test-ArchiveChecksum -Archive $index -ChecksumFile $checksums -AssetName $indexName
+        $lines = @(Get-Content -LiteralPath $index)
+        if ($lines.Count -ne 4 -or $lines[0] -ne "devo-install-v1") { throw "Invalid runtime installation index" }
+        $packs = @{}
+        for ($i = 1; $i -le 3; $i++) {
+            $kind = @("app", "node", "python")[$i - 1]
+            $parts = $lines[$i] -split ' '
+            if ($parts.Count -ne 3 -or $parts[0] -ne $kind -or $parts[1] -cnotmatch '^[a-f0-9]{64}$' -or $parts[2] -cnotmatch '^[a-zA-Z0-9_.-]+\.tar\.gz$') { throw "Invalid $kind runtime index entry" }
+            $packs[$kind] = @{ Digest = $parts[1]; Asset = $parts[2] }
+        }
+        # Runspaces work on Windows PowerShell 5.1 without opening helper windows.
+        # Independent downloads/extraction run together, with per-digest locks.
+        $workers = @()
+        $roots = @{}
+        $failure = $null
+        $runtimeBase = if ($env:DEVO_RUNTIME_BASE_URL) { $env:DEVO_RUNTIME_BASE_URL.TrimEnd('/') } else { $baseUrl }
+        try {
+            foreach ($kind in @("node", "python")) {
+                $shell = [PowerShell]::Create()
+                $workerScript = "param(`$Kind, `$Digest, `$Asset, `$BaseUrl)`n`$ErrorActionPreference = 'Stop'`nfunction Receive-DevoAsset { $((Get-Command Receive-DevoAsset).Definition) }`nfunction Get-CachedDevoRuntime { $((Get-Command Get-CachedDevoRuntime).Definition) }`nGet-CachedDevoRuntime -Kind `$Kind -Digest `$Digest -Asset `$Asset -BaseUrl `$BaseUrl"
+                [void]$shell.AddScript($workerScript).AddArgument($kind).AddArgument($packs[$kind].Digest).AddArgument($packs[$kind].Asset).AddArgument($runtimeBase)
+                $workers += @{ Kind = $kind; Shell = $shell; Handle = $shell.BeginInvoke() }
+            }
+            $appArchive = Join-Path $TempRoot "app.tar.gz"
+            Receive-DevoAsset -Url "$baseUrl/$($packs.app.Asset)" -Destination $appArchive
+            if ((Get-FileHash -LiteralPath $appArchive -Algorithm SHA256).Hash -ine $packs.app.Digest) { throw "App SHA-256 verification failed" }
+            & "$env:SystemRoot\System32\tar.exe" -xzf $appArchive -C $extracted
+            if ($LASTEXITCODE -ne 0) { throw "Failed to extract app archive" }
+        } catch { $failure = $_ } finally {
+            foreach ($worker in $workers) {
+                try {
+                    $result = $worker.Shell.EndInvoke($worker.Handle)
+                    if ($worker.Shell.HadErrors -or $result.Count -ne 1) { throw "Runtime installation failed: $($worker.Shell.Streams.Error)" }
+                    $roots[$worker.Kind] = [string]$result[0]
+                } catch { if (-not $failure) { $failure = $_ } } finally { $worker.Shell.Dispose() }
+            }
+        }
+        if ($failure) { throw $failure }
+        foreach ($kind in @("node", "python")) {
+            [IO.File]::WriteAllText((Join-Path $extracted "runtime\$kind.path"), $roots[$kind] + "`n", (New-Object Text.UTF8Encoding $false))
+        }
+        Install-DevoBundle -Source $extracted -InstallDir $InstallDir
+    } else {
+        # Releases predating runtime packs retain their complete archive layout.
+        $name = "devo-tui-${ResolvedVersion}-${Target}.zip"
+        $archive = Join-Path $TempRoot $name
+        Receive-DevoAsset -Url "$baseUrl/$name" -Destination $archive
+        Test-ArchiveChecksum -Archive $archive -ChecksumFile $checksums -AssetName $name
+        [IO.Compression.ZipFile]::ExtractToDirectory($archive, $extracted)
+        $exe = Get-ChildItem -Recurse -Filter "devo.exe" -Path $extracted | Select-Object -First 1
+        if (-not $exe) { throw "devo.exe not found in the archive" }
+        Install-DevoBundle -Source $exe.DirectoryName -InstallDir $InstallDir
+    }
 }
 
 function Test-ArchiveChecksum {
@@ -418,7 +570,7 @@ function Install-DevoOffline {
     }
 
     $target = Get-Target
-    $archive = Get-FirstMatchingFile -Directory $AssetDir -Pattern "devo-tui-*-${target}.zip"
+    $archive = Get-FirstMatchingFile -Directory $AssetDir -Pattern "devo-tui-v*-${target}.zip"
     if (-not $archive) {
         Write-Error "Offline devo asset not found. Place devo-tui-*-${target}.zip or devo.exe next to install.ps1."
     }
@@ -428,7 +580,7 @@ function Install-DevoOffline {
     if (Test-Path -LiteralPath $checksumFile) { Test-ArchiveChecksum -Archive $archive.FullName -ChecksumFile $checksumFile -AssetName $archive.Name }
     $devoTmpDir = Join-Path $TempRoot "devo-offline"
     New-Item -ItemType Directory -Force -Path $devoTmpDir | Out-Null
-    Expand-Archive -Path $archive.FullName -DestinationPath $devoTmpDir -Force
+    [IO.Compression.ZipFile]::ExtractToDirectory($archive.FullName, $devoTmpDir)
 
     $exe = Get-ChildItem -Recurse -Filter "devo.exe" -Path $devoTmpDir | Select-Object -First 1
     if (-not $exe) {
@@ -473,7 +625,7 @@ function Install-RipgrepSidecarOffline {
     Write-Host "Installing ripgrep sidecar from offline archive: $($archive.FullName)"
     $rgTmpDir = Join-Path $TempRoot "ripgrep-offline"
     New-Item -ItemType Directory -Force -Path $rgTmpDir | Out-Null
-    Expand-Archive -Path $archive.FullName -DestinationPath $rgTmpDir -Force
+    [IO.Compression.ZipFile]::ExtractToDirectory($archive.FullName, $rgTmpDir)
 
     $rgExe = Get-ChildItem -Recurse -Filter "rg.exe" -Path $rgTmpDir | Select-Object -First 1
     if (-not $rgExe) {
@@ -508,26 +660,7 @@ function Main {
 
             $skipAppInstall = Test-DevoVersionInstalled -InstallDir $installDir -ExpectedVersion $version
             if (-not $skipAppInstall) {
-                $archiveName = "devo-tui-${version}-${target}.zip"
-                $archiveUrl = "https://github.com/$Repo/releases/download/$version/$archiveName"
-
-                Write-Host "Downloading devo $version for $target ..."
-
-                $zipPath = Join-Path $tmpDir "devo.zip"
-                Invoke-WebRequest -Uri $archiveUrl -OutFile $zipPath
-                $checksumFile = Join-Path $tmpDir "SHA256SUMS.txt"
-                Invoke-WebRequest -Uri "https://github.com/$Repo/releases/download/$version/SHA256SUMS.txt" -OutFile $checksumFile
-                Test-ArchiveChecksum -Archive $zipPath -ChecksumFile $checksumFile -AssetName $archiveName
-
-                Expand-Archive -Path $zipPath -DestinationPath $tmpDir -Force
-
-                # Locate devo.exe (it's inside a versioned subdirectory).
-                $exe = Get-ChildItem -Recurse -Filter "devo.exe" -Path $tmpDir | Select-Object -First 1
-                if (-not $exe) {
-                    Write-Error "devo.exe not found in the archive"
-                }
-
-                Install-DevoBundle -Source $exe.DirectoryName -InstallDir $installDir
+                Install-DevoOnline -Target $target -ResolvedVersion $version -InstallDir $installDir -TempRoot $tmpDir
             }
             Install-RipgrepSidecar -InstallDir $installDir -TempRoot $tmpDir
         }
@@ -541,10 +674,12 @@ function Main {
         } else {
             Write-Host "ripgrep sidecar was not installed."
         }
-        Write-Host "PATH was updated for future terminals."
-        Write-Host "Open a new terminal, or run:"
-        Write-Host "  `$env:Path = `"$installDir;`$env:Path`""
-        Write-Host "Run 'devo onboard' to get started."
+        if ($env:DEVO_NO_MODIFY_PATH -ne "1") {
+            Write-Host "PATH was updated for future terminals."
+            Write-Host "Open a new terminal, or run:"
+            Write-Host "  `$env:Path = `"$installDir;`$env:Path`""
+        }
+        Write-Host "Run 'devo' to get started."
     }
     finally {
         if ([IO.Path]::GetFullPath($tmpDir).StartsWith([IO.Path]::GetFullPath($env:TEMP) + [IO.Path]::DirectorySeparatorChar)) {

@@ -2751,6 +2751,9 @@ export class InteractiveMode {
 				measureAsync("post_render.model_resource_catalog", async () => {
 					await this.refreshConnectionCatalogModelAndResources(connection, generation);
 					if (!this.isCurrentConnectionGeneration(connection, generation)) return;
+					void this.getConnectionAvailableModels({ refreshRemote: true }).then(() => {
+						if (this.isCurrentConnectionGeneration(connection, generation)) this.setupAutocompleteProvider();
+					}).catch(() => undefined);
 					this.setupAutocompleteProvider();
 					this.showLoadedResources({ force: false, showDiagnosticsWhenQuiet: true });
 					await measureAsync("post_render.provider_count", () => this.updateAvailableProviderCount());
@@ -7929,14 +7932,18 @@ export class InteractiveMode {
 		return this.connectionModelCatalog.filter((model) => this.connectionConfiguredProviders.has(model.provider));
 	}
 
-	private async getConnectionAvailableModels(): Promise<AgentConnectionModel[]> {
+	private async getConnectionAvailableModels(options: { refreshRemote?: boolean } = {}): Promise<AgentConnectionModel[]> {
 		const inFlight = this.connectionModelsRefreshInFlight;
 		if (inFlight && inFlight.version === this.connectionModelsRefreshVersion) {
 			return [...(await inFlight.promise)];
 		}
 
 		const version = this.connectionModelsRefreshVersion;
-		const promise = this.agentConnection.getModelCatalog().then((catalog) => {
+		const connection = this.agentConnection;
+		const catalogPromise = options.refreshRemote && connection.refreshModelCatalog
+			? connection.refreshModelCatalog()
+			: connection.getModelCatalog();
+		const promise = catalogPromise.then((catalog) => {
 			if (version !== this.connectionModelsRefreshVersion) {
 				return this.getAvailableConnectionModels();
 			}
@@ -7974,7 +7981,7 @@ export class InteractiveMode {
 	private getModelSelectorRefreshPromise(
 		options: { force?: boolean } = {},
 	): Promise<AgentConnectionModel[]> | undefined {
-		const refreshCatalog = () => this.getConnectionAvailableModels().then(() => this.getCachedModelCandidates());
+		const refreshCatalog = () => this.getConnectionAvailableModels({ refreshRemote: true }).then(() => this.getCachedModelCandidates());
 		if (this.connectionModelsRefreshInFlight) {
 			return refreshCatalog();
 		}
@@ -8370,6 +8377,7 @@ export class InteractiveMode {
 			let settled = false;
 			let busy = false;
 			let menu: ConfigurationMenuComponent;
+			let refreshTimer: ReturnType<typeof setInterval> | undefined;
 			const restoreEditor = () => {
 				if (!this.editorContainer.children.includes(menu)) return;
 				this.editorContainer.clear();
@@ -8383,6 +8391,7 @@ export class InteractiveMode {
 			const finish = () => {
 				if (settled) return;
 				settled = true;
+				if (refreshTimer) clearInterval(refreshTimer);
 				restoreEditor();
 				if (this.closeConfigurationMenu === finish) this.closeConfigurationMenu = undefined;
 				resolve();
@@ -8394,9 +8403,7 @@ export class InteractiveMode {
 					.then((models) => {
 						if (!settled) menu.updateModels(this.getCurrentModel(), models, this.connectionConfiguredProviders);
 					})
-					.catch((error) => {
-						if (!settled) this.showError(error instanceof Error ? error.message : String(error));
-					});
+					.catch(() => undefined);
 			};
 			const authenticate = (provider: AuthSelectorProvider, tab: "providers" | "mcp-connections") => {
 				if (settled || busy) return;
@@ -8520,6 +8527,8 @@ export class InteractiveMode {
 			focus();
 			this.ui.requestRender();
 			refreshModels(initialModelSearch !== undefined);
+			refreshTimer = setInterval(() => { if (!busy) refreshModels(false); }, MODEL_CATALOG_REFRESH_TTL_MS);
+			refreshTimer.unref();
 		});
 	}
 

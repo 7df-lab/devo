@@ -1,5 +1,6 @@
 import { cpSync, existsSync, mkdirSync, readFileSync, readdirSync, rmSync, writeFileSync } from "node:fs";
 import { basename, join, relative } from "node:path";
+import { pruneNodeInputs } from "./prune";
 
 export function run(program: string, args: string[], cwd?: string): void {
   const result = Bun.spawnSync([program, ...args], { cwd, stdout: "inherit", stderr: "inherit" });
@@ -48,6 +49,9 @@ export function buildTui(repo: string, output: string, work: string, platform: s
   compileTree(output);
   const scope = join(output, "node_modules/@earendil-works");
   for (const name of readdirSync(scope)) compileTree(join(scope, name));
+  // Runtime imports use the materialized packages. The staging originals duplicate them.
+  rmSync(join(output, "lib"), { recursive: true });
+  pruneNodeInputs(join(output, "node_modules"));
   rmSync(join(output, "package-lock.json"));
 
   const koffi = join(output, "node_modules/koffi/build/koffi");

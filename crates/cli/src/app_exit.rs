@@ -7,8 +7,6 @@ use devo_core::SessionId;
 pub struct AppExit {
     /// Active session identifier at exit, when one exists.
     pub session_id: Option<SessionId>,
-    /// Whether provider onboarding completed successfully during this run.
-    pub onboarding_completed: bool,
     /// Total turns completed in the session.
     pub turn_count: usize,
     /// Total input tokens accumulated in the session.

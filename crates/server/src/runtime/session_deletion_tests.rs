@@ -6,13 +6,27 @@ use devo_protocol::native::turn::Turn;
 use pretty_assertions::assert_eq;
 use tokio_util::sync::CancellationToken;
 
+use crate::runtime::connection::ConnectionProtocol;
+use crate::runtime::outbound::test_outbound_channel;
 use crate::test_support::{NoopProvider, TestRuntime};
 
 #[tokio::test]
 async fn concurrent_deletion_aborts_turns_that_ignore_cooperative_cancellation() {
     let directory = tempfile::tempdir().unwrap();
     let runtime = TestRuntime::new(Arc::new(NoopProvider::default())).runtime(directory.path());
+    let (outbound, mut notifications) = test_outbound_channel(/*capacity*/ 32);
+    let connection_id = runtime
+        .register_connection(crate::ClientTransportKind::Stdio, outbound)
+        .await;
+    runtime
+        .connections
+        .lock()
+        .await
+        .get_mut(&connection_id)
+        .unwrap()
+        .protocol = Some(ConnectionProtocol::Native);
     let mut executions = Vec::new();
+    let mut expected_turns = std::collections::HashMap::new();
     for _ in 0..12 {
         let session_id = SessionId::new();
         let turn: Turn = serde_json::from_value(serde_json::json!({
@@ -22,6 +36,15 @@ async fn concurrent_deletion_aborts_turns_that_ignore_cooperative_cancellation()
             "startedAt": chrono::Utc::now(),
         }))
         .unwrap();
+        expected_turns.insert(turn.id, turn.clone());
+        runtime
+            .connections
+            .lock()
+            .await
+            .get_mut(&connection_id)
+            .unwrap()
+            .event_selectors
+            .push(devo_protocol::native::event::StreamSelector::Session { session_id });
         let token = CancellationToken::new();
         let task = tokio::spawn(std::future::pending::<()>());
         let terminal = runtime.subscribe_terminal_turn_status(turn.id).await;
@@ -73,4 +96,26 @@ async fn concurrent_deletion_aborts_turns_that_ignore_cooperative_cancellation()
         ]
     );
     assert!(runtime.acp_prompt_waiters.lock().await.is_empty());
+    tokio::time::timeout(Duration::from_secs(/*secs*/ 2), async {
+        for _ in 0..12 {
+            let notification = notifications.recv().await.expect("terminal notification");
+            assert_eq!(notification["method"], "turn/completed");
+            let actual: Turn =
+                serde_json::from_value(notification["params"]["turn"].clone()).unwrap();
+            let mut expected = expected_turns
+                .remove(&actual.id)
+                .expect("exactly one event per aborted turn");
+            expected.status = devo_protocol::native::turn::TurnStatus::Interrupted;
+            expected.completed_at = Some(
+                actual
+                    .completed_at
+                    .expect("interrupted turn completion time"),
+            );
+            assert_eq!(actual, expected);
+        }
+    })
+    .await
+    .expect("all aborted turns must notify clients before deletion returns");
+    assert!(expected_turns.is_empty());
+    assert!(notifications.try_recv().is_err());
 }

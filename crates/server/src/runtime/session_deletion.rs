@@ -28,9 +28,10 @@ impl ServerRuntime {
                 .expect("steer queue poisoned")
                 .clear();
         }
-        let Some(turn_id) = self.runtime_active_turn_id(session_id).await else {
+        let Some(mut turn) = self.active_turns.active_turn(session_id).await else {
             return;
         };
+        let turn_id = turn.id;
         let terminal = self.subscribe_terminal_turn_status(turn_id).await;
         self.signal_active_turn_interrupt(session_id).await;
         // Give normal finalization/MergeTurn a short grace period. Deletion
@@ -47,14 +48,27 @@ impl ServerRuntime {
         // A forcibly aborted task cannot publish its own terminal status.
         // Resolve all turn waiters, including a subscriber that raced normal
         // finalization, rather than keeping deleted turns in the waiter map.
-        let snapshot =
-            self.recent_terminal_turn_status(turn_id)
-                .await
-                .unwrap_or(TerminalTurnSnapshot {
+        let snapshot = match self.recent_terminal_turn_status(turn_id).await {
+            Some(snapshot) => snapshot,
+            None => {
+                // Hard abort bypasses finalize_executed_turn. Publish the same
+                // Native terminal event while the session/subscriptions still
+                // exist, otherwise clients retain an in-progress turn forever.
+                turn.status = devo_protocol::native::turn::TurnStatus::Interrupted;
+                turn.completed_at = Some(chrono::Utc::now());
+                self.broadcast_notification(
+                    devo_protocol::native::event::ServerNotification::TurnCompleted {
+                        turn: Box::new(turn),
+                    },
+                )
+                .await;
+                TerminalTurnSnapshot {
                     status: devo_protocol::TurnStatus::Interrupted,
                     stop_reason: None,
                     failure_reason: None,
-                });
+                }
+            }
+        };
         self.record_terminal_turn_status(turn_id, snapshot).await;
     }
 
