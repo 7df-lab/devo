@@ -19,6 +19,7 @@ jobs:
         include:
           - os: ubuntu-latest
             target: x86_64-unknown-linux-musl
+            asset_target: x86_64-linux-musl
             ext: ""
             package_cli: true
             package_desktop: true
@@ -28,6 +29,7 @@ jobs:
             electron_args: --linux --x64
           - os: ubuntu-latest
             target: aarch64-unknown-linux-musl
+            asset_target: aarch64-linux-musl
             ext: ""
             package_cli: true
             package_desktop: true
@@ -71,6 +73,9 @@ jobs:
             desktop_arch: arm64
             rg_target: aarch64-pc-windows-msvc
             electron_args: --win --arm64
+
+    env:
+      RELEASE_TARGET: ${{ matrix.asset_target || matrix.target }}
 
     steps:
       - uses: actions/checkout@v4
@@ -170,14 +175,14 @@ jobs:
         if: matrix.package_cli
         shell: bash
         run: |
-          staging=devo-tui-${{ github.ref_name }}-${{ matrix.target }}
+          staging=devo-tui-${{ github.ref_name }}-${{ env.RELEASE_TARGET }}
           bun scripts/runtime/bundle.ts "${{ matrix.target }}" "$staging" "$DEVO_DESKTOP_RUNTIME_RG_BIN" "target/${{ matrix.target }}/release"
           echo "STAGING=$staging" >> "$GITHUB_ENV"
 
       - name: Verify private runtimes outside the checkout
         shell: bash
         run: |
-          bun scripts/runtime/smoke.ts "devo-tui-${{ github.ref_name }}-${{ matrix.target }}"
+          bun scripts/runtime/smoke.ts "${{ env.STAGING }}"
 
       - name: Create online app and cached runtime packs
         shell: bash
@@ -197,8 +202,8 @@ jobs:
       - uses: actions/upload-artifact@v4
         if: matrix.package_cli
         with:
-          name: devo-tui-${{ github.ref_name }}-${{ matrix.target }}
-          path: devo-tui-${{ github.ref_name }}-${{ matrix.target }}.*
+          name: devo-tui-${{ github.ref_name }}-${{ env.RELEASE_TARGET }}
+          path: ${{ env.STAGING }}.*
 
       - uses: actions/upload-artifact@v4
         if: matrix.package_cli
@@ -220,7 +225,7 @@ jobs:
       - name: Stage desktop runtime from release binary
         if: matrix.package_desktop
         working-directory: apps/desktop
-        run: bun scripts/prepare-runtime.ts --target ${{ matrix.target }} --bundle-dir ../../devo-tui-${{ github.ref_name }}-${{ matrix.target }}
+        run: bun scripts/prepare-runtime.ts --target ${{ matrix.target }} --bundle-dir ../../${{ env.STAGING }}
 
       - name: Package desktop with electron-builder
         if: matrix.package_desktop

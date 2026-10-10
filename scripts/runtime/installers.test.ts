@@ -1,5 +1,5 @@
 import { expect, test } from "bun:test";
-import { existsSync, mkdirSync, mkdtempSync, readFileSync, rmSync, writeFileSync } from "node:fs";
+import { existsSync, mkdirSync, mkdtempSync, readFileSync, renameSync, rmSync, writeFileSync } from "node:fs";
 import { tmpdir } from "node:os";
 import { dirname, join, resolve } from "node:path";
 
@@ -72,13 +72,19 @@ test.skipIf(process.platform === "win32")("Unix offline installation copies priv
     mkdirSync(assets);
     writeFileSync(join(assets, "install.sh"), readFileSync(join(repo, "install.sh")));
     const arch = process.arch === "arm64" ? "aarch64" : "x86_64";
-    const platform = process.platform === "darwin" ? "apple-darwin" : "unknown-linux-musl";
+    const platform = process.platform === "darwin" ? "apple-darwin" : "linux-musl";
     const archive = join(assets, `devo-tui-v0.2.0-${arch}-${platform}.tar.gz`);
     const packed = Bun.spawnSync(["tar", "-czf", archive, "-C", source, "."], { stdout: "pipe", stderr: "pipe" });
     expect({ exit: packed.exitCode, stderr: packed.stderr.toString() }).toEqual({ exit: 0, stderr: "" });
     const offlineDestination = join(root, "archive installed");
     const offline = Bun.spawnSync(["sh", join(assets, "install.sh"), "--offline", "--no-modify-path", "--install-dir", offlineDestination], { stdout: "pipe", stderr: "pipe" });
     expect({ exit: offline.exitCode, stderr: offline.stderr.toString(), complete: files.every((file) => existsSync(join(offlineDestination, file))) }).toEqual({ exit: 0, stderr: "", complete: true });
+    if (process.platform === "linux") {
+      renameSync(archive, archive.replace("-linux-musl", "-unknown-linux-musl"));
+      const olderDestination = join(root, "older archive installed");
+      const older = Bun.spawnSync(["sh", join(assets, "install.sh"), "--offline", "--no-modify-path", "--install-dir", olderDestination], { stdout: "pipe", stderr: "pipe" });
+      expect({ exit: older.exitCode, stderr: older.stderr.toString(), complete: files.every(file => existsSync(join(olderDestination, file))) }).toEqual({ exit: 0, stderr: "", complete: true });
+    }
   } finally {
     rmSync(root, { recursive: true, force: true });
   }

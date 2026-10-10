@@ -626,7 +626,6 @@ download_and_install() {
     require_command tar "Error: 'tar' is required but not installed."
     require_command find "Error: 'find' is required but not installed."
 
-    archive_name="${APP}-tui-${version_tag}-${target}.tar.gz"
     release_origin="${DEVO_RELEASE_BASE_URL:-https://github.com/${REPO}/releases/download}"
     base_url="${release_origin%/}/${version_tag}"
 
@@ -638,7 +637,16 @@ download_and_install() {
     trap 'rm -rf "$tmp_dir"' EXIT INT TERM
 
     curl -fsSL --retry 3 "$base_url/SHA256SUMS.txt" -o "$tmp_dir/SHA256SUMS.txt"
-    index_name="devo-tui-${version_tag}-${target}.install.txt"
+    # Public Linux names omit Rust's vendor field. Older releases retain it.
+    asset_target="$(printf '%s\n' "$target" | sed 's/-unknown-linux-/-linux-/')"
+    if [ "$asset_target" != "$target" ] && ! awk \
+        -v index_name="devo-tui-${version_tag}-${asset_target}.install.txt" \
+        -v archive="devo-tui-${version_tag}-${asset_target}.tar.gz" \
+        '$2 == index_name || $2 == archive { found = 1 } END { exit !found }' "$tmp_dir/SHA256SUMS.txt"; then
+        asset_target="$target"
+    fi
+    archive_name="${APP}-tui-${version_tag}-${asset_target}.tar.gz"
+    index_name="devo-tui-${version_tag}-${asset_target}.install.txt"
     status="$(curl -sSL --retry 3 --connect-timeout 20 -o "$tmp_dir/$index_name" -w '%{http_code}' "$base_url/$index_name")"
     case "$status" in
         200)
@@ -738,9 +746,13 @@ install_offline_devo() {
         return
     fi
 
-    archive_path="$(find_offline_file "$asset_dir" "${APP}-tui-v*-${target}.tar.gz" || true)"
+    asset_target="$(printf '%s\n' "$target" | sed 's/-unknown-linux-/-linux-/')"
+    archive_path="$(find_offline_file "$asset_dir" "${APP}-tui-v*-${asset_target}.tar.gz" || true)"
+    if [ -z "$archive_path" ] && [ "$asset_target" != "$target" ]; then
+        archive_path="$(find_offline_file "$asset_dir" "${APP}-tui-v*-${target}.tar.gz" || true)"
+    fi
     if [ -z "$archive_path" ]; then
-        die "Offline devo asset not found. Place ${APP}-tui-*-${target}.tar.gz or ${APP} next to install.sh."
+        die "Offline devo asset not found. Place ${APP}-tui-*-${asset_target}.tar.gz or ${APP} next to install.sh."
     fi
 
     require_command tar "Error: 'tar' is required but not installed."
