@@ -66,7 +66,7 @@ Act as a research supervisor after the brief is ready. The supervisor owns decom
 
 ### Worker contract
 
-Each delegated researcher/subagent focuses only on its assigned track. It may use available web search, fetch, code-search, local read, and inspection tools, but it cannot coordinate other agents. It must not write files or modify the workspace unless the parent explicitly assigns that artifact change. Start broad unless an authoritative source is already known, inspect underlying sources, use follow-up searches when evidence is incomplete, and stop when the track is confidently covered.
+Each delegated researcher/subagent focuses only on its assigned track. It may use available web search, fetch, local read, and inspection tools, but it cannot coordinate other agents. It must not write files or modify the workspace unless the parent explicitly assigns that artifact change. Start broad unless an authoritative source is already known, inspect underlying sources, use follow-up searches when evidence is incomplete, and stop when the track is confidently covered.
 
 Every worker returns dense, complete evidence notes (not a final report) with exactly these headings:
 

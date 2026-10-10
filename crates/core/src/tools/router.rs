@@ -957,10 +957,6 @@ fn path_for_tool_input(tool_name: &str, input: &serde_json::Value, cwd: &Path) -
             .get("path")
             .and_then(serde_json::Value::as_str)
             .or(Some(".")),
-        "code_search" => input
-            .get("path")
-            .and_then(serde_json::Value::as_str)
-            .or(Some(".")),
         _ => None,
     }?;
     let path = PathBuf::from(raw);

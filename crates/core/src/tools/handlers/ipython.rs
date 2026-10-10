@@ -505,6 +505,11 @@ fn interpreter_imports(module: &str, config: &devo_kernel::KernelSessionConfig) 
 /// private temp dir and renames it into place; the loser keeps the winner's
 /// install instead of interleaving two `--target` installs.
 fn ensure_kernel_dill(config: &mut devo_kernel::KernelSessionConfig) {
+    // Release bundles contain locked dependencies. Never provision over the
+    // network or shadow them with a user-site installation on first launch.
+    if devo_util_paths::runtime::RuntimeBundle::current().is_some() {
+        return;
+    }
     let Some(site) = kernel_site_dir() else {
         tracing::warn!(
             "could not resolve the Devo home; kernel namespace snapshots will be skipped \

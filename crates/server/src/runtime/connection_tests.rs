@@ -307,46 +307,6 @@ async fn connect_stdio(
 #[tokio::test]
 async fn mcp_rpc_branches() {
     let temp = TempDir::new().expect("temp dir");
-    let runtime = build_runtime(temp.path());
-
-    let unknown_tools = rpc(
-        &runtime,
-        3,
-        "mcp/tools",
-        serde_json::json!({ "name": "missing-server" }),
-    )
-    .await;
-    let error: ErrorResponse = serde_json::from_value(unknown_tools).expect("deserialize error");
-    assert_eq!(error.error.code, ProtocolErrorCode::InvalidParams);
-
-    let disabled_tools = rpc(
-        &runtime,
-        7,
-        "mcp/tools",
-        serde_json::json!({ "name": "code_search" }),
-    )
-    .await;
-    let result: SuccessResponse<devo_protocol::native::rpc_admin::McpToolsResult> =
-        serde_json::from_value(disabled_tools).expect("deserialize mcp/tools");
-    assert_eq!(
-        result.result,
-        devo_protocol::native::rpc_admin::McpToolsResult { tools: Vec::new() }
-    );
-
-    let list = rpc(&runtime, 2, "mcp/list", serde_json::json!({})).await;
-    let result: SuccessResponse<devo_protocol::native::rpc_admin::McpListResult> =
-        serde_json::from_value(list).expect("deserialize mcp/list");
-    let code_search = result
-        .result
-        .servers
-        .iter()
-        .find(|server| server.name == "code_search")
-        .expect("bundled code_search should be listed");
-    assert_eq!(
-        (code_search.status.as_str(), code_search.tool_count),
-        ("disabled", 0)
-    );
-
     {
         let mut store =
             AppConfigStore::load(temp.path().to_path_buf(), None).expect("load app config store");
@@ -382,6 +342,45 @@ async fn mcp_rpc_branches() {
         .mcp(mcp_manager)
         .db_file("connection.db")
         .runtime(temp.path());
+
+    let unknown_tools = rpc(
+        &runtime,
+        3,
+        "mcp/tools",
+        serde_json::json!({ "name": "missing-server" }),
+    )
+    .await;
+    let error: ErrorResponse = serde_json::from_value(unknown_tools).expect("deserialize error");
+    assert_eq!(error.error.code, ProtocolErrorCode::InvalidParams);
+
+    let disabled_tools = rpc(
+        &runtime,
+        7,
+        "mcp/tools",
+        serde_json::json!({ "name": "bad_mcp" }),
+    )
+    .await;
+    let result: SuccessResponse<devo_protocol::native::rpc_admin::McpToolsResult> =
+        serde_json::from_value(disabled_tools).expect("deserialize mcp/tools");
+    assert_eq!(
+        result.result,
+        devo_protocol::native::rpc_admin::McpToolsResult { tools: Vec::new() }
+    );
+
+    let list = rpc(&runtime, 2, "mcp/list", serde_json::json!({})).await;
+    let result: SuccessResponse<devo_protocol::native::rpc_admin::McpListResult> =
+        serde_json::from_value(list).expect("deserialize mcp/list");
+    let disabled_server = result
+        .result
+        .servers
+        .iter()
+        .find(|server| server.name == "bad_mcp")
+        .expect("configured disabled server should be listed");
+    assert_eq!(
+        (disabled_server.status.as_str(), disabled_server.tool_count),
+        ("disabled", 0)
+    );
+
     let connection_id = initialized_connection(&runtime).await;
     let enabled = runtime
         .handle_incoming(

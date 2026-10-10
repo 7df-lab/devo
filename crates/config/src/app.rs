@@ -993,7 +993,6 @@ impl AppConfigLoader for FileSystemAppConfigLoader {
             servers,
             auto_start: config.mcp.auto_start,
         };
-        config.mcp_runtime.ensure_bundled_servers();
         validate_app_config(&config)?;
         Ok(config)
     }

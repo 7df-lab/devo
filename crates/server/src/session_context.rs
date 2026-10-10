@@ -272,18 +272,7 @@ impl SessionRuntimeContext {
             &inherited_context.provider_catalog_snapshot,
         ) || config.provider_http
             != inherited_context.provider_http_snapshot;
-        let workspace_cwd = workspace_root
-            .map(Path::to_path_buf)
-            .unwrap_or_else(|| std::env::current_dir().unwrap_or_else(|_| PathBuf::from(".")));
-        let workspace_mcp = config
-            .mcp_runtime
-            .clone()
-            .with_code_search_workspace_cwd(workspace_cwd.clone());
-        let inherited_mcp = inherited_config
-            .mcp_runtime
-            .clone()
-            .with_code_search_workspace_cwd(workspace_cwd);
-        let mcp_runtime_equivalent = workspace_mcp.is_operationally_equivalent_to(&inherited_mcp);
+        let mcp_runtime_equivalent = config.mcp_runtime == inherited_config.mcp_runtime;
         let oauth_credentials_equivalent = config.mcp_oauth_credentials_store.unwrap_or_default()
             == inherited_config
                 .mcp_oauth_credentials_store
@@ -313,7 +302,7 @@ impl SessionRuntimeContext {
             }
         } else {
             let mcp_manager: Arc<dyn McpManager> = Arc::new(RmcpMcpManager::new(
-                workspace_mcp,
+                config.mcp_runtime.clone(),
                 config.mcp_oauth_credentials_store.unwrap_or_default(),
             ));
             let registry = Arc::new(StdMutex::new(Arc::new(

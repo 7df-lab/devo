@@ -10,7 +10,6 @@ use super::AppConfig;
 use super::AppConfigLoader;
 use super::AppConfigStore;
 use super::CommandHookConfig;
-use super::ExperimentalConfig;
 use super::FileSystemAppConfigLoader;
 use super::HookCommandConfig;
 use super::HookEvent;
@@ -422,7 +421,7 @@ pattern = "deploy"
 }
 
 #[test]
-fn default_app_config_server_and_bundled_mcp() {
+fn default_app_config_server_and_empty_mcp() {
     let default = AppConfig::default();
     assert_eq!(
         default.server.auth,
@@ -434,15 +433,8 @@ fn default_app_config_server_and_bundled_mcp() {
             logout: true,
         }
     );
-    assert!(
-        !default
-            .mcp_runtime
-            .servers
-            .iter()
-            .find(|record| record.id.0 == super::BUNDLED_CODE_SEARCH_MCP_SERVER_ID)
-            .expect("bundled code_search server")
-            .enabled
-    );
+    assert_eq!(default.mcp_runtime, super::McpConfig::default());
+    assert!(default.mcp_runtime.servers.is_empty());
     assert_eq!(
         default.updates,
         UpdatesConfig {
@@ -500,74 +492,6 @@ fn loader_rejects_invalid_server_auth_fields_when_enabled() {
             other => panic!("expected server auth validation error, got {other:?}"),
         }
     }
-}
-
-#[test]
-fn loader_bundled_code_search_mcp_table() {
-    let cases = [
-        (
-            "config-experimental-legacy",
-            "[experimental]\ncode-search = true\ncode_search = false\n",
-        ),
-        ("config-bundled-mcp-ensure", "[mcp]\nauto_start = true\n"),
-    ];
-    for (name, config) in cases {
-        let fixture = ConfigFixture::new(name);
-        fixture.write_home(config);
-        let loaded = fixture.load();
-        if name == "config-experimental-legacy" {
-            assert_eq!(loaded.experimental, ExperimentalConfig::default());
-        } else {
-            assert_eq!(loaded.mcp_runtime.servers.len(), 1);
-            assert_eq!(
-                loaded.mcp_runtime.servers[0].id.0,
-                super::BUNDLED_CODE_SEARCH_MCP_SERVER_ID
-            );
-        }
-        assert!(
-            !loaded
-                .mcp_runtime
-                .servers
-                .iter()
-                .find(|record| record.id.0 == super::BUNDLED_CODE_SEARCH_MCP_SERVER_ID)
-                .expect("bundled code_search server")
-                .enabled
-        );
-    }
-}
-
-/// Trace: L2-DES-MCP-002
-/// Verifies: enabling bundled code_search materializes it into user config.toml.
-#[test]
-fn set_mcp_server_enabled_materializes_bundled_code_search() {
-    let fixture = ConfigFixture::new("config-bundled-mcp-enable");
-    fixture.write_home("[mcp]\nauto_start = true\n");
-    let config_file = fixture.home.join("config.toml");
-    let mut store =
-        AppConfigStore::load(fixture.home.clone(), /*workspace_root*/ None).expect("load store");
-    assert!(
-        !std::fs::read_to_string(&config_file)
-            .expect("read user config")
-            .contains("code_search")
-    );
-
-    store
-        .set_mcp_server_enabled(
-            super::BUNDLED_CODE_SEARCH_MCP_SERVER_ID,
-            /*enabled*/ true,
-        )
-        .expect("enable bundled code_search");
-
-    let server = store
-        .mcp_servers()
-        .iter()
-        .find(|record| record.id.0 == super::BUNDLED_CODE_SEARCH_MCP_SERVER_ID)
-        .expect("bundled code_search server");
-    assert!(server.enabled);
-
-    let user_config = std::fs::read_to_string(&config_file).expect("read user config");
-    assert!(user_config.contains("code_search"));
-    assert!(user_config.contains("devo-code-search-mcp"));
 }
 
 #[test]
@@ -1244,7 +1168,6 @@ level = "warn"
     assert!(server_ids.contains(&"time"));
     assert!(server_ids.contains(&"hello"));
     assert!(server_ids.contains(&"legacy"));
-    assert!(server_ids.contains(&super::BUNDLED_CODE_SEARCH_MCP_SERVER_ID));
     assert_eq!(
         store
             .mcp_servers()
@@ -1283,7 +1206,6 @@ level = "warn"
         .collect();
     assert!(reloaded_ids.contains(&"time"));
     assert!(reloaded_ids.contains(&"legacy"));
-    assert!(reloaded_ids.contains(&super::BUNDLED_CODE_SEARCH_MCP_SERVER_ID));
     assert!(!reloaded_ids.contains(&"hello"));
     assert!(
         !reloaded

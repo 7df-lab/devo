@@ -1,7 +1,6 @@
 [workspace]
 members = [
     "crates/core",
-    "crates/code-search-mcp",
     "crates/execpolicy",
     "crates/tools",
     "crates/provider",
@@ -60,7 +59,6 @@ crossbeam-channel = "0.5.15"
 derive_more = "2"
 devo-arg0 = { path = "crates/arg0" }
 devo-client = { path = "crates/client" }
-devo-code-search-mcp = { path = "crates/code-search-mcp" }
 devo-config = { path = "crates/config" }
 devo-core = { path = "crates/core" }
 devo-execpolicy = { path = "crates/execpolicy" }

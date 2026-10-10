@@ -501,75 +501,10 @@ fn path_for_tool_input_cases() {
             serde_json::json!({ "pattern": "needle" }),
             Some(PathBuf::from("C:/workspace").join(".")),
         ),
-        (
-            "code_search",
-            serde_json::json!({
-                "operation": "find_related",
-                "file_path": "src/main.rs",
-                "line": 1
-            }),
-            Some(PathBuf::from("C:/workspace").join(".")),
-        ),
-        (
-            "code_search",
-            serde_json::json!({
-                "operation": "find_related",
-                "path": "crates/core",
-                "file_path": "src/main.rs",
-                "line": 1
-            }),
-            Some(PathBuf::from("C:/workspace").join("crates/core")),
-        ),
     ];
     for (tool, input, expected) in cases {
         assert_eq!(path_for_tool_input(tool, input, cwd), *expected, "{tool}");
     }
-}
-
-#[tokio::test]
-async fn runtime_code_search_permission_uses_search_root() {
-    let mut b = ToolRegistryBuilder::new();
-    register(
-        &mut b,
-        "code_search",
-        Arc::new(FixedTool::read()),
-        spec(
-            "code_search",
-            ToolExecutionMode::ReadOnly,
-            vec![ToolCapabilityTag::SearchWorkspace],
-            true,
-            ToolOutputMode::StructuredJson,
-        ),
-    );
-    let (checker, rx) = capture_permission(false);
-    let runtime = ToolRuntime::new_with_context(
-        Arc::new(b.build()),
-        checker,
-        ToolRuntimeContext {
-            cwd: PathBuf::from("C:/workspace"),
-            ..ToolRuntimeContext::default()
-        },
-    );
-    let result = runtime
-        .execute_single(
-            &call(
-                "call-code-search",
-                "code_search",
-                serde_json::json!({
-                    "operation": "find_related",
-                    "file_path": "src/main.rs",
-                    "line": 1
-                }),
-            ),
-            &None,
-        )
-        .await;
-    let request = rx.await.expect("permission request");
-    assert!(result.is_error);
-    assert_eq!(request.tool_name, "code_search");
-    assert_eq!(request.resource, devo_safety::ResourceKind::FileRead);
-    assert_eq!(request.path, Some(PathBuf::from("C:/workspace").join(".")));
-    assert!(result.content.into_string().contains("permission denied"));
 }
 
 #[test]

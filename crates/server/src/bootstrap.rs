@@ -282,10 +282,7 @@ pub async fn run_server_process(
     );
 
     let mcp_manager: Arc<dyn devo_core::McpManager> = Arc::new(RmcpMcpManager::new(
-        merge_tui_settings_mcp_servers(config.mcp_runtime.clone(), &resolver.user_config_dir())
-            .with_code_search_workspace_cwd(
-                std::env::current_dir().unwrap_or_else(|_| std::path::PathBuf::from(".")),
-            ),
+        merge_tui_settings_mcp_servers(config.mcp_runtime.clone(), &resolver.user_config_dir()),
         config.mcp_oauth_credentials_store.unwrap_or_default(),
     ));
     let tool_plan = ToolPlanConfig::from_app_config(&config);
@@ -671,7 +668,7 @@ mod tests {
     #[test]
     fn tui_settings_missing_or_invalid_file_is_noop() {
         let dir = tempfile::tempdir().expect("tempdir");
-        // Deliberately empty (McpConfig::default bundles code-search).
+        // Deliberately empty: no built-in MCP servers.
         let empty = devo_core::McpConfig {
             servers: Vec::new(),
             auto_start: true,

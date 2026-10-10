@@ -292,5 +292,4 @@ and Clippy ran with warnings denied. The CI goal-completion fixture now allows
   tests have request timeouts and pass; the old reproducer does not lock the
   user checkout's executable.
 
-See [Desktop session loading](../../../docs/desktop-session-loading.md) for the
-Native cursor and subscription contract.
+The Native cursor and subscription contract is implemented in the server session handlers.

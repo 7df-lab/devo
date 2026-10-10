@@ -3,6 +3,11 @@ import path from "node:path"
 import { resolveDevoProgram } from "./devo-program"
 
 describe("resolveDevoProgram", () => {
+	test("prefers the complete shared runtime bundle", () => {
+		const resourcesPath = path.join(process.cwd(), "complete-resources")
+		const bundled = path.join(resourcesPath, "runtime", process.platform === "win32" ? "devo.exe" : "devo")
+		expect(resolveDevoProgram({ appPath: process.cwd(), env: {}, isPackaged: true, resourcesPath, existsSync: () => true })).toBe(bundled)
+	})
 	test("prefers the checkout debug CLI in desktop dev mode", () => {
 		const appPath = path.join("repo", "apps", "desktop")
 		const checkoutDebug = path.resolve(appPath, "..", "..", "target", "debug", "devo")

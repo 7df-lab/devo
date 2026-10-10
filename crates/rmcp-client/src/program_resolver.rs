@@ -130,19 +130,12 @@ mod tests {
     fn unix_resolve_expands_tilde_home_prefix() {
         let mut env = HashMap::new();
         env.insert(OsString::from("HOME"), OsString::from("/tmp/fake-home"));
-        let resolved = resolve(
-            OsString::from("~/bin/devo-code-search-mcp"),
-            &env,
-            Path::new("/"),
-        )
-        .expect("resolve");
-        assert_eq!(
-            resolved,
-            OsString::from("/tmp/fake-home/bin/devo-code-search-mcp")
-        );
-        let unchanged = resolve(OsString::from("devo-code-search-mcp"), &env, Path::new("/"))
-            .expect("resolve bare");
-        assert_eq!(unchanged, OsString::from("devo-code-search-mcp"));
+        let resolved =
+            resolve(OsString::from("~/bin/example-mcp"), &env, Path::new("/")).expect("resolve");
+        assert_eq!(resolved, OsString::from("/tmp/fake-home/bin/example-mcp"));
+        let unchanged =
+            resolve(OsString::from("example-mcp"), &env, Path::new("/")).expect("resolve bare");
+        assert_eq!(unchanged, OsString::from("example-mcp"));
     }
 
     /// Windows: Verifies scripts fail to execute without the proper extension.

@@ -1,0 +1,55 @@
+name: Runtime bundles
+
+on:
+  pull_request:
+    branches: [main, master]
+  push:
+    branches: [main, master]
+
+jobs:
+  runtime:
+    name: Private runtimes (${{ matrix.target }})
+    runs-on: ${{ matrix.os }}
+    strategy:
+      fail-fast: false
+      matrix:
+        include:
+          - os: ubuntu-latest
+            target: x86_64-unknown-linux-musl
+            ext: ""
+          - os: ubuntu-latest
+            target: aarch64-unknown-linux-musl
+            ext: ""
+          - os: macos-latest
+            target: aarch64-apple-darwin
+            ext: ""
+          - os: macos-latest
+            target: x86_64-apple-darwin
+            ext: ""
+          - os: windows-latest
+            target: x86_64-pc-windows-msvc
+            ext: ".exe"
+          - os: windows-latest
+            target: aarch64-pc-windows-msvc
+            ext: ".exe"
+    steps:
+      - uses: actions/checkout@v4
+      - uses: oven-sh/setup-bun@v2
+        with:
+          bun-version: "1.4.0"
+      - uses: astral-sh/setup-uv@v6
+        with:
+          version: "0.11.13"
+      - name: Packaging and installer unit tests
+        run: bun test scripts/runtime
+      - name: Create backend placeholders for runtime-only packaging checks
+        shell: bash
+        run: |
+          mkdir -p fixture-bin
+          printf 'backend checked by Rust CI and release builds\n' > fixture-bin/devo${{ matrix.ext }}
+          printf 'ripgrep checked by release builds\n' > fixture-bin/rg${{ matrix.ext }}
+      - name: Build target runtime bundle
+        shell: bash
+        run: bun scripts/runtime/bundle.ts "${{ matrix.target }}" runtime-test-bundle "fixture-bin/rg${{ matrix.ext }}" fixture-bin
+      - name: Relocate and exercise private Node/Python without system runtimes or network
+        run: bun scripts/runtime/smoke.ts runtime-test-bundle

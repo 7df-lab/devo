@@ -65,7 +65,7 @@ jobs:
           - os: windows-latest
             target: aarch64-pc-windows-msvc
             ext: ".exe"
-            package_cli: false
+            package_cli: true
             package_desktop: true
             desktop_platform: windows
             desktop_arch: arm64
@@ -96,58 +96,29 @@ jobs:
         if: runner.os == 'Linux'
         run: |
           cargo zigbuild --release --target ${{ matrix.target }} -p devo-cli
-          cargo zigbuild --release --target ${{ matrix.target }} -p devo-code-search-mcp
 
       - name: Build release binary (macOS)
         if: runner.os == 'macOS'
         run: |
           cargo build --release --target ${{ matrix.target }} -p devo-cli
-          cargo build --release --target ${{ matrix.target }} -p devo-code-search-mcp
 
       - name: Build release binary (Windows)
         if: runner.os == 'Windows'
         run: |
           cargo build --release --target ${{ matrix.target }} -p devo-cli
-          cargo build --release --target ${{ matrix.target }} -p devo-code-search-mcp
 
       - name: Strip symbols (macOS)
         if: runner.os == 'macOS'
         run: |
           strip target/${{ matrix.target }}/release/devo${{ matrix.ext }}
-          strip target/${{ matrix.target }}/release/devo-code-search-mcp${{ matrix.ext }}
 
-      # ── CLI archive (skipped for desktop-only targets) ────────────────────
-      - name: Prepare CLI staging directory
-        if: matrix.package_cli
-        shell: bash
-        run: |
-          staging=devo-${{ github.ref_name }}-${{ matrix.target }}
-          mkdir -p "$staging"
-          cp target/${{ matrix.target }}/release/devo${{ matrix.ext }} "$staging/"
-          cp target/${{ matrix.target }}/release/devo-code-search-mcp${{ matrix.ext }} "$staging/"
-          cp README.md LICENSE "$staging/" 2>/dev/null || true
-          echo "STAGING=$staging" >> "$GITHUB_ENV"
-
-      - name: Create tar.gz archive (Linux/macOS)
-        if: matrix.package_cli && runner.os != 'Windows'
-        run: tar czf "${{ env.STAGING }}.tar.gz" "${{ env.STAGING }}"
-
-      - name: Create zip archive (Windows)
-        if: matrix.package_cli && runner.os == 'Windows'
-        shell: pwsh
-        run: |
-          $staging = "$env:STAGING"
-          Compress-Archive -Path "$staging/*" -DestinationPath "$staging.zip"
-
-      - uses: actions/upload-artifact@v4
-        if: matrix.package_cli
-        with:
-          name: devo-${{ github.ref_name }}-${{ matrix.target }}
-          path: devo-${{ github.ref_name }}-${{ matrix.target }}.*
-
-      # ── Desktop package (reuses the binary compiled above) ────────────────
       - uses: oven-sh/setup-bun@v2
-        if: matrix.package_desktop
+        with:
+          bun-version: "1.4.0"
+
+      - uses: astral-sh/setup-uv@v6
+        with:
+          version: "0.11.13"
 
       - name: Install Linux packaging dependencies
         if: matrix.package_desktop && runner.os == 'Linux'
@@ -194,6 +165,38 @@ jobs:
           Get-Item $rg.FullName | Select-Object FullName, Length
           "DEVO_DESKTOP_RUNTIME_RG_BIN=$($rg.FullName)" | Out-File -FilePath $env:GITHUB_ENV -Append
 
+      # ── CLI archive (skipped for desktop-only targets) ────────────────────
+      - name: Prepare CLI staging directory
+        if: matrix.package_cli
+        shell: bash
+        run: |
+          staging=devo-${{ github.ref_name }}-${{ matrix.target }}
+          bun scripts/runtime/bundle.ts "${{ matrix.target }}" "$staging" "$DEVO_DESKTOP_RUNTIME_RG_BIN" "target/${{ matrix.target }}/release"
+          echo "STAGING=$staging" >> "$GITHUB_ENV"
+
+      - name: Verify private runtimes outside the checkout
+        shell: bash
+        run: |
+          bun scripts/runtime/smoke.ts "devo-${{ github.ref_name }}-${{ matrix.target }}"
+
+      - name: Create tar.gz archive (Linux/macOS)
+        if: matrix.package_cli && runner.os != 'Windows'
+        run: tar czf "${{ env.STAGING }}.tar.gz" "${{ env.STAGING }}"
+
+      - name: Create zip archive (Windows)
+        if: matrix.package_cli && runner.os == 'Windows'
+        shell: pwsh
+        run: |
+          $staging = "$env:STAGING"
+          Compress-Archive -Path "$staging/*" -DestinationPath "$staging.zip"
+
+      - uses: actions/upload-artifact@v4
+        if: matrix.package_cli
+        with:
+          name: devo-${{ github.ref_name }}-${{ matrix.target }}
+          path: devo-${{ github.ref_name }}-${{ matrix.target }}.*
+
+      # ── Desktop package (reuses the binary compiled above) ────────────────
       - name: Install desktop dependencies
         if: matrix.package_desktop
         working-directory: apps/desktop
@@ -207,7 +210,7 @@ jobs:
       - name: Stage desktop runtime from release binary
         if: matrix.package_desktop
         working-directory: apps/desktop
-        run: bun scripts/prepare-runtime.ts --target ${{ matrix.target }}
+        run: bun scripts/prepare-runtime.ts --target ${{ matrix.target }} --bundle-dir ../../devo-${{ github.ref_name }}-${{ matrix.target }}
 
       - name: Package desktop with electron-builder
         if: matrix.package_desktop
@@ -257,6 +260,10 @@ jobs:
         run: |
           cat > release-notes.md <<'NOTES'
           ## Install
+
+          Packages include private Node and Python runtimes, the compiled TUI, locked Python dependencies, and ripgrep. No system Node.js, Python, npm, pip, or Rust installation is required. Keep the extracted archive together.
+
+          For offline installation, transfer the complete archive and use its included installer with `--offline` (Unix) or `-Offline` (Windows). Cloud inference still requires connectivity; use a compatible preloaded local or LAN model for disconnected use.
 
           ### Linux / macOS
 

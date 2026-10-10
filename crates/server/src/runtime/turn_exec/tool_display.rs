@@ -183,45 +183,7 @@ pub(super) fn command_display_from_input(tool_name: &str, input: &serde_json::Va
                 format!("grep {pattern} in {path}")
             }
         }
-        "code_search" | "mcp__code_search__code_search" => code_search_display_from_input(input),
         _ => String::new(),
-    }
-}
-
-fn code_search_display_from_input(input: &serde_json::Value) -> String {
-    match input
-        .get("operation")
-        .and_then(serde_json::Value::as_str)
-        .unwrap_or("search")
-    {
-        "find_related" => {
-            let path = input
-                .get("file_path")
-                .and_then(serde_json::Value::as_str)
-                .unwrap_or_default();
-            let line = input.get("line").and_then(serde_json::Value::as_u64);
-            match (path.is_empty(), line) {
-                (false, Some(line)) => format!("code_search related {path}:{line}"),
-                (false, None) => format!("code_search related {path}"),
-                (true, _) => "code_search related".to_string(),
-            }
-        }
-        _ => {
-            let query = input
-                .get("query")
-                .and_then(serde_json::Value::as_str)
-                .unwrap_or_default();
-            let path = input
-                .get("path")
-                .and_then(serde_json::Value::as_str)
-                .unwrap_or_default();
-            match (query.is_empty(), path.is_empty()) {
-                (false, false) => format!("code_search {query} in {path}"),
-                (false, true) => format!("code_search {query}"),
-                (true, false) => format!("code_search in {path}"),
-                (true, true) => "code_search".to_string(),
-            }
-        }
     }
 }
 

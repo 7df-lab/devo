@@ -20,15 +20,53 @@ pub(crate) async fn run_doctor() -> Result<()> {
 
     let mut all_ok = true;
 
-    println!("{} Rust toolchain:", "✓".green().bold());
-    let rustc = Command::new("rustc").arg("--version").output();
-    match rustc {
-        Ok(output) => {
-            let version = String::from_utf8_lossy(&output.stdout);
-            println!("  {}", version.trim());
+    println!("{} Application runtimes:", "✓".green().bold());
+    let bundle = devo_util_paths::runtime::RuntimeBundle::current();
+    let node = bundle
+        .as_ref()
+        .map_or_else(|| "node".into(), |runtime| runtime.node.clone());
+    let python = bundle
+        .as_ref()
+        .map_or_else(|| "python".into(), |runtime| runtime.python.clone());
+    for program in [&node, &python] {
+        match Command::new(program).arg("--version").output() {
+            Ok(output) if output.status.success() => {
+                println!(
+                    "  {}: {}",
+                    program.display(),
+                    String::from_utf8_lossy(&output.stdout).trim()
+                );
+            }
+            result => {
+                println!("  {} {} failed: {result:?}", "✗".red(), program.display());
+                all_ok = false;
+            }
         }
-        Err(e) => {
-            println!("  {} rustc not found: {}", "✗".red(), e);
+    }
+    let mut probe = Command::new(&python);
+    probe.args([
+        "-c",
+        "import rlm.repl, mcp, tyro, dill; print('Python kernel dependencies ready')",
+    ]);
+    if let Some(bundle) = &bundle {
+        probe
+            .env("PYTHONPATH", &bundle.python_site)
+            .env("PYTHONNOUSERSITE", "1");
+        if !bundle.tui.is_file() {
+            println!(
+                "  {} TUI entry missing; reinstall the full release archive",
+                "✗".red()
+            );
+            all_ok = false;
+        }
+    }
+    match probe.output() {
+        Ok(output) if output.status.success() => println!("  Python kernel dependencies ready"),
+        result => {
+            println!(
+                "  {} Python kernel dependencies unavailable: {result:?}",
+                "✗".red()
+            );
             all_ok = false;
         }
     }

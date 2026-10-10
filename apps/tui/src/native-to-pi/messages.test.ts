@@ -275,7 +275,7 @@ test("restore projects legacy plan without callId via envelope id", () => {
 test("mapMcpToExtensions carries runtime status for the /mcp tab", () => {
   const extensions = mapMcpToExtensions([
     { name: "echo-test", status: "ready", toolCount: 1 },
-    { name: "code_search", status: "disabled", toolCount: 0 },
+    { name: "external_search", status: "disabled", toolCount: 0 },
   ]);
   assert.deepEqual(extensions, [
     {
@@ -289,14 +289,14 @@ test("mapMcpToExtensions carries runtime status for the /mcp tab", () => {
       mcp: { name: "echo-test", status: "ready", toolCount: 1 },
     },
     {
-      path: "code_search",
+      path: "external_search",
       sourceInfo: {
-        path: "code_search",
+        path: "external_search",
         source: "mcp",
         scope: "user",
         origin: "top-level",
       },
-      mcp: { name: "code_search", status: "disabled", toolCount: 0 },
+      mcp: { name: "external_search", status: "disabled", toolCount: 0 },
     },
   ]);
 });
@@ -306,9 +306,9 @@ test("formatRuntimeMcpServersLine summarizes configured servers", () => {
     formatRuntimeMcpServersLine([
       { name: "echo-test", status: "ready", toolCount: 1 },
       { name: "advtest", status: "ready", toolCount: 3 },
-      { name: "code_search", status: "disabled", toolCount: 0 },
+      { name: "external_search", status: "disabled", toolCount: 0 },
     ]),
-    "echo-test (ready · 1 tool) · advtest (ready · 3 tools) · code_search (disabled)",
+    "echo-test (ready · 1 tool) · advtest (ready · 3 tools) · external_search (disabled)",
   );
   assert.equal(formatRuntimeMcpServersLine([]), "");
 });

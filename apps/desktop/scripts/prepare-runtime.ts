@@ -1,7 +1,8 @@
-import { chmodSync, copyFileSync, existsSync, mkdirSync, rmSync } from "node:fs"
-import { homedir } from "node:os"
+import { chmodSync, copyFileSync, cpSync, existsSync, mkdirSync, mkdtempSync, readFileSync, rmSync } from "node:fs"
+import { homedir, tmpdir } from "node:os"
 import { delimiter, dirname, join } from "node:path"
 import { fileURLToPath } from "node:url"
+import { bundleRuntime } from "../../../scripts/runtime/bundle"
 
 interface DefaultSourcePathOptions {
 	repoRoot: string
@@ -10,12 +11,12 @@ interface DefaultSourcePathOptions {
 }
 
 interface StageRuntimeOptions extends DefaultSourcePathOptions {
+	bundleDir?: string
 	devoBin?: string
 	desktopDir: string
 	hostArch?: NodeJS.Architecture
 	hostPlatform?: NodeJS.Platform
 	rgBin?: string
-	withCodeSearch?: boolean
 }
 
 const scriptDir = dirname(fileURLToPath(import.meta.url))
@@ -46,23 +47,19 @@ export function defaultDevoSourcePath({
 	return join(repoRoot, ...targetParts, runtimeBinaryName("devo", platformForTargetTriple(targetTriple, platform)))
 }
 
-export function defaultCodeSearchMcpSourcePath({
-	repoRoot,
-	targetTriple,
-	platform = process.platform,
-}: DefaultSourcePathOptions): string {
-	const targetParts = targetTriple ? ["target", targetTriple, "release"] : ["target", "release"]
-	return join(
-		repoRoot,
-		...targetParts,
-		runtimeBinaryName("devo-code-search-mcp", platformForTargetTriple(targetTriple, platform)),
-	)
-}
-
 export function stageRuntime(options: StageRuntimeOptions): void {
+	if (options.bundleDir) {
+		const manifest = JSON.parse(readFileSync(join(options.bundleDir, "runtime/manifest.json"), "utf8"))
+		if (manifest.schema !== 1 || manifest.target !== options.targetTriple) {
+			throw new Error("Desktop runtime bundle target/schema mismatch")
+		}
+		const destination = join(options.desktopDir, "resources", "runtime")
+		rmSync(destination, { recursive: true, force: true })
+		cpSync(options.bundleDir, destination, { recursive: true, dereference: true })
+		console.log(`Prepared complete Desktop runtime: ${destination}`)
+		return
+	}
 	const devoSource = options.devoBin ?? defaultDevoSourcePath(options)
-	const withCodeSearch = options.withCodeSearch ?? false
-	const codeSearchMcpSource = withCodeSearch ? defaultCodeSearchMcpSourcePath(options) : undefined
 	const targetPlatform = platformForTargetTriple(options.targetTriple, options.platform ?? process.platform)
 	const rgOverride = options.rgBin ?? optionalPath(process.env.DEVO_DESKTOP_RUNTIME_RG_BIN)
 
@@ -90,9 +87,6 @@ export function stageRuntime(options: StageRuntimeOptions): void {
 	if (!existsSync(devoSource)) {
 		throw new Error(`Devo runtime binary not found at ${devoSource}`)
 	}
-	if (codeSearchMcpSource && !existsSync(codeSearchMcpSource)) {
-		throw new Error(`code_search MCP binary not found at ${codeSearchMcpSource}`)
-	}
 	if (!rgSource || !existsSync(rgSource)) {
 		throw new Error("ripgrep sidecar not found. Install rg or pass --rg-bin <path>.")
 	}
@@ -105,14 +99,6 @@ export function stageRuntime(options: StageRuntimeOptions): void {
 	const rgDest = join(runtimeBinDir, runtimeBinaryName("rg", targetPlatform))
 	copyExecutable(devoSource, devoDest, targetPlatform)
 	copyExecutable(rgSource, rgDest, targetPlatform)
-	if (codeSearchMcpSource) {
-		const codeSearchMcpDest = join(
-			runtimeBinDir,
-			runtimeBinaryName("devo-code-search-mcp", targetPlatform),
-		)
-		copyExecutable(codeSearchMcpSource, codeSearchMcpDest, targetPlatform)
-		console.log(`Prepared code_search MCP sidecar: ${codeSearchMcpDest}`)
-	}
 
 	console.log(`Prepared Desktop runtime: ${devoDest}`)
 	console.log(`Prepared ripgrep sidecar: ${rgDest}`)
@@ -162,13 +148,28 @@ function optionalPath(value: string | undefined): string | undefined {
 }
 
 if (import.meta.main) {
-	stageRuntime({
+	const target = argValue("--target") ?? `${targetArchName(process.arch)}-${process.platform === "win32" ? "pc-windows-msvc" : process.platform === "darwin" ? "apple-darwin" : "unknown-linux-musl"}`
+	const options: StageRuntimeOptions = {
 		desktopDir,
 		repoRoot,
-		targetTriple: argValue("--target"),
+		targetTriple: target,
 		platform: process.platform,
-		devoBin: argValue("--devo-bin") ?? optionalPath(process.env.DEVO_DESKTOP_RUNTIME_DEVO_BIN),
+		devoBin: argValue("--devo-bin") ?? optionalPath(process.env.DEVO_DESKTOP_RUNTIME_DEVO_BIN) ?? defaultDevoSourcePath({ repoRoot, targetTriple: argValue("--target") }),
 		rgBin: argValue("--rg-bin"),
-		withCodeSearch: process.argv.includes("--with-code-search"),
-	})
+	}
+	const bundleDir = argValue("--bundle-dir")
+	if (bundleDir) {
+		stageRuntime({ ...options, bundleDir })
+	} else {
+		const work = mkdtempSync(join(tmpdir(), "devo-desktop-runtime-"))
+		try {
+			stageRuntime({ ...options, desktopDir: work })
+			const binaryDir = join(work, "resources/runtime/bin")
+			const output = join(work, "bundle")
+			await bundleRuntime(target, output, join(binaryDir, runtimeBinaryName("rg", platformForTargetTriple(target, process.platform))), binaryDir)
+			stageRuntime({ ...options, bundleDir: output })
+		} finally {
+			rmSync(work, { recursive: true, force: true })
+		}
+	}
 }
