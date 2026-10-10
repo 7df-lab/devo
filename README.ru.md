@@ -60,7 +60,7 @@ Devo предназначен для команд, которым нужен cod
 - **Поддержка MCP** - Подключайте внешние инструменты и контекст через серверы
   [Model Context Protocol](https://modelcontextprotocol.io/). Управляйте через
   CLI: `devo mcp add|list|enable|disable|remove` (см.
-  [Конфигурацию](./docs/configuration.ru.md#mcp-серверы)).
+  [Конфигурацию](./README.md#configuration)).
 - **Поддержка Skill** - Упаковывайте повторяемые workflow, инструкции, скрипты
   и справочные материалы как переиспользуемые
   [Agent Skills](https://agentskills.io/).
@@ -80,11 +80,7 @@ Devo предназначен для команд, которым нужен cod
   cached token и использование context window там, где провайдеры это раскрывают.
 - **Легковесный Rust runtime** - Построен на Rust, с малым расходом памяти и
   компактным локальным runtime.
-- **Встроенный семантический поиск по коду (MCP)** - Опциональный bundled MCP
-  сервер (`code_search` / `devo-code-search-mcp`), **по умолчанию не устанавливается и
-  выключен**. Запускает локальную CPU-модель эмбеддингов и сочетает dense retrieval с BM25,
-  сокращая контекст поиска по сравнению с агентами только на grep/find. Установите через
-  `--with-code-search`, затем включите через `devo mcp enable code_search` или TUI `/mcps`.
+
 
 ## Проверенные модели
 
@@ -167,28 +163,7 @@ Windows:
 irm 'https://raw.githubusercontent.com/7df-lab/devo/main/install.ps1' | iex
 ```
 
-Онлайн-установщик размещает `devo` в Devo home directory и устанавливает
-вспомогательный `rg` sidecar для быстрого поиска по репозиторию. По умолчанию
-`code_search` MCP и его локальная модель не устанавливаются.
 
-<details>
-<summary>Необязательно: установить <code>code_search</code> MCP и локальную модель</summary>
-
-Используйте это только если хотите установить code-search MCP и скачать модель Hugging Face во время установки.
-
-Linux / macOS:
-
-```bash
-curl -fsSL https://raw.githubusercontent.com/7df-lab/devo/main/install.sh | sh -s -- --with-code-search
-```
-
-Windows:
-
-```powershell
-$env:DEVO_INSTALL_CODE_SEARCH = "1"; irm 'https://raw.githubusercontent.com/7df-lab/devo/main/install.ps1' | iex
-```
-
-</details>
 
 Обновление существующей установки до последнего release:
 
@@ -200,7 +175,7 @@ devo upgrade
 установщик выводит переход версии, например `Version: v0.1.12 -> v0.1.15`.
 
 Для intranet-сред или установки без доступа к сети см.
-[Офлайн-установку](./docs/offline-installation.ru.md).
+[Офлайн-установку](./README.md#offline-installation-and-use).
 
 ## Быстрый старт
 
@@ -233,12 +208,12 @@ Connections и каталог моделей в `providers.json`, а API key с�
    `openai_chat_completions`, `openai_responses` или `anthropic_messages`.
 
 Полный пример (параметры кастомной модели + API key) и описание протоколов:
-[Конфигурация](./docs/configuration.ru.md#свой-api-key).
+[Конфигурация](./README.md#configuration).
 
 ## Docs
 
-- [Офлайн-установка](./docs/offline-installation.ru.md)
-- [Конфигурация](./docs/configuration.ru.md)
+- [Офлайн-установка](./README.md#offline-installation-and-use)
+- [Конфигурация](./README.md#configuration)
 
 ## Часто задаваемые вопросы
 
@@ -259,7 +234,7 @@ Chat Completions, OpenAI-compatible Responses или Anthropic Messages API, м�
 
 Используйте `devo onboard` или отредактируйте пользовательский `auth.json` и
 укажите этот credential id в `provider.<id>.credential` в `providers.json`. См.
-[Конфигурацию](./docs/configuration.ru.md#свой-api-key).
+[Конфигурацию](./README.md#configuration).
 
 ### Что выбрать: Desktop app или TUI/CLI?
 

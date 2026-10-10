@@ -1,6 +1,6 @@
 import { createHash } from "node:crypto";
 import { createReadStream } from "node:fs";
-import { copyFile, mkdir, readFile, stat, writeFile } from "node:fs/promises";
+import { copyFile, mkdir, readFile, readdir, stat, writeFile } from "node:fs/promises";
 import { basename, join, resolve } from "node:path";
 
 type UpdateFile = {
@@ -101,6 +101,15 @@ for (const [name, group] of manifests) {
 	const merged = { ...group[0], files: Array.from(files.values()) };
 	await writeFile(join(outputDir, name), Bun.YAML.stringify(merged));
 }
+
+const sha256Lines: string[] = [];
+for (const name of (await readdir(outputDir)).sort()) {
+	if (name === "SHA256SUMS.txt") continue;
+	const hash = createHash("sha256");
+	for await (const chunk of createReadStream(join(outputDir, name))) hash.update(chunk);
+	sha256Lines.push(`${hash.digest("hex")}  ${name}`);
+}
+await writeFile(join(outputDir, "SHA256SUMS.txt"), sha256Lines.join("\n") + "\n");
 
 console.log(
 	`Collected ${assets.size} assets and ${manifests.size} merged update manifests for v${version}`,

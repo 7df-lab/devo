@@ -4,31 +4,24 @@
 #   irm https://raw.githubusercontent.com/7df-lab/devo/main/install.ps1 | iex
 #
 # Pin a specific version:
-#   $env:VERSION = "v0.1.2"; irm https://raw.githubusercontent.com/7df-lab/devo/main/install.ps1 | iex
+#   $env:VERSION = "v0.2.0"; irm https://raw.githubusercontent.com/7df-lab/devo/main/install.ps1 | iex
 #
-# Optional code-search bundle:
-#   $env:DEVO_INSTALL_CODE_SEARCH = "1"; irm https://raw.githubusercontent.com/7df-lab/devo/main/install.ps1 | iex
 #
 # Offline install from assets next to install.ps1:
 #   .\install.ps1 -Offline
 
 param(
     [string]$Version = $env:VERSION,
-    [switch]$WithCodeSearch,
-    [switch]$InstallCodeSearchModel,
     [switch]$Offline
 )
 
 $ErrorActionPreference = "Stop"
 $Repo = "7df-lab/devo"
 $RipgrepRepo = "BurntSushi/ripgrep"
-$CodeSearchModelRepo = "minishlab/potion-code-16M"
-$CodeSearchModelDirName = "minishlab--potion-code-16M"
-$CodeSearchModelFiles = @("tokenizer.json", "model.safetensors", "config.json")
 
 # ── Platform detection ───────────────────────────────────────────────────
 function Get-Target {
-    $arch = if ([Environment]::Is64BitOperatingSystem) { "x86_64" } else {
+    $arch = if ($env:PROCESSOR_ARCHITEW6432 -eq "ARM64" -or $env:PROCESSOR_ARCHITECTURE -eq "ARM64") { "aarch64" } elseif ([Environment]::Is64BitOperatingSystem) { "x86_64" } else {
         Write-Error "32-bit Windows is not supported"
         exit 1
     }
@@ -36,7 +29,7 @@ function Get-Target {
 }
 
 function Get-RipgrepTarget {
-    $arch = if ([Environment]::Is64BitOperatingSystem) { "x86_64" } else {
+    $arch = if ($env:PROCESSOR_ARCHITEW6432 -eq "ARM64" -or $env:PROCESSOR_ARCHITECTURE -eq "ARM64") { "aarch64" } elseif ([Environment]::Is64BitOperatingSystem) { "x86_64" } else {
         Write-Error "32-bit Windows is not supported for ripgrep"
         exit 1
     }
@@ -177,13 +170,7 @@ function Test-Truthy {
     return $Value -match "^(1|true|yes|on)$"
 }
 
-function Should-InstallCodeSearchModel {
-    return (Should-InstallCodeSearch) -or $InstallCodeSearchModel -or (Test-Truthy $env:DEVO_INSTALL_CODE_SEARCH_MODEL)
-}
 
-function Should-InstallCodeSearch {
-    return $WithCodeSearch -or (Test-Truthy $env:DEVO_INSTALL_CODE_SEARCH)
-}
 
 function Get-DevoHome {
     if (-not [string]::IsNullOrWhiteSpace($env:DEVO_HOME)) {
@@ -285,7 +272,7 @@ function Test-DevoVersionInstalled {
     }
 
     $installedVersion = Get-InstalledDevoVersion -DevoPath $installedPath
-    if ($installedVersion -eq $ExpectedVersion) {
+    if ($installedVersion -eq $ExpectedVersion -and (Test-DevoBundle -Directory $InstallDir)) {
         Write-Host "devo $ExpectedVersion is already installed at $installedPath"
         return $true
     }
@@ -296,14 +283,7 @@ function Test-DevoVersionInstalled {
 
 # ── Banner ───────────────────────────────────────────────────────────────
 function Print-Banner {
-    Write-Host ""
-    Write-Host "██████╗  ███████╗██╗   ██╗ ██████╗" -ForegroundColor DarkGray
-    Write-Host "██╔══██╗ ██╔════╝██║   ██║██╔═══██╗" -ForegroundColor DarkGray
-    Write-Host "██║  ██║ █████╗  ██║   ██║██║   ██║" -ForegroundColor DarkGray
-    Write-Host "██║  ██║ ██╔══╝  ╚██╗ ██╔╝██║   ██║" -ForegroundColor DarkGray
-    Write-Host "██████╔╝ ███████╗ ╚████╔╝ ╚██████╔╝" -ForegroundColor DarkGray
-    Write-Host "╚═════╝  ╚══════╝  ╚═══╝   ╚═════╝" -ForegroundColor DarkGray
-    Write-Host ""
+    Write-Host "Devo installer"
 }
 
 function Install-RipgrepSidecar {
@@ -343,59 +323,7 @@ function Install-RipgrepSidecar {
     Copy-Item -Path $rgExe.FullName -Destination $targetPath -Force
 }
 
-function Install-CodeSearchModel {
-    param(
-        [string]$TempRoot
-    )
 
-    if (-not (Should-InstallCodeSearchModel)) {
-        return
-    }
-
-    $devoHome = Get-DevoHome
-    $modelDir = Join-Path (Join-Path $devoHome "local-models") $CodeSearchModelDirName
-    New-Item -ItemType Directory -Force -Path $modelDir | Out-Null
-
-    $missingFiles = @(
-        foreach ($file in $CodeSearchModelFiles) {
-            $targetPath = Join-Path $modelDir $file
-            if (-not (Test-Path $targetPath)) {
-                $file
-            }
-        }
-    )
-
-    if ($missingFiles.Count -eq 0) {
-        Write-Host "code_search model is already installed at $modelDir"
-        return
-    }
-
-    $modelTmpDir = Join-Path $TempRoot "code-search-model"
-    New-Item -ItemType Directory -Force -Path $modelTmpDir | Out-Null
-
-    Write-Host "Installing code_search model $CodeSearchModelRepo into $modelDir ..."
-
-    foreach ($file in $CodeSearchModelFiles) {
-        $targetPath = Join-Path $modelDir $file
-        if (Test-Path $targetPath) {
-            Write-Host "Found existing $targetPath"
-            continue
-        }
-
-        $url = "https://huggingface.co/$CodeSearchModelRepo/resolve/main/$file"
-        $tmpPath = Join-Path $modelTmpDir $file
-        Write-Host "Downloading $file ..."
-        Invoke-WebRequest -Uri $url -OutFile $tmpPath
-        Move-Item -Path $tmpPath -Destination $targetPath -Force
-    }
-
-    foreach ($file in $CodeSearchModelFiles) {
-        $targetPath = Join-Path $modelDir $file
-        if (-not (Test-Path $targetPath)) {
-            Write-Error "code_search model files were not fully installed at $modelDir"
-        }
-    }
-}
 
 function Get-InstallerAssetDir {
     if (-not [string]::IsNullOrWhiteSpace($PSScriptRoot)) {
@@ -416,6 +344,66 @@ function Get-FirstMatchingFile {
         Select-Object -First 1
 }
 
+function Test-DevoBundle {
+    param([string]$Directory)
+    foreach ($name in @("runtime\manifest.json", "runtime\node\node.exe", "runtime\python\python.exe", "runtime\python-site\dill\__init__.py", "runtime\python-site\rlm\repl.py", "tui\src\index.js", "rg.exe", "devo.exe")) {
+        if (-not (Test-Path -LiteralPath (Join-Path $Directory $name) -PathType Leaf)) { return $false }
+    }
+    try { return (Get-Content -LiteralPath (Join-Path $Directory "runtime\manifest.json") -Raw | ConvertFrom-Json).schema -eq 1 } catch { return $false }
+}
+
+function Test-ArchiveChecksum {
+    param([string]$Archive, [string]$ChecksumFile, [string]$AssetName)
+    $line = Get-Content -LiteralPath $ChecksumFile | Where-Object { $_ -match ("^[a-fA-F0-9]{64}  " + [regex]::Escape($AssetName) + "$") } | Select-Object -First 1
+    if (-not $line -or (Get-FileHash -LiteralPath $Archive -Algorithm SHA256).Hash -ine $line.Substring(0, 64)) {
+        throw "Release archive SHA-256 verification failed: $AssetName"
+    }
+}
+
+function Install-DevoBundle {
+    param([string]$Source, [string]$InstallDir)
+    if (-not (Test-DevoBundle -Directory $Source)) {
+        throw "Incomplete Devo archive. Download the complete runtime bundle; a standalone devo.exe cannot launch the TUI."
+    }
+    New-Item -ItemType Directory -Force -Path $InstallDir | Out-Null
+    $stage = Join-Path $InstallDir (".devo-install-" + [guid]::NewGuid().ToString("N"))
+    $fresh = Join-Path $stage "new"
+    $backup = Join-Path $stage "old"
+    New-Item -ItemType Directory -Path $fresh, $backup -Force | Out-Null
+    $names = @("runtime", "tui", "rg.exe")
+    $names += "devo.exe"
+    $changed = @()
+    try {
+        foreach ($name in @("devo.exe", "runtime\node\node.exe", "runtime\python\python.exe")) {
+            $existing = Join-Path $InstallDir $name
+            if (Test-Path -LiteralPath $existing) {
+                $handle = [IO.File]::Open($existing, 'Open', 'ReadWrite', 'None')
+                $handle.Dispose()
+            }
+        }
+        foreach ($name in $names) { Copy-Item -LiteralPath (Join-Path $Source $name) -Destination (Join-Path $fresh $name) -Recurse }
+        foreach ($name in $names) {
+            $destination = Join-Path $InstallDir $name
+            if (Test-Path -LiteralPath $destination) { Move-Item -LiteralPath $destination -Destination (Join-Path $backup $name) }
+            $changed += $name
+            Move-Item -LiteralPath (Join-Path $fresh $name) -Destination $destination
+        }
+    } catch {
+        [array]::Reverse($changed)
+        foreach ($name in $changed) {
+            $destination = Join-Path $InstallDir $name
+            if (Test-Path -LiteralPath $destination) { Remove-Item -LiteralPath $destination -Recurse }
+            $previous = Join-Path $backup $name
+            if (Test-Path -LiteralPath $previous) { Move-Item -LiteralPath $previous -Destination $destination }
+        }
+        throw "Devo installation failed: $($_.Exception.Message). Close running Devo apps and terminals, then retry."
+    } finally {
+        if ([IO.Path]::GetFullPath($stage).StartsWith([IO.Path]::GetFullPath($InstallDir) + [IO.Path]::DirectorySeparatorChar)) {
+            Remove-Item -LiteralPath $stage -Recurse -ErrorAction SilentlyContinue
+        }
+    }
+}
+
 function Install-DevoOffline {
     param(
         [string]$AssetDir,
@@ -425,16 +413,7 @@ function Install-DevoOffline {
 
     $localExe = Join-Path $AssetDir "devo.exe"
     if (Test-Path $localExe) {
-        Write-Host "Installing devo from local binary: $localExe"
-        New-Item -ItemType Directory -Force -Path $InstallDir | Out-Null
-        Copy-Item -Path $localExe -Destination (Join-Path $InstallDir "devo.exe") -Force
-        if (Should-InstallCodeSearch) {
-            $localMcp = Join-Path $AssetDir "devo-code-search-mcp.exe"
-            if (-not (Test-Path $localMcp)) {
-                Write-Error "Requested code_search MCP binary not found at $localMcp"
-            }
-            Copy-Item -Path $localMcp -Destination (Join-Path $InstallDir "devo-code-search-mcp.exe") -Force
-        }
+        Install-DevoBundle -Source $AssetDir -InstallDir $InstallDir
         return
     }
 
@@ -445,6 +424,8 @@ function Install-DevoOffline {
     }
 
     Write-Host "Installing devo from offline archive: $($archive.FullName)"
+    $checksumFile = Join-Path $AssetDir "SHA256SUMS.txt"
+    if (Test-Path -LiteralPath $checksumFile) { Test-ArchiveChecksum -Archive $archive.FullName -ChecksumFile $checksumFile -AssetName $archive.Name }
     $devoTmpDir = Join-Path $TempRoot "devo-offline"
     New-Item -ItemType Directory -Force -Path $devoTmpDir | Out-Null
     Expand-Archive -Path $archive.FullName -DestinationPath $devoTmpDir -Force
@@ -454,15 +435,7 @@ function Install-DevoOffline {
         Write-Error "devo.exe not found in the offline archive"
     }
 
-    New-Item -ItemType Directory -Force -Path $InstallDir | Out-Null
-    Copy-Item -Path $exe.FullName -Destination (Join-Path $InstallDir "devo.exe") -Force
-    if (Should-InstallCodeSearch) {
-        $mcpExe = Get-ChildItem -Recurse -Filter "devo-code-search-mcp.exe" -Path $devoTmpDir | Select-Object -First 1
-        if (-not $mcpExe) {
-            Write-Error "Requested code_search MCP binary was not found in the offline archive"
-        }
-        Copy-Item -Path $mcpExe.FullName -Destination (Join-Path $InstallDir "devo-code-search-mcp.exe") -Force
-    }
+    Install-DevoBundle -Source $exe.DirectoryName -InstallDir $InstallDir
 }
 
 function Install-RipgrepSidecarOffline {
@@ -511,80 +484,29 @@ function Install-RipgrepSidecarOffline {
     Copy-Item -Path $rgExe.FullName -Destination $targetPath -Force
 }
 
-function Test-CodeSearchModelFiles {
-    param(
-        [string]$Directory
-    )
 
-    foreach ($file in $CodeSearchModelFiles) {
-        if (-not (Test-Path (Join-Path $Directory $file))) {
-            return $false
-        }
-    }
-
-    return $true
-}
-
-function Install-CodeSearchModelOffline {
-    param(
-        [string]$AssetDir
-    )
-
-    if (-not (Should-InstallCodeSearchModel)) {
-        return
-    }
-
-    $nestedModelDir = Join-Path $AssetDir $CodeSearchModelDirName
-    if (Test-CodeSearchModelFiles -Directory $nestedModelDir) {
-        $sourceDir = $nestedModelDir
-    } elseif (Test-CodeSearchModelFiles -Directory $AssetDir) {
-        $sourceDir = $AssetDir
-    } else {
-        Write-Error "Requested code_search model files were not found. Place config.json, model.safetensors, and tokenizer.json next to install.ps1 or under ${CodeSearchModelDirName}\."
-    }
-
-    $modelDir = Join-Path (Join-Path (Get-DevoHome) "local-models") $CodeSearchModelDirName
-    New-Item -ItemType Directory -Force -Path $modelDir | Out-Null
-
-    Write-Host "Installing code_search model from $sourceDir into $modelDir"
-    foreach ($file in $CodeSearchModelFiles) {
-        Copy-Item -Path (Join-Path $sourceDir $file) -Destination (Join-Path $modelDir $file) -Force
-    }
-
-    if (-not (Test-CodeSearchModelFiles -Directory $modelDir)) {
-        Write-Error "code_search model files were not fully installed at $modelDir"
-    }
-}
 
 # ── Install ──────────────────────────────────────────────────────────────
 function Main {
     Print-Banner
 
-    $tmpDir = Join-Path $env:TEMP "devo-install"
-    Remove-Item -Recurse -Force $tmpDir -ErrorAction SilentlyContinue | Out-Null
+    $tmpDir = Join-Path $env:TEMP ("devo-install-" + [guid]::NewGuid().ToString("N"))
     New-Item -ItemType Directory -Force -Path $tmpDir | Out-Null
 
     try {
-        $installDir = Join-Path $env:LOCALAPPDATA "Programs\devo"
+        $installDir = if ($env:DEVO_INSTALL_DIR) { $env:DEVO_INSTALL_DIR } else { Join-Path $env:LOCALAPPDATA "Programs\devo" }
 
         if ($Offline) {
             $assetDir = Get-InstallerAssetDir
             Write-Host "Offline asset directory: $assetDir"
             Install-DevoOffline -AssetDir $assetDir -InstallDir $installDir -TempRoot $tmpDir
             Install-RipgrepSidecarOffline -AssetDir $assetDir -InstallDir $installDir -TempRoot $tmpDir
-            Install-CodeSearchModelOffline -AssetDir $assetDir
         } else {
             $target = Get-Target
             $version = Resolve-Version
             Write-VersionTransition -InstallDir $installDir -TargetVersion $version
 
             $skipAppInstall = Test-DevoVersionInstalled -InstallDir $installDir -ExpectedVersion $version
-            if ($skipAppInstall -and (Should-InstallCodeSearch)) {
-                $mcpPath = Join-Path $installDir "devo-code-search-mcp.exe"
-                if (-not (Test-Path $mcpPath)) {
-                    $skipAppInstall = $false
-                }
-            }
             if (-not $skipAppInstall) {
                 $archiveUrl = "https://github.com/$Repo/releases/download/$version/devo-${version}-${target}.zip"
 
@@ -592,6 +514,9 @@ function Main {
 
                 $zipPath = Join-Path $tmpDir "devo.zip"
                 Invoke-WebRequest -Uri $archiveUrl -OutFile $zipPath
+                $checksumFile = Join-Path $tmpDir "SHA256SUMS.txt"
+                Invoke-WebRequest -Uri "https://github.com/$Repo/releases/download/$version/SHA256SUMS.txt" -OutFile $checksumFile
+                Test-ArchiveChecksum -Archive $zipPath -ChecksumFile $checksumFile -AssetName "devo-${version}-${target}.zip"
 
                 Expand-Archive -Path $zipPath -DestinationPath $tmpDir -Force
 
@@ -601,23 +526,12 @@ function Main {
                     Write-Error "devo.exe not found in the archive"
                 }
 
-                New-Item -ItemType Directory -Force -Path $installDir | Out-Null
-                Copy-Item -Path $exe.FullName -Destination (Join-Path $installDir "devo.exe") -Force
-
-                if (Should-InstallCodeSearch) {
-                    $mcpExe = Get-ChildItem -Recurse -Filter "devo-code-search-mcp.exe" -Path $tmpDir | Select-Object -First 1
-                    if (-not $mcpExe) {
-                        Write-Error "Requested code_search MCP binary was not found in the release archive"
-                    }
-                    Copy-Item -Path $mcpExe.FullName -Destination (Join-Path $installDir "devo-code-search-mcp.exe") -Force
-                    Write-Host "Installed code_search MCP sidecar"
-                }
+                Install-DevoBundle -Source $exe.DirectoryName -InstallDir $installDir
             }
             Install-RipgrepSidecar -InstallDir $installDir -TempRoot $tmpDir
-            Install-CodeSearchModel -TempRoot $tmpDir
         }
 
-        Add-InstallDirToPath -InstallDir $installDir
+        if ($env:DEVO_NO_MODIFY_PATH -ne "1") { Add-InstallDirToPath -InstallDir $installDir }
 
         Write-Host "Installed devo to ${installDir}\devo.exe"
         $rgPath = Join-Path $installDir "rg.exe"
@@ -626,17 +540,15 @@ function Main {
         } else {
             Write-Host "ripgrep sidecar was not installed."
         }
-        if (Should-InstallCodeSearchModel) {
-            $modelPath = Join-Path (Join-Path (Get-DevoHome) "local-models") $CodeSearchModelDirName
-            Write-Host "code_search model available at $modelPath"
-        }
         Write-Host "PATH was updated for future terminals."
         Write-Host "Open a new terminal, or run:"
         Write-Host "  `$env:Path = `"$installDir;`$env:Path`""
         Write-Host "Run 'devo onboard' to get started."
     }
     finally {
-        Remove-Item -Recurse -Force $tmpDir -ErrorAction SilentlyContinue | Out-Null
+        if ([IO.Path]::GetFullPath($tmpDir).StartsWith([IO.Path]::GetFullPath($env:TEMP) + [IO.Path]::DirectorySeparatorChar)) {
+            Remove-Item -LiteralPath $tmpDir -Recurse -ErrorAction SilentlyContinue
+        }
     }
 }
 

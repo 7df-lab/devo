@@ -62,7 +62,7 @@ test("release collection preserves both Mac architectures and blockmaps without 
 			assets: (await readdir(fixture.output)).sort(),
 			manifest: Bun.YAML.parse(await readFile(join(fixture.output, "latest-mac.yml"), "utf8")),
 		}).toEqual({
-			assets: [...fixture.files.flatMap(file => [file.url, `${file.url}.blockmap`]), "latest-mac.yml"].sort(),
+			assets: [...fixture.files.flatMap(file => [file.url, `${file.url}.blockmap`]), "latest-mac.yml", "SHA256SUMS.txt"].sort(),
 			manifest: {
 				version: "0.2.0",
 				files: fixture.files,

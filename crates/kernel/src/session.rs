@@ -95,11 +95,18 @@ pub struct KernelSessionConfig {
 
 impl Default for KernelSessionConfig {
     fn default() -> Self {
+        let bundle = devo_util_paths::runtime::RuntimeBundle::current();
         Self {
-            python: PathBuf::from("python"),
+            python: bundle
+                .as_ref()
+                .map_or_else(|| PathBuf::from("python"), |runtime| runtime.python.clone()),
             cwd: std::env::current_dir().unwrap_or_else(|_| PathBuf::from(".")),
-            python_path_entries: Vec::new(),
-            extra_env: Vec::new(),
+            python_path_entries: bundle
+                .as_ref()
+                .map_or_else(Vec::new, |runtime| vec![runtime.python_site.clone()]),
+            extra_env: bundle.map_or_else(Vec::new, |_| {
+                vec![("PYTHONNOUSERSITE".to_string(), "1".to_string())]
+            }),
             fence: None,
             workspace_access: WorkspaceAccess::ReadWrite,
         }
@@ -1173,6 +1180,9 @@ async fn collect_into_shared(
 /// Walks up from `start` looking for `crates/kernel/rlm-runtime/src` or `rlm-runtime/src`.
 /// Override with `DEVO_RLM_RUNTIME_SRC`.
 pub fn default_runtime_pythonpath(start: &Path) -> Option<PathBuf> {
+    if let Some(bundle) = devo_util_paths::runtime::RuntimeBundle::current() {
+        return Some(bundle.python_site);
+    }
     let mut dir = start.to_path_buf();
     for _ in 0..8 {
         let candidates = [

@@ -12,9 +12,9 @@ files:
   - "node_modules/electron-liquid-glass/**/*"
 
 # Bundle the private Devo runtime into the app package.
-# macOS: Contents/Resources/runtime/bin/devo
-# Linux: resources/runtime/bin/devo
-# Windows: resources/runtime/bin/devo.exe
+# macOS: Contents/Resources/runtime/devo
+# Linux: resources/runtime/devo
+# Windows: resources/runtime/devo.exe
 extraResources:
   - from: resources/runtime
     to: runtime

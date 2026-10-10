@@ -213,34 +213,6 @@ fn grep_tool_start_item_is_native_tool_call() {
 }
 
 #[test]
-fn code_search_tool_start_item_is_native_tool_call() {
-    let input = serde_json::json!({
-        "operation": "search",
-        "query": "live tool feedback",
-        "path": "crates"
-    });
-    let start_item = tool_start_item_from_input(
-        "call-1",
-        "code_search",
-        "code_search live tool feedback in crates",
-        &input,
-        ToolDisplayKind::Generic,
-        ToolPreparationFeedback::None,
-    );
-
-    assert_eq!(
-        start_item.native_item,
-        devo_protocol::native::item::Item::ToolCall {
-            call_id: "call-1".to_string(),
-            tool_name: "code_search".to_string(),
-            source: devo_protocol::native::item::ToolSource::Builtin,
-            server_name: None,
-            input: Some(input),
-        }
-    );
-}
-
-#[test]
 fn exec_tool_start_item_is_native_command_execution() {
     let input = serde_json::json!({
         "cmd": "cargo test -p devo-server"

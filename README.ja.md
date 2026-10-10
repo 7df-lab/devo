@@ -60,7 +60,7 @@ Desktop 体験、terminal workflow、ランタイムの動作、ワークスペ�
 - **MCP サポート** - [Model Context Protocol](https://modelcontextprotocol.io/)
   サーバーを通じて外部ツールとコンテキストを接続できます。CLI で
   `devo mcp add|list|enable|disable|remove` により追加・管理できます（
-  [設定](./docs/configuration.ja.md#mcp-サーバー) を参照）。
+  [設定](./README.md#configuration) を参照）。
 - **Skill サポート** - 再利用可能なワークフロー、手順、スクリプト、参照資料を
   [Agent Skills](https://agentskills.io/) としてパッケージ化できます。
 - **長時間タスクのサポート** - 複数ターンにまたがる作業でも Devo が自動的にコンテキストを管理し、
@@ -74,12 +74,7 @@ Desktop 体験、terminal workflow、ランタイムの動作、ワークスペ�
 - **コストとコンテキストの可視化** - プロバイダーが提供する場合、入力/出力 token、cached token、
   コンテキストウィンドウ使用量を表示します。
 - **軽量な Rust ランタイム** - Rust で構築され、メモリ使用量が小さく、コンパクトなローカルランタイムを備えます。
-- **組み込みセマンティックコード検索（MCP）** - 同梱のオプション MCP サーバー
-  （`code_search` / `devo-code-search-mcp`）。**既定ではインストールも有効化もされません**。
-  ローカル CPU のコード埋め込みモデルを実行し、dense retrieval と BM25 を組み合わせて、
-  grep/find のみのエージェントよりコード検索コンテキストを削減します。
-  `--with-code-search` でインストールし、`devo mcp enable code_search` または TUI `/mcps`
-  で有効化します。
+
 
 ## 検証済みモデル
 
@@ -157,27 +152,7 @@ Windows:
 irm 'https://raw.githubusercontent.com/7df-lab/devo/main/install.ps1' | iex
 ```
 
-オンラインインストーラーは `devo` を Devo home ディレクトリに配置し、高速なリポジトリ検索に使う
-`rg` sidecar をインストールします。既定では `code_search` MCP とローカルモデルをインストールしません。
 
-<details>
-<summary>任意: <code>code_search</code> MCP とローカルモデルをインストール</summary>
-
-インストール時に code-search MCP と Hugging Face モデルをインストールしたい場合だけ使用してください。
-
-Linux / macOS:
-
-```bash
-curl -fsSL https://raw.githubusercontent.com/7df-lab/devo/main/install.sh | sh -s -- --with-code-search
-```
-
-Windows:
-
-```powershell
-$env:DEVO_INSTALL_CODE_SEARCH = "1"; irm 'https://raw.githubusercontent.com/7df-lab/devo/main/install.ps1' | iex
-```
-
-</details>
 
 既存のインストールを最新 release にアップグレードするには:
 
@@ -189,7 +164,7 @@ devo upgrade
 インストーラーは `Version: v0.1.12 -> v0.1.15` のようにバージョン遷移を表示します。
 
 イントラネット環境やオフライン環境でインストールする場合は、
-[オフラインインストール](./docs/offline-installation.ja.md) を参照してください。
+[オフラインインストール](./README.md#offline-installation-and-use) を参照してください。
 
 ## クイックスタート
 
@@ -224,12 +199,12 @@ directory を `providers.json` に書き、API key をユーザースコープ�
    いずれかに設定します。
 
 完全な作業例（カスタムモデルパラメータ + API key）とプロトコルの説明は
-[設定](./docs/configuration.ja.md#自分の-api-key-を使う) を参照してください。
+[設定](./README.md#configuration) を参照してください。
 
 ## Docs
 
-- [オフラインインストール](./docs/offline-installation.ja.md)
-- [設定](./docs/configuration.ja.md)
+- [オフラインインストール](./README.md#offline-installation-and-use)
+- [設定](./README.md#configuration)
 
 ## よくある質問
 
@@ -248,7 +223,7 @@ provider/model Connection を通じて接続できます。
 
 `devo onboard` を使うか、ユーザースコープの `auth.json` を編集し、
 `providers.json` の `provider.<id>.credential` からその credential id を参照します。
-詳細は [設定](./docs/configuration.ja.md#自分の-api-key-を使う) を参照してください。
+詳細は [設定](./README.md#configuration) を参照してください。
 
 ### Desktop app と TUI/CLI のどちらを使うべきですか?
 

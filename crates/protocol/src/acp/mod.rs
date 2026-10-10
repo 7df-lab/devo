@@ -998,7 +998,7 @@ mod tests {
             0,
             &crate::native::item::Item::ToolCall {
                 call_id: "call-1".to_string(),
-                tool_name: "code_search".to_string(),
+                tool_name: "external_search".to_string(),
                 source: crate::native::item::ToolSource::Builtin,
                 server_name: None,
                 input: Some(serde_json::json!({

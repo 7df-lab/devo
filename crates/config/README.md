@@ -131,7 +131,6 @@ provider fields without clearing every omitted provider field from lower layers.
 - `skills.bundled.enabled = true`
 - `skills.include_instructions = true`
 - `skills.config = []`
-- bundled `[[mcp.servers]]` entry `id = "code_search"` with `enabled = false`
 - `tools.web_search.mode = "provider"`
 - `updates.enabled = true`
 - `updates.check_on_startup = true`
@@ -190,16 +189,6 @@ enabled = false
 [[skills.config]]
 name = "code-review"
 enabled = true
-
-[[mcp.servers]]
-id = "code_search"
-display_name = "Code Search"
-enabled = false
-startup_policy = "lazy"
-
-[mcp.servers.transport]
-kind = "stdio"
-command = ["devo-code-search-mcp"]
 
 [tools.web_search]
 mode = "local" # disabled, provider, or local
@@ -440,8 +429,7 @@ should use `reasoning_capability` plus the named `variants` map (keys named
 after logical selections; optional `request_model`) documented in
 the configuration reference. The full
 field reference, including JSON shapes for web capabilities and truncation,
-is maintained in [`docs/configuration.md`](../../docs/configuration.md) and
-its [Chinese version](../../docs/configuration.zh-Hans.md).
+is maintained in the [configuration section](../../README.md#configuration).
 
 Onboarding keeps the provider template directory separate from Connection
 model management. Selecting a saved Connection lists only its nested models;

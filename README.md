@@ -72,20 +72,6 @@ connect a model provider in its setup flow.
 | **TUI / CLI** | A terminal-native agent workflow, including session resume and command-line access. |
 | **Shared runtime** | Persistent Python execution, model connections, permissions, MCP servers, skills, and child-agent sessions. |
 
-- **Work recursively:** Keep the parent focused on the overall task while child
-  agents investigate independent parts and report back.
-- **Bring your own model:** Select a provider and model without tying the agent
-  to a single hosted model service. Local endpoints are supported when they
-  implement a compatible API.
-- **Plan and execute:** Review a plan before implementation, and approve
-  sensitive tool actions when permissions require it.
-- **Extend the agent:** Connect [Model Context Protocol](https://modelcontextprotocol.io/)
-  (MCP) servers and package repeatable workflows as [Agent Skills](https://agentskills.io/).
-- **Continue your work:** Inspect session history, resume previous sessions,
-  and coordinate child agents on larger tasks.
-- **Optional local code search:** The `code_search` MCP combines embeddings and
-  keyword search. Its binary and model are not installed by default.
-
 ## Models and providers
 
 Devo supports configurable connections for
@@ -107,6 +93,9 @@ Download the package for your operating system and architecture from
 assets include macOS `.dmg`/`.zip`, Windows `.exe`, and Linux `.AppImage`/`.deb`/`.rpm`
 packages. Check the asset name for the right architecture before installing.
 
+Desktop packages include the Rust backend and a private Python interpreter with
+the agent's Python dependencies. You do not need to install Python separately.
+
 ### Terminal TUI / CLI
 
 **Linux or macOS:**
@@ -121,31 +110,67 @@ curl -fsSL https://raw.githubusercontent.com/7df-lab/devo/main/install.sh | sh
 irm 'https://raw.githubusercontent.com/7df-lab/devo/main/install.ps1' | iex
 ```
 
-Review an installer before running it if your environment requires it.
-The installer sets up the `devo` command and its `rg` search sidecar;
-`code_search` is an optional extra.
+The installer includes the Rust backend, compiled TUI, private Node.js 24 and
+Python 3.13 runtimes, locked Python dependencies, and ripgrep. No system Node.js,
+Python, npm, pip, Bun, or Rust installation is needed.
 
-<details>
-<summary>Install the optional code-search MCP and local model</summary>
+Keep the complete installation directory together. Copying only `devo.exe` or
+`devo` is insufficient in v0.2.0. Portable use is supported: extract the complete
+CLI archive and run its `devo` executable from any working directory.
 
-On Linux or macOS:
-
-```bash
-curl -fsSL https://raw.githubusercontent.com/7df-lab/devo/main/install.sh | sh -s -- --with-code-search
-```
-
-On Windows (PowerShell):
-
-```powershell
-$env:DEVO_INSTALL_CODE_SEARCH = "1"; irm 'https://raw.githubusercontent.com/7df-lab/devo/main/install.ps1' | iex
-```
-
-After installation, enable the MCP with `devo mcp enable code_search` or
-TUI `/mcps`.
-
-</details>
+Supported systems: 64-bit Windows (x64/ARM64), macOS (Intel/Apple Silicon), and
+Linux (x64/ARM64 with glibc 2.28 or later). The Linux archive's `musl` suffix
+describes the Rust backend; its bundled Node/Python runtimes require glibc.
+Alpine/musl-only installations are not supported by the complete bundle.
 
 To upgrade an existing CLI installation, run `devo upgrade`.
+If you installed the original incomplete v0.2.0 archive, rerun the installer;
+it detects the missing runtime files and repairs that same version.
+
+### Offline installation and use
+
+On a connected computer, download the complete CLI archive for the destination
+OS/architecture and `SHA256SUMS.txt` from the same
+[release](https://github.com/7df-lab/devo/releases/tag/v0.2.0). Verify its SHA-256,
+then transfer both files to the offline computer and extract the archive.
+All TUI and Python dependencies are included; first launch does not run npm,
+pip, or download an interpreter.
+
+Run the extracted executable directly, or use the installer included in the
+extracted directory:
+
+```bash
+sh ./install.sh --offline
+```
+
+```powershell
+.\install.ps1 -Offline
+```
+
+No administrator privileges are required. Close running Devo instances before
+upgrading on Windows. Installers stage the full application and restore the
+previous files if replacement fails; provider credentials and conversations
+remain in your Devo home directory.
+
+An offline installation does not make cloud models available offline. Configure
+a compatible local model endpoint with model weights already downloaded, or an
+accessible LAN/private gateway. External MCP servers and optional packages need
+their own offline preparation. To disable update and model-catalog refreshes,
+add these settings to `~/.devo/config.toml` (or your `DEVO_HOME/config.toml`):
+
+```toml
+[updates]
+enabled = false
+check_on_startup = false
+
+[catalog]
+offline = true
+refresh_on_startup = false
+```
+
+These settings control update/catalog traffic; model providers, tools, and MCP
+servers follow their own network configuration. Run `devo doctor` to check the
+private runtimes and Python dependencies before starting a session.
 
 ## Configuration
 

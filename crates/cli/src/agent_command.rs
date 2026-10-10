@@ -111,16 +111,34 @@ pub(crate) fn launch_interactive_mode_client(
         );
     }
 
-    let client_entry = resolve_interactive_mode_entry()?;
-    let tsx_cli = resolve_tsx_entry(&client_entry)?;
-    let node = resolve_node_program();
-    let tsx = path_for_node_arg(&tsx_cli);
+    let bundle = devo_util_paths::runtime::RuntimeBundle::current();
+    let (node, client_entry, tsx_cli) = if let Some(bundle) = &bundle {
+        anyhow::ensure!(
+            bundle.node.is_file() && bundle.tui.is_file(),
+            "Devo runtime bundle is incomplete at {}. Reinstall Devo using the full release archive.",
+            bundle.root.display()
+        );
+        (bundle.node.clone(), bundle.tui.clone(), None)
+    } else {
+        let entry = resolve_interactive_mode_entry()?;
+        let tsx = resolve_tsx_entry(&entry)?;
+        (resolve_node_program(), entry, Some(tsx))
+    };
     let script = path_for_node_arg(&client_entry);
     let server_bin = simplify_windows_path(std::env::current_exe()?);
 
     let mut command = Command::new(&node);
+    if let Some(tsx) = tsx_cli {
+        command.arg(path_for_node_arg(&tsx));
+    }
+    if let Some(bundle) = bundle {
+        let mut paths = vec![bundle.root];
+        paths.extend(std::env::split_paths(
+            &std::env::var_os("PATH").unwrap_or_default(),
+        ));
+        command.env("PATH", std::env::join_paths(paths)?);
+    }
     command
-        .arg(&tsx)
         .arg(&script)
         .env("DEVO_SERVER_BIN", server_bin.as_os_str())
         .env("DEVO_VERSION", env!("CARGO_PKG_VERSION"))
@@ -151,7 +169,7 @@ pub(crate) fn launch_interactive_mode_client(
 
     let status = command.status().with_context(|| {
         format!(
-            "failed to spawn {} for InteractiveMode ({tsx} {script})",
+            "failed to spawn {} for InteractiveMode ({script})",
             node.display()
         )
     })?;

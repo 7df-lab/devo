@@ -56,7 +56,7 @@ Desktop 体验、终端工作流以及工作区执行边界的团队。
 - **MCP 支持** - 通过
   [Model Context Protocol](https://modelcontextprotocol.io/) 服务器连接外部工具和上下文。
   可用 CLI 管理：`devo mcp add|list|enable|disable|remove`（见
-  [配置](./docs/configuration.zh-Hans.md#mcp-服务器)）。
+  [配置](./README.md#configuration)）。
 - **Skill 支持** - 将可复用工作流、说明、脚本和参考资料打包成可复用的
   [Agent Skills](https://agentskills.io/)。
 - **长任务支持** - 让 Devo 在多轮工作中自动管理上下文，避免任务变长后丢失上下文。
@@ -69,10 +69,7 @@ Desktop 体验、终端工作流以及工作区执行边界的团队。
 - **成本和上下文可见性** - 在提供商支持时显示输入/输出 token、缓存 token
   和上下文窗口用量。
 - **轻量级 Rust 运行时** - 使用 Rust 构建，内存开销低，本地运行时紧凑。
-- **内置语义代码搜索（MCP）** - 可选的捆绑 MCP 服务器（`code_search` /
-  `devo-code-search-mcp`），**默认不安装且不启用**。在本地 CPU 上运行代码嵌入模型，
-  并结合密集检索与 BM25 关键词匹配，相比仅用 grep/find 的代理减少代码搜索上下文。
-  使用 `--with-code-search` 安装，再用 `devo mcp enable code_search` 或 TUI `/mcps` 启用。
+
 
 ## 已测试模型
 
@@ -147,27 +144,7 @@ Windows:
 irm 'https://raw.githubusercontent.com/7df-lab/devo/main/install.ps1' | iex
 ```
 
-在线安装器会把 `devo` 放到 Devo home 目录下，并安装用于快速仓库搜索的
-`rg` sidecar。默认不会安装 `code_search` MCP 或其本地模型。
 
-<details>
-<summary>可选：安装 <code>code_search</code> MCP 和本地模型</summary>
-
-仅在希望安装阶段就安装 code-search MCP 和下载 Hugging Face 模型时使用。
-
-Linux / macOS:
-
-```bash
-curl -fsSL https://raw.githubusercontent.com/7df-lab/devo/main/install.sh | sh -s -- --with-code-search
-```
-
-Windows:
-
-```powershell
-$env:DEVO_INSTALL_CODE_SEARCH = "1"; irm 'https://raw.githubusercontent.com/7df-lab/devo/main/install.ps1' | iex
-```
-
-</details>
 
 将现有安装升级到最新 release：
 
@@ -179,7 +156,7 @@ devo upgrade
 `Version: v0.1.12 -> v0.1.15`。
 
 如需在内网或无网络环境中安装，请参阅
-[离线安装](./docs/offline-installation.zh-Hans.md)。
+[离线安装](./README.md#offline-installation-and-use)。
 
 ## 快速开始
 
@@ -212,7 +189,7 @@ devo resume <session-id>
    `openai_responses` 或 `anthropic_messages`。
 
 完整示例（自定义模型参数 + API key）与协议说明见
-[配置](./docs/configuration.zh-Hans.md#接入自有-api-key)。
+[配置](./README.md#configuration)。
 
 ## 响应较慢的 Provider
 
@@ -221,8 +198,8 @@ Provider 连接建立仍有内部期限，并且用户可以随时取消请求�
 
 ## Docs
 
-- [离线安装](./docs/offline-installation.zh-Hans.md)
-- [配置](./docs/configuration.zh-Hans.md)
+- [离线安装](./README.md#offline-installation-and-use)
+- [配置](./README.md#configuration)
 
 ## 常见问题
 
@@ -242,7 +219,7 @@ Anthropic Messages API 的模型端点，都可以通过 provider/model Connecti
 使用 `devo onboard`，或在 `providers.json` 中手动定义自定义 provider/model，
 把 key 存入用户级 `auth.json`，并将 `wire_api`
 设为 `openai_chat_completions`、`openai_responses` 或 `anthropic_messages`。详见
-[配置](./docs/configuration.zh-Hans.md#接入自有-api-key)。
+[配置](./README.md#configuration)。
 
 ### 应该使用 Desktop app 还是 TUI/CLI？
 

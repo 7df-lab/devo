@@ -959,22 +959,6 @@ mod tests {
         }
     }
 
-    /// Trace: L2-DES-MCP-002
-    /// Verifies: native code_search is no longer registered; retrieval is MCP-only.
-    #[test]
-    fn plan_builder_omits_native_code_search() {
-        let plan = build_tool_registry_plan(&ToolPlanConfig::default());
-        let spec_names: Vec<&str> = plan.specs.iter().map(|spec| spec.name.as_str()).collect();
-        let handler_names: Vec<&str> = plan
-            .handlers
-            .iter()
-            .map(|(_, name)| name.as_str())
-            .collect();
-
-        assert!(!spec_names.contains(&"code_search"));
-        assert!(!handler_names.contains(&"code_search"));
-    }
-
     /// Trace: L2-DES-RLM-001
     /// Verifies: the internal RLM plan retains Python, shell, plan, and question handlers.
     #[test]

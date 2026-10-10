@@ -61,11 +61,6 @@ impl AppConfigStore {
     }
 
     /// Sets the `enabled` flag for one MCP server in the user-level `config.toml`.
-    ///
-    /// Bundled servers (for example `code_search`) are injected into the
-    /// effective config on load and may not yet exist on disk. Enabling or
-    /// disabling them materializes the full bundled record into
-    /// `config.toml` instead of failing with "not found".
     pub fn set_mcp_server_enabled(&mut self, id: &str, enabled: bool) -> anyhow::Result<()> {
         let id = id.trim();
         if id.is_empty() {
@@ -76,11 +71,6 @@ impl AppConfigStore {
         let mut document = read_provider_config_document(target_config_file)?;
         let mcp_servers = mcp_servers_table_mut(&mut document)?;
         if !mcp_servers.contains_key(id) {
-            if id == crate::BUNDLED_CODE_SEARCH_MCP_SERVER_ID {
-                let mut record = crate::bundled_code_search_mcp_server();
-                record.enabled = enabled;
-                return self.upsert_mcp_server(record);
-            }
             anyhow::bail!("mcp server `{id}` not found");
         }
 
