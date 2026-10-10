@@ -18,7 +18,6 @@ import {
 import { Skeleton } from "@devo/ui/components/skeleton"
 import {
 	AlertCircleIcon,
-	MinusIcon,
 	PlusIcon,
 	RefreshCwIcon,
 } from "lucide-react"
@@ -89,7 +88,7 @@ export function ProviderSettings() {
 			invalidateProviderDependentQueries()
 			setDisconnectTarget(null)
 		} catch (error) {
-			setDisconnectError(error instanceof Error ? error.message : "Failed to remove provider")
+			setDisconnectError(error instanceof Error ? error.message : "Failed to disconnect provider")
 		} finally {
 			setDisconnecting(false)
 		}
@@ -239,7 +238,7 @@ export function ProviderSettings() {
 				<DialogContent className="sm:max-w-lg gap-5 p-5">
 					<DialogHeader className="gap-1.5">
 						<DialogTitle className="text-base font-medium tracking-tight">
-							Remove {disconnectTarget?.name}?
+							Disconnect {disconnectTarget?.name}?
 						</DialogTitle>
 						<DialogDescription className="text-sm leading-5">
 							Removes this connection and its credential. The built-in template stays available to reconnect.
@@ -251,7 +250,7 @@ export function ProviderSettings() {
 							Cancel
 						</Button>
 						<Button variant="destructive" size="sm" disabled={disconnecting} onClick={handleDisconnect}>
-							{disconnecting ? "Removing…" : "Remove"}
+							{disconnecting ? "Disconnecting…" : "Disconnect"}
 						</Button>
 					</DialogFooter>
 				</DialogContent>
@@ -329,8 +328,7 @@ function ConnectedProviderRow({
 				className="text-muted-foreground hover:text-destructive"
 				onClick={onDisconnect}
 			>
-				<MinusIcon className="size-3.5 stroke-[1.5]" />
-				Remove
+				Disconnect
 			</Button>
 		</div>
 	)

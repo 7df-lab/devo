@@ -711,6 +711,27 @@ impl ServerRuntime {
                 format!("provider {provider_id} is not a user Connection"),
             );
         }
+        // Check the directory independently of user overlays: a manually
+        // saved override cannot make a bundled or remote model removable.
+        let directory = PresetModelCatalog::load_from_provider_config_with_home(
+            &Default::default(),
+            &Default::default(),
+            Some(store.user_config_dir()),
+        );
+        let unqualified_id = model_id
+            .strip_prefix(&format!("{provider_id}/"))
+            .unwrap_or(model_id);
+        if directory.is_ok_and(|directory| {
+            directory.list_providers().iter().any(|provider| {
+                provider.id == provider_id && provider.models.contains_key(unqualified_id)
+            })
+        }) {
+            return self.error_response(
+                request_id,
+                ProtocolErrorCode::InvalidParams,
+                format!("catalog model {provider_id}/{unqualified_id} is read-only"),
+            );
+        }
         if let Err(error) = store.remove_provider_model(provider_id, model_id) {
             return self.error_response(
                 request_id,

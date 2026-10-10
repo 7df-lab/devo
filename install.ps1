@@ -418,9 +418,9 @@ function Install-DevoOffline {
     }
 
     $target = Get-Target
-    $archive = Get-FirstMatchingFile -Directory $AssetDir -Pattern "devo-*-${target}.zip"
+    $archive = Get-FirstMatchingFile -Directory $AssetDir -Pattern "devo-tui-*-${target}.zip"
     if (-not $archive) {
-        Write-Error "Offline devo asset not found. Place devo-*-${target}.zip or devo.exe next to install.ps1."
+        Write-Error "Offline devo asset not found. Place devo-tui-*-${target}.zip or devo.exe next to install.ps1."
     }
 
     Write-Host "Installing devo from offline archive: $($archive.FullName)"
@@ -508,7 +508,8 @@ function Main {
 
             $skipAppInstall = Test-DevoVersionInstalled -InstallDir $installDir -ExpectedVersion $version
             if (-not $skipAppInstall) {
-                $archiveUrl = "https://github.com/$Repo/releases/download/$version/devo-${version}-${target}.zip"
+                $archiveName = "devo-tui-${version}-${target}.zip"
+                $archiveUrl = "https://github.com/$Repo/releases/download/$version/$archiveName"
 
                 Write-Host "Downloading devo $version for $target ..."
 
@@ -516,7 +517,7 @@ function Main {
                 Invoke-WebRequest -Uri $archiveUrl -OutFile $zipPath
                 $checksumFile = Join-Path $tmpDir "SHA256SUMS.txt"
                 Invoke-WebRequest -Uri "https://github.com/$Repo/releases/download/$version/SHA256SUMS.txt" -OutFile $checksumFile
-                Test-ArchiveChecksum -Archive $zipPath -ChecksumFile $checksumFile -AssetName "devo-${version}-${target}.zip"
+                Test-ArchiveChecksum -Archive $zipPath -ChecksumFile $checksumFile -AssetName $archiveName
 
                 Expand-Archive -Path $zipPath -DestinationPath $tmpDir -Force
 

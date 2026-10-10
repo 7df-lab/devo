@@ -65,3 +65,81 @@ async fn oauth_and_custom_connections_survive_native_runtime_restart() -> Result
     );
     Ok(())
 }
+
+#[tokio::test]
+async fn remote_models_remain_read_only_after_restart_and_settings_edits() -> Result<()> {
+    let home = tempfile::tempdir()?;
+    let runtime = TestRuntime::noop().runtime(home.path());
+    let saved = runtime
+        .handle_native_provider_upsert(
+            json!(1),
+            json!({
+                "provider": {"id": "catalog-qa", "name": "Catalog QA", "enabled": true,
+                    "wireApis": ["openai_chat_completions"], "models": {
+                        "remote": {"name": "Remote", "origin": "remote"},
+                        "manual": {"name": "Manual"}
+                    }}
+            }),
+        )
+        .await;
+    assert!(saved.get("error").is_none(), "save failed: {saved}");
+    drop(runtime);
+    let restarted = TestRuntime::noop().runtime(home.path());
+    let before = restarted.handle_native_provider_list(json!(2)).await;
+    assert_eq!(
+        before["result"]["connectionModels"]["catalog-qa"],
+        json!({
+            "remote": {"name": "Remote", "origin": "remote"},
+            "manual": {"name": "Manual", "origin": "user"}
+        })
+    );
+    // Even an old or incorrect client cannot reclassify a discovered model.
+    let edited = restarted
+        .handle_native_provider_upsert(
+            json!(3),
+            json!({
+                "provider": {"id": "catalog-qa", "name": "Catalog QA", "enabled": true,
+                    "wireApis": ["openai_chat_completions"], "models": {
+                        "remote": {"name": "Remote", "origin": "user"}
+                    }}
+            }),
+        )
+        .await;
+    assert!(edited.get("error").is_none(), "edit failed: {edited}");
+    let denied = restarted
+        .handle_native_provider_model_remove(
+            json!(4),
+            json!({
+                "providerId": "catalog-qa", "modelId": "remote"
+            }),
+        )
+        .await;
+    assert!(
+        denied["error"]["message"]
+            .as_str()
+            .is_some_and(|message| message.contains("read-only")),
+        "removal was not denied: {denied}"
+    );
+    let after = restarted.handle_native_provider_list(json!(5)).await;
+    assert_eq!(after["result"], before["result"]);
+    let removed = restarted
+        .handle_native_provider_model_remove(
+            json!(6),
+            json!({
+                "providerId": "catalog-qa", "modelId": "manual"
+            }),
+        )
+        .await;
+    assert_eq!(
+        removed,
+        json!({"id": 6, "result": {"providerId": "catalog-qa", "modelId": "manual"}})
+    );
+    let remaining = restarted.handle_native_provider_list(json!(7)).await;
+    assert_eq!(
+        remaining["result"]["connectionModels"]["catalog-qa"],
+        json!({
+            "remote": {"name": "Remote", "origin": "remote"}
+        })
+    );
+    Ok(())
+}

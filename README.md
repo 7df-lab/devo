@@ -81,6 +81,13 @@ Its bundled catalog includes model definitions for providers such as DeepSeek,
 Qwen, Kimi, GLM, and MiniMax. You can configure a compatible endpoint or private
 gateway rather than relying on the bundled entries.
 
+Desktop onboarding, Settings, and the composer share the server's provider and
+model catalog. Onboarding shows all available providers, supports searching by
+provider or model, and refreshes remote model metadata. Use **Refresh catalog**
+to check for updates; the saved catalog remains available offline. Catalog providers
+and remotely fetched models cannot be deleted. You can disconnect a provider,
+change model preferences, or remove models you added manually.
+
 Model requests go to the endpoint you configure. For local model traffic,
 choose a compatible local endpoint.
 
@@ -117,6 +124,10 @@ Python, npm, pip, Bun, or Rust installation is needed.
 Keep the complete installation directory together. Copying only `devo.exe` or
 `devo` is insufficient in v0.2.0. Portable use is supported: extract the complete
 CLI archive and run its `devo` executable from any working directory.
+
+Terminal archives use the `devo-tui-` prefix, for example
+`devo-tui-v0.2.0-x86_64-pc-windows-msvc.zip`. Graphical installers use the
+`devo-desktop-` prefix. The installed terminal command remains `devo`.
 
 Supported systems: 64-bit Windows (x64/ARM64), macOS (Intel/Apple Silicon), and
 Linux (x64/ARM64 with glibc 2.28 or later). The Linux archive's `musl` suffix

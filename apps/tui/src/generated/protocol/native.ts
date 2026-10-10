@@ -797,7 +797,13 @@ export type ProviderModelVariant = { label?: string | null, disabled: boolean,
  */
 requestModel?: string | null, request?: JsonValue | null, options?: JsonValue | null, headers?: { [key in string]: string }, };
 
-export type ProviderModelInfo = { name?: string | null, family?: string | null, releaseDate?: string | null, status?: string | null,
+export type ProviderModelOrigin = "remote" | "user";
+
+export type ProviderModelInfo = {
+/**
+ * Persisted ownership, independent of connection state and user overrides.
+ */
+origin?: ProviderModelOrigin | null, name?: string | null, family?: string | null, releaseDate?: string | null, status?: string | null,
 /**
  * Open-ended model capabilities, compatible with directory sources such
  * as OpenCode/models.dev (for example tools, input/output, attachment,

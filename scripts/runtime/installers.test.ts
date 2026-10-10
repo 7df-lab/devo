@@ -22,6 +22,13 @@ test.skipIf(process.platform !== "win32")("Windows installation repairs an incom
     const script = readFileSync(join(repo, "install.ps1"), "utf8").replace(/\nMain\s*$/, "\n") + `
       Install-DevoBundle -Source ${quote(source)} -InstallDir ${quote(destination)}
       $complete = Test-DevoBundle -Directory ${quote(destination)}
+      $assets = ${quote(join(root, "assets"))}
+      New-Item -ItemType Directory -Path $assets | Out-Null
+      $archive = Join-Path $assets "devo-tui-v0.2.0-$(Get-Target).zip"
+      Compress-Archive -Path ${quote(join(source, "*"))} -DestinationPath $archive
+      Set-Content -LiteralPath (Join-Path $assets 'SHA256SUMS.txt') -Value "$((Get-FileHash -LiteralPath $archive -Algorithm SHA256).Hash.ToLower())  $([IO.Path]::GetFileName($archive))"
+      Install-DevoOffline -AssetDir $assets -InstallDir ${quote(join(root, "offline installed"))} -TempRoot ${quote(join(root, "extracted"))} 6>$null
+      $offlineComplete = Test-DevoBundle -Directory ${quote(join(root, "offline installed"))}
       $rejected = $false
       try { Install-DevoBundle -Source ${quote(root)} -InstallDir ${quote(destination)} } catch { $rejected = $true }
       Set-Content -LiteralPath ${quote(join(destination, "runtime/manifest.json"))} -Value 'old runtime'
@@ -29,13 +36,16 @@ test.skipIf(process.platform !== "win32")("Windows installation repairs an incom
       $failed = $false
       try { Install-DevoBundle -Source ${quote(source)} -InstallDir ${quote(destination)} } catch { $failed = $true } finally { $lock.Dispose() }
       $restored = (Get-Content -LiteralPath ${quote(join(destination, "runtime/manifest.json"))} -Raw).Trim() -eq 'old runtime'
-      @{complete=$complete; rejected=$rejected; rolledBack=($failed -and $restored)} | ConvertTo-Json -Compress
+      @{complete=$complete; offlineComplete=$offlineComplete; rejected=$rejected; rolledBack=($failed -and $restored)} | ConvertTo-Json -Compress
     `;
     const path = join(root, "test.ps1");
     writeFileSync(path, script);
-    const result = Bun.spawnSync([join(process.env.SystemRoot!, "System32/WindowsPowerShell/v1.0/powershell.exe"), "-NoProfile", "-NonInteractive", "-ExecutionPolicy", "Bypass", "-File", path], { stdout: "pipe", stderr: "pipe" });
+    const result = Bun.spawnSync([join(process.env.SystemRoot!, "System32/WindowsPowerShell/v1.0/powershell.exe"), "-NoProfile", "-NonInteractive", "-ExecutionPolicy", "Bypass", "-File", path], {
+      stdout: "pipe", stderr: "pipe",
+      env: { ...process.env, PSModulePath: join(process.env.SystemRoot!, "System32/WindowsPowerShell/v1.0/Modules") },
+    });
     if (result.exitCode !== 0) throw new Error(result.stderr.toString());
-    expect({ exit: result.exitCode, stderr: result.stderr.toString(), checks: JSON.parse(result.stdout.toString()) }).toEqual({ exit: 0, stderr: "", checks: { complete: true, rejected: true, rolledBack: true } });
+    expect({ exit: result.exitCode, stderr: result.stderr.toString(), checks: JSON.parse(result.stdout.toString()) }).toEqual({ exit: 0, stderr: "", checks: { complete: true, offlineComplete: true, rejected: true, rolledBack: true } });
   } finally {
     rmSync(root, { recursive: true, force: true });
   }
@@ -58,6 +68,17 @@ test.skipIf(process.platform === "win32")("Unix offline installation copies priv
     expect({ exit: result.exitCode, stderr: result.stderr.toString(), complete: files.every((file) => existsSync(join(destination, file))) }).toEqual({ exit: 0, stderr: "", complete: true });
     const second = Bun.spawnSync(["sh", join(source, "install.sh"), "--offline", "--no-modify-path", "--install-dir", destination], { stdout: "pipe", stderr: "pipe" });
     expect({ exit: second.exitCode, stderr: second.stderr.toString(), contents: readFileSync(join(destination, "tui/src/index.js"), "utf8") }).toEqual({ exit: 0, stderr: "", contents: "new" });
+    const assets = join(root, "assets");
+    mkdirSync(assets);
+    writeFileSync(join(assets, "install.sh"), readFileSync(join(repo, "install.sh")));
+    const arch = process.arch === "arm64" ? "aarch64" : "x86_64";
+    const platform = process.platform === "darwin" ? "apple-darwin" : "unknown-linux-musl";
+    const archive = join(assets, `devo-tui-v0.2.0-${arch}-${platform}.tar.gz`);
+    const packed = Bun.spawnSync(["tar", "-czf", archive, "-C", source, "."], { stdout: "pipe", stderr: "pipe" });
+    expect({ exit: packed.exitCode, stderr: packed.stderr.toString() }).toEqual({ exit: 0, stderr: "" });
+    const offlineDestination = join(root, "archive installed");
+    const offline = Bun.spawnSync(["sh", join(assets, "install.sh"), "--offline", "--no-modify-path", "--install-dir", offlineDestination], { stdout: "pipe", stderr: "pipe" });
+    expect({ exit: offline.exitCode, stderr: offline.stderr.toString(), complete: files.every((file) => existsSync(join(offlineDestination, file))) }).toEqual({ exit: 0, stderr: "", complete: true });
   } finally {
     rmSync(root, { recursive: true, force: true });
   }

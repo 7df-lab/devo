@@ -1,280 +1,247 @@
-/**
- * Onboarding: Provider Setup.
- *
- * Allows users to connect AI providers during onboarding.
- * Devo Zen is featured prominently as the built-in provider with free models.
- * Reuses ConnectProviderDialog for the actual auth flows.
- */
-
+/** Onboarding uses the same server-owned catalog and connection flows as Settings. */
 import { Button } from "@devo/ui/components/button"
+import { Input } from "@devo/ui/components/input"
 import { Spinner } from "@devo/ui/components/spinner"
-import { useQueryClient } from "@tanstack/react-query"
-import { CheckIcon, ExternalLinkIcon, LinkIcon, SparklesIcon, ZapIcon } from "lucide-react"
-import { motion } from "motion/react"
-import { useCallback, useMemo, useState } from "react"
+import { CheckIcon, RefreshCwIcon } from "lucide-react"
+import { useCallback, useEffect, useMemo, useState } from "react"
 import {
-	type CatalogProvider,
-	queryKeys,
-	useAllProviders,
-	useConnectedProviders,
-	useProviderAuthMethods,
+	type CatalogProviderInfo,
+	useProviderCatalog,
 } from "../../../hooks/use-devo-data"
+import { useModelDirectory } from "../../../hooks/use-model-directory"
 import { useServerConnection } from "../../../hooks/use-server"
-import {
-	compareConnectedFirst,
-	isZenFreeTier,
-	POPULAR_PROVIDER_IDS,
-	ZEN_PROVIDER_ID,
-	ZEN_SIGNUP_URL,
-} from "../../../lib/providers"
+import { invalidateProviderDependentQueries } from "../../../lib/invalidate-provider-queries"
+import { compareConnectedFirst } from "../../../lib/providers"
 import { ConnectProviderDialog } from "../../settings/connect-provider-dialog"
+import { ConnectionDetailDialog } from "../../settings/connection-detail-dialog"
+import { isDesktopOAuthProvider } from "../../settings/desktop-oauth-providers"
 import { ProviderIcon } from "../../settings/provider-icon"
-
-// ============================================================
-// Component
-// ============================================================
+import { TemplateConnectDialog } from "../../settings/template-connect-dialog"
 
 interface ProviderSetupStepProps {
 	onComplete: (count: number) => void
 	onSkip: () => void
 }
 
-export function ProviderSetupStep({ onComplete, onSkip }: ProviderSetupStepProps) {
+export function ProviderSetupStep({
+	onComplete,
+	onSkip,
+}: ProviderSetupStepProps) {
 	const { connected: serverConnected } = useServerConnection()
-	const { data: allProviders, loading: catalogLoading, reload: reloadCatalog } = useAllProviders()
-	const { loading: connectedLoading, reload: reloadConnected } = useConnectedProviders()
-	const { data: authMethods } = useProviderAuthMethods()
-	const queryClient = useQueryClient()
-
-	const [connectDialogProvider, setConnectDialogProvider] = useState<CatalogProvider | null>(null)
-
-	const loading = catalogLoading || connectedLoading
-	const connectedIds = useMemo(
-		() => new Set(allProviders?.connected ?? []),
-		[allProviders?.connected],
+	const catalog = useProviderCatalog()
+	const directory = useModelDirectory()
+	const [search, setSearch] = useState("")
+	const [connection, setConnection] = useState<CatalogProviderInfo | null>(null)
+	const [detailId, setDetailId] = useState<string | null>(null)
+	// Keep the OAuth provider stable while catalog refreshes complete.
+	const oauthProvider = useMemo(
+		() => (connection ? { ...connection, env: [] } : null),
+		[connection],
 	)
 
-	// Separate Zen from the other popular providers
-	const zenProvider = useMemo(
-		() => allProviders?.all.find((p) => p.id === ZEN_PROVIDER_ID) ?? null,
-		[allProviders],
+	useEffect(() => {
+		if (serverConnected) directory.refreshCatalog("ifStale")
+	}, [serverConnected, directory.refreshCatalog])
+
+	const providers = useMemo(() => {
+		const data = catalog.data
+		if (!data) return []
+		const terms = search.toLowerCase().trim().split(/\s+/).filter(Boolean)
+		return data.providers
+			.filter((provider) => {
+				const text =
+					`${provider.id} ${provider.name} ${provider.description ?? ""} ${Object.entries(
+						provider.models ?? {},
+					)
+						.map(([id, model]) => `${id} ${model.name ?? ""}`)
+						.join(" ")}`.toLowerCase()
+				return terms.every((term) => text.includes(term))
+			})
+			.sort((a, b) => compareConnectedFirst(data.connectedIds, a, b))
+	}, [catalog.data, search])
+	const connectedCount = catalog.data?.connectedIds.size ?? 0
+	const detail = catalog.data?.providers.find(
+		(provider) => provider.id === detailId,
 	)
-
-	const otherProviders = useMemo(() => {
-		if (!allProviders) return []
-		const filtered = allProviders.all.filter(
-			(p) =>
-				p.id !== ZEN_PROVIDER_ID &&
-				POPULAR_PROVIDER_IDS.includes(p.id as (typeof POPULAR_PROVIDER_IDS)[number]),
-		)
-		return [...filtered].sort((a, b) => compareConnectedFirst(connectedIds, a, b))
-	}, [allProviders, connectedIds])
-
-	const zenIsConnected = connectedIds.has(ZEN_PROVIDER_ID)
-	const zenHasApiKey =
-		zenIsConnected && zenProvider !== null && !isZenFreeTier(zenProvider.models ?? {})
-
-	const reload = useCallback(() => {
-		reloadCatalog()
-		reloadConnected()
-		queryClient.invalidateQueries({ queryKey: queryKeys.allProviders })
-		queryClient.invalidateQueries({ queryKey: queryKeys.connectedProviders })
-		queryClient.invalidateQueries({
-			predicate: (q) => q.queryKey[0] === "providers",
-		})
-	}, [reloadCatalog, reloadConnected, queryClient])
-
-	const handleContinue = useCallback(() => {
-		onComplete(connectedIds.size)
-	}, [onComplete, connectedIds.size])
+	const error = catalog.error ?? directory.error
+	const refresh = () => {
+		catalog.reload()
+		directory.refreshCatalog("force")
+	}
+	const changed = useCallback(() => {
+		invalidateProviderDependentQueries()
+		catalog.reload()
+	}, [catalog.reload])
+	const connected = () => {
+		setConnection(null)
+		changed()
+	}
 
 	if (!serverConnected) {
 		return (
-			<div className="flex h-full flex-col items-center justify-center space-y-6 text-center">
-				<div className="flex flex-col items-center space-y-2">
-					<Spinner className="size-8 text-muted-foreground" />
-					<h2 className="text-[22px] font-medium tracking-tight">Waiting for Devo server...</h2>
-					<p className="max-w-md text-sm text-muted-foreground">
-						Devo is connecting to the Devo background process. This should only take a moment.
-					</p>
-				</div>
-				<div className="flex gap-3">
-					<Button variant="outline" onClick={onSkip}>
-						Skip for now
-					</Button>
-				</div>
+			<div className="flex h-full flex-col items-center justify-center gap-6 px-6 text-center">
+				<Spinner className="size-6 text-muted-foreground" />
+				<h2 className="text-[22px] font-medium tracking-tight">
+					Connecting to Devo…
+				</h2>
+				<Button variant="outline" onClick={onSkip}>
+					Skip for now
+				</Button>
 			</div>
 		)
 	}
 
 	return (
-		<div className="flex h-full flex-col items-center justify-center space-y-8 px-6 text-center">
-			<div className="max-w-md space-y-2">
-				<motion.div
-					initial={{ scale: 0.9, opacity: 0 }}
-					animate={{ scale: 1, opacity: 1 }}
-					transition={{ duration: 0.4, ease: "easeOut" }}
-					className="mx-auto flex size-12 items-center justify-center rounded-xl bg-primary/10 text-primary"
-				>
-					<SparklesIcon className="size-6" />
-				</motion.div>
-				<h2 className="text-[22px] font-medium tracking-tight text-foreground">AI Providers</h2>
-				<p className="text-muted-foreground">
-					Devo supports connecting your own model API keys for more model choices.
+		<div className="mx-auto flex min-h-full w-full max-w-2xl flex-col justify-center gap-6 px-6 py-8">
+			<div className="space-y-2 text-center">
+				<h2 className="text-[22px] font-medium tracking-tight">
+					Connect a provider
+				</h2>
+				<p className="text-sm text-muted-foreground">
+					Choose from the live catalog or search for a model you want to use.
 				</p>
 			</div>
-
-			<div className="w-full max-w-lg space-y-4">
-				{/* Zen featured card */}
-				{loading ? (
-					<div className="flex items-center gap-4 rounded-xl border border-border bg-muted/20 p-4">
-						<div className="size-10 animate-pulse rounded-lg bg-muted" />
-						<div className="flex-1 space-y-2">
-							<div className="h-4 w-32 animate-pulse rounded bg-muted" />
-							<div className="h-3 w-48 animate-pulse rounded bg-muted" />
-						</div>
-					</div>
-				) : zenProvider ? (
-					<ZenFeaturedCard
-						provider={zenProvider}
-						hasApiKey={zenHasApiKey}
-						onConnect={() => setConnectDialogProvider(zenProvider)}
+			<div className="space-y-3">
+				<div className="flex items-center gap-2">
+					<Input
+						aria-label="Search providers or models"
+						placeholder="Search providers or models…"
+						value={search}
+						onChange={(event) => setSearch(event.target.value)}
+						className="h-9 flex-1"
 					/>
-				) : null}
-
-				{/* Other providers grid */}
-				<div className="grid max-h-[42vh] grid-cols-1 gap-3 overflow-y-auto p-1 sm:grid-cols-2">
-					{loading
-						? ["s1", "s2", "s3", "s4", "s5", "s6"].map((key) => (
-								<div
-									key={key}
-									className="flex items-center gap-3 rounded-xl border border-border bg-muted/20 px-4 py-3"
-								>
-									<div className="size-8 animate-pulse rounded-md bg-muted" />
-									<div className="h-4 w-24 animate-pulse rounded bg-muted" />
-								</div>
-							))
-						: otherProviders.map((provider) => {
-								const isConnected = connectedIds.has(provider.id)
-								return (
-									<button
-										key={provider.id}
-										type="button"
-										onClick={() => setConnectDialogProvider(provider)}
-										className="group flex items-center gap-3 rounded-xl border border-border bg-background px-4 py-3 text-left transition-all hover:border-primary/50 hover:bg-accent"
-									>
-										<ProviderIcon id={provider.id} name={provider.name} />
-										<div className="flex min-w-0 flex-1 flex-col">
-											<span className="text-sm font-medium">{provider.name}</span>
-											{typeof provider.description === "string" && provider.description.trim() ? (
-												<span className="truncate text-xs text-muted-foreground">
-													{provider.description}
-												</span>
-											) : null}
-											{isConnected && (
-												<span className="text-[10px] font-semibold uppercase tracking-wider text-emerald-600 dark:text-emerald-400">
-													Connected
-												</span>
-											)}
-										</div>
-										{isConnected ? (
-											<CheckIcon className="size-4 text-emerald-500" />
-										) : (
-											<LinkIcon className="size-4 text-muted-foreground opacity-0 transition-opacity group-hover:opacity-100" />
-										)}
-									</button>
-								)
-							})}
-				</div>
-
-				<div className="flex flex-col items-center gap-4 pt-4">
-					<Button size="lg" className="min-w-40" onClick={handleContinue} disabled={loading}>
-						{connectedIds.size > 0 || zenIsConnected ? "Continue" : "I'll do this later"}
+					<Button
+						size="sm"
+						variant="outline"
+						onClick={refresh}
+						disabled={directory.refreshing}
+					>
+						<RefreshCwIcon
+							className={`size-3.5 stroke-[1.5] ${directory.refreshing ? "animate-spin" : ""}`}
+							aria-hidden="true"
+						/>
+						{directory.refreshing ? "Refreshing…" : "Refresh catalog"}
 					</Button>
-					{connectedIds.size === 0 && !zenIsConnected && (
-						<p className="text-xs text-muted-foreground">
-							You won't be able to chat until a provider is connected.
+				</div>
+				{error && (
+					<p role="alert" className="text-sm text-destructive">
+						Could not refresh the catalog: {error}. You can retry or continue
+						with saved providers.
+					</p>
+				)}
+				{directory.offline && (
+					<p role="status" className="text-xs text-muted-foreground">
+						Offline mode · showing the saved catalog.
+					</p>
+				)}
+				<p className="text-xs text-muted-foreground" aria-live="polite">
+					{providers.length} provider{providers.length === 1 ? "" : "s"} ·{" "}
+					{connectedCount} connected
+				</p>
+				<div
+					className="grid h-[42vh] auto-rows-min grid-cols-1 gap-2 overflow-y-auto p-1 sm:grid-cols-2"
+					aria-label="Provider catalog"
+					aria-busy={catalog.loading}
+				>
+					{catalog.loading && !catalog.data ? (
+						<div className="col-span-full flex justify-center py-12">
+							<Spinner className="size-5 text-muted-foreground" />
+						</div>
+					) : (
+						providers.map((provider) => {
+							const isConnected =
+								catalog.data?.connectedIds.has(provider.id) ?? false
+							const count = Object.values(provider.models ?? {}).filter(
+								(model) => model.enabled !== false,
+							).length
+							return (
+								<button
+									key={provider.id}
+									type="button"
+									onClick={() =>
+										isConnected
+											? setDetailId(provider.id)
+											: setConnection(provider)
+									}
+									className="flex items-center gap-3 rounded-lg border border-border/60 bg-background px-3 py-3 text-left transition-colors hover:bg-muted/50 focus-visible:outline-none focus-visible:ring-2 focus-visible:ring-ring"
+								>
+									<ProviderIcon
+										id={provider.id}
+										name={provider.name}
+										size="sm"
+									/>
+									<div className="min-w-0 flex-1">
+										<div className="truncate text-sm font-medium">
+											{provider.name}
+										</div>
+										<div className="mt-0.5 text-xs text-muted-foreground">
+											{count} model{count === 1 ? "" : "s"}
+											{isConnected ? " · Connected" : ""}
+										</div>
+									</div>
+									{isConnected && (
+										<CheckIcon
+											className="size-3.5 shrink-0 stroke-[1.5] text-emerald-600"
+											aria-hidden="true"
+										/>
+									)}
+								</button>
+							)
+						})
+					)}
+					{!catalog.loading && providers.length === 0 && (
+						<p className="col-span-full py-8 text-center text-sm text-muted-foreground">
+							{search.trim()
+								? "No providers or models match your search."
+								: "No providers available. Refresh the catalog to try again."}
 						</p>
 					)}
 				</div>
 			</div>
-
-			<ConnectProviderDialog
-				provider={connectDialogProvider}
-				pluginAuthMethods={
-					connectDialogProvider ? authMethods?.[connectDialogProvider.id] : undefined
-				}
-				onClose={() => setConnectDialogProvider(null)}
-				onConnected={() => {
-					setConnectDialogProvider(null)
-					reload()
-				}}
-			/>
-		</div>
-	)
-}
-
-// ============================================================
-// Zen featured card
-// ============================================================
-
-function ZenFeaturedCard({
-	provider,
-	hasApiKey,
-	onConnect,
-}: {
-	provider: CatalogProvider
-	hasApiKey: boolean
-	onConnect: () => void
-}) {
-	const freeModelCount = Object.values(provider.models ?? {}).filter(
-		(m) => (m as { cost?: { input?: number } }).cost?.input === 0,
-	).length
-	const totalModelCount = Object.keys(provider.models ?? {}).length
-
-	return (
-		<motion.div
-			initial={{ opacity: 0, y: 8 }}
-			animate={{ opacity: 1, y: 0 }}
-			transition={{ duration: 0.3, ease: "easeOut" }}
-			className="relative overflow-hidden rounded-xl border border-primary/20 bg-gradient-to-br from-primary/[0.04] to-primary/[0.08]"
-		>
-			<div className="flex items-start gap-4 p-4">
-				<div className="flex size-10 shrink-0 items-center justify-center rounded-lg bg-primary/10">
-					<ProviderIcon id={provider.id} name={provider.name} size="md" />
-				</div>
-				<div className="min-w-0 flex-1 text-left">
-					<div className="flex items-center gap-2">
-						<span className="text-sm font-semibold">{provider.name}</span>
-						<span className="inline-flex items-center gap-1 rounded-full bg-emerald-500/10 px-2 py-0.5 text-[10px] font-semibold uppercase tracking-wider text-emerald-600 dark:text-emerald-400">
-							<ZapIcon className="size-2.5" aria-hidden="true" />
-							Included
-						</span>
-					</div>
-					<p className="mt-0.5 text-xs text-muted-foreground">
-						{freeModelCount} free models ready to use.{" "}
-						{hasApiKey
-							? `${totalModelCount} models available with API key.`
-							: `Upgrade for ${totalModelCount}+ premium models.`}
+			<div className="space-y-3 text-center">
+				<Button
+					size="lg"
+					className="min-w-40"
+					onClick={() =>
+						connectedCount > 0 ? onComplete(connectedCount) : onSkip()
+					}
+				>
+					{connectedCount > 0 ? "Continue" : "I'll do this later"}
+				</Button>
+				{connectedCount === 0 && (
+					<p className="text-xs text-muted-foreground">
+						You can connect a provider later in Settings.
 					</p>
-					<div className="mt-2.5 flex flex-wrap items-center gap-2">
-						<Button size="sm" variant="outline" className="h-7 text-xs" onClick={onConnect}>
-							{hasApiKey ? "Manage" : "Enter API key"}
-						</Button>
-						{!hasApiKey && (
-							<a
-								href={ZEN_SIGNUP_URL}
-								target="_blank"
-								rel="noopener noreferrer"
-								className="inline-flex items-center gap-1 text-[11px] text-primary hover:underline"
-							>
-								Get a key at devo.ai
-								<ExternalLinkIcon className="size-2.5" aria-hidden="true" />
-							</a>
-						)}
-					</div>
-				</div>
+				)}
 			</div>
-		</motion.div>
+			{connection &&
+				(isDesktopOAuthProvider(connection.id) ? (
+					<ConnectProviderDialog
+						provider={oauthProvider}
+						onClose={() => setConnection(null)}
+						onConnected={connected}
+					/>
+				) : (
+					<TemplateConnectDialog
+						provider={connection}
+						open
+						onOpenChange={(open) => {
+							if (!open) setConnection(null)
+						}}
+						onConnected={connected}
+					/>
+				))}
+			{detail && (
+				<ConnectionDetailDialog
+					provider={detail}
+					connectionModels={catalog.data?.connectionModels[detail.id] ?? {}}
+					open
+					onOpenChange={(open) => {
+						if (!open) setDetailId(null)
+					}}
+					onChanged={changed}
+				/>
+			)}
+		</div>
 	)
 }

@@ -533,7 +533,7 @@ download_and_install() {
     require_command tar "Error: 'tar' is required but not installed."
     require_command find "Error: 'find' is required but not installed."
 
-    archive_name="${APP}-${version_tag}-${target}.tar.gz"
+    archive_name="${APP}-tui-${version_tag}-${target}.tar.gz"
     archive_url="https://github.com/${REPO}/releases/download/${version_tag}/${archive_name}"
 
     print_message info ""
@@ -634,9 +634,9 @@ install_offline_devo() {
         return
     fi
 
-    archive_path="$(find_offline_file "$asset_dir" "${APP}-*-${target}.tar.gz" || true)"
+    archive_path="$(find_offline_file "$asset_dir" "${APP}-tui-*-${target}.tar.gz" || true)"
     if [ -z "$archive_path" ]; then
-        die "Offline devo asset not found. Place ${APP}-*-${target}.tar.gz or ${APP} next to install.sh."
+        die "Offline devo asset not found. Place ${APP}-tui-*-${target}.tar.gz or ${APP} next to install.sh."
     fi
 
     require_command tar "Error: 'tar' is required but not installed."

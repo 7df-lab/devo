@@ -564,6 +564,7 @@ export function ModelEditDialog({
 							</Label>
 							<Input
 								id="model-id"
+								readOnly={!isCreate && model?.origin !== "user"}
 								value={modelId}
 								onChange={(e) => setModelId(e.target.value)}
 								placeholder="provider-facing-model-id"
@@ -573,7 +574,9 @@ export function ModelEditDialog({
 							<p className="text-[11px] text-muted-foreground">
 								{isCreate
 									? "Sent to the provider as the request model."
-									: "Sent to the provider as the request model. Changing it renames this entry."}
+									: model?.origin === "user"
+										? "Sent to the provider as the request model. Changing it renames this entry."
+										: "Catalog model IDs are read-only."}
 							</p>
 						</div>
 

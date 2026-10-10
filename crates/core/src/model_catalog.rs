@@ -424,6 +424,7 @@ fn provider_model_info_from_config(
             .is_some_and(|map| !map.is_empty())
         || !matches!(capability, ReasoningCapability::Unsupported);
     ProviderModelInfo {
+        origin: config.origin,
         name: config.name.clone(),
         family: config.family.clone(),
         release_date: config.release_date.clone(),
