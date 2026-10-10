@@ -66,6 +66,7 @@ export async function archiveTree(root: string, paths: string[], output: string)
 /** Emit the small online app and independently cacheable interpreter packs. */
 export async function buildPacks(bundle: string, output: string): Promise<string> {
   const manifest = JSON.parse(readFileSync(join(bundle, "runtime/manifest.json"), "utf8"));
+  const assetTarget = manifest.target.replace("-unknown-linux-", "-linux-");
   mkdirSync(output, { recursive: true });
   const lines = ["devo-install-v1"];
   for (const kind of ["app", "node", "python"] as const) {
@@ -79,15 +80,15 @@ export async function buildPacks(bundle: string, output: string): Promise<string
     const hash = createHash("sha256");
     for await (const chunk of createReadStream(partial)) hash.update(chunk);
     const digest = hash.digest("hex");
-    const name = kind === "app" ? `devo-tui-app-v${manifest.version}-${manifest.target}.tar.gz`
-      : `devo-runtime-${kind}-${manifest.target}-${digest}.tar.gz`;
+    const name = kind === "app" ? `devo-tui-app-v${manifest.version}-${assetTarget}.tar.gz`
+      : `devo-runtime-${kind}-${assetTarget}-${digest}.tar.gz`;
     const destination = join(output, name);
     // Overwriting the same runtime digest is harmless; app archives are versioned.
     rmSync(destination, { force: true });
     renameSync(partial, destination);
     lines.push(`${kind} ${digest} ${name}`);
   }
-  const index = join(output, `devo-tui-v${manifest.version}-${manifest.target}.install.txt`);
+  const index = join(output, `devo-tui-v${manifest.version}-${assetTarget}.install.txt`);
   writeFileSync(index, lines.join("\n") + "\n");
   console.log(`Online installation index: ${basename(index)}`);
   return index;

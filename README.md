@@ -150,6 +150,10 @@ installation uses it; the app's `runtime/*.path` files reference it. Re-running
 the installer repairs missing runtimes. Old runtime packs remain available to
 running terminals and older installations; they are not automatically deleted.
 
+Linux terminal archives use names such as `devo-tui-v0.2.0-x86_64-linux-musl.tar.gz`
+and `devo-tui-v0.2.0-aarch64-linux-musl.tar.gz`. Online app/runtime components
+use the same platform suffix.
+
 For portable/offline use, download the **complete** `devo-tui-` archive, extract
 it together, and run its `devo` executable from any working directory. Copying
 only `devo.exe` or `devo` is insufficient. Files named `devo-tui-app-` and

@@ -1,11 +1,13 @@
 import { expect, test } from "bun:test";
-import { existsSync, mkdirSync, mkdtempSync, readFileSync, readdirSync, rmSync, symlinkSync, utimesSync, writeFileSync } from "node:fs";
+import { existsSync, mkdirSync, mkdtempSync, readFileSync, readdirSync, renameSync, rmSync, symlinkSync, utimesSync, writeFileSync } from "node:fs";
 import { tmpdir } from "node:os";
 import { basename, dirname, join } from "node:path";
 import { archiveTree, buildPacks } from "./packs";
 import { installOnline, writeChecksums } from "./installer-fixture";
 
 const target = `${process.arch === "arm64" ? "aarch64" : "x86_64"}-${process.platform === "win32" ? "pc-windows-msvc" : process.platform === "darwin" ? "apple-darwin" : "unknown-linux-musl"}`;
+
+const assetTarget = target.replace("-unknown-linux-", "-linux-");
 
 function fixture(root: string) {
   const source = join(root, "source");
@@ -18,6 +20,25 @@ function fixture(root: string) {
   writeFileSync(join(source, "runtime/manifest.json"), JSON.stringify({ schema: 1, version: "0.2.0", target }));
   return source;
 }
+
+test("Linux public pack names omit the vendor while retaining canonical manifest targets", async () => {
+  const root = mkdtempSync(join(tmpdir(), "devo Linux asset names "));
+  try {
+    const source = fixture(root);
+    for (const arch of ["x86_64", "aarch64"]) {
+      const manifest = { schema: 1, version: "0.2.0", target: `${arch}-unknown-linux-musl` };
+      writeFileSync(join(source, "runtime/manifest.json"), JSON.stringify(manifest));
+      const output = join(root, arch);
+      const index = await buildPacks(source, output);
+      const packs = readFileSync(index, "utf8").trim().split("\n").slice(1).map(line => line.split(" "));
+      expect({ index: basename(index), assets: packs.map(([kind, digest]) => kind === "app"
+        ? `devo-tui-app-v0.2.0-${arch}-linux-musl.tar.gz`
+        : `devo-runtime-${kind}-${arch}-linux-musl-${digest}.tar.gz`), manifest: JSON.parse(readFileSync(join(source, "runtime/manifest.json"), "utf8")) })
+        .toEqual({ index: `devo-tui-v0.2.0-${arch}-linux-musl.install.txt`, assets: packs.map(parts => parts[2]), manifest });
+      expect(readdirSync(output).some(name => name.includes("unknown"))).toBe(false);
+    }
+  } finally { rmSync(root, { recursive: true, force: true }); }
+});
 
 test("runtime tar archives are reproducible and preserve long Unicode paths, executable modes and symlinks", async () => {
   const root = mkdtempSync(join(tmpdir(), "devo tar QA "));
@@ -64,7 +85,7 @@ test("real installers reuse runtimes across upgrades, repair damage, reject corr
     expect(first.map(parts => parts[0])).toEqual(["app", "node", "python"]);
     writeFileSync(join(source, "runtime/manifest.json"), JSON.stringify({ schema: 1, version: "0.2.1", target }));
     await buildPacks(source, assets);
-    const second = readFileSync(join(assets, `devo-tui-v0.2.1-${target}.install.txt`), "utf8").trim().split("\n").slice(1).map(line => line.split(" "));
+    const second = readFileSync(join(assets, `devo-tui-v0.2.1-${assetTarget}.install.txt`), "utf8").trim().split("\n").slice(1).map(line => line.split(" "));
     expect(second.slice(1)).toEqual(first.slice(1));
     expect(second[0][1]).not.toBe(first[0][1]);
     writeChecksums(assets);
@@ -115,7 +136,7 @@ test("real installers reuse runtimes across upgrades, repair damage, reject corr
     if (entrypoint.exit !== 0) throw new Error(`${entrypoint.stdout}\n${entrypoint.stderr}`);
     expect(entrypoint.stdout).toContain(process.platform === "win32" ? "Run 'devo'" : "devo is ready");
 
-    const fullName = `devo-tui-v0.2.0-${target}.${process.platform === "win32" ? "zip" : "tar.gz"}`;
+    const fullName = `devo-tui-v0.2.0-${assetTarget}.${process.platform === "win32" ? "zip" : "tar.gz"}`;
     if (process.platform === "win32") {
       const path = join(root, "legacy.ps1");
       const quote = (value: string) => `'${value.replaceAll("'", "''")}'`;
@@ -132,5 +153,21 @@ test("real installers reuse runtimes across upgrades, repair damage, reject corr
     const legacy = await installOnline(root, legacyDestination, join(root, "legacy cache"), origin, target);
     if (legacy.exit !== 0) throw new Error(`${legacy.stdout}\n${legacy.stderr}`);
     expect({ fullArchive: requests.includes(fullName), localNode: existsSync(join(legacyDestination, "runtime/node")), reference: existsSync(join(legacyDestination, "runtime/node.path")) }).toEqual({ fullArchive: true, localNode: true, reference: false });
+    if (assetTarget !== target) {
+      // Pinned older Linux releases can still use canonical Rust target names.
+      missing.clear();
+      const oldIndex = join(assets, `devo-tui-v0.2.0-${target}.install.txt`);
+      renameSync(index, oldIndex);
+      writeChecksums(assets);
+      const oldPacks = await installOnline(root, join(root, "old named packs"), cache, origin, target);
+      if (oldPacks.exit !== 0) throw new Error(`${oldPacks.stdout}\n${oldPacks.stderr}`);
+      rmSync(oldIndex);
+      renameSync(join(assets, fullName), join(assets, fullName.replace(assetTarget, target)));
+      writeChecksums(assets);
+      requests.length = 0;
+      const oldArchive = await installOnline(root, join(root, "old named archive"), cache, origin, target);
+      if (oldArchive.exit !== 0) throw new Error(`${oldArchive.stdout}\n${oldArchive.stderr}`);
+      expect(requests.includes(fullName.replace(assetTarget, target))).toBe(true);
+    }
   } finally { server.stop(true); rmSync(root, { recursive: true, force: true }); }
 }, 120_000);
