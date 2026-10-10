@@ -76,8 +76,8 @@ impl GrantChannel {
         self.peer.as_raw_fd()
     }
 
-    /// Deliver one grant: open a detached mount clone of `root` and send it
-    /// with its (dev, ino) claim.
+    /// Deliver one grant: open `root` and send it with its (dev, ino) claim.
+    /// Linux prefers a detached mount clone; other Unix hosts use a directory fd.
     pub fn grant(&self, root: &Path, access: &str) -> io::Result<()> {
         let path = std::ffi::CString::new(root.as_os_str().as_encoded_bytes())
             .map_err(|e| io::Error::new(io::ErrorKind::InvalidInput, e))?;
@@ -87,16 +87,35 @@ impl GrantChannel {
         // EPERM — degrade to a plain O_PATH dirfd (no mount clamp; the OS
         // fence stays the actual wall, and `..`-traversal beyond the grant
         // remains subject to the kernel's Landlock/bwrap ruleset).
-        const SYS_OPEN_TREE: libc::c_long = 428;
-        let fd = unsafe { libc::syscall(SYS_OPEN_TREE, -100i64, path.as_ptr(), 1 | 0x8000) };
-        let tree = if fd >= 0 {
-            unsafe { OwnedFd::from_raw_fd(fd as i32) }
-        } else {
-            let open_fd = unsafe { libc::open(path.as_ptr(), libc::O_PATH | libc::O_DIRECTORY) };
-            if open_fd < 0 {
+        #[cfg(target_os = "linux")]
+        let tree = {
+            let fd = unsafe {
+                libc::syscall(
+                    libc::SYS_open_tree,
+                    libc::AT_FDCWD,
+                    path.as_ptr(),
+                    1 | 0x8000,
+                )
+            };
+            if fd >= 0 {
+                unsafe { OwnedFd::from_raw_fd(fd as RawFd) }
+            } else {
+                let fd = unsafe { libc::open(path.as_ptr(), libc::O_PATH | libc::O_DIRECTORY) };
+                if fd < 0 {
+                    return Err(io::Error::last_os_error());
+                }
+                unsafe { OwnedFd::from_raw_fd(fd) }
+            }
+        };
+        // macOS has no open_tree or O_PATH. This directory descriptor remains
+        // subject to the sandbox policy; it does not clamp parent traversal.
+        #[cfg(not(target_os = "linux"))]
+        let tree = {
+            let fd = unsafe { libc::open(path.as_ptr(), libc::O_RDONLY | libc::O_DIRECTORY) };
+            if fd < 0 {
                 return Err(io::Error::last_os_error());
             }
-            unsafe { OwnedFd::from_raw_fd(open_fd) }
+            unsafe { OwnedFd::from_raw_fd(fd) }
         };
         let claim = stat_claim(tree.as_raw_fd())?;
         let message = GrantMessage {
@@ -132,6 +151,7 @@ impl GrantChannel {
 
     /// Receive one message + fd (kernel/test side). `buf` must be large
     /// enough for the JSON payload.
+    #[allow(clippy::unnecessary_cast)] // libc length fields differ between GNU and ARM64 musl.
     pub(crate) fn recv_with_fd(fd: RawFd, buf: &mut [u8]) -> io::Result<(usize, OwnedFd)> {
         let mut cmsg_buf = vec![0u8; unsafe { libc::CMSG_SPACE((SCM_MAX_FD * 4) as u32) } as usize];
         let mut iov = libc::iovec {
@@ -142,7 +162,7 @@ impl GrantChannel {
         msg.msg_iov = &mut iov;
         msg.msg_iovlen = 1;
         msg.msg_control = cmsg_buf.as_mut_ptr() as *mut libc::c_void;
-        msg.msg_controllen = cmsg_buf.len();
+        msg.msg_controllen = cmsg_buf.len() as _;
         let n = unsafe { libc::recvmsg(fd, &mut msg, 0) };
         if n < 0 {
             return Err(io::Error::last_os_error());
@@ -175,6 +195,7 @@ impl GrantChannel {
         Ok((n as usize, fd))
     }
 
+    #[allow(clippy::unnecessary_cast)] // libc length fields differ between GNU and ARM64 musl.
     fn send_with_fd(&self, message: &GrantMessage, fd: &OwnedFd) -> io::Result<()> {
         let mut payload = serde_json::to_vec(message).map_err(io::Error::other)?;
         payload.push(b'\n');
@@ -187,7 +208,7 @@ impl GrantChannel {
         unsafe {
             (*cmsg).cmsg_level = libc::SOL_SOCKET;
             (*cmsg).cmsg_type = libc::SCM_RIGHTS;
-            (*cmsg).cmsg_len = libc::CMSG_LEN((SCM_MAX_FD * 4) as u32) as usize;
+            (*cmsg).cmsg_len = libc::CMSG_LEN((SCM_MAX_FD * 4) as u32) as _;
             let data = libc::CMSG_DATA(cmsg) as *mut i32;
             *data = fd.as_raw_fd();
         }
@@ -195,7 +216,7 @@ impl GrantChannel {
         msg.msg_iov = &mut iov;
         msg.msg_iovlen = 1;
         msg.msg_control = cmsg_buf.as_mut_ptr() as *mut libc::c_void;
-        msg.msg_controllen = cmsg_buf.len();
+        msg.msg_controllen = cmsg_buf.len() as _;
         let rc = unsafe { libc::sendmsg(self.socket.as_raw_fd(), &msg, 0) };
         if rc < 0 {
             return Err(io::Error::last_os_error());
@@ -247,6 +268,7 @@ mod tests {
         assert_eq!(ino, message.ino);
     }
 
+    #[cfg(target_os = "linux")]
     #[test]
     fn grant_fd_parent_traversal_behavior_matches_capabilities() {
         // When open_tree(CLONE) is available the grant fd is a detached mount

@@ -11,6 +11,40 @@ env:
   RUSTFLAGS: -Dwarnings
 
 jobs:
+  unix-kernel:
+    name: Unix kernel (${{ matrix.target }})
+    runs-on: ${{ matrix.os }}
+    strategy:
+      fail-fast: false
+      matrix:
+        include:
+          - os: ubuntu-latest
+            target: x86_64-unknown-linux-musl
+          - os: ubuntu-latest
+            target: aarch64-unknown-linux-musl
+          - os: macos-latest
+            target: x86_64-apple-darwin
+          - os: macos-latest
+            target: aarch64-apple-darwin
+    steps:
+      - uses: actions/checkout@v4
+      - uses: dtolnay/rust-toolchain@stable
+        with:
+          targets: ${{ matrix.target }}
+      - uses: Swatinem/rust-cache@v2
+      - uses: mlugg/setup-zig@v2
+        if: runner.os == 'Linux'
+      - uses: taiki-e/install-action@v2
+        if: runner.os == 'Linux'
+        with:
+          tool: cargo-zigbuild@0.23.0
+      - run: cargo zigbuild --locked -p devo-kernel --lib --target ${{ matrix.target }}
+        if: runner.os == 'Linux'
+      - run: cargo check --locked -p devo-kernel --all-targets --target ${{ matrix.target }}
+        if: runner.os == 'macOS'
+      - run: cargo test --locked -p devo-kernel credential_unix::tests
+        if: runner.os == 'macOS'
+
   windows-kernel:
     name: Windows kernel (Python ${{ matrix.python }})
     runs-on: windows-latest
