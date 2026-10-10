@@ -240,27 +240,17 @@ jobs:
     steps:
       - uses: actions/checkout@v4
 
+      - uses: oven-sh/setup-bun@v2
+        with:
+          bun-version: "1.4.0"
+
       - name: Download all artifacts
         uses: actions/download-artifact@v4
         with:
-          merge-multiple: true
           path: artifacts
 
       - name: Collect individual release assets
-        run: |
-          mkdir -p release-assets
-          find artifacts -maxdepth 1 -type f \
-            \( -name '*.AppImage' \
-            -o -name '*.blockmap' \
-            -o -name '*.deb' \
-            -o -name '*.dmg' \
-            -o -name '*.exe' \
-            -o -name '*.rpm' \
-            -o -name '*.tar.gz' \
-            -o -name '*.yml' \
-            -o -name '*.zip' \) \
-            -exec cp {} release-assets/ \;
-          find release-assets -maxdepth 1 -type f -print | sort
+        run: bun apps/desktop/scripts/collect-release-assets.ts artifacts release-assets "${{ github.ref_name }}"
 
       - name: Generate release notes
         run: |
