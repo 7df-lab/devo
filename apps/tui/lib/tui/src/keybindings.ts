@@ -152,7 +152,8 @@ export const TUI_KEYBINDINGS = {
 		description: "Scroll transcript to top (fullscreen)",
 	},
 	"tui.viewport.follow": {
-		defaultKeys: "ctrl+shift+down",
+		// Windows Terminal reserves Ctrl+Shift+Down for its own scrollback.
+		defaultKeys: ["ctrl+end", "ctrl+shift+down"],
 		description: "Scroll to bottom and follow output (fullscreen)",
 	},
 	"tui.select.up": { defaultKeys: "up", description: "Move selection up" },

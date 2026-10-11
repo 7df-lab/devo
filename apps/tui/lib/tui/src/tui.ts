@@ -1514,10 +1514,10 @@ export class TUI extends Container {
 			...this.createDockSelectionRegions(frame, fullscreen.viewport.windowHeight(), width),
 		);
 		const scrollInfo = fullscreen.viewport.scrollInfo();
-		if (fullscreen.viewportControls && !scrollInfo.following) {
+		const followKey = getKeybindings().getKeys("tui.viewport.follow")[0];
+		if (fullscreen.viewportControls && !scrollInfo.following && followKey) {
 			// Follow hint composited over the bottom of the transcript window,
 			// just above the dock. Overlays still paint on top of it.
-			const followKey = getKeybindings().getKeys("tui.viewport.follow")[0] ?? "ctrl+shift+down";
 			const label = ` ${followKey} to follow `;
 			const labelWidth = visibleWidth(label);
 			const row = fullscreen.viewport.windowHeight() - 1;

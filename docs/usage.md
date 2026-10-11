@@ -61,6 +61,11 @@ request boundary. **Alt+Enter** explicitly queues a separate follow-up turn.
 Steering does not interrupt a tool or model request already in progress;
 press **Escape** to interrupt it.
 
+Scroll the TUI transcript with the mouse wheel or **PageUp/PageDown**.
+Press **Ctrl+End** to jump to the latest output and resume following it.
+**Ctrl+Shift+Down** also works when your terminal forwards it; Windows Terminal
+normally reserves that shortcut for its own scrolling.
+
 ## Features
 
 | Interface | What it offers |
