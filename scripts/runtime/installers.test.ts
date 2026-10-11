@@ -2,6 +2,7 @@ import { expect, test } from "bun:test";
 import { existsSync, mkdirSync, mkdtempSync, readFileSync, renameSync, rmSync, writeFileSync } from "node:fs";
 import { tmpdir } from "node:os";
 import { dirname, join, resolve } from "node:path";
+import { WINDOWS_SANDBOX_HELPERS } from "./backend";
 
 const repo = resolve(import.meta.dir, "../..");
 
@@ -10,7 +11,7 @@ test.skipIf(process.platform !== "win32")("Windows installation repairs an incom
   try {
     const source = join(root, "source");
     const destination = join(root, "installed");
-    const files = ["devo.exe", "rg.exe", "runtime/node/node.exe", "runtime/python/python.exe", "runtime/python-site/dill/__init__.py", "runtime/python-site/rlm/repl.py", "tui/src/index.js"];
+    const files = ["devo.exe", "rg.exe", ...WINDOWS_SANDBOX_HELPERS, "runtime/node/node.exe", "runtime/python/python.exe", "runtime/python-site/dill/__init__.py", "runtime/python-site/rlm/repl.py", "tui/src/index.js"];
     for (const file of files) {
       mkdirSync(dirname(join(source, file)), { recursive: true });
       writeFileSync(join(source, file), "new");
@@ -22,6 +23,12 @@ test.skipIf(process.platform !== "win32")("Windows installation repairs an incom
     const script = readFileSync(join(repo, "install.ps1"), "utf8").replace(/\nMain\s*$/, "\n") + `
       Install-DevoBundle -Source ${quote(source)} -InstallDir ${quote(destination)}
       $complete = Test-DevoBundle -Directory ${quote(destination)}
+      function Get-InstalledDevoVersion { param([string]$DevoPath) return 'v0.2.0' }
+      $sameVersionSkipped = Test-DevoVersionInstalled -InstallDir ${quote(destination)} -ExpectedVersion 'v0.2.0' 6>$null
+      Remove-Item -LiteralPath ${quote(join(destination, WINDOWS_SANDBOX_HELPERS[0]))}
+      $missingHelperRejected = -not (Test-DevoBundle -Directory ${quote(destination)}) -and -not (Test-DevoVersionInstalled -InstallDir ${quote(destination)} -ExpectedVersion 'v0.2.0' 6>$null)
+      Install-DevoBundle -Source ${quote(source)} -InstallDir ${quote(destination)}
+      $helpersRepaired = (Test-DevoBundle -Directory ${quote(destination)}) -and (Get-Content -LiteralPath ${quote(join(destination, WINDOWS_SANDBOX_HELPERS[0]))} -Raw) -eq 'new'
       $assets = ${quote(join(root, "assets"))}
       New-Item -ItemType Directory -Path $assets | Out-Null
       $archive = Join-Path $assets "devo-tui-v0.2.0-$(Get-Target).zip"
@@ -36,7 +43,7 @@ test.skipIf(process.platform !== "win32")("Windows installation repairs an incom
       $failed = $false
       try { Install-DevoBundle -Source ${quote(source)} -InstallDir ${quote(destination)} } catch { $failed = $true } finally { $lock.Dispose() }
       $restored = (Get-Content -LiteralPath ${quote(join(destination, "runtime/manifest.json"))} -Raw).Trim() -eq 'old runtime'
-      @{complete=$complete; offlineComplete=$offlineComplete; rejected=$rejected; rolledBack=($failed -and $restored)} | ConvertTo-Json -Compress
+      @{complete=$complete; sameVersionSkipped=$sameVersionSkipped; helpersRepaired=$helpersRepaired; missingHelperRejected=$missingHelperRejected; offlineComplete=$offlineComplete; rejected=$rejected; rolledBack=($failed -and $restored)} | ConvertTo-Json -Compress
     `;
     const path = join(root, "test.ps1");
     writeFileSync(path, script);
@@ -45,7 +52,7 @@ test.skipIf(process.platform !== "win32")("Windows installation repairs an incom
       env: { ...process.env, PSModulePath: join(process.env.SystemRoot!, "System32/WindowsPowerShell/v1.0/Modules") },
     });
     if (result.exitCode !== 0) throw new Error(result.stderr.toString());
-    expect({ exit: result.exitCode, stderr: result.stderr.toString(), checks: JSON.parse(result.stdout.toString()) }).toEqual({ exit: 0, stderr: "", checks: { complete: true, offlineComplete: true, rejected: true, rolledBack: true } });
+    expect({ exit: result.exitCode, stderr: result.stderr.toString(), checks: JSON.parse(result.stdout.toString()) }).toEqual({ exit: 0, stderr: "", checks: { complete: true, sameVersionSkipped: true, helpersRepaired: true, missingHelperRejected: true, offlineComplete: true, rejected: true, rolledBack: true } });
   } finally {
     rmSync(root, { recursive: true, force: true });
   }

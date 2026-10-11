@@ -3,8 +3,40 @@ import { existsSync, mkdirSync, mkdtempSync, readFileSync, writeFileSync } from 
 import { tmpdir } from "node:os"
 import { join } from "node:path"
 import { defaultDevoSourcePath, runtimeBinaryName, stageRuntime } from "./prepare-runtime"
+import { WINDOWS_SANDBOX_HELPERS } from "../../../scripts/runtime/backend"
 
 describe("prepare-runtime helpers", () => {
+	test("Windows staging requires and preserves both sandbox helpers", () => {
+		const root = mkdtempSync(join(tmpdir(), "devo-helper-staging-"))
+		const source = join(root, "source")
+		const desktopDir = join(root, "desktop")
+		mkdirSync(source)
+		writeFileSync(join(source, "devo.exe"), "backend")
+		writeFileSync(join(source, "rg.exe"), "ripgrep")
+		const options = { repoRoot: root, desktopDir, platform: "win32" as const, devoBin: join(source, "devo.exe"), rgBin: join(source, "rg.exe") }
+		for (const helper of WINDOWS_SANDBOX_HELPERS) {
+			expect(() => stageRuntime(options)).toThrow(`Windows sandbox helper not found: ${helper}`)
+			expect(existsSync(join(desktopDir, "resources/runtime/bin"))).toBe(false)
+			writeFileSync(join(source, helper), helper)
+		}
+		stageRuntime(options)
+		expect(WINDOWS_SANDBOX_HELPERS.map(name => readFileSync(join(desktopDir, "resources/runtime/bin", name), "utf8"))).toEqual([...WINDOWS_SANDBOX_HELPERS])
+	})
+
+	test("a Windows bundle missing helpers cannot replace a staged Desktop runtime", () => {
+		const root = mkdtempSync(join(tmpdir(), "devo-helper-desktop-"))
+		const bundleDir = join(root, "bundle")
+		const desktopDir = join(root, "desktop")
+		mkdirSync(join(bundleDir, "runtime"), { recursive: true })
+		mkdirSync(join(desktopDir, "resources/runtime"), { recursive: true })
+		writeFileSync(join(desktopDir, "resources/runtime/keep.txt"), "existing")
+		writeFileSync(join(bundleDir, "runtime/manifest.json"), JSON.stringify({ schema: 1, target: "aarch64-pc-windows-msvc" }))
+		expect(() => stageRuntime({ repoRoot: root, desktopDir, bundleDir, targetTriple: "aarch64-pc-windows-msvc" })).toThrow("Windows sandbox helper not found")
+		expect(readFileSync(join(desktopDir, "resources/runtime/keep.txt"), "utf8")).toBe("existing")
+		for (const name of WINDOWS_SANDBOX_HELPERS) writeFileSync(join(bundleDir, name), name)
+		stageRuntime({ repoRoot: root, desktopDir, bundleDir, targetTriple: "aarch64-pc-windows-msvc" })
+		expect(WINDOWS_SANDBOX_HELPERS.map(name => readFileSync(join(desktopDir, "resources/runtime", name), "utf8"))).toEqual([...WINDOWS_SANDBOX_HELPERS])
+	})
 	test("uses platform executable names", () => {
 		expect({
 			darwin: runtimeBinaryName("devo", "darwin"),

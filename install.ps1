@@ -348,7 +348,7 @@ function Get-FirstMatchingFile {
 
 function Test-DevoBundle {
     param([string]$Directory)
-    foreach ($name in @("runtime\manifest.json", "runtime\python-site\dill\__init__.py", "runtime\python-site\rlm\repl.py", "tui\src\index.js", "rg.exe", "devo.exe")) {
+    foreach ($name in @("runtime\manifest.json", "runtime\python-site\dill\__init__.py", "runtime\python-site\rlm\repl.py", "tui\src\index.js", "rg.exe", "devo.exe", "devo-windows-sandbox-setup.exe", "devo-command-runner.exe")) {
         if (-not (Test-Path -LiteralPath (Join-Path $Directory $name) -PathType Leaf)) { return $false }
     }
     foreach ($kind in @("node", "python")) {
@@ -523,10 +523,10 @@ function Install-DevoBundle {
     $backup = Join-Path $stage "old"
     New-Item -ItemType Directory -Path $fresh, $backup -Force | Out-Null
     $names = @("runtime", "tui", "rg.exe")
-    $names += "devo.exe"
+    $names += @("devo.exe", "devo-windows-sandbox-setup.exe", "devo-command-runner.exe")
     $changed = @()
     try {
-        foreach ($name in @("devo.exe", "runtime\node\node.exe", "runtime\python\python.exe")) {
+        foreach ($name in @("devo.exe", "devo-windows-sandbox-setup.exe", "devo-command-runner.exe", "runtime\node\node.exe", "runtime\python\python.exe")) {
             $existing = Join-Path $InstallDir $name
             if (Test-Path -LiteralPath $existing) {
                 $handle = [IO.File]::Open($existing, 'Open', 'ReadWrite', 'None')
