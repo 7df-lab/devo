@@ -72,4 +72,23 @@ cd apps/tui && npm test
 npm run test:tmux -- T1
 ```
 
-First-slice smoke: T1 idle, T2 prompt, T3 interrupt. Agents View is off.
+Smoke scenarios: `T1` startup, `T2` completed model turn, `T3` interruption,
+`goal` set/pause, `bash` shell output, `agents` agent manager, `schedule`
+heartbeat status, and `heartbeat` scheduled delivery/clear.
+
+The shared Node runner uses tmux (Unix) or psmux (Windows), an explicit repository
+cwd, a unique session, and an isolated temporary Devo home. It copies local
+provider configuration/auth for model scenarios, skips onboarding, and removes
+the test session and home in `finally`. It never reuses or kills an existing
+named session. No product shortcuts are changed: `agents` uses Left to open the
+manager; Ctrl+O continues to change conversation detail.
+
+Startup requires successful Native session creation and visible chat chrome.
+Model and interrupt checks require matching Native turn outcomes, without
+asserting exact model text. Heartbeat delivery requires a Native user item,
+which avoids passing on the echoed scheduling command. Failures exit nonzero
+and print the last captured pane.
+
+Overrides: `DEVO_BIN` (or `DEVO_SERVER_BIN`), `DEVO_TMUX_BIN`,
+`DEVO_TUI_TEST_SESSION` (must not exist), and `DEVO_TUI_TEST_TIMEOUT_MS`
+(per-outcome timeout, default 90000). Build the CLI before running the harness.
