@@ -4,6 +4,7 @@ import { tmpdir } from "node:os";
 import { basename, dirname, join } from "node:path";
 import { archiveTree, buildPacks } from "./packs";
 import { installOnline, writeChecksums } from "./installer-fixture";
+import { WINDOWS_SANDBOX_HELPERS } from "./backend";
 
 const target = `${process.arch === "arm64" ? "aarch64" : "x86_64"}-${process.platform === "win32" ? "pc-windows-msvc" : process.platform === "darwin" ? "apple-darwin" : "unknown-linux-musl"}`;
 
@@ -13,6 +14,7 @@ function fixture(root: string) {
   const source = join(root, "source");
   const windows = process.platform === "win32";
   const files = [windows ? "devo.exe" : "devo", windows ? "rg.exe" : "rg", windows ? "runtime/node/node.exe" : "runtime/node/bin/node", windows ? "runtime/python/python.exe" : "runtime/python/bin/python3", "runtime/python-site/dill/__init__.py", "runtime/python-site/rlm/repl.py", "tui/src/index.js"];
+  if (windows) files.push(...WINDOWS_SANDBOX_HELPERS);
   for (const file of files) {
     mkdirSync(dirname(join(source, file)), { recursive: true });
     writeFileSync(join(source, file), "original " + file, { mode: 0o755 });

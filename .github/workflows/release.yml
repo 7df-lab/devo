@@ -110,7 +110,7 @@ jobs:
       - name: Build release binary (Windows)
         if: runner.os == 'Windows'
         run: |
-          cargo build --release --target ${{ matrix.target }} -p devo-cli
+          cargo build --release --target ${{ matrix.target }} -p devo-cli -p devo-windows-sandbox --bins
 
       - name: Strip symbols (macOS)
         if: runner.os == 'macOS'
