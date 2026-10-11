@@ -5,6 +5,7 @@ import { basename, dirname, join, resolve } from "node:path";
 import { fileURLToPath } from "node:url";
 import sources from "./sources.json";
 import { buildTui, run } from "./tui";
+import { WINDOWS_SANDBOX_HELPERS } from "./backend";
 
 const repo = resolve(dirname(fileURLToPath(import.meta.url)), "../..");
 
@@ -32,9 +33,10 @@ export async function bundleRuntime(target: string, output: string, rg: string, 
   const platform = target.includes("windows") ? "win32" : target.includes("darwin") ? "darwin" : "linux";
   const arch = target.startsWith("aarch64-") ? "arm64" : "x64";
   const ext = platform === "win32" ? ".exe" : "";
+  const backendNames = [`devo${ext}`, ...(platform === "win32" ? WINDOWS_SANDBOX_HELPERS : [])];
   // Git Bash's GNU tar treats C: paths as remote hosts. Use native bsdtar.
   const tar = process.platform === "win32" ? join(process.env.SystemRoot ?? "C:/Windows", "System32/tar.exe") : "tar";
-  for (const file of [join(binaryDir, `devo${ext}`), rg]) {
+  for (const file of [...backendNames.map(name => join(binaryDir, name)), rg]) {
     if (!existsSync(file)) throw new Error(`Missing release binary ${file}`);
   }
   const work = mkdtempSync(join(tmpdir(), "devo-bundle-"));
@@ -63,8 +65,8 @@ export async function bundleRuntime(target: string, output: string, rg: string, 
     }
     copyFileSync(join(repo, "scripts/runtime/requirements.lock"), join(output, "runtime/requirements.lock"));
     buildTui(repo, join(output, "tui"), work, platform, arch);
-    for (const name of ["devo"]) {
-      copyFileSync(join(binaryDir, name + ext), join(output, name + ext));
+    for (const name of backendNames) {
+      copyFileSync(join(binaryDir, name), join(output, name));
       if (platform !== "win32") chmodSync(join(output, name), 0o755);
     }
     copyFileSync(rg, join(output, "rg" + ext));

@@ -48,6 +48,11 @@ jobs:
           mkdir -p fixture-bin
           printf 'backend checked by Rust CI and release builds\n' > fixture-bin/devo${{ matrix.ext }}
           printf 'ripgrep checked by release builds\n' > fixture-bin/rg${{ matrix.ext }}
+          if [ "${{ matrix.ext }}" = ".exe" ]; then
+            for helper in devo-windows-sandbox-setup devo-command-runner; do
+              printf 'sandbox helper checked by Rust CI and release builds\n' > "fixture-bin/$helper.exe"
+            done
+          fi
       - name: Build target runtime bundle
         shell: bash
         run: bun scripts/runtime/bundle.ts "${{ matrix.target }}" runtime-test-bundle "fixture-bin/rg${{ matrix.ext }}" fixture-bin

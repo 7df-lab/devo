@@ -151,6 +151,8 @@ irm 'https://raw.githubusercontent.com/7df-lab/devo/main/install.ps1' | iex
 The installer includes the Rust backend, compiled TUI, private Node.js 24 and
 Python 3.13 runtimes, locked Python dependencies, and ripgrep. No system Node.js,
 Python, npm, pip, Bun, or Rust installation is needed.
+Windows bundles also include the sandbox setup and command-runner executables;
+keep them beside `devo.exe`. The installer repairs installations missing these helpers.
 
 Online installers download the smaller app package and cache checksum-pinned
 Node/Python runtimes separately. Upgrades reuse unchanged runtimes without

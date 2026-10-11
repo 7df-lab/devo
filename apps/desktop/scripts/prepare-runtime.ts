@@ -3,6 +3,7 @@ import { homedir, tmpdir } from "node:os"
 import { delimiter, dirname, join } from "node:path"
 import { fileURLToPath } from "node:url"
 import { bundleRuntime } from "../../../scripts/runtime/bundle"
+import { WINDOWS_SANDBOX_HELPERS } from "../../../scripts/runtime/backend"
 
 interface DefaultSourcePathOptions {
 	repoRoot: string
@@ -53,6 +54,11 @@ export function stageRuntime(options: StageRuntimeOptions): void {
 		if (manifest.schema !== 1 || manifest.target !== options.targetTriple) {
 			throw new Error("Desktop runtime bundle target/schema mismatch")
 		}
+		if (manifest.target.includes("windows")) {
+			for (const name of WINDOWS_SANDBOX_HELPERS) {
+				if (!existsSync(join(options.bundleDir, name))) throw new Error(`Windows sandbox helper not found: ${name}`)
+			}
+		}
 		const destination = join(options.desktopDir, "resources", "runtime")
 		rmSync(destination, { recursive: true, force: true })
 		cpSync(options.bundleDir, destination, { recursive: true, dereference: true })
@@ -90,6 +96,10 @@ export function stageRuntime(options: StageRuntimeOptions): void {
 	if (!rgSource || !existsSync(rgSource)) {
 		throw new Error("ripgrep sidecar not found. Install rg or pass --rg-bin <path>.")
 	}
+	const helpers = targetPlatform === "win32" ? WINDOWS_SANDBOX_HELPERS : []
+	for (const name of helpers) {
+		if (!existsSync(join(dirname(devoSource), name))) throw new Error(`Windows sandbox helper not found: ${name}`)
+	}
 
 	const runtimeBinDir = join(options.desktopDir, "resources", "runtime", "bin")
 	rmSync(runtimeBinDir, { recursive: true, force: true })
@@ -99,6 +109,7 @@ export function stageRuntime(options: StageRuntimeOptions): void {
 	const rgDest = join(runtimeBinDir, runtimeBinaryName("rg", targetPlatform))
 	copyExecutable(devoSource, devoDest, targetPlatform)
 	copyExecutable(rgSource, rgDest, targetPlatform)
+	for (const name of helpers) copyExecutable(join(dirname(devoSource), name), join(runtimeBinDir, name), targetPlatform)
 
 	console.log(`Prepared Desktop runtime: ${devoDest}`)
 	console.log(`Prepared ripgrep sidecar: ${rgDest}`)

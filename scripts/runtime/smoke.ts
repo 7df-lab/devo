@@ -1,12 +1,18 @@
 import { cpSync, existsSync, mkdirSync, mkdtempSync, readFileSync, rmSync } from "node:fs";
 import { tmpdir } from "node:os";
 import { join, resolve } from "node:path";
+import { WINDOWS_SANDBOX_HELPERS } from "./backend";
 
 /** Exercise real private runtimes from a relocated installation without PATH tools. */
 export function smokeBundle(bundle: string): void {
   const manifest = JSON.parse(readFileSync(join(bundle, "runtime/manifest.json"), "utf8"));
   const platform = manifest.target.includes("windows") ? "win32" : manifest.target.includes("darwin") ? "darwin" : "linux";
   const arch = manifest.target.startsWith("aarch64-") ? "arm64" : "x64";
+  if (platform === "win32") {
+    for (const name of WINDOWS_SANDBOX_HELPERS) {
+      if (!existsSync(join(bundle, name))) throw new Error(`Incomplete Windows sandbox: ${name}`);
+    }
+  }
   const pythonRelative = platform === "win32" ? "runtime/python/python.exe" : "runtime/python/bin/python3";
   const nodeRelative = platform === "win32" ? "runtime/node/node.exe" : "runtime/node/bin/node";
   const runtimePath = (root: string, kind: string, relative: string) => {
