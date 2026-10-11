@@ -260,10 +260,7 @@ fn direct_server_early_dispatch() -> devo_arg0::EarlyDispatch {
             });
             match devo_windows_sandbox::request_default_sandbox_setup(&devo_home, &cwd) {
                 Ok(()) => {
-                    println!(
-                        "Windows sandbox setup requested (approve the UAC prompt). \
-                         Re-run devo to verify with: sandbox_setup_is_complete"
-                    );
+                    println!("Windows sandbox setup complete. Run devo to start a session.");
                     return devo_arg0::EarlyDispatch::Handled(Ok(()));
                 }
                 Err(error) => {

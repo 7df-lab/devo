@@ -24,9 +24,13 @@ test.skipIf(process.platform !== "win32")("Windows installation repairs an incom
       Install-DevoBundle -Source ${quote(source)} -InstallDir ${quote(destination)}
       $complete = Test-DevoBundle -Directory ${quote(destination)}
       function Get-InstalledDevoVersion { param([string]$DevoPath) return 'v0.2.0' }
-      $sameVersionSkipped = Test-DevoVersionInstalled -InstallDir ${quote(destination)} -ExpectedVersion 'v0.2.0' 6>$null
+      $digest = 'a' * 64
+      $missingReceiptRepaired = -not (Test-DevoVersionInstalled -InstallDir ${quote(destination)} -ExpectedVersion 'v0.2.0' -ExpectedAppDigest $digest 6>$null)
+      Set-Content -LiteralPath ${quote(join(destination, "runtime/app.sha256"))} -Value $digest
+      $sameVersionSkipped = Test-DevoVersionInstalled -InstallDir ${quote(destination)} -ExpectedVersion 'v0.2.0' -ExpectedAppDigest $digest 6>$null
+      $rebuiltVersionRepaired = -not (Test-DevoVersionInstalled -InstallDir ${quote(destination)} -ExpectedVersion 'v0.2.0' -ExpectedAppDigest ('b' * 64) 6>$null)
       Remove-Item -LiteralPath ${quote(join(destination, WINDOWS_SANDBOX_HELPERS[0]))}
-      $missingHelperRejected = -not (Test-DevoBundle -Directory ${quote(destination)}) -and -not (Test-DevoVersionInstalled -InstallDir ${quote(destination)} -ExpectedVersion 'v0.2.0' 6>$null)
+      $missingHelperRejected = -not (Test-DevoBundle -Directory ${quote(destination)}) -and -not (Test-DevoVersionInstalled -InstallDir ${quote(destination)} -ExpectedVersion 'v0.2.0' -ExpectedAppDigest $digest 6>$null)
       Install-DevoBundle -Source ${quote(source)} -InstallDir ${quote(destination)}
       $helpersRepaired = (Test-DevoBundle -Directory ${quote(destination)}) -and (Get-Content -LiteralPath ${quote(join(destination, WINDOWS_SANDBOX_HELPERS[0]))} -Raw) -eq 'new'
       $assets = ${quote(join(root, "assets"))}
@@ -43,7 +47,7 @@ test.skipIf(process.platform !== "win32")("Windows installation repairs an incom
       $failed = $false
       try { Install-DevoBundle -Source ${quote(source)} -InstallDir ${quote(destination)} } catch { $failed = $true } finally { $lock.Dispose() }
       $restored = (Get-Content -LiteralPath ${quote(join(destination, "runtime/manifest.json"))} -Raw).Trim() -eq 'old runtime'
-      @{complete=$complete; sameVersionSkipped=$sameVersionSkipped; helpersRepaired=$helpersRepaired; missingHelperRejected=$missingHelperRejected; offlineComplete=$offlineComplete; rejected=$rejected; rolledBack=($failed -and $restored)} | ConvertTo-Json -Compress
+      @{complete=$complete; sameVersionSkipped=$sameVersionSkipped; missingReceiptRepaired=$missingReceiptRepaired; rebuiltVersionRepaired=$rebuiltVersionRepaired; helpersRepaired=$helpersRepaired; missingHelperRejected=$missingHelperRejected; offlineComplete=$offlineComplete; rejected=$rejected; rolledBack=($failed -and $restored)} | ConvertTo-Json -Compress
     `;
     const path = join(root, "test.ps1");
     writeFileSync(path, script);
@@ -52,7 +56,7 @@ test.skipIf(process.platform !== "win32")("Windows installation repairs an incom
       env: { ...process.env, PSModulePath: join(process.env.SystemRoot!, "System32/WindowsPowerShell/v1.0/Modules") },
     });
     if (result.exitCode !== 0) throw new Error(result.stderr.toString());
-    expect({ exit: result.exitCode, stderr: result.stderr.toString(), checks: JSON.parse(result.stdout.toString()) }).toEqual({ exit: 0, stderr: "", checks: { complete: true, sameVersionSkipped: true, helpersRepaired: true, missingHelperRejected: true, offlineComplete: true, rejected: true, rolledBack: true } });
+    expect({ exit: result.exitCode, stderr: result.stderr.toString(), checks: JSON.parse(result.stdout.toString()) }).toEqual({ exit: 0, stderr: "", checks: { complete: true, sameVersionSkipped: true, missingReceiptRepaired: true, rebuiltVersionRepaired: true, helpersRepaired: true, missingHelperRejected: true, offlineComplete: true, rejected: true, rolledBack: true } });
   } finally {
     rmSync(root, { recursive: true, force: true });
   }
