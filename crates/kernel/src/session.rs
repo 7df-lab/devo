@@ -592,7 +592,8 @@ impl KernelSession {
         #[cfg(unix)]
         let mut fence_outcome = crate::fence::fence_or_bare(&config, cmd);
         #[cfg(windows)]
-        let fence_outcome = crate::fence::wrap_or_bare(&config, cmd);
+        let fence_outcome =
+            crate::fence::wrap_or_bare(&config, cmd, devo_util_paths::find_devo_home());
         #[cfg(windows)]
         tracing::warn!(
             program = ?fence_outcome.command.as_std().get_program(),

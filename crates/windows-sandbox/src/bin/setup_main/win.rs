@@ -70,6 +70,7 @@ const WRITE_ROOT_ALLOW_MASK: u32 =
 
 mod sandbox_users;
 mod setup_runtime_bin;
+use read_acl_mutex::ReadAclWait;
 use read_acl_mutex::acquire_read_acl_mutex;
 use read_acl_mutex::read_acl_mutex_exists;
 use sandbox_users::commit_setup_marker;
@@ -103,6 +104,8 @@ struct Payload {
     mode: SetupMode,
     #[serde(default)]
     refresh_only: bool,
+    #[serde(default)]
+    wait_for_read_acls: bool,
 }
 
 #[derive(Debug, Clone, Copy, Deserialize, Serialize, PartialEq, Eq, Default)]
@@ -516,7 +519,12 @@ fn run_setup(payload: &Payload, log: &mut dyn Write, sbx_dir: &Path) -> Result<(
 }
 
 fn run_read_acl_only(payload: &Payload, log: &mut dyn Write) -> Result<()> {
-    let _read_acl_guard = match acquire_read_acl_mutex()? {
+    let wait = if payload.wait_for_read_acls {
+        ReadAclWait::Wait
+    } else {
+        ReadAclWait::SkipBusy
+    };
+    let _read_acl_guard = match acquire_read_acl_mutex(wait)? {
         Some(guard) => guard,
         None => {
             log_line(log, "read ACL helper already running; skipping")?;
@@ -570,7 +578,7 @@ fn run_read_acl_only(payload: &Payload, log: &mut dyn Write) -> Result<()> {
             log,
             &format!("read ACL run completed with errors: {refresh_errors:?}"),
         )?;
-        if payload.refresh_only {
+        if payload.refresh_only || payload.wait_for_read_acls {
             anyhow::bail!("read ACL run had errors");
         }
     }
@@ -806,6 +814,11 @@ fn run_setup_full(payload: &Payload, log: &mut dyn Write, sbx_dir: &Path) -> Res
 
     if payload.read_roots.is_empty() {
         log_line(log, "no read roots to grant; skipping read ACL helper")?;
+    } else if payload.wait_for_read_acls {
+        // Interpreter/DLL/PYTHONPATH access must be ready before the runner
+        // starts the child. Never drop an explicit request because another
+        // read-ACL helper is busy with a different set of roots.
+        run_read_acl_only(payload, log)?;
     } else {
         match read_acl_mutex_exists() {
             Ok(true) => {

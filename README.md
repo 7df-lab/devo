@@ -153,6 +153,13 @@ Python 3.13 runtimes, locked Python dependencies, and ripgrep. No system Node.js
 Python, npm, pip, Bun, or Rust installation is needed.
 Windows bundles also include the sandbox setup and command-runner executables;
 keep them beside `devo.exe`. The installer repairs installations missing these helpers.
+On the first Python tool use, Windows requests UAC consent to provision the sandbox.
+Approve it once; subsequent sessions reuse the setup. Canceling setup prevents that
+sandboxed Python kernel from starting. To provision it explicitly, run
+`devo sandbox-setup` and approve the Windows prompt.
+The Windows online installer compares the verified app checksum before skipping
+an existing version, so re-running it also installs a rebuilt release with the
+same version number while reusing unchanged cached runtimes.
 
 Online installers download the smaller app package and cache checksum-pinned
 Node/Python runtimes separately. Upgrades reuse unchanged runtimes without

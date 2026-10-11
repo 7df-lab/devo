@@ -329,6 +329,7 @@ fn run_setup_refresh_inner(
     if !request.permissions.is_enforceable_by_windows_sandbox() {
         anyhow::bail!("unsupported filesystem permissions for Windows sandbox setup");
     }
+    let wait_for_read_acls = overrides.read_roots.is_some();
     let (read_roots, write_roots) = build_payload_roots(&request, &overrides);
     let deny_read_paths = build_payload_deny_read_paths(overrides.deny_read_paths);
     let deny_write_paths = build_payload_deny_write_paths(&request, overrides.deny_write_paths);
@@ -350,6 +351,7 @@ fn run_setup_refresh_inner(
         real_user: std::env::var("USERNAME").unwrap_or_else(|_| "Administrators".to_string()),
         mode: SetupMode::Full,
         refresh_only: true,
+        wait_for_read_acls,
     };
     let json = serde_json::to_vec(&payload)?;
     let b64 = BASE64_STANDARD.encode(json);
@@ -665,6 +667,8 @@ struct ElevationPayload {
     mode: SetupMode,
     #[serde(default)]
     refresh_only: bool,
+    /// Explicit read roots are prerequisites for the requested child process.
+    wait_for_read_acls: bool,
 }
 
 #[derive(Clone, Copy, Serialize)]
@@ -1023,6 +1027,7 @@ fn run_elevated_setup_inner(
             format!("failed to create sandbox dir {}: {err}", sbx_dir.display()),
         )
     })?;
+    let wait_for_read_acls = overrides.read_roots.is_some();
     let (read_roots, write_roots) = build_payload_roots(&request, &overrides);
     let deny_read_paths = build_payload_deny_read_paths(overrides.deny_read_paths);
     let deny_write_paths = build_payload_deny_write_paths(&request, overrides.deny_write_paths);
@@ -1044,6 +1049,7 @@ fn run_elevated_setup_inner(
         otel: crate::otel_stub::global_statsig_metrics_settings(),
         mode: SetupMode::Full,
         refresh_only: false,
+        wait_for_read_acls,
     };
     let needs_elevation = !is_elevated().map_err(|err| {
         failure(
@@ -1089,6 +1095,7 @@ pub fn run_elevated_provisioning_setup(devo_home: &Path, real_user: &str) -> Res
         real_user: real_user.to_string(),
         mode: SetupMode::ProvisionOnly,
         refresh_only: false,
+        wait_for_read_acls: false,
     };
     run_setup_exe(&payload, /*needs_elevation*/ false, devo_home)
 }

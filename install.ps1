@@ -265,7 +265,8 @@ function Write-VersionTransition {
 function Test-DevoVersionInstalled {
     param(
         [string]$InstallDir,
-        [string]$ExpectedVersion
+        [string]$ExpectedVersion,
+        [string]$ExpectedAppDigest
     )
 
     $installedPath = Get-ExistingDevoPath -InstallDir $InstallDir
@@ -274,7 +275,10 @@ function Test-DevoVersionInstalled {
     }
 
     $installedVersion = Get-InstalledDevoVersion -DevoPath $installedPath
-    if ($installedVersion -eq $ExpectedVersion -and (Test-DevoBundle -Directory $InstallDir)) {
+    $digestPath = Join-Path $InstallDir "runtime\app.sha256"
+    $digestMatches = (Test-Path -LiteralPath $digestPath -PathType Leaf) -and
+        ((Get-Content -LiteralPath $digestPath -Raw).Trim() -ceq $ExpectedAppDigest)
+    if ($installedVersion -eq $ExpectedVersion -and $digestMatches -and (Test-DevoBundle -Directory $InstallDir)) {
         Write-Host "devo $ExpectedVersion is already installed at $installedPath"
         return $true
     }
@@ -459,6 +463,9 @@ function Install-DevoOnline {
             if ($parts.Count -ne 3 -or $parts[0] -ne $kind -or $parts[1] -cnotmatch '^[a-f0-9]{64}$' -or $parts[2] -cnotmatch '^[a-zA-Z0-9_.-]+\.tar\.gz$') { throw "Invalid $kind runtime index entry" }
             $packs[$kind] = @{ Digest = $parts[1]; Asset = $parts[2] }
         }
+        # A version tag can be rebuilt; compare its verified app digest before
+        # skipping an installation. Older installs without a receipt are repaired.
+        if (Test-DevoVersionInstalled -InstallDir $InstallDir -ExpectedVersion $ResolvedVersion -ExpectedAppDigest $packs.app.Digest) { return }
         # Runspaces work on Windows PowerShell 5.1 without opening helper windows.
         # Independent downloads/extraction run together, with per-digest locks.
         $workers = @()
@@ -490,6 +497,7 @@ function Install-DevoOnline {
         foreach ($kind in @("node", "python")) {
             [IO.File]::WriteAllText((Join-Path $extracted "runtime\$kind.path"), $roots[$kind] + "`n", (New-Object Text.UTF8Encoding $false))
         }
+        [IO.File]::WriteAllText((Join-Path $extracted "runtime\app.sha256"), $packs.app.Digest + "`n", (New-Object Text.UTF8Encoding $false))
         Install-DevoBundle -Source $extracted -InstallDir $InstallDir
     } else {
         # Releases predating runtime packs retain their complete archive layout.
@@ -658,10 +666,7 @@ function Main {
             $version = Resolve-Version
             Write-VersionTransition -InstallDir $installDir -TargetVersion $version
 
-            $skipAppInstall = Test-DevoVersionInstalled -InstallDir $installDir -ExpectedVersion $version
-            if (-not $skipAppInstall) {
-                Install-DevoOnline -Target $target -ResolvedVersion $version -InstallDir $installDir -TempRoot $tmpDir
-            }
+            Install-DevoOnline -Target $target -ResolvedVersion $version -InstallDir $installDir -TempRoot $tmpDir
             Install-RipgrepSidecar -InstallDir $installDir -TempRoot $tmpDir
         }
 

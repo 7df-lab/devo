@@ -328,6 +328,18 @@ impl ServerRuntime {
                     // a failed Plan spawn.
                     state.kernel = None;
                     tracing::warn!(%err, "RLM kernel unavailable; model tools are disabled for this turn");
+                    self.emit_turn_native_item(
+                        session_id,
+                        turn_id,
+                        devo_protocol::native::item::Item::Warning {
+                            code: "ipythonKernelUnavailable".to_string(),
+                            message: "Python could not start, so local execution tools are unavailable \
+                                      for this turn. Check the Devo server log for the startup error."
+                                .to_string(),
+                            retryable: true,
+                        },
+                    )
+                    .await;
                     None
                 }
             }
