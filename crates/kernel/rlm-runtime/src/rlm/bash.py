@@ -18,12 +18,13 @@ import sys
 import threading
 import time
 from collections import deque
-from collections.abc import Callable, Generator
+from collections.abc import Callable, Generator, Mapping
 from dataclasses import dataclass
 from datetime import datetime, timezone
 from typing import Any, cast
 
 from . import _winjob
+from .windows_shell import find_windows_bash
 
 _IS_POSIX = os.name == "posix"
 
@@ -958,20 +959,22 @@ def bash(command: str) -> BashHandle:
     return BashHandle(command)
 
 
-def _shell() -> str:
+def _shell(environment: Mapping[str, str] | None = None) -> str:
     # Read per call so env changes made in the REPL apply to later commands.
-    override = os.environ.get("DEVO_BASH_SHELL")
+    environment = os.environ if environment is None else environment
+    override = environment.get("DEVO_BASH_SHELL")
     if override:
         if not os.path.isabs(override):
             raise ValueError("DEVO_BASH_SHELL must be an absolute path")
         return override
     if not _IS_POSIX:
-        # Never consult PATH on Windows: a repo-controlled PATH could supply
-        # the shell. The host injects DEVO_BASH_SHELL when one exists.
+        # Installer registrations and standard locations also cover custom
+        # drives. Never use a workspace-controlled PATH to choose the shell.
+        if shell := find_windows_bash(environment):
+            return shell
         raise RuntimeError(
-            "bash() needs DEVO_BASH_SHELL set to the absolute path of a "
-            "POSIX shell on Windows (e.g. install Git Bash in its default "
-            "location so the host injects it)"
+            "Install Git for Windows to use bash(), or set DEVO_BASH_SHELL "
+            "to the absolute path of a POSIX shell"
         )
     # PATH fallback only serves bare/standalone POSIX runtime use: the host
     # always injects DEVO_BASH_SHELL (an absolute path) when a shell exists.

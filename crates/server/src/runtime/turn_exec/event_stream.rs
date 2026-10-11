@@ -205,6 +205,51 @@ pub(crate) fn spawn_turn_event_stream(
                         .await;
                     }
                 }
+                devo_core::QueryEvent::ModelResponseCompleted => {
+                    // This boundary owns the same local stream state as tool
+                    // transitions; close it before the steered response starts.
+                    finish_proposed_plan_stream(
+                        &runtime,
+                        &event_stream,
+                        native_session_id,
+                        native_turn_id,
+                        &mut proposed_plan_parser,
+                        &mut assistant_item_id,
+                        &mut assistant_item_seq,
+                        &mut assistant_text,
+                        &mut assistant_delta_seq,
+                        &mut proposed_plan_item,
+                        &mut proposed_plan_leading_normal,
+                    )
+                    .await;
+                    if let Some(parser) = proposed_plan_parser.as_mut() {
+                        *parser = ProposedPlanParser::default();
+                    }
+                    complete_open_reasoning_item(
+                        &runtime,
+                        native_session_id,
+                        native_turn_id,
+                        &mut reasoning_item_id,
+                        &mut reasoning_item_seq,
+                        &mut reasoning_text,
+                        &event_stream,
+                    )
+                    .await;
+                    if let (Some(item_id), Some(item_seq)) =
+                        (assistant_item_id.take(), assistant_item_seq.take())
+                    {
+                        complete_assistant_item(
+                            &runtime,
+                            native_session_id,
+                            native_turn_id,
+                            item_id,
+                            item_seq,
+                            std::mem::take(&mut assistant_text),
+                        )
+                        .await;
+                    }
+                    assistant_delta_seq = 0;
+                }
                 devo_core::QueryEvent::ReasoningDelta(text) => {
                     handle_reasoning_delta(
                         &runtime,

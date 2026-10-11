@@ -20,7 +20,6 @@ import os
 import platform
 import signal
 import sys
-import tempfile
 import threading
 import time
 import traceback
@@ -29,6 +28,7 @@ import uuid
 from collections.abc import Awaitable, Callable
 from typing import Any
 
+from ._snapshot_files import create_snapshot_temp
 from .bash import _kill_live_handles
 
 PROTOCOL_VERSION = 3
@@ -712,9 +712,7 @@ def _snapshot_state(
     def stage_temp(target: str, mode: str):
         # Unique same-directory temps: a fixed '.tmp' name could alias the other
         # final path (clobbering it) or collide with a concurrent snapshot.
-        fd, name = tempfile.mkstemp(
-            dir=os.path.dirname(target) or ".", prefix=os.path.basename(target) + ".", suffix=".tmp"
-        )
+        fd, name = create_snapshot_temp(target)
         temps.append(name)
         try:
             return os.fdopen(fd, mode), name

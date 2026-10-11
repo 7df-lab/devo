@@ -967,6 +967,23 @@ pub async fn query(
                 continue;
             }
             TurnContinuation::Complete { stop_reason } => {
+                // Steering can arrive while the final model response streams,
+                // even when that response has no tool calls. Consume it at the
+                // next request boundary in this turn instead of letting
+                // end_turn silently convert accepted steering into a follow-up.
+                if !options
+                    .cancel_token
+                    .as_ref()
+                    .is_some_and(CancellationToken::is_cancelled)
+                    && !session
+                        .steer_input_queue
+                        .lock()
+                        .expect("steer input queue mutex should not be poisoned")
+                        .is_empty()
+                {
+                    emit_query_event(&on_event, QueryEvent::ModelResponseCompleted).await;
+                    continue;
+                }
                 if let Some(journal) = &options.journal
                     && !options
                         .cancel_token

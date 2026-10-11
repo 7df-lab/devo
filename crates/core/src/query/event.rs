@@ -49,6 +49,9 @@ pub enum QueryEvent {
     },
     /// Incremental text from the assistant.
     TextDelta(String),
+    /// The current response ended and steering will continue the same turn.
+    /// Close its message before rendering the next provider response.
+    ModelResponseCompleted,
     /// Incremental reasoning text from the assistant.
     ReasoningDelta(String),
     /// Current reasoning block completed.

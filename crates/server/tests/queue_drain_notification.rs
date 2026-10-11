@@ -46,6 +46,7 @@ const QUEUED_TEXT: &str = "queued follow-up message";
 struct ToolCallThenGatedDoneProvider {
     stream_requests: Mutex<Vec<ModelRequest>>,
     release: Arc<Notify>,
+    final_response_started: Arc<Notify>,
 }
 
 #[async_trait]
@@ -110,13 +111,17 @@ impl ModelProviderSDK for ToolCallThenGatedDoneProvider {
             ]
         } else if request_number == 2 {
             let release = Arc::clone(&self.release);
+            let final_response_started = Arc::clone(&self.final_response_started);
             let mut events = done_events().into_iter();
             let first = events.next().expect("text delta event");
             let stream = futures::stream::once(async move {
-                release.notified().await;
+                final_response_started.notify_one();
                 first
             })
-            .chain(futures::stream::iter(events.collect::<Vec<_>>()))
+            .chain(futures::stream::once(async move {
+                release.notified().await;
+                events.next().expect("message done event")
+            }))
             .boxed();
             return Ok(Box::pin(stream));
         } else {
@@ -263,6 +268,7 @@ async fn queued_input_drains_into_followup_turn_and_broadcasts_empty_queue() -> 
     let provider = Arc::new(ToolCallThenGatedDoneProvider {
         stream_requests: Mutex::new(Vec::new()),
         release: Arc::clone(&release),
+        final_response_started: Arc::new(Notify::new()),
     });
     let runtime = build_runtime(temp_dir.path(), provider.clone());
     let (connection_id, mut notifications_rx) = initialize_connection(&runtime).await?;
@@ -344,7 +350,7 @@ async fn queued_input_drains_into_followup_turn_and_broadcasts_empty_queue() -> 
     .await
     .context("timed out waiting for the ipython probe to execute")?;
 
-    // Turn is running: push the message onto the queue (TUI Enter behavior).
+    // Turn is running: explicitly queue a follow-up (TUI Alt+Enter behavior).
     let push_response = runtime
         .handle_incoming(
             connection_id,
@@ -463,6 +469,182 @@ async fn queued_input_drains_into_followup_turn_and_broadcasts_empty_queue() -> 
     assert!(
         followup_texts.iter().any(|text| text.contains(QUEUED_TEXT)),
         "drained input should appear in the follow-up turn: {followup_texts:?}"
+    );
+    Ok(())
+}
+
+#[tokio::test]
+async fn steering_during_final_response_stays_in_the_active_turn() -> Result<()> {
+    let temp_dir = TempDir::new()?;
+    let workspace_root = temp_dir.path().join("workspace");
+    std::fs::create_dir_all(&workspace_root)?;
+    let release = Arc::new(Notify::new());
+    let final_response_started = Arc::new(Notify::new());
+    let provider = Arc::new(ToolCallThenGatedDoneProvider {
+        stream_requests: Mutex::new(Vec::new()),
+        release: Arc::clone(&release),
+        final_response_started: Arc::clone(&final_response_started),
+    });
+    let runtime = build_runtime(temp_dir.path(), provider.clone());
+    let (connection_id, mut notifications_rx) = initialize_connection(&runtime).await?;
+    let created = runtime
+        .handle_incoming(connection_id, json!({
+            "id": 2, "method": "session/new",
+            "params": { "cwd": workspace_root, "idempotencyKey": "steer-final-response-session" }
+        }))
+        .await
+        .context("session/new response")?;
+    let session_id = created["result"]["session"]["id"]
+        .as_str()
+        .context("session id")?;
+    let subscribed = runtime
+        .handle_incoming(
+            connection_id,
+            json!({
+                "id": 3, "method": "subscription/create",
+                "params": {
+                    "selectors": [{ "kind": "session", "sessionId": session_id }],
+                    "includeSnapshot": false
+                }
+            }),
+        )
+        .await
+        .context("subscription/create response")?;
+    assert!(subscribed.get("error").is_none(), "{subscribed}");
+    let started = runtime
+        .handle_incoming(
+            connection_id,
+            json!({
+                "id": 4, "method": "turn/start",
+                "params": {
+                    "sessionId": session_id,
+                    "input": [{ "type": "text", "text": "Start with the tool." }],
+                    "idempotencyKey": "steer-final-response-turn"
+                }
+            }),
+        )
+        .await
+        .context("turn/start response")?;
+    let turn_id = started["result"]["turn"]["id"]
+        .as_str()
+        .context("turn id")?;
+    let mut collected = Vec::new();
+    recv_until(
+        &mut notifications_rx,
+        "executed Python probe",
+        |value| executed_tool_result(value, "tool-1"),
+        &mut collected,
+    )
+    .await?;
+    timeout(Duration::from_secs(10), final_response_started.notified())
+        .await
+        .context("final response started streaming")?;
+    // The next provider response has no tool calls. Enter must still inject
+    // into this turn, rather than silently becoming a queued follow-up.
+    let steering_text = "Change the remaining task before ending this turn.";
+    let steered = runtime
+        .handle_incoming(
+            connection_id,
+            json!({
+                "id": 5, "method": "turn/steer",
+                "params": {
+                    "sessionId": session_id, "expectedTurnId": turn_id,
+                    "input": [{ "type": "text", "text": steering_text }],
+                    "idempotencyKey": "steer-final-response-input"
+                }
+            }),
+        )
+        .await
+        .context("turn/steer response")?;
+    assert!(steered.get("error").is_none(), "{steered}");
+    assert_eq!(steered["result"]["outcome"], json!("injected"));
+    // The blocked model stream must not hold up the control plane.
+    for (id, method, params) in [
+        (7, "runtime/ping", json!({})),
+        (8, "session/list", json!({})),
+        (9, "session/items/list", json!({ "sessionId": session_id })),
+        (
+            10,
+            "workspace/changes/read",
+            json!({ "sessionId": session_id, "scopes": ["uncommitted"] }),
+        ),
+    ] {
+        let response = timeout(
+            Duration::from_secs(2),
+            runtime.handle_incoming(
+                connection_id,
+                json!({ "id": id, "method": method, "params": params }),
+            ),
+        )
+        .await
+        .with_context(|| format!("responsive {method}"))?
+        .with_context(|| format!("{method} response"))?;
+        assert!(response.get("error").is_none(), "{method}: {response}");
+    }
+    release.notify_one();
+    let completed = recv_until(
+        &mut notifications_rx,
+        "original turn completed",
+        is_turn_completed,
+        &mut collected,
+    )
+    .await?;
+    assert_eq!(completed["params"]["turn"]["id"], json!(turn_id));
+    let assistant_messages = collected
+        .iter()
+        .filter(|value| {
+            value["method"] == "item/completed"
+                && value["params"]["item"]["item"]["type"] == "assistantMessage"
+        })
+        .map(|value| value["params"]["item"]["item"]["text"].clone())
+        .collect::<Vec<_>>();
+    assert_eq!(assistant_messages, vec![json!("Done."), json!("Done.")]);
+    let queued = runtime
+        .handle_incoming(
+            connection_id,
+            json!({
+                "id": 6, "method": "session/queue/list",
+                "params": { "sessionId": session_id }
+            }),
+        )
+        .await
+        .context("session/queue/list response")?;
+    assert_eq!(queued["result"]["entries"], json!([]));
+    assert_eq!(
+        collected
+            .iter()
+            .filter(|value| value["method"] == "turn/started")
+            .count(),
+        1,
+    );
+    assert_eq!(
+        collected
+            .iter()
+            .filter_map(queue_updated_change)
+            .collect::<Vec<_>>(),
+        Vec::<&str>::new(),
+    );
+    let requests = provider
+        .stream_requests
+        .lock()
+        .expect("captured requests lock");
+    assert_eq!(
+        requests.len(),
+        3,
+        "steering must request another model leg in the same turn"
+    );
+    let steering_in_requests = requests
+        .iter()
+        .map(|request| {
+            all_user_request_texts(request)
+                .into_iter()
+                .filter(|text| text.contains(steering_text))
+                .collect::<Vec<_>>()
+        })
+        .collect::<Vec<_>>();
+    assert_eq!(
+        steering_in_requests,
+        vec![vec![], vec![], vec![steering_text.to_string()]]
     );
     Ok(())
 }

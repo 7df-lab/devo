@@ -322,6 +322,7 @@ fn lifecycle_and_control_query_events_are_must_deliver() {
             breakdown: devo_core::RawContextBreakdown::default(),
         },
         devo_core::QueryEvent::ReasoningCompleted,
+        devo_core::QueryEvent::ModelResponseCompleted,
         devo_core::QueryEvent::ToolUseStart {
             id: "tool-1".to_string(),
             name: "read".to_string(),

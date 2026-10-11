@@ -583,7 +583,7 @@ fn write_query_event_jsonl(session_id: &str, event: &QueryEvent) -> Result<()> {
                 message,
             })
         }
-        QueryEvent::ContextEstimate { .. } => Ok(()),
+        QueryEvent::ContextEstimate { .. } | QueryEvent::ModelResponseCompleted => Ok(()),
         QueryEvent::UsageDelta { usage } => write_jsonl(&PromptJsonlEvent::UsageDelta {
             session_id,
             usage: PromptUsageDelta::new(usage),

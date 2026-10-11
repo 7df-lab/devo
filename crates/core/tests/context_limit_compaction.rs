@@ -130,6 +130,7 @@ async fn context_limit_error_compacts_and_retries_query() {
             | QueryEvent::ProviderRetryStatus(_)
             | QueryEvent::ProviderQueryFailed { .. }
             | QueryEvent::TextDelta(_)
+            | QueryEvent::ModelResponseCompleted
             | QueryEvent::ReasoningDelta(_)
             | QueryEvent::ReasoningCompleted
             | QueryEvent::ContextEstimate { .. }
