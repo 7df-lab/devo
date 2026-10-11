@@ -13,7 +13,7 @@ const PYTHON_DEFINITION_PATTERN = /^\s*(?:async\s+def|def|class)\s+/;
 const PYTHON_MAIN_PATTERN = /^\s*if\s+__name__\s*==\s*['"]__main__['"]\s*:/;
 const PYTHON_CONTROL_PATTERN = /^\s*(?:if|elif|else|for|while|with|try|except|finally)\b.*:\s*$/;
 const PYTHON_CALL_PATTERN = /^\s*(?:await\s+)?[A-Za-z_][A-Za-z0-9_.]*\s*\(/;
-const BASH_SKILL_CALL_PATTERN = /^\s*(?:[A-Za-z_][A-Za-z0-9_]*\s*=\s*)?(?:await\s+)?bash\s*\(\s*[rR]?("""|'''|"|')/;
+const BASH_SKILL_CALL_PATTERN = /^\s*(?:[A-Za-z_][A-Za-z0-9_]*\s*=\s*)?(?:await\s+)?(?:rlm\.)?bash\s*\(\s*[rR]?("""|'''|"|')/;
 const PYTHON_LOW_SIGNAL_CALL_PATTERN = /^\s*(?:await\s+)?(?:print|len|str|repr|int|float|list|dict|set|tuple)\s*\(/;
 const PYTHON_ASSIGNMENT_CALL_PATTERN =
 	/^\s*[A-Za-z_][A-Za-z0-9_]*(?:\s*:\s*[^=]+)?\s*=\s*(?:await\s+)?[A-Za-z_][A-Za-z0-9_.]*\s*\(/;
