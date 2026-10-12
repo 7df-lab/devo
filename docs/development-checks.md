@@ -40,6 +40,47 @@ directory through `CARGO_TARGET_DIR`; avoid concurrent builds against the same
 target directory because Cargo serializes them. TypeScript and Python changes
 can be tested without waiting for that Rust build lock.
 
+## Optional faster Rust iteration
+
+Use `dev-fast` when filename/line backtraces are enough for the edit:
+
+```sh
+cargo build --locked --profile dev-fast -p devo-cli --bin devo
+cargo test --locked --profile dev-fast -p devo-server --lib compact
+```
+
+This profile inherits `dev` and changes only debug information to
+`line-tables-only`. Incremental compilation, debug assertions, overflow checks
+and optimization settings still come from `dev`. It keeps filename/line
+backtraces but omits variable and parameter debugger information. Use the
+normal `dev` profile when inspecting those values in a debugger. Default builds,
+tests and release packaging keep their existing profiles.
+
+Artifacts are under `target/dev-fast` (or the selected `CARGO_TARGET_DIR`).
+Point `DEVO_SERVER_BIN` at its `devo` binary when running the development TUI.
+On Windows, build the helper binaries in that profile before using the sandbox:
+
+```sh
+cargo build --locked --profile dev-fast -p devo-windows-sandbox --bins
+```
+
+The first build warms a separate profile cache; keep using the same profile
+and target directory during an edit cycle. Switching profiles is not a way to
+avoid that one-time cost.
+
+Two small server log-string edits on one Windows machine, with both profiles
+warm and the order reversed for the second edit, gave:
+
+| Edit | Normal dev | dev-fast |
+| --- | ---: | ---: |
+| A (dev first) | 25.53s | 12.03s |
+| B (dev-fast first) | 21.90s | 10.50s |
+
+These are CLI rebuild wall times for a small source edit, not clean-build,
+CI or arbitrary-change guarantees. Record `--timings` for the component being
+changed before making broader compiler, crate-boundary or build-system changes.
+Cargo documents the [debug information tradeoff](https://doc.rust-lang.org/cargo/reference/profiles.html#debug).
+
 ## CI scope
 
 `scripts/ci_scope.py` selects the Rust, desktop, TUI, and Python-kernel jobs for
