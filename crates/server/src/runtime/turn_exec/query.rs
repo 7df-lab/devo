@@ -126,6 +126,15 @@ impl ServerRuntime {
         } else {
             None
         };
+        let live_goal = if let Some(stream) = self.active_stream_state(session_id).await {
+            let stream = stream.lock().await;
+            stream
+                .turn_inline
+                .as_ref()
+                .map(|inline| Arc::clone(&inline.live_goal))
+        } else {
+            None
+        };
         let last_model_request = if let Some(stream) = self.active_stream_state(session_id).await {
             let stream = stream.lock().await;
             stream
@@ -512,6 +521,7 @@ impl ServerRuntime {
                     cancel_token: Some(query_cancel_token.clone()),
                     compaction_provider: Some(compaction_provider),
                     live_settings: live_turn_settings.clone(),
+                    live_goal,
                     last_model_request,
                     harness_digest,
                 },

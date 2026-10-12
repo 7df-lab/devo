@@ -160,6 +160,18 @@ async fn goal_complete_finishes_current_turn_without_another_continuation() -> R
             .captured_requests
             .lock()
             .expect("lock captured requests");
+        let active_goal_contexts = requests
+            .iter()
+            .map(|request| {
+                request.messages.iter().any(|message| {
+                    message.content.iter().any(|content| {
+                        matches!(content, devo_protocol::RequestContent::Text { text, .. }
+                            if text.contains("Continue working toward the active thread goal."))
+                    })
+                })
+            })
+            .collect::<Vec<_>>();
+        assert_eq!(active_goal_contexts, vec![true, false]);
         assert!(
             requests[1].messages.iter().any(|message| {
                 message.content.iter().any(|content| {

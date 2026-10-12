@@ -849,12 +849,20 @@ impl ServerRuntime {
         let Some(session_handle) = self.session(session_id).await else {
             return;
         };
-        if self.runtime_active_turn_id(session_id).await.is_some() {
-            // Queue without blocking the goal handler; the actor applies this once
-            // the in-flight turn releases the mailbox.
-            let _ = session_handle.try_set_active_goal(thread_goal);
-            return;
+        let live_goal = if let Some(stream) = self.active_stream_state(session_id).await {
+            let stream = stream.lock().await;
+            stream
+                .turn_inline
+                .as_ref()
+                .map(|inline| Arc::clone(&inline.live_goal))
+        } else {
+            None
+        };
+        if let Some(live_goal) = live_goal {
+            *live_goal.lock().expect("live goal mutex poisoned") = Some(thread_goal.clone());
         }
+        // The actor mailbox stays responsive while its turn owns a working copy.
+        // Await this short command so MergeTurn cannot restore an older goal tip.
         session_handle.set_active_goal(thread_goal).await;
     }
 

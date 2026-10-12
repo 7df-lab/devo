@@ -17,6 +17,7 @@ pub use event::ProviderRetryStatus;
 pub use event::QueryEvent;
 pub use event::QueryOptions;
 pub use event::SharedLastModelRequest;
+pub use event::SharedLiveGoal;
 pub use event::SharedLiveTurnSettings;
 
 pub(crate) use event::emit_query_event;
@@ -552,6 +553,17 @@ pub async fn query(
             }
         }
 
+        // Host goal changes must reach the checked-out working copy before
+        // assembling another request, including after a Python completion call.
+        if let Some(live_goal) = &options.live_goal {
+            let update = live_goal.lock().expect("live goal mutex poisoned").clone();
+            if let Some(goal) = update {
+                match goal {
+                    Some(goal) => session.set_active_goal(goal),
+                    None => session.clear_active_goal(),
+                }
+            }
+        }
         // Check token budget and compact before building the request
         if let Some(live) = &options.live_settings {
             let live = live.lock().expect("live settings mutex poisoned");

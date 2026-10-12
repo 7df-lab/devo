@@ -44,6 +44,9 @@ pub(crate) struct TurnInlineState {
     /// Live model/effort/compaction-limit overrides shared with the core
     /// query loop (L2-DES-CONV-002 Phase 4).
     pub(crate) live_turn_settings: devo_core::SharedLiveTurnSettings,
+    /// Host goal changes shared with the checked-out query loop. The actor
+    /// retains the durable goal mirror independently of turn conversation I/O.
+    pub(crate) live_goal: devo_core::SharedLiveGoal,
     /// Last assembled provider request for this turn. Auto-review clones this
     /// prefix so the reviewer shares the main-turn prompt cache.
     pub(crate) last_model_request: devo_core::SharedLastModelRequest,
@@ -86,6 +89,7 @@ impl TurnInlineState {
                 state.config.sandbox_profile.clone(),
             )),
             live_turn_settings: Default::default(),
+            live_goal: Default::default(),
             last_model_request: Arc::new(std::sync::Mutex::new(None)),
             item_started_at: std::collections::HashMap::new(),
             transcript_leaf_id: state.transcript_leaf_id,
