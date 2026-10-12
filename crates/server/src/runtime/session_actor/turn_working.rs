@@ -67,6 +67,7 @@ impl SessionActorState {
 
         let session_config = self.config.clone();
         let session_core_config = self.core.config.clone();
+        let session_goal = self.core.active_goal.clone();
         let session_permission_preset = self.summary.permission_preset();
         let session_model = self.summary.model_name().map(str::to_string);
         let session_model_binding_id = self.summary.model_binding_id().map(str::to_string);
@@ -78,6 +79,7 @@ impl SessionActorState {
 
         self.core = working.core;
         self.core.config = session_core_config;
+        self.core.active_goal = session_goal;
         self.config = session_config;
 
         self.summary = working.summary;

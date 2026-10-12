@@ -147,6 +147,9 @@ pub struct QueryOptions {
     /// Phase 4). The query loop re-reads it once per iteration so a mid-turn
     /// settings change applies at the next model call or compaction check.
     pub live_settings: Option<SharedLiveTurnSettings>,
+    /// Host goal changes visible at the next model-request boundary. The
+    /// shared outer `None` keeps the turn-start goal; `Some(None)` clears it.
+    pub live_goal: Option<SharedLiveGoal>,
     /// Slot written before each provider attempt so in-turn callers (auto-review)
     /// can reuse the same request prefix for prompt-cache hits.
     pub last_model_request: Option<SharedLastModelRequest>,
@@ -179,6 +182,10 @@ pub struct LiveTurnSettings {
 /// Shared handle to a turn's live settings override.
 pub type SharedLiveTurnSettings = Arc<std::sync::Mutex<LiveTurnSettings>>;
 
+/// Goal override shared with a checked-out turn. An unset outer option means
+/// no host change; a set option replaces or clears the turn's goal context.
+pub type SharedLiveGoal = Arc<std::sync::Mutex<Option<Option<devo_protocol::ThreadGoal>>>>;
+
 /// Shared handle to the last assembled provider request for the running turn.
 pub type SharedLastModelRequest = Arc<std::sync::Mutex<Option<ModelRequest>>>;
 
@@ -202,6 +209,7 @@ impl std::fmt::Debug for QueryOptions {
                 "last_model_request",
                 &self.last_model_request.as_ref().map(|_| "<shared>"),
             )
+            .field("live_goal", &self.live_goal.as_ref().map(|_| "<shared>"))
             .field(
                 "harness_digest",
                 &self

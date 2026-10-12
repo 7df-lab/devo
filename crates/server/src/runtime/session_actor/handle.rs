@@ -221,10 +221,6 @@ impl SessionHandle {
         let _ = self.send(SessionCommand::SetActiveGoal { goal }).await;
     }
 
-    pub(crate) fn try_set_active_goal(&self, goal: Option<ThreadGoal>) -> bool {
-        self.try_send(SessionCommand::SetActiveGoal { goal })
-    }
-
     pub(crate) async fn parent_session_id(&self) -> Option<Option<SessionId>> {
         let (reply_tx, reply_rx) = oneshot::channel();
         if !self
