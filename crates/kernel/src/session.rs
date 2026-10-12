@@ -573,6 +573,12 @@ impl KernelSession {
         let workspace_root =
             std::fs::canonicalize(&config.cwd).unwrap_or_else(|_| config.cwd.clone());
         let mut cmd = Command::new(&config.python);
+        if devo_util_paths::runtime::RuntimeBundle::current().is_some() {
+            devo_util_paths::runtime_environment::remove_interpreter_environment(
+                cmd.as_std_mut(),
+                devo_util_paths::runtime_environment::Interpreter::Python,
+            );
+        }
         cmd.arg("-m")
             .arg("rlm.repl")
             .current_dir(&config.cwd)
@@ -1058,7 +1064,9 @@ pub(crate) fn kernel_env_overrides(config: &KernelSessionConfig) -> Vec<(String,
         .collect();
     if !config.python_path_entries.is_empty() {
         let mut paths: Vec<PathBuf> = config.python_path_entries.clone();
-        if let Some(existing) = std::env::var_os("PYTHONPATH") {
+        if devo_util_paths::runtime::RuntimeBundle::current().is_none()
+            && let Some(existing) = std::env::var_os("PYTHONPATH")
+        {
             paths.extend(std::env::split_paths(&existing));
         }
         if let Ok(joined) = std::env::join_paths(&paths) {

@@ -8,6 +8,7 @@ pub mod absolute_path;
 mod config_paths;
 pub mod home_dir;
 pub mod runtime;
+pub mod runtime_environment;
 
 pub use config_paths::*;
 pub use home_dir::*;

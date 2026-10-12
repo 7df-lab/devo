@@ -247,8 +247,16 @@ pub(super) fn wrap_or_bare(
     // The sandbox wrapper serializes the child's environment into
     // argv before `cmd.env_remove` can act. Filter the snapshot before
     // it enters either the wrapper argv or the eventual Python kernel.
+    let installed_bundle = devo_util_paths::runtime::RuntimeBundle::current().is_some();
     let inherited_env = std::env::vars()
         .filter(|(key, value)| !crate::session::is_credential_env_var(key, value))
+        .filter(|(key, _)| {
+            !installed_bundle
+                || !devo_util_paths::runtime_environment::is_interpreter_env_var(
+                    key.as_ref(),
+                    devo_util_paths::runtime_environment::Interpreter::Python,
+                )
+        })
         .collect();
     match devo_windows_sandbox::prepare_windows_sandbox_launch_for_argv_with_env(
         &request,

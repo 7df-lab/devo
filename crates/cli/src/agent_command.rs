@@ -127,6 +127,12 @@ pub(crate) fn launch_interactive_mode_client(
     let server_bin = simplify_windows_path(std::env::current_exe()?);
 
     let mut command = Command::new(&node);
+    if bundle.is_some() {
+        devo_util_paths::runtime_environment::remove_interpreter_environment(
+            &mut command,
+            devo_util_paths::runtime_environment::Interpreter::Node,
+        );
+    }
     if let Some(tsx) = tsx_cli {
         command.arg(path_for_node_arg(&tsx));
     }
