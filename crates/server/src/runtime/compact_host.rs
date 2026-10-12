@@ -127,12 +127,16 @@ pub(crate) fn pending_compact_request(session_id: &SessionId) -> Option<PendingC
         .cloned()
 }
 
-/// Clear only the attempted request; a newer request must retain its instructions.
-pub(crate) fn complete_pending_compact(session_id: &SessionId, attempted: &PendingCompact) {
+/// Consume only the attempted request, returning whether it was still pending.
+/// A newer request must retain its instructions.
+#[must_use]
+pub(crate) fn complete_pending_compact(session_id: &SessionId, attempted: &PendingCompact) -> bool {
     let mut pending = PENDING_COMPACTS.lock().unwrap_or_else(|e| e.into_inner());
     if pending.get(session_id.as_str()) == Some(attempted) {
         pending.remove(session_id.as_str());
+        return true;
     }
+    false
 }
 
 /// Clear a scheduled agent-requested compact (abort / interrupt path).
@@ -269,7 +273,7 @@ mod tests {
         schedule_compact_run(&id, Some("keep queued input".into()), true);
         let request = pending_compact_request(&id).expect("pending request");
         assert_eq!(pending_compact_request(&id), Some(request.clone()));
-        complete_pending_compact(&id, &request);
+        assert!(complete_pending_compact(&id, &request));
         assert_eq!(pending_compact_request(&id), None);
     }
 
@@ -282,7 +286,7 @@ mod tests {
         let newer = pending_compact_request(&id).expect("new request");
         // Identity must distinguish identical requests even at clock granularity.
         old.requested_at = newer.requested_at;
-        complete_pending_compact(&id, &old);
+        assert!(!complete_pending_compact(&id, &old));
         assert_eq!(take_pending_compact(&id), Some(newer));
     }
 
@@ -292,7 +296,7 @@ mod tests {
         schedule_compact_run(&id, None, true);
         let attempted = pending_compact_request(&id).expect("pending request");
         clear_pending_compact(&id);
-        complete_pending_compact(&id, &attempted);
+        assert!(!complete_pending_compact(&id, &attempted));
         assert_eq!(pending_compact_request(&id), None);
     }
 }

@@ -7022,3 +7022,6 @@ async fn schedule_dispatch_skips_fire_when_identical_prompt_already_queued() -> 
     open.store(true, std::sync::atomic::Ordering::SeqCst);
     Ok(())
 }
+
+#[path = "agent_compaction_admission_tests.rs"]
+mod agent_compaction_admission_tests;

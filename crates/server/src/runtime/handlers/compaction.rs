@@ -444,7 +444,13 @@ impl ServerRuntime {
             }
 
             // Admission owns the request before compaction can drain another turn.
-            complete_pending_compact(&native_session_id, &pending);
+            if !complete_pending_compact(&native_session_id, &pending) {
+                // The scheduler may have read this request before an interrupt,
+                // replacement, or another scheduler consumed it. Roll back the
+                // unpublished reservation instead of executing stale work.
+                let _ = session_handle.clear_active_turn_if_matches(turn_id).await;
+                return AgentCompactionOutcome::Consumed;
+            }
 
             if let Some(persistence) = session_handle.turn_persistence_snapshot().await
                 && persistence.rollout_path.is_some()

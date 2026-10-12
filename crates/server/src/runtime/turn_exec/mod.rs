@@ -79,7 +79,7 @@ pub(crate) fn spawn_post_turn_scheduling(
                 super::compact_host::AgentCompactionOutcome::Consumed
             )
         {
-            super::compact_host::complete_pending_compact(&native_session_id, &pending);
+            let _ = super::compact_host::complete_pending_compact(&native_session_id, &pending);
         }
 
         // Session facts for refine / auto-interval.
