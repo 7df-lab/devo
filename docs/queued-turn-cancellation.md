@@ -5,6 +5,10 @@ queue admission registers its Native turn metadata and cancellation token in
 the active-turn registry. Both queue-start paths run it on a dedicated task
 whose abort handle belongs to that same registry.
 
+Admission installs the reservation snapshot before the active metadata, matching
+ordinary turn admission. Immediate queue reads after restore can then resolve
+the admitted turn before its execution task begins.
+
 `session/interrupt` can then find and cancel the queued turn, just as it does
 an ordinary turn. Cancellation goes through normal finalization and merge;
 the dedicated abort handle remains available for timeout recovery. The

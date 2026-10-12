@@ -320,6 +320,10 @@ impl ServerRuntime {
             session_handle
                 .activate_runtime_queued_turn(turn.clone(), turn_config.clone())
                 .await;
+            if let Some(spawn) = session_handle.spawn_snapshot().await {
+                self.register_turn_spawn_snapshot(session_id, turn.turn_id(), Arc::new(spawn))
+                    .await;
+            }
             self.register_active_runtime_turn_execution(
                 session_id,
                 turn.clone(),
