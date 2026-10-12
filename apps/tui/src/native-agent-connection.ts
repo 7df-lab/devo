@@ -250,6 +250,7 @@ export class NativeAgentConnection implements AgentConnection {
   private followUpMode: "all" | "one-at-a-time" = "all";
   private autoCompactionEnabled = true;
   private contextUsage: ReturnType<typeof occupancyToContextUsage> = emptyContextUsage();
+  private contextUsageWindowSource: "bootstrap" | "model-switch" | "server" = "bootstrap";
   private permissionProfile: "default" | "autoReview" | "fullAccess" = "default";
   /** Explicit per-session auto-refine fields from the live session snapshot. */
   private sessionAutoRefine: { enabled?: boolean; turnInterval?: number } = {};
@@ -604,6 +605,13 @@ export class NativeAgentConnection implements AgentConnection {
       if (this.subscriptionReplayDepth > 0 && ev.type === "agent_start") {
         continue;
       }
+      if (ev.type === "context_usage_update") {
+        this.applyNativeContextUsage(
+          ev.contextUsage as NonNullable<ReturnType<typeof occupancyToContextUsage>>,
+          "notification",
+        );
+        ev.contextUsage = this.contextUsage;
+      }
       this.emitSessionEvent(ev);
       if (ev.type === "auto_retry_start") {
         this.retryAttempt = Number((ev as { attempt?: unknown }).attempt ?? 0);
@@ -631,9 +639,6 @@ export class NativeAgentConnection implements AgentConnection {
           followUp: [...(actions.followUps ?? [])],
         };
         this.syncActionsFromQueue();
-      }
-      if (ev.type === "context_usage_update") {
-        this.contextUsage = ev.contextUsage as never;
       }
       if (ev.type === "session_info_changed" && ev.name != null) {
         this.sessionName = String(ev.name);
@@ -763,6 +768,26 @@ export class NativeAgentConnection implements AgentConnection {
     }
   }
 
+  /** Native effective windows outrank catalog defaults outside a model switch. */
+  private applyNativeContextUsage(
+    next: NonNullable<ReturnType<typeof occupancyToContextUsage>>,
+    source: "snapshot" | "notification",
+  ): void {
+    if (next.contextWindow > 1) {
+      this.contextUsage = next as never;
+      if (source === "notification" || this.contextUsageWindowSource !== "model-switch") {
+        this.contextUsageWindowSource = "server";
+      }
+    } else {
+      // Token-only updates must not discard an already known effective window.
+      this.contextUsage = occupancyToContextUsage({
+        tokens: next.tokens,
+        contextWindow: this.contextUsage?.contextWindow ?? this.model?.contextWindow,
+      }) as never;
+    }
+    if (this.contextUsageWindowSource !== "server") this.syncContextUsageWindowFromModel();
+  }
+
   /** Keep footer % window aligned with the active model (switch must update). */
   private syncContextUsageWindowFromModel(): void {
     const window = Number(this.model?.contextWindow ?? 0);
@@ -778,7 +803,7 @@ export class NativeAgentConnection implements AgentConnection {
   /** Footer shows `0 (0%)` once a model window is known. */
   private ensureDefaultContextUsage(): void {
     if (this.contextUsage) {
-      this.syncContextUsageWindowFromModel();
+      if (this.contextUsageWindowSource !== "server") this.syncContextUsageWindowFromModel();
       return;
     }
     const window = Number(this.model?.contextWindow ?? 0);
@@ -1004,10 +1029,7 @@ export class NativeAgentConnection implements AgentConnection {
       if (this.sessionId !== sessionId) return;
       const next = occupancyToContextUsage(result?.occupancy);
       if (next) {
-        this.contextUsage = next as never;
-        // Occupancy snapshots can still carry the previous model's window after
-        // a mid-session model switch; prefer the active catalog window.
-        this.syncContextUsageWindowFromModel();
+        this.applyNativeContextUsage(next, "snapshot");
         this.emitSessionEvent({ type: "context_usage_update", contextUsage: this.contextUsage });
       } else {
         this.ensureDefaultContextUsage();
@@ -2646,8 +2668,9 @@ export class NativeAgentConnection implements AgentConnection {
       normalizeAgentModel({ provider, id: modelId, modelId, reasoning: true })!;
     this.model = model;
     this.applyAvailableThinkingLevelsFromModel(model);
-    // Model switch must rewrite the footer window immediately; occupancy refresh
-    // can race and still carry the previous model's contextWindowTokens.
+    // Keep the new model window provisional until fresh Native usage arrives;
+    // an immediate occupancy read can still describe the previous model.
+    this.contextUsageWindowSource = "model-switch";
     this.ensureDefaultContextUsage();
     if (this.contextUsage) {
       this.emitSessionEvent({ type: "context_usage_update", contextUsage: this.contextUsage });
@@ -3023,6 +3046,7 @@ export class NativeAgentConnection implements AgentConnection {
     // Fresh session has no occupancy yet — clear so the footer does not keep
     // the previous session's token % after /new.
     this.contextUsage = emptyContextUsage();
+    this.contextUsageWindowSource = "bootstrap";
     this.ensureDefaultContextUsage();
 
     if (session?.model) {
@@ -3066,6 +3090,7 @@ export class NativeAgentConnection implements AgentConnection {
     this.expectedTurnId = null;
     const resumedUsage = occupancyToContextUsage(resumed.lastContextOccupancy);
     this.contextUsage = (resumedUsage ?? emptyContextUsage()) as never;
+    this.contextUsageWindowSource = resumedUsage && resumedUsage.contextWindow > 1 ? "server" : "bootstrap";
     this.ensureDefaultContextUsage();
     if (session.model) {
       this.model = normalizeAgentModel(session.model as Record<string, unknown>) ?? this.model;

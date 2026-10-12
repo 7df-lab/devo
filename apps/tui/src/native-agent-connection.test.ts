@@ -2068,3 +2068,58 @@ test("applyAutoRefineDefaults leaves explicit session values alone", async () =>
   );
   await conn.dispose();
 });
+
+
+test("server context window survives catalog enrichment and stats refresh", async () => {
+  const { conn } = await bootConnection();
+  const expected = { tokens: 100, contextWindow: 1000, percent: 10 };
+  assert.deepEqual((await conn.getState()).contextUsage, expected);
+  assert.deepEqual((await conn.getSessionStats()).contextUsage, expected);
+  assert.deepEqual((await conn.getState()).contextUsage, expected);
+  await conn.dispose();
+});
+
+test("model switch window stays provisional until fresh native occupancy", async () => {
+  const { conn } = await bootConnection([
+    (method, _params, respond) => {
+      if (method !== "model/list") return false;
+      respond({ models: [
+        { provider: "openai", id: "gpt-test", contextWindow: 1000 },
+        { provider: "openai", id: "gpt-other", contextWindow: 2000 },
+      ] });
+      return true;
+    },
+  ]);
+  await conn.setModel("openai", "gpt-other");
+  assert.deepEqual((await conn.getSessionStats()).contextUsage, {
+    tokens: 100, contextWindow: 2000, percent: 5,
+  });
+  conn.pushChunk(`${JSON.stringify({
+    jsonrpc: "2.0", method: "context/usageUpdated",
+    params: { sessionId: "sess_test", occupancy: { totalTokens: 180, contextWindowTokens: 1900 } },
+  })}\n`);
+  assert.deepEqual((await conn.getState()).contextUsage, {
+    tokens: 180, contextWindow: 1900, percent: 9.5,
+  });
+  await conn.dispose();
+});
+
+test("token-only usage events retain the known server window", async () => {
+  const { conn } = await bootConnection();
+  const updates: unknown[] = [];
+  conn.subscribe((event) => {
+    if (event.type === "session_event") {
+      const update = event.event as { type?: string; contextUsage?: unknown };
+      if (update.type === "context_usage_update") updates.push(update.contextUsage);
+    }
+  });
+  conn.pushChunk(`${JSON.stringify({
+    jsonrpc: "2.0", method: "context/usageUpdated",
+    params: { sessionId: "sess_test", occupancy: { totalTokens: 200 } },
+  })}\n`);
+  assert.deepEqual((await conn.getState()).contextUsage, {
+    tokens: 200, contextWindow: 1000, percent: 20,
+  });
+  assert.deepEqual(updates.at(-1), { tokens: 200, contextWindow: 1000, percent: 20 });
+  await conn.dispose();
+});
