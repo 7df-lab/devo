@@ -374,7 +374,7 @@ export class IPythonCellComponent implements Component {
 		// Cached by state version so unrelated repaints don't re-render (flicker).
 		const lines = [truncateToWidth(` ${this.collapsedLine(details)}`, safeWidth, "")];
 
-		const hasCode = this.state.expanded ? this.renderCode(lines, safeWidth) : false;
+		const hasCode = this.state.expanded ? this.renderCode(lines, safeWidth, details) : false;
 		if ((details.diffs?.length ?? 0) > 0) {
 			this.renderDiffs(lines, safeWidth, details.diffs ?? [], hasCode);
 		}
@@ -401,7 +401,7 @@ export class IPythonCellComponent implements Component {
 			// Collapsed preview stays plain and dim so the one-line summary reads as
 			// quiet metadata; the expanded block below keeps full highlighting.
 			parts.push(theme.fg("dim", preview.text));
-		} else if (!this.state.executionStarted) {
+		} else if (this.statusKind(details) === "queued") {
 			parts.push(theme.fg("dim", "waiting for code"));
 		}
 
@@ -510,10 +510,13 @@ export class IPythonCellComponent implements Component {
 	}
 
 	// Only runs when expanded — shows the full source below the fixed top line.
-	private renderCode(lines: string[], width: number): boolean {
+	private renderCode(lines: string[], width: number, details: IpythonDetails): boolean {
 		const code = this.state.code.trimEnd();
 		if (!code) {
-			this.addWrapped(lines, theme.fg("dim", "╰─ "), theme.fg("muted", "waiting for code"), width);
+			const status = this.statusKind(details);
+			if (status === "queued" || status === "running") {
+				this.addWrapped(lines, theme.fg("dim", "╰─ "), theme.fg("muted", "waiting for code"), width);
+			}
 			return false;
 		}
 
