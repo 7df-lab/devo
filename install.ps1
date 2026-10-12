@@ -44,7 +44,7 @@ function Normalize-PathEntry {
     )
 
     $normalized = $Value.Trim()
-    while ($normalized.Length -gt 3 -and $normalized.EndsWith("\\")) {
+    while ($normalized.Length -gt 3 -and $normalized.EndsWith("\")) {
         $normalized = $normalized.Substring(0, $normalized.Length - 1)
     }
 
