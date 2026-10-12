@@ -70,10 +70,29 @@ impl ServerRuntime {
     {
         self.register_active_runtime_turn_execution(session_id, turn, connection_id)
             .await;
+        drop(
+            self.spawn_registered_active_turn_task(session_id, task)
+                .await,
+        );
+    }
+
+    /// Spawns work after its cancellation token and turn metadata are registered.
+    /// Queued turns register during admission, before publishing `turn/started`.
+    /// The returned handle lets a post-turn chain wait without losing the
+    /// dedicated abort handle required by interrupt timeout recovery.
+    pub(crate) async fn spawn_registered_active_turn_task<F>(
+        self: &Arc<Self>,
+        session_id: SessionId,
+        task: F,
+    ) -> tokio::task::JoinHandle<()>
+    where
+        F: std::future::Future<Output = ()> + Send + 'static,
+    {
         let runtime = Arc::clone(self);
         let join_handle = tokio::spawn(task);
         runtime
             .attach_active_turn_abort_handle(session_id, join_handle.abort_handle())
             .await;
+        join_handle
     }
 }
