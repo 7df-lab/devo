@@ -15,6 +15,11 @@ Requests remain last-write-wins: completion of an older attempt cannot discard
 newer instructions. Interrupt still clears pending compaction; retry never
 recreates a request that was canceled.
 
+Admission revalidates the saved request's identity atomically. If cancellation,
+replacement, or another scheduler already consumed it, discard the unpublished
+turn reservation before persisting or running compaction. Conditional cleanup
+alone cannot prevent stale work from starting.
+
 The integration regression queues a follow-up while the parent is completing
 its `compact.run` turn, using semaphore gates rather than timing-dependent
 sleeps. It requires a completed compaction notification after the follow-up.
