@@ -47,7 +47,10 @@ test.skipIf(process.platform !== "win32")("Windows installation repairs an incom
       $failed = $false
       try { Install-DevoBundle -Source ${quote(source)} -InstallDir ${quote(destination)} } catch { $failed = $true } finally { $lock.Dispose() }
       $restored = (Get-Content -LiteralPath ${quote(join(destination, "runtime/manifest.json"))} -Raw).Trim() -eq 'old runtime'
-      @{complete=$complete; sameVersionSkipped=$sameVersionSkipped; missingReceiptRepaired=$missingReceiptRepaired; rebuiltVersionRepaired=$rebuiltVersionRepaired; helpersRepaired=$helpersRepaired; missingHelperRejected=$missingHelperRejected; offlineComplete=$offlineComplete; rejected=$rejected; rolledBack=($failed -and $restored)} | ConvertTo-Json -Compress
+      $singleTrailingSlash = Normalize-PathEntry 'C:\Users\test\Programs\devo\'
+      $doubleTrailingSlash = Normalize-PathEntry 'C:\Users\test\Programs\devo\\'
+      $pathEntriesRecognizeBothForms = (Test-PathEntryPresent -PathValue 'C:\Users\test\Programs\devo\' -Entry 'C:\Users\test\Programs\devo') -and (Test-PathEntryPresent -PathValue 'C:\Users\test\Programs\devo\\' -Entry 'C:\Users\test\Programs\devo')
+      @{complete=$complete; sameVersionSkipped=$sameVersionSkipped; missingReceiptRepaired=$missingReceiptRepaired; rebuiltVersionRepaired=$rebuiltVersionRepaired; helpersRepaired=$helpersRepaired; missingHelperRejected=$missingHelperRejected; offlineComplete=$offlineComplete; rejected=$rejected; rolledBack=($failed -and $restored); singleTrailingSlash=$singleTrailingSlash; doubleTrailingSlash=$doubleTrailingSlash; pathEntriesRecognizeBothForms=$pathEntriesRecognizeBothForms} | ConvertTo-Json -Compress
     `;
     const path = join(root, "test.ps1");
     writeFileSync(path, script);
@@ -56,7 +59,7 @@ test.skipIf(process.platform !== "win32")("Windows installation repairs an incom
       env: { ...process.env, PSModulePath: join(process.env.SystemRoot!, "System32/WindowsPowerShell/v1.0/Modules") },
     });
     if (result.exitCode !== 0) throw new Error(result.stderr.toString());
-    expect({ exit: result.exitCode, stderr: result.stderr.toString(), checks: JSON.parse(result.stdout.toString()) }).toEqual({ exit: 0, stderr: "", checks: { complete: true, sameVersionSkipped: true, missingReceiptRepaired: true, rebuiltVersionRepaired: true, helpersRepaired: true, missingHelperRejected: true, offlineComplete: true, rejected: true, rolledBack: true } });
+    expect({ exit: result.exitCode, stderr: result.stderr.toString(), checks: JSON.parse(result.stdout.toString()) }).toEqual({ exit: 0, stderr: "", checks: { complete: true, sameVersionSkipped: true, missingReceiptRepaired: true, rebuiltVersionRepaired: true, helpersRepaired: true, missingHelperRejected: true, offlineComplete: true, rejected: true, rolledBack: true, singleTrailingSlash: "C:\Users\test\Programs\devo", doubleTrailingSlash: "C:\Users\test\Programs\devo", pathEntriesRecognizeBothForms: true } });
   } finally {
     rmSync(root, { recursive: true, force: true });
   }
