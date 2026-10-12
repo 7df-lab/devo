@@ -1,6 +1,6 @@
 {
   "name": "@devo/tui",
-  "version": "0.2.3",
+  "version": "0.2.4",
   "private": true,
   "description": "Devo product TUI — InteractiveMode + Native AgentConnection",
   "type": "module",
