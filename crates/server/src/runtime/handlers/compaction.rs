@@ -1,3 +1,6 @@
+use super::super::compact_host::{
+    AgentCompactionOutcome, PendingCompact, complete_pending_compact,
+};
 use super::super::*;
 use std::panic::AssertUnwindSafe;
 
@@ -355,21 +358,21 @@ impl ServerRuntime {
     pub(crate) async fn execute_agent_requested_compaction(
         self: &Arc<Self>,
         session_id: SessionId,
-        instructions: Option<String>,
-    ) {
+        pending: PendingCompact,
+    ) -> AgentCompactionOutcome {
         let Some(session_handle) = self.session(session_id).await else {
             tracing::warn!(
                 %session_id,
                 "agent-requested compaction skipped: session unavailable"
             );
-            return;
+            return AgentCompactionOutcome::Consumed;
         };
         if self.runtime_active_turn_id(session_id).await.is_some() {
             tracing::warn!(
                 %session_id,
-                "agent-requested compaction skipped: turn still active"
+                "agent-requested compaction deferred: turn still active"
             );
-            return;
+            return AgentCompactionOutcome::Deferred;
         }
 
         let turn = {
@@ -379,7 +382,7 @@ impl ServerRuntime {
                     %session_id,
                     "agent-requested compaction skipped: session unavailable"
                 );
-                return;
+                return AgentCompactionOutcome::Consumed;
             };
 
             let requested_model = session_model_selection(&reservation.summary);
@@ -435,10 +438,13 @@ impl ServerRuntime {
             {
                 tracing::warn!(
                     %session_id,
-                    "agent-requested compaction skipped: could not admit turn"
+                    "agent-requested compaction deferred: could not admit turn"
                 );
-                return;
+                return AgentCompactionOutcome::Deferred;
             }
+
+            // Admission owns the request before compaction can drain another turn.
+            complete_pending_compact(&native_session_id, &pending);
 
             if let Some(persistence) = session_handle.turn_persistence_snapshot().await
                 && persistence.rollout_path.is_some()
@@ -452,7 +458,7 @@ impl ServerRuntime {
                     %error,
                     "agent-requested compaction failed to persist turn start"
                 );
-                return;
+                return AgentCompactionOutcome::Consumed;
             }
 
             if let Some(spawn) = session_handle.spawn_snapshot().await {
@@ -497,10 +503,11 @@ impl ServerRuntime {
                 turn,
                 CompactionRunOptions {
                     trigger: CompactionTrigger::AgentRequested,
-                    custom_instructions: instructions,
+                    custom_instructions: pending.instructions,
                 },
             )
             .await;
+        AgentCompactionOutcome::Consumed
     }
 
     pub(crate) async fn run_session_compaction(

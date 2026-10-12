@@ -71,10 +71,15 @@ pub(crate) fn spawn_post_turn_scheduling(
             // boundary: legacy session id when summary unavailable
             session_id
         };
-        if let Some(pending) = super::compact_host::take_pending_compact(&native_session_id) {
-            runtime
-                .execute_agent_requested_compaction(session_id, pending.instructions)
-                .await;
+        if let Some(pending) = super::compact_host::pending_compact_request(&native_session_id)
+            && matches!(
+                runtime
+                    .execute_agent_requested_compaction(session_id, pending.clone())
+                    .await,
+                super::compact_host::AgentCompactionOutcome::Consumed
+            )
+        {
+            super::compact_host::complete_pending_compact(&native_session_id, &pending);
         }
 
         // Session facts for refine / auto-interval.

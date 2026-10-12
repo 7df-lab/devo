@@ -19,11 +19,18 @@ use devo_protocol::native::item::ContextOccupancy;
 static PENDING_COMPACTS: LazyLock<Mutex<HashMap<String, PendingCompact>>> =
     LazyLock::new(|| Mutex::new(HashMap::new()));
 
-#[derive(Debug, Clone)]
+#[derive(Debug, Clone, PartialEq)]
 pub(crate) struct PendingCompact {
+    request_id: uuid::Uuid,
     pub instructions: Option<String>,
     #[allow(dead_code)] // telemetry / future digest strip timing
     pub requested_at: chrono::DateTime<Utc>,
+}
+
+/// Whether turn-end scheduling consumed a request or must retry after busy work.
+pub(crate) enum AgentCompactionOutcome {
+    Consumed,
+    Deferred,
 }
 
 /// Model-facing `compact.status` payload (wire snake_case keys).
@@ -112,6 +119,22 @@ pub(crate) fn take_pending_compact(session_id: &SessionId) -> Option<PendingComp
         .remove(session_id.as_str())
 }
 
+pub(crate) fn pending_compact_request(session_id: &SessionId) -> Option<PendingCompact> {
+    PENDING_COMPACTS
+        .lock()
+        .unwrap_or_else(|e| e.into_inner())
+        .get(session_id.as_str())
+        .cloned()
+}
+
+/// Clear only the attempted request; a newer request must retain its instructions.
+pub(crate) fn complete_pending_compact(session_id: &SessionId, attempted: &PendingCompact) {
+    let mut pending = PENDING_COMPACTS.lock().unwrap_or_else(|e| e.into_inner());
+    if pending.get(session_id.as_str()) == Some(attempted) {
+        pending.remove(session_id.as_str());
+    }
+}
+
 /// Clear a scheduled agent-requested compact (abort / interrupt path).
 #[allow(dead_code)]
 pub(crate) fn clear_pending_compact(session_id: &SessionId) {
@@ -137,6 +160,7 @@ pub fn schedule_compact_run(
         };
     }
     let pending = PendingCompact {
+        request_id: uuid::Uuid::new_v4(),
         instructions,
         requested_at: Utc::now(),
     };
@@ -237,5 +261,38 @@ mod tests {
         assert!(schedule_compact_run(&id, None, true).scheduled);
         clear_pending_compact(&id);
         assert!(!peek_pending_compact(&id));
+    }
+
+    #[test]
+    fn deferred_request_remains_pending_until_consumed() {
+        let id = unique_session();
+        schedule_compact_run(&id, Some("keep queued input".into()), true);
+        let request = pending_compact_request(&id).expect("pending request");
+        assert_eq!(pending_compact_request(&id), Some(request.clone()));
+        complete_pending_compact(&id, &request);
+        assert_eq!(pending_compact_request(&id), None);
+    }
+
+    #[test]
+    fn completing_an_old_request_preserves_newer_identical_instructions() {
+        let id = unique_session();
+        schedule_compact_run(&id, Some("keep goals".into()), true);
+        let mut old = pending_compact_request(&id).expect("old request");
+        schedule_compact_run(&id, Some("keep goals".into()), true);
+        let newer = pending_compact_request(&id).expect("new request");
+        // Identity must distinguish identical requests even at clock granularity.
+        old.requested_at = newer.requested_at;
+        complete_pending_compact(&id, &old);
+        assert_eq!(take_pending_compact(&id), Some(newer));
+    }
+
+    #[test]
+    fn completing_an_attempt_does_not_restore_an_interrupted_request() {
+        let id = unique_session();
+        schedule_compact_run(&id, None, true);
+        let attempted = pending_compact_request(&id).expect("pending request");
+        clear_pending_compact(&id);
+        complete_pending_compact(&id, &attempted);
+        assert_eq!(pending_compact_request(&id), None);
     }
 }
