@@ -28,8 +28,13 @@ pub(crate) async fn run_doctor() -> Result<()> {
     let python = bundle
         .as_ref()
         .map_or_else(|| "python".into(), |runtime| runtime.python.clone());
-    for program in [&node, &python] {
-        match Command::new(program).arg("--version").output() {
+    use devo_util_paths::runtime_environment::{Interpreter, remove_interpreter_environment};
+    for (program, interpreter) in [(&node, Interpreter::Node), (&python, Interpreter::Python)] {
+        let mut command = Command::new(program);
+        if bundle.is_some() {
+            remove_interpreter_environment(&mut command, interpreter);
+        }
+        match command.arg("--version").output() {
             Ok(output) if output.status.success() => {
                 println!(
                     "  {}: {}",
@@ -49,6 +54,7 @@ pub(crate) async fn run_doctor() -> Result<()> {
         "import rlm.repl, mcp, tyro, dill; print('Python kernel dependencies ready')",
     ]);
     if let Some(bundle) = &bundle {
+        remove_interpreter_environment(&mut probe, Interpreter::Python);
         probe
             .env("PYTHONPATH", &bundle.python_site)
             .env("PYTHONNOUSERSITE", "1");
