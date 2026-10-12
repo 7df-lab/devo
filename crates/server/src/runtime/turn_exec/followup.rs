@@ -105,24 +105,27 @@ impl ServerRuntime {
         )
         .await;
         let runtime = Arc::clone(self);
-        tokio::spawn(async move {
-            runtime
-                .execute_turn(ExecuteTurnRequest {
-                    session_id,
-                    turn,
-                    turn_config,
-                    display_input: queued.display_input,
-                    client_user_message_id: queued.client_user_message_id,
-                    input: queued.input_text,
-                    input_messages: queued.input_messages,
-                    input_images: queued.input_images,
-                    input_image_paths: queued.input_image_paths,
-                    collaboration_mode: queued.collaboration_mode,
-                    input_mode: TurnInputMode::VisibleUserMessage,
-                    user_message_already_emitted: false,
-                })
-                .await;
-        });
+        drop(
+            self.spawn_registered_active_turn_task(session_id, async move {
+                runtime
+                    .execute_turn(ExecuteTurnRequest {
+                        session_id,
+                        turn,
+                        turn_config,
+                        display_input: queued.display_input,
+                        client_user_message_id: queued.client_user_message_id,
+                        input: queued.input_text,
+                        input_messages: queued.input_messages,
+                        input_images: queued.input_images,
+                        input_image_paths: queued.input_image_paths,
+                        collaboration_mode: queued.collaboration_mode,
+                        input_mode: TurnInputMode::VisibleUserMessage,
+                        user_message_already_emitted: false,
+                    })
+                    .await;
+            })
+            .await,
+        );
         true
     }
 
@@ -183,21 +186,27 @@ impl ServerRuntime {
             Some(turn.native.id),
         )
         .await;
-        Box::pin(Arc::clone(self).execute_turn(ExecuteTurnRequest {
-            session_id,
-            turn,
-            turn_config,
-            display_input: queued.display_input,
-            client_user_message_id: queued.client_user_message_id,
-            input: queued.input_text,
-            input_messages: queued.input_messages,
-            input_images: queued.input_images,
-            input_image_paths: queued.input_image_paths,
-            collaboration_mode: queued.collaboration_mode,
-            input_mode: TurnInputMode::VisibleUserMessage,
-            user_message_already_emitted: false,
-        }))
-        .await;
+        let runtime = Arc::clone(self);
+        let task = self
+            .spawn_registered_active_turn_task(session_id, async move {
+                Box::pin(runtime.execute_turn(ExecuteTurnRequest {
+                    session_id,
+                    turn,
+                    turn_config,
+                    display_input: queued.display_input,
+                    client_user_message_id: queued.client_user_message_id,
+                    input: queued.input_text,
+                    input_messages: queued.input_messages,
+                    input_images: queued.input_images,
+                    input_image_paths: queued.input_image_paths,
+                    collaboration_mode: queued.collaboration_mode,
+                    input_mode: TurnInputMode::VisibleUserMessage,
+                    user_message_already_emitted: false,
+                }))
+                .await;
+            })
+            .await;
+        let _ = task.await;
         true
     }
 
@@ -307,10 +316,16 @@ impl ServerRuntime {
         turn_config: &devo_core::TurnConfig,
         display_input: &str,
     ) {
-        if let Some(session_handle) = self.sessions.lock().await.get(&session_id).cloned() {
+        if let Some(session_handle) = self.session(session_id).await {
             session_handle
                 .activate_runtime_queued_turn(turn.clone(), turn_config.clone())
                 .await;
+            self.register_active_runtime_turn_execution(
+                session_id,
+                turn.clone(),
+                /*connection_id*/ None,
+            )
+            .await;
             self.add_active_turn_user_text(session_id, turn.turn_id(), display_input.to_string())
                 .await;
         }
