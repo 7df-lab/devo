@@ -7,6 +7,7 @@ import { NativeAgentConnection } from "./native-agent-connection.js";
 import { createNativeTrafficLogFromEnv } from "./native-traffic-log.js";
 import { applyDevoAgentDirEnv, runInteractiveHost } from "./host.js";
 import { applyCliSessionOverrides, nativeServerArgs } from "./cli-session-overrides.js";
+import { DEVO_TUI_VERSION } from "./devo-brand.js";
 
 export function assertInheritedTty(): void {
   if (!process.stdin.isTTY || !process.stdout.isTTY) {
@@ -54,7 +55,7 @@ export async function main(): Promise<void> {
 
   await conn.initialize({
     name: "devo-tui",
-    version: process.env.DEVO_VERSION || "0.2.0",
+    version: DEVO_TUI_VERSION,
   });
 
   const resumeSessionId = String(process.env.DEVO_RESUME_SESSION_ID ?? "").trim();
