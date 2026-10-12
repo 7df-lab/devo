@@ -28,6 +28,30 @@ class AgentDirectoryTests(unittest.TestCase):
 
 
 class RlmHostHelperTests(unittest.IsolatedAsyncioTestCase):
+    async def test_harness_followup_guidance_matches_recovered_child_contract(self):
+        session_dir = Path(gettempdir()) / "devo-recovered-child"
+        payload = {
+            "rlm_child_id": "child-id",
+            "active_session_id": "child-id",
+            "session_id": "child-id",
+            "session_name": "worker",
+            "session_dir": str(session_dir),
+            "status": "completed",
+        }
+
+        async def fake_host_request(request_type, request_payload=None):
+            self.assertEqual((request_type, request_payload), ("rlm.list_subagents", None))
+            return {"subagents": [payload]}
+
+        with patch.object(rlm, "host_request", new=fake_host_request):
+            children = await rlm.list_subagents()
+
+        self.assertEqual(children, [rlm.RLMSubagent(**{**payload, "session_dir": session_dir})])
+        overview = harness.HarnessState(in_memory=True).overview()
+        self.assertIn("receiver_name=child.session_name", overview)
+        self.assertIn("spawn handle uses handle.name", overview)
+        self.assertEqual(children[0].session_name, "worker")
+
     async def test_helpers_use_typed_host_requests(self):
         calls = []
 

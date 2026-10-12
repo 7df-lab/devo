@@ -749,8 +749,9 @@ class HarnessState:
             "handle = await rlm.spawn('sub-task', name='worker'); admission returns immediately with rlm_child_id, name, session_dir, "
             "and model, never the child's answer. Results arrive only through explicit agent_message replies or "
             "files; children reply with await agent_message.send(message, receiver_role='parent'). Use "
-            "await rlm.list_subagents() to recover direct child handles and await agent_message.send(..., "
-            "receiver_role='child', receiver_name=handle.name) for follow-ups.",
+            "await rlm.list_subagents() to recover direct children. A recovered child uses child.session_name "
+            "(the spawn handle uses handle.name); send await agent_message.send(..., "
+            "receiver_role='child', receiver_name=child.session_name) for follow-ups.",
         ]
         for kind in _KINDS:
             records = self.list(kind)[:max_entries_per_kind]
