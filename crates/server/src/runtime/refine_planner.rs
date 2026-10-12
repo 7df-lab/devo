@@ -40,6 +40,7 @@ const REFINE_SYSTEM_PROMPT: &str = "You plan Continual Harness refinements. Repl
 const AUTO_REFINE_PLAN_INSTRUCTIONS: &str = "auto-refine: consolidate the existing harness — merge duplicate or overlapping entries, tighten stale guidance, and remove noise. Prefer Update/Delete over Create unless something durable is missing. If the harness is already clean, return empty edits; never store this instruction text itself as an entry.";
 
 pub(crate) fn build_refine_plan_request(
+    model_slug: String,
     model: String,
     pending: &PendingRefine,
     harness_snapshot: &str,
@@ -61,7 +62,7 @@ pub(crate) fn build_refine_plan_request(
         harness_snapshot
     );
     ModelRequest {
-        model_slug: devo_protocol::ModelProfileKey::Generic,
+        model_slug: devo_protocol::ModelProfileKey::CatalogSlug(model_slug),
         model,
         system: Some(format!(
             "{REFINE_SYSTEM_PROMPT} JSON shape: {REFINE_JSON_SHAPE}."
@@ -302,7 +303,8 @@ impl ServerRuntime {
             devo_protocol::native::usage::UsagePurpose::Refine,
         );
         let snapshot = harness_snapshot_json(harness_path);
-        let model_request = build_refine_plan_request(request_model, pending, &snapshot);
+        let model_request =
+            build_refine_plan_request(catalog_request_model, request_model, pending, &snapshot);
         let response = match tokio::time::timeout(
             REFINE_AUX_TIMEOUT,
             provider.completion(model_request),
@@ -435,7 +437,8 @@ mod tests {
     #[test]
     fn auto_sentinel_never_reaches_planner_prompt() {
         let user_text = |instructions: Option<&str>| {
-            let request = build_refine_plan_request("m".into(), &pending(instructions), "{}");
+            let request =
+                build_refine_plan_request("m".into(), "m".into(), &pending(instructions), "{}");
             match &request.messages[0].content[0] {
                 RequestContent::Text { text } => text.clone(),
                 other => unreachable!("refine plan user content: {other:?}"),
@@ -454,5 +457,28 @@ mod tests {
         let manual = user_text(Some("focus digest wiring"));
         assert!(manual.contains("Instructions:\nfocus digest wiring"));
         assert!(!manual.contains("consolidate the existing harness"));
+    }
+
+    #[test]
+    fn refine_preserves_catalog_profile_with_provider_model_override() {
+        // Provider capability filtering must use the catalog identity even
+        // when a deployment config overrides the model name sent on the wire.
+        let request = build_refine_plan_request(
+            "gpt-5.6-luna".into(),
+            "my-deployment".into(),
+            &pending(Some("remember the QA result")),
+            "{}",
+        );
+        assert_eq!(
+            (request.model_slug, request.model, request.sampling),
+            (
+                devo_protocol::ModelProfileKey::CatalogSlug("gpt-5.6-luna".into()),
+                "my-deployment".into(),
+                SamplingControls {
+                    temperature: Some(0.0),
+                    ..SamplingControls::default()
+                },
+            )
+        );
     }
 }
