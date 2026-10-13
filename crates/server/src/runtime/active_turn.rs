@@ -23,6 +23,8 @@ pub(crate) struct ActiveTurnExecution {
     pub active_user_text_turn_id: Option<TurnId>,
     /// User text admitted to this turn; cleared when the turn becomes terminal.
     pub active_user_texts: Vec<String>,
+    /// Explicit host goal activation retained until this turn finishes merging.
+    goal_continuation_requested: bool,
 }
 
 /// Unified registry replacing the scattered `active_turn_*`, `active_tasks`,
@@ -43,6 +45,7 @@ impl ActiveTurnRegistry {
             stream: None,
             active_user_text_turn_id: None,
             active_user_texts: Vec::new(),
+            goal_continuation_requested: false,
         }
     }
 
@@ -233,26 +236,28 @@ impl ActiveTurnRegistry {
         }
     }
 
-    /// Clears cancellation, the turn snapshot, and connection routing while a turn ends.
-    ///
-    /// Stream state and spawn snapshots remain registered until the turn task
-    /// unregisters them after `MergeTurn`.
-    pub(crate) async fn clear_interrupt_handles(&self, session_id: SessionId) {
+    /// Retains an explicit goal activation while a turn is still registered.
+    /// Returns false once cleanup has made the session available for admission.
+    pub(crate) async fn defer_goal_continuation(&self, session_id: SessionId) -> bool {
         let mut turns = self.turns.lock().await;
-        if let Some(execution) = turns.get_mut(&session_id) {
-            execution.turn = None;
-            execution.cancel_token = None;
-            execution.abort_handle = None;
-            execution.connection_id = None;
-            execution.active_user_text_turn_id = None;
-            execution.active_user_texts.clear();
-            Self::maybe_remove_empty(&mut turns, &session_id);
-        }
+        let Some(execution) = turns
+            .get_mut(&session_id)
+            .filter(|entry| entry.turn.is_some())
+        else {
+            return false;
+        };
+        execution.goal_continuation_requested = true;
+        true
     }
 
     /// Drops all runtime state for a session turn, including stream mirrors.
-    pub(crate) async fn clear_runtime_handles(&self, session_id: SessionId) {
-        self.turns.lock().await.remove(&session_id);
+    /// Returns any explicit goal activation atomically with releasing admission.
+    pub(crate) async fn clear_runtime_handles(&self, session_id: SessionId) -> bool {
+        self.turns
+            .lock()
+            .await
+            .remove(&session_id)
+            .is_some_and(|execution| execution.goal_continuation_requested)
     }
 
     pub(crate) async fn register_spawn_snapshot(
@@ -378,6 +383,7 @@ impl ActiveTurnRegistry {
                 && execution.stream.is_none()
                 && execution.active_user_text_turn_id.is_none()
                 && execution.active_user_texts.is_empty()
+                && !execution.goal_continuation_requested
         });
         if should_remove {
             turns.remove(session_id);
