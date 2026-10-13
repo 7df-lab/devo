@@ -88,29 +88,14 @@ enum ResumeTiming {
     WhilePausing,
 }
 
-#[test]
-fn paused_python_goal_resumes_and_completes() -> Result<()> {
-    run_in_test_thread(ResumeTiming::AfterPauseReply)
+#[tokio::test]
+async fn paused_python_goal_resumes_and_completes() -> Result<()> {
+    check_pause_resume(ResumeTiming::AfterPauseReply).await
 }
 
-#[test]
-fn concurrent_resume_is_not_overwritten_by_late_pause_reply() -> Result<()> {
-    run_in_test_thread(ResumeTiming::WhilePausing)
-}
-
-fn run_in_test_thread(timing: ResumeTiming) -> Result<()> {
-    // Native dispatch futures exceed the default Windows debug test stack.
-    // Use a local test thread rather than mutating process environment.
-    std::thread::Builder::new()
-        .stack_size(8 * 1024 * 1024)
-        .spawn(move || {
-            tokio::runtime::Builder::new_current_thread()
-                .enable_all()
-                .build()?
-                .block_on(check_pause_resume(timing))
-        })?
-        .join()
-        .expect("goal pause/resume test thread panicked")
+#[tokio::test]
+async fn concurrent_resume_is_not_overwritten_by_late_pause_reply() -> Result<()> {
+    check_pause_resume(ResumeTiming::WhilePausing).await
 }
 
 async fn check_pause_resume(timing: ResumeTiming) -> Result<()> {
