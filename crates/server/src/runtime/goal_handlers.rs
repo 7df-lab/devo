@@ -471,7 +471,22 @@ impl ServerRuntime {
                             self.interrupt_active_goal_continuation_turn(session_id, "goal paused")
                                 .await;
                         }
-                        self.sync_core_session_goal(session_id, None).await;
+                        // Resume can arrive during the bounded interrupt wait.
+                        // Mirror and return the latest host state, not the pause
+                        // snapshot from before that wait.
+                        let latest_goal = self
+                            .goal_stores
+                            .lock()
+                            .await
+                            .get(&session_id)
+                            .and_then(GoalStore::get)
+                            .cloned();
+                        self.sync_core_session_goal(session_id, latest_goal.as_ref())
+                            .await;
+                        let native_goal = latest_goal
+                            .as_ref()
+                            .map(Goal::to_native_goal)
+                            .unwrap_or(native_goal);
                         return serde_json::to_value(SuccessResponse {
                             id: request_id,
                             result:
@@ -899,7 +914,9 @@ impl ServerRuntime {
         if !should_continue {
             return;
         }
-        if turn_active {
+        // Registration and cleanup share one registry lock: an activation is
+        // either consumed after MergeTurn or admitted directly once idle.
+        if self.active_turns.defer_goal_continuation(session_id).await {
             return;
         }
         self.maybe_start_goal_continuation_turn(session_id).await;

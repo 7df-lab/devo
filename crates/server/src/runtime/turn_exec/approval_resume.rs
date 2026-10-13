@@ -453,9 +453,15 @@ impl ServerRuntime {
         }
         self.clear_turn_spawn_snapshot(session_id, turn_id).await;
         self.unregister_active_stream(session_id).await;
-        self.clear_active_turn_interrupt_handles(session_id).await;
-        self.clear_active_turn_runtime_handles(session_id).await;
+        let explicit_goal_activation = self.clear_active_turn_runtime_handles(session_id).await;
         cancel_token.cancel();
+        if explicit_goal_activation {
+            super::spawn_post_turn_scheduling(
+                Arc::clone(self),
+                session_id,
+                /*should_auto_continue_goal*/ true,
+            );
+        }
         continuation_result
     }
 

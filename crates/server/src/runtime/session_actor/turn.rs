@@ -159,11 +159,8 @@ pub(crate) async fn execute_turn_task(
 
     runtime.clear_turn_spawn_snapshot(session_id, turn_id).await;
     runtime.unregister_active_stream(session_id).await;
-    runtime
-        .clear_active_turn_interrupt_handles(session_id)
-        .await;
-    runtime.clear_active_turn_runtime_handles(session_id).await;
+    let explicit_goal_activation = runtime.clear_active_turn_runtime_handles(session_id).await;
     runtime.broadcast_recovery_state(session_id).await;
 
-    should_auto_continue_goal
+    should_auto_continue_goal || explicit_goal_activation
 }

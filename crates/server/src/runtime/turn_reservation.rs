@@ -79,18 +79,11 @@ impl ServerRuntime {
             .await;
     }
 
-    pub(super) async fn clear_active_turn_interrupt_handles(
-        &self,
-        session_id: devo_protocol::native::ids::SessionId,
-    ) {
-        self.active_turns.clear_interrupt_handles(session_id).await;
-    }
-
     pub(super) async fn clear_active_turn_runtime_handles(
         &self,
         session_id: devo_protocol::native::ids::SessionId,
-    ) {
-        self.active_turns.clear_runtime_handles(session_id).await;
+    ) -> bool {
+        self.active_turns.clear_runtime_handles(session_id).await
     }
 }
 
