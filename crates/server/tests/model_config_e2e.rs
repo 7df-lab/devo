@@ -265,7 +265,7 @@ async fn spawn_initialized_stdio_server(
     tokio::io::Lines<AsyncBufReader<tokio::process::ChildStdout>>,
     AsyncBufReader<tokio::process::ChildStderr>,
 )> {
-    let mut command = devo_command()?;
+    let mut command = devo_command().await?;
     let mut child = command
         .arg("server")
         .arg("--transport")

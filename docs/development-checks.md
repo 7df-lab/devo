@@ -40,6 +40,15 @@ directory through `CARGO_TARGET_DIR`; avoid concurrent builds against the same
 target directory because Cargo serializes them. TypeScript and Python changes
 can be tested without waiting for that Rust build lock.
 
+The server's stdio test helpers resolve CLI and MCP fixture binaries beside
+the running test's `deps` directory. Their on-demand Cargo builds use that
+same profile (`debug` maps to Cargo's `dev` name), so `dev-fast` tests cannot
+silently select an older `target/debug/devo`. Cargo checks fixture freshness
+once per test process; subsequent child launches reuse the checked binary.
+The build inherits the invocation's target-directory and target settings and
+fails if its expected output is absent. An explicit `CARGO_BIN_EXE_devo`
+fixture override remains supported. These helpers change test execution only.
+
 ## Optional faster Rust iteration
 
 Use `dev-fast` when filename/line backtraces are enough for the edit:

@@ -1,8 +1,15 @@
 #![allow(dead_code)]
 
+#[path = "cargo_test_binary.rs"]
+mod cargo_test_binary;
+
+pub(crate) use cargo_test_binary::devo_command;
+// Some suites use only the CLI fixture.
+#[allow(unused_imports)]
+pub(crate) use cargo_test_binary::mcp_server_binary as build_test_mcp_server_binary;
+
 use std::io;
 use std::path::Path;
-use std::path::PathBuf;
 use std::time::Duration;
 
 use anyhow::Context;
@@ -16,7 +23,6 @@ use tokio::io::AsyncWriteExt;
 use tokio::io::BufReader as AsyncBufReader;
 use tokio::net::TcpListener;
 use tokio::net::TcpStream;
-use tokio::process::Command;
 use tokio::sync::mpsc;
 use tokio::time::timeout;
 
@@ -74,7 +80,7 @@ pub(crate) struct StdioAcpProcess {
 }
 
 pub(crate) async fn spawn_stdio_acp_process(home_dir: &Path) -> Result<StdioAcpProcess> {
-    let mut command = devo_command()?;
+    let mut command = devo_command().await?;
     let mut child = command
         .arg("server")
         .arg("--protocols")
@@ -614,63 +620,6 @@ fn sse_data(value: Value) -> String {
     format!("data: {value}\n\n")
 }
 
-pub(crate) async fn build_test_mcp_server_binary() -> Result<PathBuf> {
-    let workspace = workspace_root()?;
-    let binary = target_debug_binary(&workspace, "test_stdio_server");
-    if binary.is_file() {
-        return Ok(binary);
-    }
-
-    let manifest = workspace.join("Cargo.toml");
-    let cargo_path = std::env::var_os("CARGO")
-        .map(PathBuf::from)
-        .unwrap_or_else(|| PathBuf::from("cargo"));
-    let status = Command::new(cargo_path)
-        .current_dir(&workspace)
-        .arg("build")
-        .arg("--quiet")
-        .arg("--manifest-path")
-        .arg(&manifest)
-        .arg("-p")
-        .arg("devo-rmcp-client")
-        .arg("--bin")
-        .arg("test_stdio_server")
-        .status()
-        .await
-        .context("build MCP test stdio server")?;
-    anyhow::ensure!(status.success(), "MCP test stdio server build failed");
-    anyhow::ensure!(
-        binary.is_file(),
-        "MCP test stdio server binary was not built at {}",
-        binary.display()
-    );
-    Ok(binary)
-}
-
-fn workspace_root() -> Result<PathBuf> {
-    PathBuf::from(env!("CARGO_MANIFEST_DIR"))
-        .join("..")
-        .join("..")
-        .canonicalize()
-        .context("canonicalize workspace root")
-}
-
-fn target_debug_binary(workspace: &Path, name: &str) -> PathBuf {
-    let target_dir = std::env::var_os("CARGO_TARGET_DIR")
-        .map(PathBuf::from)
-        .unwrap_or_else(|| workspace.join("target"));
-    let target_dir = if target_dir.is_absolute() {
-        target_dir
-    } else {
-        workspace.join(target_dir)
-    };
-    let mut binary = target_dir.join("debug").join(name);
-    if cfg!(windows) {
-        binary.set_extension("exe");
-    }
-    binary
-}
-
 pub(crate) async fn write_stdio_json(
     stdin: &mut tokio::process::ChildStdin,
     value: serde_json::Value,
@@ -776,42 +725,20 @@ async fn parse_stdio_json_line(
     })
 }
 
-pub(crate) fn devo_command() -> Result<Command> {
-    if let Some(binary_path) = std::env::var_os("CARGO_BIN_EXE_devo").map(PathBuf::from)
-        && binary_path.is_file()
-    {
-        return Ok(Command::new(binary_path));
-    }
-
-    let binary_path = devo_binary_path()?;
-    if binary_path.is_file() {
-        return Ok(Command::new(binary_path));
-    }
-
-    let cargo_path = std::env::var_os("CARGO")
-        .map(PathBuf::from)
-        .unwrap_or_else(|| PathBuf::from("cargo"));
-    let mut command = Command::new(cargo_path);
-    command
-        .current_dir(env!("CARGO_MANIFEST_DIR"))
-        .arg("run")
-        .arg("--quiet")
-        .arg("-p")
-        .arg("devo-cli")
-        .arg("--bin")
-        .arg("devo")
-        .arg("--");
-    Ok(command)
-}
-
-fn devo_binary_path() -> Result<PathBuf> {
-    let target_root = match std::env::var_os("CARGO_TARGET_DIR") {
-        Some(dir) => PathBuf::from(dir),
-        None => workspace_root()?.join("target"),
-    };
-    let mut binary = target_root.join("debug").join("devo");
-    if cfg!(windows) {
-        binary.set_extension("exe");
-    }
-    Ok(binary)
+#[test]
+fn stdio_fixture_binaries_follow_the_test_profile() -> Result<()> {
+    let executable = std::env::current_exe()?;
+    let expected = executable
+        .parent()
+        .context("test deps directory")?
+        .parent()
+        .context("test profile directory")?
+        .to_path_buf();
+    let mcp = cargo_test_binary::current_binary_path("test_stdio_server")?;
+    let devo = cargo_test_binary::current_binary_path("devo")?;
+    assert_eq!(
+        [mcp.parent(), devo.parent()],
+        [Some(expected.as_path()), Some(expected.as_path())],
+    );
+    Ok(())
 }
