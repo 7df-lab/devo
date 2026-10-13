@@ -90,6 +90,8 @@ pub(crate) fn invent_session_persistence_extras() -> SessionPersistenceExtras {
         source: "cli".into(),
         collaboration_mode: None,
         permission_preset: None,
+        agent_path: None,
+        agent_nickname: None,
         kernel_snapshot_path: None,
     }
 }

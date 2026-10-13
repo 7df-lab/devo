@@ -148,7 +148,11 @@ pub fn session_record_from_native(
                 // Canonical Session has no path string; use a non-empty sentinel
                 // so SQLite + row parsers keep subagents off the default list
                 // (`""` was previously collapsed to NULL on read).
-                Some(role.clone().unwrap_or_else(|| "subagent".to_string())),
+                Some(
+                    extras
+                        .and_then(|extras| extras.agent_path.clone())
+                        .unwrap_or_else(|| role.clone().unwrap_or_else(|| "subagent".to_string())),
+                ),
                 None,
                 None,
             ),
@@ -190,7 +194,7 @@ pub fn session_record_from_native(
             .map(|extras| extras.source.clone())
             .unwrap_or_default(),
         // Nickname is not modeled on canonical `SessionParent`.
-        agent_nickname: None,
+        agent_nickname: extras.and_then(|extras| extras.agent_nickname.clone()),
         agent_role,
         agent_path,
         model_provider: session.model.provider.clone(),
