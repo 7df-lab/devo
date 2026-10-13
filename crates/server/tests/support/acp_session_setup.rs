@@ -727,7 +727,7 @@ async fn parse_stdio_json_line(
 
 #[test]
 fn stdio_fixture_binaries_follow_the_test_profile() -> Result<()> {
-    let executable = std::env::current_exe()?;
+    let executable = std::fs::canonicalize(std::env::current_exe()?)?;
     let expected = executable
         .parent()
         .context("test deps directory")?

@@ -1,6 +1,7 @@
 #![allow(dead_code)]
 
-use std::path::{Path, PathBuf};
+use std::ffi::OsString;
+use std::path::{Component, Path, PathBuf};
 
 use anyhow::{Context, Result, ensure};
 use tokio::process::Command;
@@ -29,11 +30,11 @@ pub(crate) async fn mcp_server_binary() -> Result<PathBuf> {
 }
 
 pub(crate) fn current_binary_path(name: &str) -> Result<PathBuf> {
-    Ok(TestProfile::from_executable(&std::env::current_exe()?)?.binary_path(name))
+    Ok(TestProfile::current()?.binary_path(name))
 }
 
 async fn build_binary(package: &str, name: &str) -> Result<PathBuf> {
-    let profile = TestProfile::from_executable(&std::env::current_exe()?)?;
+    let profile = TestProfile::current()?;
     // Check freshness once per test process. Existence alone can silently run
     // an older CLI even though Cargo just rebuilt the test's server library.
     let status = profile
@@ -51,10 +52,23 @@ async fn build_binary(package: &str, name: &str) -> Result<PathBuf> {
 struct TestProfile {
     directory: PathBuf,
     cargo_name: String,
+    target_directory: PathBuf,
+    target: Option<OsString>,
 }
 
 impl TestProfile {
-    fn from_executable(executable: &Path) -> Result<Self> {
+    fn current() -> Result<Self> {
+        let target_directory = Path::new(env!("CARGO_TARGET_TMPDIR"))
+            .parent()
+            .context("Cargo target directory")?;
+        let target_directory =
+            std::fs::canonicalize(target_directory).context("canonical Cargo target directory")?;
+        let executable =
+            std::fs::canonicalize(std::env::current_exe()?).context("canonical test executable")?;
+        Self::from_executable(&executable, &target_directory)
+    }
+
+    fn from_executable(executable: &Path, target_directory: &Path) -> Result<Self> {
         let deps = executable.parent().context("test executable directory")?;
         ensure!(
             deps.file_name().is_some_and(|name| name == "deps"),
@@ -64,10 +78,22 @@ impl TestProfile {
             .parent()
             .context("test profile directory")?
             .to_path_buf();
-        let output_name = directory
-            .file_name()
-            .and_then(|name| name.to_str())
-            .context("test profile name")?;
+        let relative = directory.strip_prefix(target_directory).with_context(|| {
+            format!(
+                "test profile {} is outside Cargo target directory {}",
+                directory.display(),
+                target_directory.display()
+            )
+        })?;
+        let components = relative.components().collect::<Vec<_>>();
+        let (target, output_name) = match components.as_slice() {
+            [Component::Normal(profile)] => (None, *profile),
+            [Component::Normal(target), Component::Normal(profile)] => {
+                (Some(target.to_os_string()), *profile)
+            }
+            _ => anyhow::bail!("unexpected Cargo test output layout"),
+        };
+        let output_name = output_name.to_str().context("test profile name")?;
         let cargo_name = match output_name {
             "debug" => "dev",
             name => name,
@@ -76,6 +102,8 @@ impl TestProfile {
         Ok(Self {
             directory,
             cargo_name,
+            target_directory: target_directory.to_path_buf(),
+            target,
         })
     }
 
@@ -90,17 +118,21 @@ impl TestProfile {
             .join("..");
         let cargo = std::env::var_os("CARGO").unwrap_or_else(|| "cargo".into());
         let mut command = Command::new(cargo);
-        command.current_dir(workspace).args([
-            "build",
-            "--quiet",
-            "--locked",
-            "--profile",
-            &self.cargo_name,
-            "-p",
-            package,
-            "--bin",
-            name,
-        ]);
+        command
+            .current_dir(workspace)
+            .args([
+                "build",
+                "--quiet",
+                "--locked",
+                "--profile",
+                &self.cargo_name,
+                "--target-dir",
+            ])
+            .arg(&self.target_directory)
+            .args(["-p", package, "--bin", name]);
+        if let Some(target) = &self.target {
+            command.arg("--target").arg(target);
+        }
         command
     }
 }
@@ -109,50 +141,83 @@ impl TestProfile {
 mod tests {
     use super::*;
     use pretty_assertions::assert_eq;
+    use tempfile::TempDir;
 
     #[test]
-    fn binaries_and_builds_use_the_test_profile() -> Result<()> {
+    fn binaries_and_builds_use_the_test_profile_and_target() -> Result<()> {
+        let root = TempDir::new()?;
+        let target_directory = root.path().join("custom-output");
         for (output, cargo_name) in [
             ("debug", "dev"),
             ("dev-fast", "dev-fast"),
             ("release", "release"),
         ] {
-            let directory = PathBuf::from("custom-target").join(output);
-            let executable = directory.join("deps").join("contract-test");
-            let profile = TestProfile::from_executable(&executable)?;
-            assert_eq!(
-                profile,
-                TestProfile {
-                    directory: directory.clone(),
-                    cargo_name: cargo_name.to_owned()
-                }
-            );
-            assert_eq!(
-                profile.binary_path("devo"),
-                directory.join(format!("devo{}", std::env::consts::EXE_SUFFIX))
-            );
-            let command = profile.build_command("devo-cli", "devo");
-            assert_eq!(
-                command.as_std().get_args().collect::<Vec<_>>(),
-                [
+            for target in [None, Some("x86_64-pc-windows-msvc")] {
+                let directory = target
+                    .map_or_else(
+                        || target_directory.clone(),
+                        |name| target_directory.join(name),
+                    )
+                    .join(output);
+                let executable = directory.join("deps").join("contract-test");
+                let profile = TestProfile::from_executable(&executable, &target_directory)?;
+                assert_eq!(
+                    profile,
+                    TestProfile {
+                        directory: directory.clone(),
+                        cargo_name: cargo_name.to_owned(),
+                        target_directory: target_directory.clone(),
+                        target: target.map(OsString::from),
+                    }
+                );
+                assert_eq!(
+                    profile.binary_path("devo"),
+                    directory.join(format!("devo{}", std::env::consts::EXE_SUFFIX))
+                );
+                let command = profile.build_command("devo-cli", "devo");
+                let mut expected = [
                     "build",
                     "--quiet",
                     "--locked",
                     "--profile",
                     cargo_name,
-                    "-p",
-                    "devo-cli",
-                    "--bin",
-                    "devo",
+                    "--target-dir",
                 ]
-                .map(std::ffi::OsStr::new)
-            );
+                .map(OsString::from)
+                .to_vec();
+                expected.push(target_directory.as_os_str().to_owned());
+                expected.extend(["-p", "devo-cli", "--bin", "devo"].map(OsString::from));
+                if let Some(target) = target {
+                    expected.extend(["--target", target].map(OsString::from));
+                }
+                assert_eq!(
+                    command
+                        .as_std()
+                        .get_args()
+                        .map(std::ffi::OsStr::to_owned)
+                        .collect::<Vec<_>>(),
+                    expected
+                );
+            }
         }
         Ok(())
     }
 
     #[test]
     fn unexpected_test_executable_layout_is_rejected() {
-        assert!(TestProfile::from_executable(&PathBuf::from("other").join("test")).is_err());
+        let root = PathBuf::from("target");
+        assert!(TestProfile::from_executable(&root.join("other").join("test"), &root).is_err());
+        assert!(
+            TestProfile::from_executable(
+                &root
+                    .join("a")
+                    .join("b")
+                    .join("debug")
+                    .join("deps")
+                    .join("test"),
+                &root
+            )
+            .is_err()
+        );
     }
 }
