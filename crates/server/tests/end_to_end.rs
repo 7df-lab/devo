@@ -1,5 +1,9 @@
+#[path = "support/cargo_test_binary.rs"]
+mod cargo_test_binary;
+
+use cargo_test_binary::devo_command;
+
 use std::net::TcpListener as StdTcpListener;
-use std::path::PathBuf;
 use std::sync::Arc;
 use std::sync::atomic::AtomicUsize;
 use std::sync::atomic::Ordering;
@@ -17,7 +21,6 @@ use tokio::io::AsyncBufReadExt;
 use tokio::io::AsyncReadExt;
 use tokio::io::AsyncWriteExt;
 use tokio::io::BufReader as AsyncBufReader;
-use tokio::process::Command;
 use tokio::time::timeout;
 use tokio_tungstenite::connect_async;
 use tokio_tungstenite::tungstenite::Message;
@@ -202,7 +205,7 @@ async fn stdio_server_process_supports_handshake_and_session_start() -> Result<(
 
     let test_cwd = home_dir.path().to_string_lossy().into_owned();
 
-    let mut command = devo_command()?;
+    let mut command = devo_command().await?;
     let mut child = command
         .arg("server")
         .arg("--transport")
@@ -292,7 +295,7 @@ async fn second_stdio_server_process_extends_protocols_before_proxying() -> Resu
     std::fs::create_dir_all(&second_workspace)?;
     let second_cwd = second_workspace.to_string_lossy().into_owned();
 
-    let mut first_command = devo_command()?;
+    let mut first_command = devo_command().await?;
     let mut first_child = first_command
         .arg("server")
         .arg("--transport")
@@ -328,7 +331,7 @@ async fn second_stdio_server_process_extends_protocols_before_proxying() -> Resu
     .await?;
     assert_eq!(first_initialize_response["id"], serde_json::json!(1));
 
-    let mut second_command = devo_command()?;
+    let mut second_command = devo_command().await?;
     let mut second_child = second_command
         .arg("server")
         .arg("--transport")
@@ -444,7 +447,7 @@ async fn primary_stdio_disconnect_keeps_singleton_for_proxy_client() -> Result<(
     let first_cwd = first_workspace.to_string_lossy().into_owned();
     let second_cwd = second_workspace.to_string_lossy().into_owned();
 
-    let mut first_command = devo_command()?;
+    let mut first_command = devo_command().await?;
     let mut first_child = first_command
         .arg("server")
         .arg("--transport")
@@ -507,7 +510,7 @@ async fn primary_stdio_disconnect_keeps_singleton_for_proxy_client() -> Result<(
     )
     .await?;
 
-    let mut second_command = devo_command()?;
+    let mut second_command = devo_command().await?;
     let mut second_child = second_command
         .arg("server")
         .arg("--transport")
@@ -1006,42 +1009,6 @@ async fn websocket_turn_streams_final_ipython_cell_metadata() -> Result<()> {
     listener_task.abort();
     let _ = listener_task.await;
     Ok(())
-}
-
-fn devo_command() -> Result<Command> {
-    if let Some(binary_path) = std::env::var_os("CARGO_BIN_EXE_devo").map(PathBuf::from)
-        && binary_path.is_file()
-    {
-        return Ok(Command::new(binary_path));
-    }
-
-    let binary_path = devo_binary_path()?;
-    if binary_path.is_file() {
-        return Ok(Command::new(binary_path));
-    }
-
-    let cargo_path = std::env::var_os("CARGO")
-        .map(PathBuf::from)
-        .unwrap_or_else(|| PathBuf::from("cargo"));
-    let mut command = Command::new(cargo_path);
-    command
-        .current_dir(env!("CARGO_MANIFEST_DIR"))
-        .arg("run")
-        .arg("--quiet")
-        .arg("-p")
-        .arg("devo-cli")
-        .arg("--bin")
-        .arg("devo")
-        .arg("--");
-    Ok(command)
-}
-
-fn devo_binary_path() -> Result<PathBuf> {
-    let mut path = std::env::current_exe()?;
-    path.pop();
-    path.pop();
-    path.push(if cfg!(windows) { "devo.exe" } else { "devo" });
-    Ok(path)
 }
 
 fn has_original_method(value: &serde_json::Value, method: &str) -> bool {
