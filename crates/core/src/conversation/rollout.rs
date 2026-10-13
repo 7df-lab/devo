@@ -43,6 +43,12 @@ pub struct SessionPersistenceExtras {
     /// Session-level permission preset override, when set.
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub permission_preset: Option<crate::PermissionPreset>,
+    /// Display path for a spawned agent (for example `root/reviewer`).
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub agent_path: Option<String>,
+    /// Display nickname for a spawned agent.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub agent_nickname: Option<String>,
     /// Relative path to the kernel dill snapshot under the session dir (RLM).
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub kernel_snapshot_path: Option<String>,

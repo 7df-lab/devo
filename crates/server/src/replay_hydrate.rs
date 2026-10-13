@@ -41,14 +41,29 @@ impl ReplayedSession {
             source: String::new(),
             collaboration_mode: None,
             permission_preset: None,
+            agent_path: None,
+            agent_nickname: None,
             kernel_snapshot_path: None,
         });
+        let is_agent = matches!(
+            &native.parent,
+            Some(devo_protocol::native::session::SessionParent::Agent { .. })
+        );
+        let agent_path = is_agent.then(|| extras.agent_path.clone()).flatten();
+        let agent_nickname = is_agent
+            .then(|| {
+                extras
+                    .agent_nickname
+                    .clone()
+                    .or_else(|| native.title.clone())
+            })
+            .flatten();
         Self {
             native,
             extras,
             updated_at,
-            agent_path: None,
-            agent_nickname: None,
+            agent_path,
+            agent_nickname,
         }
     }
 
@@ -61,6 +76,109 @@ impl ReplayedSession {
             Some(devo_protocol::native::session::SessionParent::Agent { role, .. }) => role.clone(),
             None => None,
         }
+    }
+}
+
+#[cfg(test)]
+mod tests {
+    use chrono::DateTime;
+    use devo_protocol::native::model::{ModelBinding, PermissionProfile};
+    use devo_protocol::native::session::SessionParent;
+    use devo_protocol::native::session::{
+        Session, SessionActivity, SessionSettings, SessionStatus,
+    };
+    use devo_protocol::native::usage::{SessionUsage, UsageTotals};
+
+    use super::ReplayedSession;
+
+    fn native_agent_session() -> Session {
+        let now = DateTime::<chrono::Utc>::UNIX_EPOCH;
+        Session {
+            id: devo_protocol::native::ids::SessionId::new(),
+            version: 1,
+            cwd: std::path::PathBuf::new(),
+            additional_directories: Vec::new(),
+            parent: Some(SessionParent::Agent {
+                session_id: devo_protocol::native::ids::SessionId::new(),
+                role: Some("default".into()),
+            }),
+            fork_from_id: None,
+            at_turn_id: None,
+            ephemeral: false,
+            created_at: now,
+            status: SessionStatus::Idle,
+            flags: Vec::new(),
+            archived: false,
+            activity: SessionActivity::Idle,
+            active_turn_id: None,
+            queued_count: 0,
+            title: Some("reviewer".into()),
+            title_state: Default::default(),
+            model: ModelBinding {
+                provider: "test".into(),
+                model: "test".into(),
+                variant: None,
+                reasoning_effort: None,
+            },
+            settings: SessionSettings {
+                permission_profile: PermissionProfile::AutoReview,
+                reasoning_effort: None,
+                mode: None,
+                sandbox_profile: None,
+                effective_context_window: None,
+                auto_refine_enabled: None,
+                auto_refine_turn_interval: None,
+                python_cell_first_wait_ms: None,
+            },
+            git_info: None,
+            preview: String::new(),
+            last_activity_at: now,
+            transcript_size_bytes: None,
+            message_count: None,
+            summary: None,
+            task_state: None,
+            usage: SessionUsage {
+                total: UsageTotals::default(),
+                by_purpose: Vec::new(),
+                legacy: None,
+                updated_at: now,
+            },
+        }
+    }
+
+    #[test]
+    fn native_agent_identity_survives_replay() {
+        let native = native_agent_session();
+        let extras = devo_core::SessionPersistenceExtras {
+            session_context: None,
+            cli_version: String::new(),
+            source: String::new(),
+            collaboration_mode: None,
+            permission_preset: None,
+            agent_path: Some("root/planner/reviewer".into()),
+            agent_nickname: Some("reviewer".into()),
+            kernel_snapshot_path: None,
+        };
+
+        let replayed =
+            ReplayedSession::from_native(native, Some(extras), DateTime::<chrono::Utc>::UNIX_EPOCH);
+
+        assert_eq!(
+            replayed.agent_path.as_deref(),
+            Some("root/planner/reviewer")
+        );
+        assert_eq!(replayed.agent_nickname.as_deref(), Some("reviewer"));
+    }
+
+    #[test]
+    fn legacy_native_agent_uses_title_as_nickname() {
+        let native = native_agent_session();
+
+        let replayed =
+            ReplayedSession::from_native(native, None, DateTime::<chrono::Utc>::UNIX_EPOCH);
+
+        assert_eq!(replayed.agent_path, None);
+        assert_eq!(replayed.agent_nickname.as_deref(), Some("reviewer"));
     }
 }
 

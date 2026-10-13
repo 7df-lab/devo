@@ -185,10 +185,13 @@ fn subagent_hook_extra(
 mod tests {
     use super::*;
 
+    use anyhow::Context;
     use anyhow::Result;
     use devo_core::tools::AgentToolCoordinator;
     use devo_protocol::AgentInfo;
     use devo_protocol::AgentListParams;
+    use devo_protocol::AgentToolPolicy;
+    use devo_protocol::SpawnAgentParams;
     use devo_protocol::SuccessResponse;
     use devo_protocol::WaitAgentParams;
     use pretty_assertions::assert_eq;
@@ -282,6 +285,111 @@ mod tests {
                 status: Some("failed".to_string()),
             }]
         );
+
+        Ok(())
+    }
+
+    #[tokio::test]
+    async fn nested_agent_path_survives_cold_child_hydration() -> Result<()> {
+        let data_root = TempDir::new()?;
+        let runtime = build_runtime(data_root.path())?;
+        let (notifications_tx, _notifications_rx) = crate::test_outbound_channel(32);
+        let connection_id = runtime
+            .register_connection(crate::ClientTransportKind::Stdio, notifications_tx)
+            .await;
+        runtime
+            .handle_incoming(
+                connection_id,
+                serde_json::json!({
+                    "id": 1,
+                    "method": "initialize",
+                    "params": {
+                        "protocolVersion": 1,
+                        "clientCapabilities": {},
+                        "_meta": { "devo": { "protocol": "native" } },
+                        "clientInfo": { "name": "test", "title": "test", "version": "1.0.0" }
+                    }
+                }),
+            )
+            .await
+            .context("initialize response")?;
+        let created = runtime
+            .handle_incoming(
+                connection_id,
+                serde_json::json!({
+                    "id": 2,
+                    "method": "session/new",
+                    "params": {
+                        "cwd": data_root.path(),
+                        "idempotencyKey": "nested-agent-path-parent"
+                    }
+                }),
+            )
+            .await
+            .context("session/new response")?;
+        let parent_session_id = serde_json::from_value::<
+            SuccessResponse<devo_protocol::native::rpc_session::SessionNewResult>,
+        >(created)?
+        .result
+        .session
+        .id;
+
+        let child = Arc::clone(&runtime)
+            .spawn_agent(SpawnAgentParams {
+                session_id: parent_session_id,
+                message: "spawn a nested worker".into(),
+                fork_turns: Some("none".into()),
+                max_turns: None,
+                tool_policy: AgentToolPolicy::Inherit,
+                ephemeral: false,
+                nickname: Some("planner".into()),
+            })
+            .await?;
+        let grandchild = Arc::clone(&runtime)
+            .spawn_agent(SpawnAgentParams {
+                session_id: child.child_session_id,
+                message: "verify a nested path".into(),
+                fork_turns: Some("none".into()),
+                max_turns: None,
+                tool_policy: AgentToolPolicy::Inherit,
+                ephemeral: false,
+                nickname: Some("reviewer".into()),
+            })
+            .await?;
+        assert_eq!(child.agent_path, "root/planner");
+        assert_eq!(grandchild.agent_path, "root/planner/reviewer");
+
+        runtime
+            .agent_registries
+            .lock()
+            .await
+            .remove(&parent_session_id);
+        runtime
+            .agent_registries
+            .lock()
+            .await
+            .remove(&child.child_session_id);
+        let mut sessions = runtime.sessions.lock().await;
+        sessions.remove(&child.child_session_id);
+        sessions.remove(&grandchild.child_session_id);
+        drop(sessions);
+
+        let restored = runtime
+            .get_or_load_parent_session(grandchild.child_session_id)
+            .await?;
+        assert_eq!(
+            restored
+                .summary()
+                .await
+                .expect("restored summary")
+                .agent_path,
+            Some("root/planner/reviewer".into())
+        );
+        let (_, restored_path) = runtime
+            .child_parent_and_path(grandchild.child_session_id)
+            .await
+            .expect("restored grandchild linkage");
+        assert_eq!(restored_path, "root/planner/reviewer");
 
         Ok(())
     }

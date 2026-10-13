@@ -168,6 +168,8 @@ pub fn session_persistence_extras_from_record(record: &SessionRecord) -> Session
         source: record.source.clone(),
         collaboration_mode: record.collaboration_mode,
         permission_preset: record.permission_preset,
+        agent_path: record.agent_path.clone(),
+        agent_nickname: record.agent_nickname.clone(),
         kernel_snapshot_path: None,
     }
 }

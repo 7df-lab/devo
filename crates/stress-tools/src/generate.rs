@@ -357,6 +357,8 @@ fn write_session_transcript(
         source: "stress".into(),
         collaboration_mode: None,
         permission_preset: None,
+        agent_path: None,
+        agent_nickname: None,
         kernel_snapshot_path: None,
     };
     write_line(writer, &session_line(session, Some(extras), base))?;

@@ -171,6 +171,8 @@ impl ServerRuntime {
                 .map_err(|error| ToolCallError::InternalError(error.to_string()))?;
             invented.extras.collaboration_mode = Some(parent_summary.collaboration_mode);
             invented.extras.permission_preset = parent_summary.permission_preset();
+            invented.extras.agent_path = Some(agent_path.clone());
+            invented.extras.agent_nickname = Some(nickname.clone());
             self.rollout_store
                 .append_session_meta_at(
                     &invented.rollout_path,
@@ -476,8 +478,12 @@ impl ServerRuntime {
             .clone()
             .or_else(|| summary.native.title.clone())
             .unwrap_or_else(|| child_session_id.to_string());
-        let parent_path = self.session_agent_path(parent_session_id).await;
-        let agent_path = AgentPath::new(parent_path).join(&nickname).0;
+        let agent_path = if let Some(agent_path) = &summary.agent_path {
+            agent_path.clone()
+        } else {
+            let parent_path = self.session_agent_path(parent_session_id).await;
+            AgentPath::new(parent_path).join(&nickname).0
+        };
         let status = runtime_session
             .latest_turn
             .as_ref()
