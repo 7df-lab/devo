@@ -211,7 +211,7 @@ impl ServerRuntime {
 
         if method == ACP_INITIALIZE_METHOD {
             return Some(IncomingResponse::new(
-                self.handle_acp_initialize(connection_id, id, params).await,
+                Box::pin(self.handle_acp_initialize(connection_id, id, params)).await,
             ));
         }
         // Before connection enter `Ready` state, only allowed method: "initialize"
@@ -232,13 +232,12 @@ impl ServerRuntime {
         if protocol == ConnectionProtocol::Acp {
             if method == ACP_AUTHENTICATE_METHOD {
                 return Some(IncomingResponse::new(
-                    self.handle_acp_authenticate(connection_id, id, params)
-                        .await,
+                    Box::pin(self.handle_acp_authenticate(connection_id, id, params)).await,
                 ));
             }
             if method == ACP_LOGOUT_METHOD {
                 return Some(IncomingResponse::new(
-                    self.handle_acp_logout(connection_id, id, params).await,
+                    Box::pin(self.handle_acp_logout(connection_id, id, params)).await,
                 ));
             }
             if !self.connection_authenticated(connection_id).await {
@@ -255,9 +254,7 @@ impl ServerRuntime {
                 return None;
             }
             if let Some(route) = acp_route(&method) {
-                return self
-                    .handle_acp_route(route, connection_id, id, params)
-                    .await;
+                return Box::pin(self.handle_acp_route(route, connection_id, id, params)).await;
             }
             return id.map(|request_id| {
                 IncomingResponse::new(crate::acp_error_response(
@@ -268,72 +265,64 @@ impl ServerRuntime {
             });
         }
 
+        // Heap-pin each selected handler before awaiting it. Keeping the full
+        // handler graph inline makes unrelated RPC callers overflow the Windows
+        // debug test stack, even when the outer dispatch future is boxed.
         let response = match method.as_str() {
             // Update session metadata, including the current model and reasoning effort.
-            "session/metadata/update" => Some(
-                self.handle_native_session_metadata_update(id?, params)
-                    .await,
-            ),
+            "session/metadata/update" => {
+                Some(Box::pin(self.handle_native_session_metadata_update(id?, params)).await)
+            }
             // resume a history session, server load the jsonl file then replay the events in jsonl
-            "session/resume" => Some(
-                self.handle_native_session_resume(connection_id, id?, params)
-                    .await,
-            ),
+            "session/resume" => {
+                Some(Box::pin(self.handle_native_session_resume(connection_id, id?, params)).await)
+            }
             // fork a given session at given user turn index
-            "session/fork" => Some(
-                self.handle_native_session_fork(connection_id, id?, params)
-                    .await,
-            ),
+            "session/fork" => {
+                Some(Box::pin(self.handle_native_session_fork(connection_id, id?, params)).await)
+            }
             "session/rollback/preview" => Some(
-                self.handle_session_rollback_preview(connection_id, id?, params)
-                    .await,
+                Box::pin(self.handle_session_rollback_preview(connection_id, id?, params)).await,
             ),
             "session/rollback/commit" => Some(
-                self.handle_session_rollback_commit(connection_id, id?, params)
-                    .await,
+                Box::pin(self.handle_session_rollback_commit(connection_id, id?, params)).await,
             ),
             // compact session context history
             "session/compact/start" => {
-                Some(self.handle_native_session_compact_start(id?, params).await)
+                Some(Box::pin(self.handle_native_session_compact_start(id?, params)).await)
             }
-            "session/new" => Some(
-                self.handle_native_session_new(connection_id, id?, params)
-                    .await,
-            ),
-            "session/list" => Some(self.handle_native_session_list(id?, params).await),
-            "session/read" => Some(self.handle_native_session_read(id?, params).await),
-            "session/systemPrompt/read" => Some(
-                self.handle_native_session_system_prompt_read(id?, params)
-                    .await,
-            ),
+            "session/new" => {
+                Some(Box::pin(self.handle_native_session_new(connection_id, id?, params)).await)
+            }
+            "session/list" => Some(Box::pin(self.handle_native_session_list(id?, params)).await),
+            "session/read" => Some(Box::pin(self.handle_native_session_read(id?, params)).await),
+            "session/systemPrompt/read" => {
+                Some(Box::pin(self.handle_native_session_system_prompt_read(id?, params)).await)
+            }
             "session/schedule/list" => {
-                Some(self.handle_native_session_schedule_list(id?, params).await)
+                Some(Box::pin(self.handle_native_session_schedule_list(id?, params)).await)
             }
-            "session/schedule/upsert" => Some(
-                self.handle_native_session_schedule_upsert(id?, params)
-                    .await,
-            ),
-            "session/schedule/update" => Some(
-                self.handle_native_session_schedule_update(id?, params)
-                    .await,
-            ),
-            "session/schedule/delete" => Some(
-                self.handle_native_session_schedule_delete(id?, params)
-                    .await,
-            ),
-            "session/heartbeat/command" => Some(
-                self.handle_native_session_heartbeat_command(id?, params)
-                    .await,
-            ),
-            "session/export" => Some(self.handle_native_session_export(id?, params).await),
-            "session/import" => Some(
-                self.handle_native_session_import(connection_id, id?, params)
-                    .await,
-            ),
-            "session/interrupt" => Some(
-                self.handle_session_interrupt(connection_id, id?, params)
-                    .await,
-            ),
+            "session/schedule/upsert" => {
+                Some(Box::pin(self.handle_native_session_schedule_upsert(id?, params)).await)
+            }
+            "session/schedule/update" => {
+                Some(Box::pin(self.handle_native_session_schedule_update(id?, params)).await)
+            }
+            "session/schedule/delete" => {
+                Some(Box::pin(self.handle_native_session_schedule_delete(id?, params)).await)
+            }
+            "session/heartbeat/command" => {
+                Some(Box::pin(self.handle_native_session_heartbeat_command(id?, params)).await)
+            }
+            "session/export" => {
+                Some(Box::pin(self.handle_native_session_export(id?, params)).await)
+            }
+            "session/import" => {
+                Some(Box::pin(self.handle_native_session_import(connection_id, id?, params)).await)
+            }
+            "session/interrupt" => {
+                Some(Box::pin(self.handle_session_interrupt(connection_id, id?, params)).await)
+            }
             "runtime/ping" => Some(
                 serde_json::to_value(SuccessResponse {
                     id: id?,
@@ -343,164 +332,202 @@ impl ServerRuntime {
                 })
                 .expect("serialize runtime/ping response"),
             ),
-            "model/list" => Some(self.handle_native_model_list(id?, params).await),
-            "model/catalog/refresh" => Some(self.handle_native_catalog_refresh(id?, params).await),
-            "model/preferences/read" => {
-                Some(self.handle_native_model_preferences_read(id?, params).await)
+            "model/list" => Some(Box::pin(self.handle_native_model_list(id?, params)).await),
+            "model/catalog/refresh" => {
+                Some(Box::pin(self.handle_native_catalog_refresh(id?, params)).await)
             }
-            "model/preferences/write" => Some(
-                self.handle_native_model_preferences_write(id?, params)
-                    .await,
-            ),
-            "session/delete" => Some(self.handle_native_session_delete(id?, params).await),
-            "session/cwd/change" => Some(self.handle_native_session_cwd_change(id?, params).await),
-            "session/archive" => Some(self.handle_native_session_archive(id?, params).await),
-            "turn/read" => Some(self.handle_native_turn_read(id?, params).await),
-            "tool/list" => Some(self.handle_native_tool_list(id?, params).await),
-            "session/goal/set" => Some(self.handle_native_session_goal_set(id?, params).await),
-            "session/refine/run" => Some(self.handle_native_session_refine_run(id?, params).await),
-            "session/goal/read" => Some(self.handle_native_session_goal_read(id?, params).await),
+            "model/preferences/read" => {
+                Some(Box::pin(self.handle_native_model_preferences_read(id?, params)).await)
+            }
+            "model/preferences/write" => {
+                Some(Box::pin(self.handle_native_model_preferences_write(id?, params)).await)
+            }
+            "session/delete" => {
+                Some(Box::pin(self.handle_native_session_delete(id?, params)).await)
+            }
+            "session/cwd/change" => {
+                Some(Box::pin(self.handle_native_session_cwd_change(id?, params)).await)
+            }
+            "session/archive" => {
+                Some(Box::pin(self.handle_native_session_archive(id?, params)).await)
+            }
+            "turn/read" => Some(Box::pin(self.handle_native_turn_read(id?, params)).await),
+            "tool/list" => Some(Box::pin(self.handle_native_tool_list(id?, params)).await),
+            "session/goal/set" => {
+                Some(Box::pin(self.handle_native_session_goal_set(id?, params)).await)
+            }
+            "session/refine/run" => {
+                Some(Box::pin(self.handle_native_session_refine_run(id?, params)).await)
+            }
+            "session/goal/read" => {
+                Some(Box::pin(self.handle_native_session_goal_read(id?, params)).await)
+            }
             "session/goal/update" => {
-                Some(self.handle_native_session_goal_update(id?, params).await)
+                Some(Box::pin(self.handle_native_session_goal_update(id?, params)).await)
             }
             "session/message/edit" => Some(
-                self.handle_native_session_message_edit(connection_id, id?, params)
-                    .await,
+                Box::pin(self.handle_native_session_message_edit(connection_id, id?, params)).await,
             ),
-            "task/start" => Some(
-                self.handle_native_task_start(connection_id, id?, params)
-                    .await,
-            ),
-            "task/read" => Some(self.handle_native_task_read(id?, params).await),
-            "task/list" => Some(self.handle_native_task_list(id?, params).await),
-            "task/interrupt" => Some(
-                self.handle_native_task_interrupt(connection_id, id?, params)
-                    .await,
-            ),
+            "task/start" => {
+                Some(Box::pin(self.handle_native_task_start(connection_id, id?, params)).await)
+            }
+            "task/read" => Some(Box::pin(self.handle_native_task_read(id?, params)).await),
+            "task/list" => Some(Box::pin(self.handle_native_task_list(id?, params)).await),
+            "task/interrupt" => {
+                Some(Box::pin(self.handle_native_task_interrupt(connection_id, id?, params)).await)
+            }
             "task/write_stdin" => Some(
-                self.handle_native_task_write_stdin(connection_id, id?, params)
-                    .await,
+                Box::pin(self.handle_native_task_write_stdin(connection_id, id?, params)).await,
             ),
-            "task/resize" => Some(
-                self.handle_native_task_resize(connection_id, id?, params)
-                    .await,
-            ),
-            "agent/cancel" => Some(self.handle_native_agent_cancel(id?, params).await),
-            "agent/list" => Some(self.handle_native_agent_list(id?, params).await),
-            "agent/message" => Some(self.handle_native_agent_message(id?, params).await),
-            "agent/read" => Some(self.handle_native_agent_read(id?, params).await),
+            "task/resize" => {
+                Some(Box::pin(self.handle_native_task_resize(connection_id, id?, params)).await)
+            }
+            "agent/cancel" => Some(Box::pin(self.handle_native_agent_cancel(id?, params)).await),
+            "agent/list" => Some(Box::pin(self.handle_native_agent_list(id?, params)).await),
+            "agent/message" => Some(Box::pin(self.handle_native_agent_message(id?, params)).await),
+            "agent/read" => Some(Box::pin(self.handle_native_agent_read(id?, params)).await),
             "session/goal/pause"
             | "session/goal/resume"
             | "session/goal/complete"
             | "session/goal/cancel"
             | "session/goal/clear" => Some(
-                self.handle_native_session_goal_transition(&method, id?, params)
-                    .await,
+                Box::pin(self.handle_native_session_goal_transition(&method, id?, params)).await,
             ),
-            "skill/list" => Some(self.handle_native_skill_list(id?, params).await),
-            "skill/set_enabled" => Some(self.handle_native_skill_set_enabled(id?, params).await),
-            "mcp/list" => Some(self.handle_mcp_list(id?, params).await),
-            "mcp/tools" => Some(self.handle_mcp_tools(id?, params).await),
-            "mcp/set_enabled" => Some(self.handle_mcp_set_enabled(id?, params).await),
-            "context/usage/read" => Some(self.handle_context_usage_read(id?, params).await),
-            "search/start" => Some(
-                self.handle_native_search_start(connection_id, id?, params)
-                    .await,
-            ),
-            "search/update" => Some(self.handle_native_search_update(id?, params).await),
-            "search/cancel" => Some(self.handle_native_search_cancel(id?, params).await),
-            "command/exec" => Some(self.handle_command_exec(connection_id, id?, params).await),
-            "command/exec/write" => Some(
-                self.handle_command_exec_write(connection_id, id?, params)
-                    .await,
-            ),
-            "command/exec/resize" => Some(
-                self.handle_command_exec_resize(connection_id, id?, params)
-                    .await,
-            ),
-            "command/exec/terminate" => Some(
-                self.handle_command_exec_terminate(connection_id, id?, params)
-                    .await,
-            ),
-            "turn/resume" => Some(self.handle_turn_resume(connection_id, id?, params).await),
-            "turn/recovery/read" => Some(self.handle_turn_recovery_read(id?, params).await),
+            "skill/list" => Some(Box::pin(self.handle_native_skill_list(id?, params)).await),
+            "skill/set_enabled" => {
+                Some(Box::pin(self.handle_native_skill_set_enabled(id?, params)).await)
+            }
+            "mcp/list" => Some(Box::pin(self.handle_mcp_list(id?, params)).await),
+            "mcp/tools" => Some(Box::pin(self.handle_mcp_tools(id?, params)).await),
+            "mcp/set_enabled" => Some(Box::pin(self.handle_mcp_set_enabled(id?, params)).await),
+            "context/usage/read" => {
+                Some(Box::pin(self.handle_context_usage_read(id?, params)).await)
+            }
+            "search/start" => {
+                Some(Box::pin(self.handle_native_search_start(connection_id, id?, params)).await)
+            }
+            "search/update" => Some(Box::pin(self.handle_native_search_update(id?, params)).await),
+            "search/cancel" => Some(Box::pin(self.handle_native_search_cancel(id?, params)).await),
+            "command/exec" => {
+                Some(Box::pin(self.handle_command_exec(connection_id, id?, params)).await)
+            }
+            "command/exec/write" => {
+                Some(Box::pin(self.handle_command_exec_write(connection_id, id?, params)).await)
+            }
+            "command/exec/resize" => {
+                Some(Box::pin(self.handle_command_exec_resize(connection_id, id?, params)).await)
+            }
+            "command/exec/terminate" => {
+                Some(Box::pin(self.handle_command_exec_terminate(connection_id, id?, params)).await)
+            }
+            "turn/resume" => {
+                Some(Box::pin(self.handle_turn_resume(connection_id, id?, params)).await)
+            }
+            "turn/recovery/read" => {
+                Some(Box::pin(self.handle_turn_recovery_read(id?, params)).await)
+            }
             "turn/start" => Some(
-                self.handle_turn_start_for_connection(Some(connection_id), id?, params)
+                Box::pin(self.handle_turn_start_for_connection(Some(connection_id), id?, params))
                     .await,
             ),
-            "turn/steer" => Some(self.handle_turn_steer(connection_id, id?, params).await),
+            "turn/steer" => {
+                Some(Box::pin(self.handle_turn_steer(connection_id, id?, params)).await)
+            }
             "workspace/worktree/list" => Some(
-                self.handle_native_worktree(id?, params, super::worktrees::WorktreeOperation::List)
-                    .await,
+                Box::pin(self.handle_native_worktree(
+                    id?,
+                    params,
+                    super::worktrees::WorktreeOperation::List,
+                ))
+                .await,
             ),
             "workspace/worktree/create" => Some(
-                self.handle_native_worktree(
+                Box::pin(self.handle_native_worktree(
                     id?,
                     params,
                     super::worktrees::WorktreeOperation::Create,
-                )
+                ))
                 .await,
             ),
             "workspace/worktree/remove" => Some(
-                self.handle_native_worktree(
+                Box::pin(self.handle_native_worktree(
                     id?,
                     params,
                     super::worktrees::WorktreeOperation::Remove,
-                )
+                ))
                 .await,
             ),
             "workspace/worktree/reset" => Some(
-                self.handle_native_worktree(
+                Box::pin(self.handle_native_worktree(
                     id?,
                     params,
                     super::worktrees::WorktreeOperation::Reset,
-                )
+                ))
                 .await,
             ),
-            "workspace/changes/read" => Some(self.handle_workspace_changes_read(id?, params).await),
-            "provider/list" => Some(self.handle_native_provider_list(id?).await),
-            "provider/validate" => Some(self.handle_native_provider_validate(id?, params).await),
-            "provider/discover" => Some(self.handle_native_provider_discover(id?, params).await),
-            "provider/upsert" => Some(self.handle_native_provider_upsert(id?, params).await),
+            "workspace/changes/read" => {
+                Some(Box::pin(self.handle_workspace_changes_read(id?, params)).await)
+            }
+            "provider/list" => Some(Box::pin(self.handle_native_provider_list(id?)).await),
+            "provider/validate" => {
+                Some(Box::pin(self.handle_native_provider_validate(id?, params)).await)
+            }
+            "provider/discover" => {
+                Some(Box::pin(self.handle_native_provider_discover(id?, params)).await)
+            }
+            "provider/upsert" => {
+                Some(Box::pin(self.handle_native_provider_upsert(id?, params)).await)
+            }
             "provider/disconnect" => {
-                Some(self.handle_native_provider_disconnect(id?, params).await)
+                Some(Box::pin(self.handle_native_provider_disconnect(id?, params)).await)
             }
             "provider/model/remove" => {
-                Some(self.handle_native_provider_model_remove(id?, params).await)
+                Some(Box::pin(self.handle_native_provider_model_remove(id?, params)).await)
             }
-            "credential/list" => Some(self.handle_native_credential_list(id?).await),
-            "credential/set" => Some(self.handle_native_credential_set(id?, params).await),
-            "credential/delete" => Some(self.handle_native_credential_delete(id?, params).await),
+            "credential/list" => Some(Box::pin(self.handle_native_credential_list(id?)).await),
+            "credential/set" => {
+                Some(Box::pin(self.handle_native_credential_set(id?, params)).await)
+            }
+            "credential/delete" => {
+                Some(Box::pin(self.handle_native_credential_delete(id?, params)).await)
+            }
             // Paged history reads of the new Native API (native types).
-            "session/turns/list" => Some(self.handle_session_turns_list(id?, params).await),
-            "session/items/list" => Some(self.handle_session_items_list(id?, params).await),
-            "session/tree/read" => Some(self.handle_session_tree_read(id?, params).await),
-            "session/tree/navigate" => Some(self.handle_session_tree_navigate(id?, params).await),
+            "session/turns/list" => {
+                Some(Box::pin(self.handle_session_turns_list(id?, params)).await)
+            }
+            "session/items/list" => {
+                Some(Box::pin(self.handle_session_items_list(id?, params)).await)
+            }
+            "session/tree/read" => Some(Box::pin(self.handle_session_tree_read(id?, params)).await),
+            "session/tree/navigate" => {
+                Some(Box::pin(self.handle_session_tree_navigate(id?, params)).await)
+            }
             // Durable event subscriptions (08 §4).
-            "subscription/create" => Some(
-                self.handle_subscription_create(connection_id, id?, params)
-                    .await,
-            ),
-            "subscription/update" => Some(
-                self.handle_subscription_update(connection_id, id?, params)
-                    .await,
-            ),
-            "subscription/ack" => Some(
-                self.handle_subscription_ack(connection_id, id?, params)
-                    .await,
-            ),
+            "subscription/create" => {
+                Some(Box::pin(self.handle_subscription_create(connection_id, id?, params)).await)
+            }
+            "subscription/update" => {
+                Some(Box::pin(self.handle_subscription_update(connection_id, id?, params)).await)
+            }
+            "subscription/ack" => {
+                Some(Box::pin(self.handle_subscription_ack(connection_id, id?, params)).await)
+            }
             "subscription/unsubscribe" => Some(
-                self.handle_subscription_unsubscribe(connection_id, id?, params)
-                    .await,
+                Box::pin(self.handle_subscription_unsubscribe(connection_id, id?, params)).await,
             ),
             // Session input queue of the new Native API (01 §4.3).
-            "session/queue/push" => Some(
-                self.handle_session_queue_push(connection_id, id?, params)
-                    .await,
-            ),
-            "session/queue/list" => Some(self.handle_session_queue_list(id?, params).await),
-            "session/queue/update" => Some(self.handle_session_queue_update(id?, params).await),
-            "session/queue/remove" => Some(self.handle_session_queue_remove(id?, params).await),
+            "session/queue/push" => {
+                Some(Box::pin(self.handle_session_queue_push(connection_id, id?, params)).await)
+            }
+            "session/queue/list" => {
+                Some(Box::pin(self.handle_session_queue_list(id?, params)).await)
+            }
+            "session/queue/update" => {
+                Some(Box::pin(self.handle_session_queue_update(id?, params)).await)
+            }
+            "session/queue/remove" => {
+                Some(Box::pin(self.handle_session_queue_remove(id?, params)).await)
+            }
             _ => Some(self.error_response(
                 id?,
                 ProtocolErrorCode::InvalidParams,
