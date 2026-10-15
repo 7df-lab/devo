@@ -196,10 +196,10 @@ pub fn build_rlm_base_prompt(options: &RlmPromptOptions) -> String {
     }
 
     if can_run_shell_skills {
-        // The Python helper is fenced but cannot request the shell tool's extra permissions.
+        // Local bash stays fenced; rlm.shell mediates explicit grants through the host.
         parts.push(String::new());
         parts.push(
-            "Sandbox and approvals: shell commands launched through Python's `bash()` helper run inside the kernel's OS sandbox and cannot request additional grants or escalation. Treat a fence refusal as final; explain the limit and ask the user to change permission settings through the product flow. If a dedicated shell tool appears in the current tool list, only that tool can request `sandbox_permissions`: prefer `sandbox_permissions: \"with_additional_permissions\"` for narrow, still-sandboxed grants; use `sandbox_permissions: \"require_escalated\"` only with a short `justification` phrased as a question for the user. Never attach these fields to an `ipython` call or route a denied operation through another tool to bypass the fence."
+            "Sandbox and approvals: ordinary Python `bash()` runs inside the kernel fence. If a command needs additional access, use `await rlm.shell(command, sandbox_permissions=\"with_additional_permissions\", additional_permissions={\"network\": {\"enabled\": True}}, justification=\"May I ...?\")` for narrow grants, or `await rlm.shell(command, sandbox_permissions=\"require_escalated\", justification=\"May I ...?\")` for an approved unsandboxed command. This calls the host shell approval pipeline; the kernel stays fenced and denial is final. Do not retry a denied approval through another route. Never attach these fields to an `ipython` call itself. The command uses the host platform shell (PowerShell on Windows), so use native shell syntax rather than nesting another shell. The result is a dict with command output and status."
                 .to_string(),
         );
     }
@@ -452,7 +452,7 @@ mod tests {
         assert!(prompt.contains("You are Devo"));
         assert!(prompt.contains("ipython"));
         assert!(prompt.contains("bash()"));
-        assert!(prompt.contains("cannot request additional grants or escalation"));
+        assert!(prompt.contains("await rlm.shell(command"));
         assert!(prompt.contains("Never attach these fields to an `ipython` call"));
         assert!(!prompt.contains("Request it on the tool call itself"));
         assert!(prompt.contains("16 MiB"));

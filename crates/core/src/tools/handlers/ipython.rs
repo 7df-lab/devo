@@ -20,6 +20,9 @@ use devo_tools::python_cell_watch::{
     PythonCellWatchDecision, PythonCellWatchInput, effective_first_wait_ms, output_tail,
 };
 
+mod kernel_fence;
+pub(crate) use kernel_fence::resolve_kernel_fence;
+
 pub struct IpythonHandler {
     spec: ToolSpec,
 }
@@ -389,97 +392,6 @@ fn build_ipython_result(
     let mut result = ToolResult::success(content, "ipython ok");
     result.images = images;
     result
-}
-
-/// Ensure a kernel exists for RLM sessions (created on the turn task, not the actor).
-///
-/// `session_dir` is the session **artifact** directory
-/// (`session-artifacts/<id>/` for roots), not the parent of the rollout JSONL.
-/// When provided, the kernel receives harness env so `rlm.harness` and
-/// `await refine.run()` share the host's local store.
-///
-/// Build the kernel OS-fence spec on the `rlm-kernel` base profile (design doc
-/// §5.1, P4): **no default read** — the kernel reads only the system/
-/// interpreter base trees plus the roots granted here (workspace read-only in
-/// Plan mode, read-write in Build; temp and session artifacts rw, global
-/// harness rw, devo home r). Reads and writes anywhere else are OS-refused,
-/// so model code escalates through the rlm front door (`rlm.read`/`rlm.write`)
-/// and the approval pipeline instead of the fence silently allowing it.
-pub(crate) fn resolve_kernel_fence(
-    cwd: &std::path::Path,
-    session_dir: Option<&std::path::Path>,
-    collaboration_mode: devo_protocol::CollaborationMode,
-) -> Option<devo_kernel::KernelFenceSpec> {
-    let mut writable_roots = Vec::new();
-    if collaboration_mode == devo_protocol::CollaborationMode::Build {
-        writable_roots.push(cwd.to_path_buf());
-    }
-    // Unix's base profile grants shared scratch roots too: retain them here
-    // so the Plan overlap check sees every writable root in the actual fence.
-    // Windows session kernels instead use owned scratch below the artifact
-    // root, avoiding recursive ACL propagation across large shared temp trees.
-    if session_dir.is_none() || !cfg!(windows) {
-        writable_roots.extend(devo_sandbox::temp_writable_paths());
-    }
-    if let Some(dir) = session_dir {
-        writable_roots.push(dir.to_path_buf());
-    }
-    // Global harness state is agent-owned memory/prompt/skill data — the same
-    // trust class as session artifacts. The kernel harness API writes it
-    // directly (`rlm.harness.create_memory(..., global_=True)` and friends),
-    // and its own guidance points models there, so refusing it broke every
-    // global create/update/delete with EACCES. Create the directory host-side
-    // first: fence roots resolve to path-beneath rules against real
-    // directories, and a missing root would downgrade the whole fence.
-    let global_harness = global_harness_state_dir();
-    if std::fs::create_dir_all(&global_harness).is_ok() && global_harness.is_dir() {
-        writable_roots.push(global_harness);
-    }
-    Some(devo_kernel::KernelFenceSpec {
-        // Devo home is READ-granted so the kernel can inspect other agents'
-        // rollouts/artifacts directly. The grant is composed per-subdirectory
-        // instead of `~/.devo` wholesale so credentials (`auth.json` — a
-        // root-level file) stay OUTSIDE it; root-level files are not granted
-        // at all because fence read roots must be directories (the capability
-        // builder maps them to path-beneath rules; a file root would fail
-        // resolution and downgrade the whole fence to unfenced).
-        readable_roots: {
-            let mut roots = devo_home_read_roots();
-            if collaboration_mode == devo_protocol::CollaborationMode::Plan {
-                roots.push(cwd.to_path_buf());
-            }
-            roots
-        },
-        writable_roots,
-        deny_read: Vec::new(),
-        // RLM kernel fence: network is restricted by default (§5.2 — the fence
-        // spec carries the RLM default, not the shell profile's; kernel network
-        // goes through the proxy when granted, not through profile inheritance).
-        restrict_network: true,
-    })
-}
-
-/// Read roots inside the Devo home for the kernel fence: every subdirectory.
-/// Root-level files (notably `auth.json` with the API keys, but also
-/// config.toml / providers.json) are excluded — read roots are directory
-/// grants, and credential files must stay unreadable by the kernel.
-fn devo_home_read_roots() -> Vec<std::path::PathBuf> {
-    let Ok(home) = devo_util_paths::find_devo_home() else {
-        return Vec::new();
-    };
-    let mut roots = Vec::new();
-    if let Ok(entries) = std::fs::read_dir(&home) {
-        for entry in entries.flatten() {
-            let path = entry.path();
-            // Follow only real directories (skip dot-directories and
-            // non-directory entries such as lock/socket files).
-            if path.is_dir() && !path.is_symlink() {
-                roots.push(path);
-            }
-        }
-    }
-    roots.sort();
-    roots
 }
 
 /// Host-owned site dir where `dill` is provisioned for the kernel interpreter.

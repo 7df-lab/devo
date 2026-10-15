@@ -1013,7 +1013,8 @@ fn target_for_tool_input(tool_name: &str, input: &serde_json::Value) -> Option<S
     }
 }
 
-fn command_prefix_for_tool_input(
+/// Derive a screened command-prefix suggestion using the shell tool policy.
+pub fn command_prefix_for_tool_input(
     tool_name: &str,
     input: &serde_json::Value,
 ) -> Option<Vec<String>> {
@@ -1266,7 +1267,7 @@ fn command_prefix(command: &str) -> Option<Vec<String>> {
 /// token-based matching unsafe: compound commands, expansions, redirects,
 /// and leading env assignments. Returns `None` unless the command is a
 /// single plain invocation.
-fn safe_shell_argv(command: &str) -> Option<Vec<String>> {
+pub fn safe_shell_argv(command: &str) -> Option<Vec<String>> {
     if command_contains_line_separators(command) {
         return None;
     }

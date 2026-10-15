@@ -10,6 +10,7 @@ import os
 from typing import Any
 
 from .bash import BashHandle, BashResult, bash
+from .shell import shell
 from .harness import HarnessEntry, HarnessScope, HarnessState, RefinementEvent, get_harness_state
 
 _NOT_CALLABLE_MESSAGE = "'rlm' is not callable; spawn a child with: handle = await rlm.spawn('sub-task', name='worker')"
@@ -479,6 +480,7 @@ _harness_state = _HarnessProxy()
 
 
 class _RLMNamespace:
+    shell = staticmethod(shell)
     harness = _harness_state
     get_harness_state = staticmethod(get_harness_state)
 
@@ -564,6 +566,7 @@ __all__ = [
     "create_session",
     "RefinementEvent",
     "bash",
+    "shell",
     "delete_subagent",
     "emit",
     "find_models",
