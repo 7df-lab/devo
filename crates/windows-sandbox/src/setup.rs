@@ -1263,11 +1263,11 @@ fn user_profile_child_name(path: &Path, user_profile: &Path) -> Option<String> {
 }
 
 fn filter_sensitive_write_roots(mut roots: Vec<PathBuf>, devo_home: &Path) -> Vec<PathBuf> {
-    // Never grant capability write access to DEVO_HOME or anything under
-    // DEVO_HOME/.sandbox, DEVO_HOME/.sandbox-bin, or DEVO_HOME/.sandbox-secrets.
+    // DEVO_HOME is writable agent state. Only the sandbox control directories
+    // DEVO_HOME/.sandbox, DEVO_HOME/.sandbox-bin, and DEVO_HOME/.sandbox-secrets
+    // are excluded from capability write grants.
     // These locations contain sandbox control/state and helper binaries and must
     // remain tamper-resistant.
-    let devo_home_key = canonical_path_key(devo_home);
     let sbx_dir_key = canonical_path_key(&sandbox_dir(devo_home));
     let sbx_dir_prefix = format!("{}/", sbx_dir_key.trim_end_matches('/'));
     let sbx_bin_dir_key = canonical_path_key(&sandbox_bin_dir(devo_home));
@@ -1277,8 +1277,7 @@ fn filter_sensitive_write_roots(mut roots: Vec<PathBuf>, devo_home: &Path) -> Ve
 
     roots.retain(|root| {
         let key = canonical_path_key(root);
-        key != devo_home_key
-            && key != sbx_dir_key
+        key != sbx_dir_key
             && !key.starts_with(&sbx_dir_prefix)
             && key != sbx_bin_dir_key
             && !key.starts_with(&sbx_bin_dir_prefix)
@@ -1769,7 +1768,7 @@ mod tests {
     }
 
     #[test]
-    fn expanded_write_roots_still_drop_protected_devo_home() {
+    fn expanded_write_roots_preserve_writable_devo_home() {
         let tmp = TempDir::new().expect("tempdir");
         let user_profile = tmp.path().join("user-profile");
         let devo_home = user_profile.join("DevoHome");
@@ -1784,7 +1783,10 @@ mod tests {
         roots.retain(|root| !super::is_user_profile_root_exclusion(root, &user_profile));
         let roots = super::filter_sensitive_write_roots(roots, &devo_home);
 
-        assert_eq!(vec![documents], roots);
+        assert_eq!(
+            [documents, devo_home].into_iter().collect::<HashSet<_>>(),
+            roots.into_iter().collect::<HashSet<_>>()
+        );
     }
 
     #[test]
@@ -1905,12 +1907,20 @@ mod tests {
             &workspace_write_profile(&[], true, true),
             workspace_roots_for(command_cwd.as_path()).as_slice(),
         );
-        let override_roots = vec![
+        let mut override_roots = vec![
             command_cwd.clone(),
             extra_root.clone(),
             devo_home.clone(),
             sandbox_root.clone(),
         ];
+        for root in [
+            sandbox_root.join("nested"),
+            super::sandbox_bin_dir(&devo_home),
+            super::sandbox_secrets_dir(&devo_home),
+        ] {
+            fs::create_dir_all(&root).expect("create sandbox control root");
+            override_roots.push(root);
+        }
         let request = super::SandboxSetupRequest {
             permissions: &permissions,
             command_cwd: &command_cwd,
@@ -1942,9 +1952,12 @@ mod tests {
             effective_write_roots
                 .contains(&dunce::canonicalize(&extra_root).expect("canonical extra root"))
         );
-        assert!(
-            !effective_write_roots
-                .contains(&dunce::canonicalize(&devo_home).expect("canonical devo home"))
+        assert_eq!(
+            effective_write_roots.into_iter().collect::<HashSet<_>>(),
+            [&command_cwd, &extra_root, &devo_home]
+                .into_iter()
+                .map(|path| dunce::canonicalize(path).expect("canonical write root"))
+                .collect::<HashSet<_>>()
         );
 
         let workspace_root = tmp.path().join("workspace-root");

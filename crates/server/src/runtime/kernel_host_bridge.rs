@@ -20,6 +20,9 @@ use uuid::Uuid;
 use super::ServerRuntime;
 use devo_core::McpManager;
 use devo_core::tools::contracts::ToolBudgets;
+mod shell;
+pub(crate) use shell::handle_bash;
+
 use devo_core::tools::handlers::{
     EditHandler, PlanHandler, QuestionHandler, ShellCommandHandler, WebFetchHandler,
     WebSearchHandler, WriteHandler,
@@ -315,80 +318,6 @@ fn map_tool_outcome(result: Result<ToolResult, ToolCallError>) -> Value {
         Ok(tool_result) => tool_result_to_reply(tool_result),
         Err(err) => error_reply(err.to_string()),
     }
-}
-
-pub(crate) async fn handle_bash(bridge: &HostBridge, params: &Value) -> Value {
-    if plan_mode_denies_mutation(bridge) {
-        return deny_plan_mutation("bash");
-    }
-    let command = params
-        .get("command")
-        .or_else(|| params.get("cmd"))
-        .cloned()
-        .unwrap_or(Value::Null);
-    let command_str = command.as_str().unwrap_or("").to_string();
-    if command_str.is_empty() {
-        return error_reply("missing bash command");
-    }
-    let mut input = params.clone();
-    if input.get("command").is_none() {
-        input["command"] = json!(command_str.clone());
-    }
-    let tool_call_id = synthetic_tool_call_id("bash");
-    let req = permission_request(
-        bridge,
-        tool_call_id.clone(),
-        "shell_command",
-        input.clone(),
-        ResourceKind::ShellExec,
-        format!("Run shell command: {command_str}"),
-        None,
-        Some(command_str),
-    );
-    let grant = match check_or_grant(bridge, req).await {
-        Ok(grant) => grant,
-        Err(reply) => return reply,
-    };
-    let ctx = tool_context_from_bridge(bridge, tool_call_id.clone());
-    let outcome = ShellCommandHandler::new()
-        .handle(ctx, input.clone(), None)
-        .await;
-    // UnlessTrusted retry (mirrors `ToolRuntime::execute_single`): a
-    // user-approved shell call the OS sandbox refused retries once unsandboxed
-    // — without this, kernel `bash` approvals visibly succeed while the
-    // command still fails with EACCES. Policy-allows (no approval) keep the
-    // denial so the model re-requests with `require_escalated`.
-    let outcome = match outcome {
-        Ok(ref output)
-            if grant.already_approved
-                && !grant.bypass_sandbox
-                && tool_result_is_sandbox_denied_bridge(output)
-                && devo_sandbox::unsandboxed_execution_allowed(
-                    bridge.sandbox_profile.as_deref(),
-                    &bridge.cwd,
-                ) =>
-        {
-            let mut ctx = tool_context_from_bridge(bridge, tool_call_id);
-            ctx.sandbox_profile = Some("off".to_string());
-            ShellCommandHandler::new().handle(ctx, input, None).await
-        }
-        other => other,
-    };
-    map_tool_outcome(outcome)
-}
-
-/// Bridge twin of the router's `tool_result_is_sandbox_denied` (private there):
-/// only the structured `SANDBOX_DENIED:` prefix triggers the retry.
-fn tool_result_is_sandbox_denied_bridge(output: &ToolResult) -> bool {
-    let text = match &output.content {
-        devo_core::tools::contracts::ToolResultContent::Text(text) => text.as_str(),
-        devo_core::tools::contracts::ToolResultContent::Mixed {
-            text: Some(text), ..
-        } => text.as_str(),
-        devo_core::tools::contracts::ToolResultContent::Json(_)
-        | devo_core::tools::contracts::ToolResultContent::Mixed { text: None, .. } => "",
-    };
-    text.starts_with("SANDBOX_DENIED:") || output.result_summary.starts_with("SANDBOX_DENIED:")
 }
 
 async fn check_or_grant(
