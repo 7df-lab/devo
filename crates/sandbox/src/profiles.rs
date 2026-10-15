@@ -336,6 +336,17 @@ impl ProfileName {
             if !p.exists() {
                 continue;
             }
+            // nono opens device rules read-only when applying Landlock. Linux
+            // exposes /dev/tty even without a controlling terminal, where open
+            // returns ENXIO and aborts the entire headless child sandbox. Omit
+            // only that unavailable optional device; retain every other rule.
+            #[cfg(target_os = "linux")]
+            if *dev == "/dev/tty"
+                && std::fs::File::open(p)
+                    .is_err_and(|error| error.raw_os_error() == Some(libc::ENXIO))
+            {
+                continue;
+            }
             if profile.name == "rlm-kernel" && *dev == "/dev/fd" && cfg!(target_os = "linux") {
                 // /dev/fd points to /proc/self/fd. CapabilitySet canonicalizes
                 // it in the server *before* spawning the kernel, which would

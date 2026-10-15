@@ -64,7 +64,7 @@ pub(crate) async fn run_prompt(
         model_override,
         &resolved_provider.default_model,
         Some(home_dir.as_path()),
-    );
+    )?;
     let selected_model = turn_config.model.slug.clone();
 
     let mut session_state = SessionState::new(
@@ -113,7 +113,7 @@ pub(crate) async fn run_prompt(
     let registry = Arc::new(handlers::build_registry_from_plan(&tool_plan));
     let runtime = Arc::new(ToolRuntime::new_with_context(
         std::sync::Arc::clone(&registry),
-        devo_core::tools::PermissionChecker::always_allow(),
+        crate::prompt_host::permission_checker(),
         devo_core::tools::ToolRuntimeContext {
             session_id: session_state.id.as_str().into(),
             turn_id: None,
@@ -268,7 +268,7 @@ fn prompt_turn_config(
     requested_model: Option<&str>,
     default_model: &str,
     home_dir: Option<&Path>,
-) -> TurnConfig {
+) -> Result<TurnConfig> {
     let catalog_model = |model_slug: &str| {
         model_catalog
             .get(model_slug)
@@ -286,10 +286,16 @@ fn prompt_turn_config(
     let selected_model = requested_model
         .or(effective.model.as_deref())
         .or(Some(default_model));
-    if let Some(selection) = selected_model
-        .and_then(|model| effective.resolve_model(Some(model)).ok())
-        .or_else(|| effective.resolve_model(None).ok())
-    {
+    let selection = if let Some(requested) = requested_model {
+        Some(effective.resolve_model(Some(requested)).map_err(|error| {
+            anyhow::anyhow!("cannot select requested model `{requested}`: {error}")
+        })?)
+    } else {
+        selected_model
+            .and_then(|model| effective.resolve_model(Some(model)).ok())
+            .or_else(|| effective.resolve_model(None).ok())
+    };
+    if let Some(selection) = selection {
         let model_reference = format!("{}/{}", selection.provider_id, selection.model_id);
         let mut model_config = effective
             .providers
@@ -340,14 +346,14 @@ fn prompt_turn_config(
         );
         turn_config.model_binding_id = Some(model_reference);
         turn_config.variant = variant_id;
-        return turn_config;
+        return Ok(turn_config);
     }
 
     let selected_model = requested_model.unwrap_or(default_model);
-    TurnConfig::new(
+    Ok(TurnConfig::new(
         catalog_model(selected_model),
         provider_config.reasoning_effort.clone(),
-    )
+    ))
 }
 
 #[derive(Debug, Clone, PartialEq, Eq, Serialize)]

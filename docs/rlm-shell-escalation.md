@@ -49,3 +49,23 @@ The initial narrow-grant command nested PowerShell with incorrect quoting. It
 failed at execution; using native PowerShell syntax passed. The host's existing
 PowerShell encoding prelude emits constrained-language warnings for sandboxed
 commands, but the corrected probe still completed all file operations with exit 0.
+
+## Headless execution
+
+`devo prompt` accepts the same `rlm.shell()` helper. Its host bridge projects
+`bash` and `bash.start` requests into the existing hidden shell runtime handler,
+retaining permission metadata, command prefixes, and timeouts. Its existing
+static-allow permission policy applies explicitly requested full or narrow grants
+without marking them as human approvals. The headless command does not offer
+interactive approval prompts; use the interactive client when a human approval
+decision is required.
+
+Headless model selection uses `provider/model[/variant]` references, for example
+`devo --model openai-codex/gpt-5.6-luna prompt "your task"`. An invalid explicit
+reference returns an error rather than silently running the configured default.
+
+On Linux, `/dev/tty` exists even when a process has no controlling terminal.
+The sandbox omits that optional device grant when opening it returns `ENXIO`,
+so detached headless kernels can start while retaining filesystem and network
+enforcement. The Linux regression probe verifies startup, scratch access, and
+continued denial of `/proc/self/environ` after applying the kernel fence.
