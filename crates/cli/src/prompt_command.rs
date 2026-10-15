@@ -113,7 +113,7 @@ pub(crate) async fn run_prompt(
     let registry = Arc::new(handlers::build_registry_from_plan(&tool_plan));
     let runtime = Arc::new(ToolRuntime::new_with_context(
         std::sync::Arc::clone(&registry),
-        devo_core::tools::PermissionChecker::always_allow(),
+        crate::prompt_host::permission_checker(),
         devo_core::tools::ToolRuntimeContext {
             session_id: session_state.id.as_str().into(),
             turn_id: None,
