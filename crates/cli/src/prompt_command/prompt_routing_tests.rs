@@ -148,7 +148,8 @@ fn prompt_turn_config_routes_requested_connection_model_to_provider_route() {
         Some("anthropic-provider/alt/fast"),
         "default-provider/main",
         None,
-    );
+    )
+    .expect("configured model route");
 
     assert_eq!(turn_config.model.slug, "anthropic-provider/alt");
     assert_eq!(turn_config.request_model, "alt");
@@ -175,4 +176,26 @@ async fn routed_prompt_provider_forwards_configured_route() {
         .expect("complete request");
 
     assert_eq!(router.calls(), vec![(route, "vendor/alt".to_string())]);
+}
+
+#[test]
+fn invalid_explicit_prompt_model_does_not_fall_back_to_another_model() {
+    let app_config = AppConfig::default();
+    let catalog = PresetModelCatalog::new(Vec::new());
+    for requested in ["gpt-5.6-luna", "missing-provider/missing-model"] {
+        let error = prompt_turn_config(
+            &app_config,
+            &catalog,
+            Some(requested),
+            "openai/gpt-5.5",
+            None,
+        )
+        .expect_err("invalid explicit selection must fail");
+        assert!(
+            error
+                .to_string()
+                .starts_with(&format!("cannot select requested model `{requested}`:")),
+            "{error}"
+        );
+    }
 }

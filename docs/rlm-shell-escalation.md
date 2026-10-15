@@ -59,3 +59,13 @@ static-allow permission policy applies explicitly requested full or narrow grant
 without marking them as human approvals. The headless command does not offer
 interactive approval prompts; use the interactive client when a human approval
 decision is required.
+
+Headless model selection uses `provider/model[/variant]` references, for example
+`devo --model openai-codex/gpt-5.6-luna prompt "your task"`. An invalid explicit
+reference returns an error rather than silently running the configured default.
+
+On Linux, `/dev/tty` exists even when a process has no controlling terminal.
+The sandbox omits that optional device grant when opening it returns `ENXIO`,
+so detached headless kernels can start while retaining filesystem and network
+enforcement. The Linux regression probe verifies startup, scratch access, and
+continued denial of `/proc/self/environ` after applying the kernel fence.

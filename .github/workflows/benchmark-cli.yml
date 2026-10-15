@@ -4,6 +4,7 @@ on:
   pull_request:
     paths:
       - crates/cli/**
+      - crates/sandbox/**
       - .github/workflows/benchmark-cli.yml
   workflow_dispatch:
 
@@ -25,6 +26,8 @@ jobs:
       - uses: Swatinem/rust-cache@v2
         with:
           key: benchmark-linux-cli
+      - name: Verify detached Linux kernel fence
+        run: cargo test -p devo-sandbox --test headless_tty -- --nocapture
       - name: Build native Linux CLI for container smoke runs
         run: cargo zigbuild --target x86_64-unknown-linux-musl -p devo-cli
       - name: Strip debug information from the benchmark artifact
