@@ -199,7 +199,9 @@ impl ServerRuntime {
                 reasoning_effort: None,
             },
             settings: devo_protocol::native::session::SessionSettings {
-                permission_profile: devo_protocol::native::model::PermissionProfile::AutoReview,
+                // Sandbox temporarily disabled: new sessions advertise the
+                // full-access default (matches the session_context fallback).
+                permission_profile: devo_protocol::native::model::PermissionProfile::FullAccess,
                 reasoning_effort: initial_effort,
                 mode: Some("build".to_string()),
                 sandbox_profile: None,

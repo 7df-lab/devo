@@ -20,7 +20,7 @@ describe("composer permission profiles", () => {
 		expect(parseComposerPermissionProfile("auto-review")).toBe("autoReview")
 		expect(parseComposerPermissionProfile("fullAccess")).toBe("fullAccess")
 		expect(parseComposerPermissionProfile("default")).toBe("default")
-		expect(parseComposerPermissionProfile(undefined)).toBe("autoReview")
+		expect(parseComposerPermissionProfile(undefined)).toBe("fullAccess")
 		expect(composerPermissionLabel("autoReview")).toBe("Approve for me")
 		expect(composerPermissionLabel("default")).toBe("Ask for approval")
 	})

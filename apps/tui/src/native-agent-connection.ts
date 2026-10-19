@@ -36,6 +36,7 @@ import type {
 } from "@earendil-works/pi-coding-agent/agent-connection";
 import type { ThinkingLevel } from "@earendil-works/pi-agent-core";
 import type { ContextTreeNode } from "../lib/coding-agent/src/core/context-tree.js";
+import { PERMISSIONS_COMMAND_ENABLED } from "../lib/coding-agent/src/core/slash-commands.js";
 import type { BashResult } from "../lib/coding-agent/src/core/bash-executor.js";
 import { measureAsync } from "@earendil-works/pi-coding-agent/timings";
 import { StdioJsonRpc, type JsonRpcId } from "./stdio-jsonrpc.js";
@@ -2187,7 +2188,7 @@ export class NativeAgentConnection implements AgentConnection {
 
   async prompt(message: string, options: AgentConnectionPromptOptions = {}): Promise<void> {
     if (await this.tryHandleGoalSlash(message)) return;
-    if (await this.tryHandlePermissionsSlash(message)) return;
+    if (PERMISSIONS_COMMAND_ENABLED && (await this.tryHandlePermissionsSlash(message))) return;
     if (await this.tryHandleCollaborationModeSlash(message)) return;
     if (await this.tryHandleTracesSlash(message)) return;
     if (await this.tryHandleSessionSlash(message)) return;

@@ -39,6 +39,14 @@ mod seatbelt;
 mod types;
 mod wrap;
 
+/// Master switch for OS-sandbox enforcement, read at every process-spawn
+/// decision point (tool router, server terminals, RLM kernel fence).
+///
+/// The OS-sandbox mechanisms are immature and are TEMPORARILY DISABLED:
+/// every process runs with full user permissions. Flip to `false` to
+/// re-enable enforcement everywhere (see docs/runtime-isolation.md).
+pub const SANDBOX_ENFORCEMENT_TEMPORARILY_DISABLED: bool = true;
+
 #[cfg(target_os = "linux")]
 pub use bwrap::bwrap_reexec_for_profile;
 pub use bwrap::{

@@ -147,6 +147,7 @@ import {
 	DEFAULT_COMPOSER_PERMISSION_PROFILE,
 	type ComposerPermissionProfile,
 	parseComposerPermissionProfile,
+	PERMISSION_PICKER_ENABLED,
 	takeComposerPermissionForSession,
 } from "./composer-permission"
 import { goalPromptText, parseComposerSlash } from "./composer-slash"
@@ -2389,11 +2390,13 @@ export function ChatInputSection({
 									<PromptInputFooter className="flex-wrap">
 										<PromptInputTools>
 											<AttachButton disabled={!isConnected} />
-											<ComposerPermissionPicker
-												value={permissionProfile}
-												onChange={handlePermissionProfileChange}
-												disabled={!isConnected}
-											/>
+											{PERMISSION_PICKER_ENABLED && (
+												<ComposerPermissionPicker
+													value={permissionProfile}
+													onChange={handlePermissionProfileChange}
+													disabled={!isConnected}
+												/>
+											)}
 											{collaborationMode === "plan" && (
 												<ComposerModeChip
 													variant="plan"

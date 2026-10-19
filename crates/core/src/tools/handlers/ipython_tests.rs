@@ -610,6 +610,12 @@ fn plan_fence_reads_workspace_but_only_build_fence_writes_it() {
 #[cfg(unix)]
 #[tokio::test]
 async fn plan_kernel_fails_closed_when_workspace_is_in_scratch() {
+    if devo_sandbox::SANDBOX_ENFORCEMENT_TEMPORARILY_DISABLED {
+        // No fence is requested while the sandbox is disabled, so the Plan
+        // overlap check never runs. Kept for the post-revert contract.
+        eprintln!("skip: OS sandbox temporarily disabled");
+        return;
+    }
     let workspace = tempfile::tempdir().expect("workspace under /tmp");
     let err = match ensure_kernel(
         &None,
@@ -634,6 +640,12 @@ async fn plan_kernel_fails_closed_when_workspace_is_in_scratch() {
 #[cfg(target_os = "linux")]
 #[tokio::test]
 async fn plan_kernel_denies_python_workspace_write_but_allows_scratch_and_mode_switch() {
+    if devo_sandbox::SANDBOX_ENFORCEMENT_TEMPORARILY_DISABLED {
+        // Kernels spawn bare while the sandbox is disabled, so the workspace
+        // write cannot be OS-refused. Kept for the post-revert contract.
+        eprintln!("skip: OS sandbox temporarily disabled");
+        return;
+    }
     let workspace = tempfile::Builder::new()
         .prefix(".devo-plan-kernel-")
         .tempdir_in(env!("CARGO_MANIFEST_DIR"))

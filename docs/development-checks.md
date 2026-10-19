@@ -1,5 +1,13 @@
 # Fast development checks
 
+> **Temporarily disabled.** OS sandboxing and the permission picker are
+> disabled repo-wide: every process runs with full user permissions and new
+> sessions default to full-access. Revert by flipping
+> `SANDBOX_ENFORCEMENT_TEMPORARILY_DISABLED` (Rust, `crates/sandbox/src/lib.rs`),
+> `PERMISSIONS_COMMAND_ENABLED` (TUI), `PERMISSION_PICKER_ENABLED` (desktop),
+> and the default-preset literals back to their asking defaults.
+
+
 Use the existing Cargo workspace and check the component being edited first.
 The Node TUI loads TypeScript source directly; UI edits do not require rebuilding
 the Rust server. Keep one built server and use `DEVO_SERVER_BIN` when launching
@@ -101,6 +109,49 @@ Rust crates and embedded Python/skill assets select every component. Unknown
 paths, build/CI configuration, and unavailable diffs also select every component.
 Renames include both the removed and added paths. Pushes to the main branches
 always run full CI. The separate runtime-bundle workflow remains unchanged.
+
+## TUI tmux smoke in CI
+
+Two jobs drive the product TTY under tmux with the scenario runner
+(`apps/tui/scripts/run-tmux-smoke.js`; scenarios described in the repository
+AGENTS.md). Both build the debug CLI and boot the real TUI against a
+per-run temporary Devo home; assertions read the Native protocol trace
+(turn outcomes, RPC success), never exact model reply text.
+
+- **`tmux` (secret-free, every qualifying PR):** boots the TUI (T1), runs the
+  `/goal` and `/heartbeat` slash flows, and completes a real turn (T2) against
+  a local mock provider (`apps/tui/scripts/smoke-mock-provider.mjs`, an
+  OpenAI-completions SSE stub) seeded via `providers.json` +
+  `auth.json` in `DEVO_HOME`. Fork PRs run this job because it needs no
+  credentials.
+- **`tmux-live` (repo-owned runs only):** completes real turns on all three
+  model wire APIs, on `ubuntu-latest` and `macos-latest` (macOS exercises the
+  seatbelt fence and the `python3` interpreter fallback):
+  - **Chat Completions** — DeepSeek at `https://api.deepseek.com`
+    (`openai_chat_completions`), using the `DEEPSEEK_API_KEY` repository
+    secret; this configuration also runs the interrupt scenario (T3).
+  - **Anthropic Messages** — DeepSeek's Anthropic-compatible endpoint
+    `https://api.deepseek.com/anthropic` (`anthropic_messages`), same secret.
+  - **Responses** — OpenAI at `https://api.openai.com/v1`
+    (`openai_responses`, `gpt-5-mini`), using the optional
+    `OPENAI_API_KEY` repository secret; the step is skipped when that secret
+    is absent.
+  The job is skipped when `DEEPSEEK_API_KEY` is absent — including fork PRs,
+  where secrets are unavailable. Add secrets under *Settings → Secrets and
+  variables → Actions*; spare low-quota keys are sufficient because each run
+  issues a handful of short prompts.
+
+The mock provider never validates credentials and speaks all three wires
+(`--wire openai|anthropic|responses`), so the same seeded-home shape works
+for local dry runs:
+
+```sh
+node apps/tui/scripts/smoke-mock-provider.mjs 8801 --wire anthropic &
+home=$(mktemp -d)
+printf '%s\n' '{"model": "deepseek/deepseek-v4-flash", "provider": {"deepseek": {"credential": "deepseek", "enabled": true, "base_url": "http://127.0.0.1:8801", "wire_api": "anthropic_messages"}}}' > "$home/providers.json"
+printf '%s\n' '{"deepseek": {"type": "api_key", "key": "ci-mock-key"}}' > "$home/auth.json"
+DEVO_HOME="$home" node apps/tui/scripts/run-tmux-smoke.js T2
+```
 
 Preview a committed change's scope without building:
 

@@ -952,6 +952,13 @@ fn sandbox_runtime(
 
 #[tokio::test]
 async fn execute_single_retries_without_sandbox_when_already_approved() {
+    if devo_sandbox::SANDBOX_ENFORCEMENT_TEMPORARILY_DISABLED {
+        // The router never profiles spawns while the sandbox is disabled, so
+        // the SANDBOX_DENIED retry ladder cannot be exercised. Kept for the
+        // post-revert contract.
+        eprintln!("skip: OS sandbox temporarily disabled");
+        return;
+    }
     let permission_checks = Arc::new(std::sync::atomic::AtomicUsize::new(0));
     let permission_checks_for_checker = Arc::clone(&permission_checks);
     let attempts = Arc::new(std::sync::Mutex::new(Vec::new()));
@@ -1001,6 +1008,11 @@ async fn execute_single_retries_without_sandbox_when_already_approved() {
 
 #[tokio::test]
 async fn execute_single_does_not_silent_unsandbox_without_approval() {
+    if devo_sandbox::SANDBOX_ENFORCEMENT_TEMPORARILY_DISABLED {
+        // See execute_single_retries_without_sandbox_when_already_approved.
+        eprintln!("skip: OS sandbox temporarily disabled");
+        return;
+    }
     let (runtime, attempts) = sandbox_runtime(false, false, "workspace", None);
     let result = runtime
         .execute_single(
@@ -1026,6 +1038,11 @@ async fn execute_single_does_not_silent_unsandbox_without_approval() {
 
 #[tokio::test]
 async fn execute_single_skips_unsandbox_retry_when_profile_has_deny_read() {
+    if devo_sandbox::SANDBOX_ENFORCEMENT_TEMPORARILY_DISABLED {
+        // See execute_single_retries_without_sandbox_when_already_approved.
+        eprintln!("skip: OS sandbox temporarily disabled");
+        return;
+    }
     let temp = tempfile::tempdir().expect("tempdir");
     let workspace = temp.path();
     let config_dir = workspace.join(".devo");

@@ -131,6 +131,7 @@ import {
 	builtinSlashCommandTakesArgument,
 	isBuiltinSlashCommandName,
 	parseSlashCommand,
+	PERMISSIONS_COMMAND_ENABLED,
 	resolveBuiltinSlashCommandName,
 } from "../../core/slash-commands.js";
 import {
@@ -1103,6 +1104,7 @@ export class InteractiveMode {
 		const slashCommands: SlashCommand[] = BUILTIN_SLASH_COMMANDS.filter(
 			(command) => command.name !== "fast" || this.currentModelSupportsFastMode(),
 		)
+			.filter((command) => command.name !== "permissions" || PERMISSIONS_COMMAND_ENABLED)
 			.filter((command) => !this.isExcludedBuiltinCommand(command.name))
 			.map((command) => ({
 				name: command.name,
@@ -4655,7 +4657,11 @@ export class InteractiveMode {
 				}
 				if (commandName === "permissions") {
 					this.editor.setText("");
-					await this.handlePermissionCommand(commandArgs);
+					if (PERMISSIONS_COMMAND_ENABLED) {
+						await this.handlePermissionCommand(commandArgs);
+					} else {
+						this.showStatus("/permissions is temporarily unavailable");
+					}
 					return;
 				}
 				if (commandName === "fast") {
@@ -8900,18 +8906,20 @@ export class InteractiveMode {
 		const selectedModel =
 			currentModel?.provider === "unknown" && currentModel.id === "unknown" ? undefined : currentModel;
 		let action = resolvePrimeInferencePostLoginModelAction(authResult, selectedModel, this.modelRegistry);
-		if (!action.openModelPicker) {
+		// Devo's debrand stub returns undefined (no hosted-inference auto-select).
+		if (!action?.openModelPicker) {
 			return false;
 		}
 
 		if (!selectedModel) {
 			try {
 				const availableModels = await this.getConnectionAvailableModels();
-				action = resolvePrimeInferencePostLoginModelAction(authResult, selectedModel, {
-					find: (provider, modelId) =>
-						availableModels.find((model) => model.provider === provider && model.id === modelId) ??
-						this.modelRegistry.find(provider, modelId),
-				});
+				action =
+					resolvePrimeInferencePostLoginModelAction(authResult, selectedModel, {
+						find: (provider, modelId) =>
+							availableModels.find((model) => model.provider === provider && model.id === modelId) ??
+							this.modelRegistry.find(provider, modelId),
+					}) ?? action;
 			} catch {
 				// Preserve the registry fallback so selection can still report a specific failure below.
 			}

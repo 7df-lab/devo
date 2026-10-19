@@ -7,8 +7,13 @@
 
 export type ComposerPermissionProfile = "default" | "autoReview" | "fullAccess"
 
-/** Matches server `new_session_state`: new sessions default to AutoReview. */
-export const DEFAULT_COMPOSER_PERMISSION_PROFILE: ComposerPermissionProfile = "autoReview"
+/** The picker is temporarily hidden while OS sandboxing is disabled repo-wide;
+ *  flip to true to restore it. */
+export const PERMISSION_PICKER_ENABLED = false
+
+/** Matches server `new_session_state`: new sessions default to FullAccess
+ *  (temporary product default while the sandbox is disabled). */
+export const DEFAULT_COMPOSER_PERMISSION_PROFILE: ComposerPermissionProfile = "fullAccess"
 
 export const COMPOSER_PERMISSION_PROFILES: readonly {
 	id: ComposerPermissionProfile
