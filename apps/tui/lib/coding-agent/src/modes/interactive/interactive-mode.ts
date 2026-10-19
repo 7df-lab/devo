@@ -8900,18 +8900,20 @@ export class InteractiveMode {
 		const selectedModel =
 			currentModel?.provider === "unknown" && currentModel.id === "unknown" ? undefined : currentModel;
 		let action = resolvePrimeInferencePostLoginModelAction(authResult, selectedModel, this.modelRegistry);
-		if (!action.openModelPicker) {
+		// Devo's debrand stub returns undefined (no hosted-inference auto-select).
+		if (!action?.openModelPicker) {
 			return false;
 		}
 
 		if (!selectedModel) {
 			try {
 				const availableModels = await this.getConnectionAvailableModels();
-				action = resolvePrimeInferencePostLoginModelAction(authResult, selectedModel, {
-					find: (provider, modelId) =>
-						availableModels.find((model) => model.provider === provider && model.id === modelId) ??
-						this.modelRegistry.find(provider, modelId),
-				});
+				action =
+					resolvePrimeInferencePostLoginModelAction(authResult, selectedModel, {
+						find: (provider, modelId) =>
+							availableModels.find((model) => model.provider === provider && model.id === modelId) ??
+							this.modelRegistry.find(provider, modelId),
+					}) ?? action;
 			} catch {
 				// Preserve the registry fallback so selection can still report a specific failure below.
 			}
