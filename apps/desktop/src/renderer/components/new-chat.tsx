@@ -59,6 +59,7 @@ import { ComposerPermissionPicker } from "./chat/composer-permission-picker"
 import {
 	DEFAULT_COMPOSER_PERMISSION_PROFILE,
 	type ComposerPermissionProfile,
+	PERMISSION_PICKER_ENABLED,
 	stashComposerPermissionForSession,
 } from "./chat/composer-permission"
 import { goalPromptText, parseComposerSlash } from "./chat/composer-slash"
@@ -846,11 +847,13 @@ export function NewChat() {
 								<PromptInputFooter className="px-4 pb-2">
 									<PromptInputTools>
 										<AttachButton disabled={launching || !selectedDirectory} />
-										<ComposerPermissionPicker
-											value={permissionProfile}
-											onChange={setPermissionProfile}
-											disabled={launching || !selectedDirectory}
-										/>
+										{PERMISSION_PICKER_ENABLED && (
+											<ComposerPermissionPicker
+												value={permissionProfile}
+												onChange={setPermissionProfile}
+												disabled={launching || !selectedDirectory}
+											/>
+										)}
 										{collaborationMode === "plan" && (
 											<ComposerModeChip
 												variant="plan"
