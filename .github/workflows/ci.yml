@@ -5,6 +5,7 @@ on:
     branches: [main, master]
   pull_request:
     branches: [main, master]
+  workflow_dispatch:
 
 env:
   CARGO_TERM_COLOR: always
@@ -149,6 +150,146 @@ jobs:
       - run: npm ci --ignore-scripts --no-audit --no-fund
       - run: npm test
       - run: node --import tsx --test lib/coding-agent/src/modes/interactive/interactive-mode-model-candidates.test.ts lib/coding-agent/src/modes/interactive/interactive-mode-session-ancillary.test.ts
+
+  tmux-secrets:
+    name: Detect live TUI provider secrets
+    runs-on: ubuntu-latest
+    outputs:
+      live: ${{ steps.detect.outputs.live }}
+    steps:
+      # Job-level `if` cannot read the secrets context; fork PRs see empty
+      # secrets, so this doubles as the fork gate for the live job.
+      - id: detect
+        env:
+          DEEPSEEK_API_KEY: ${{ secrets.DEEPSEEK_API_KEY }}
+        run: |
+          if [ -n "$DEEPSEEK_API_KEY" ]; then
+            echo "live=true" >> "$GITHUB_OUTPUT"
+          else
+            echo "live=false" >> "$GITHUB_OUTPUT"
+          fi
+
+  tmux:
+    needs: changes
+    if: needs.changes.outputs.rust == 'true' || needs.changes.outputs.tui == 'true'
+    name: TUI tmux smoke (mock provider)
+    runs-on: ubuntu-latest
+    timeout-minutes: 30
+    steps:
+      - uses: actions/checkout@v4
+      - uses: dtolnay/rust-toolchain@stable
+      - uses: Swatinem/rust-cache@v2
+      - uses: actions/setup-node@v4
+        with:
+          node-version: "24"
+          cache: npm
+          cache-dependency-path: apps/tui/package-lock.json
+      - name: Ensure tmux
+        run: command -v tmux || (sudo apt-get update && sudo apt-get install -y tmux)
+      - name: Install TUI dependencies
+        working-directory: apps/tui
+        run: npm ci --ignore-scripts --no-audit --no-fund
+      - name: Build CLI
+        run: cargo build -p devo-cli --bin devo --locked
+      - name: Boot and outcome scenarios (no provider credentials)
+        working-directory: apps/tui
+        run: |
+          for scenario in T1 goal heartbeat; do
+            echo "::group::tmux smoke: $scenario"
+            node scripts/run-tmux-smoke.js "$scenario"
+            echo "::endgroup::"
+          done
+      - name: Completed-turn scenario against the local mock provider
+        working-directory: apps/tui
+        env:
+          DEVO_TUI_TEST_TIMEOUT_MS: "120000"
+        run: |
+          home="$(mktemp -d)"
+          node scripts/smoke-mock-provider.mjs 8801 &
+          mock_pid=$!
+          trap 'kill "$mock_pid" 2>/dev/null || true' EXIT
+          printf '%s\n' \
+            '{"model": "deepseek/deepseek-v4-flash", "provider": {"deepseek": {"credential": "deepseek", "enabled": true, "base_url": "http://127.0.0.1:8801"}}}' \
+            > "$home/providers.json"
+          printf '%s\n' '{"deepseek": {"type": "api_key", "key": "ci-mock-key"}}' > "$home/auth.json"
+          chmod 600 "$home/auth.json"
+          DEVO_HOME="$home" node scripts/run-tmux-smoke.js T2
+
+  tmux-live:
+    needs: [changes, tmux-secrets]
+    if: >-
+      needs.tmux-secrets.outputs.live == 'true' &&
+      (needs.changes.outputs.rust == 'true' || needs.changes.outputs.tui == 'true')
+    name: TUI tmux live LLM (${{ matrix.os }})
+    runs-on: ${{ matrix.os }}
+    timeout-minutes: 40
+    strategy:
+      fail-fast: false
+      matrix:
+        # macOS covers the seatbelt fence and python3 fallback paths that
+        # Linux cannot reach with the same code.
+        os: [ubuntu-latest, macos-latest]
+    env:
+      DEEPSEEK_API_KEY: ${{ secrets.DEEPSEEK_API_KEY }}
+      OPENAI_API_KEY: ${{ secrets.OPENAI_API_KEY }}
+    steps:
+      - uses: actions/checkout@v4
+      - uses: dtolnay/rust-toolchain@stable
+      - uses: Swatinem/rust-cache@v2
+      - uses: actions/setup-node@v4
+        with:
+          node-version: "24"
+          cache: npm
+          cache-dependency-path: apps/tui/package-lock.json
+      - name: Ensure tmux
+        run: command -v tmux || (if [ "$(uname)" = Darwin ]; then brew install tmux; else sudo apt-get update && sudo apt-get install -y tmux; fi)
+      - name: Install TUI dependencies
+        working-directory: apps/tui
+        run: npm ci --ignore-scripts --no-audit --no-fund
+      - name: Build CLI
+        run: cargo build -p devo-cli --bin devo --locked
+      - name: Seed live Devo homes (one per wire API)
+        run: |
+          # chat-completions: builtin DeepSeek endpoint
+          chat="$(mktemp -d)/home"; mkdir -p "$chat"
+          printf '%s\n' '{"model": "deepseek/deepseek-v4-flash", "provider": {"deepseek": {"credential": "deepseek", "enabled": true, "base_url": "https://api.deepseek.com", "wire_api": "openai_chat_completions"}}}' > "$chat/providers.json"
+          # anthropic-messages: DeepSeek's Anthropic-compatible endpoint, same key
+          anth="$(mktemp -d)/home"; mkdir -p "$anth"
+          printf '%s\n' '{"model": "deepseek/deepseek-v4-flash", "provider": {"deepseek": {"credential": "deepseek", "enabled": true, "base_url": "https://api.deepseek.com/anthropic", "wire_api": "anthropic_messages"}}}' > "$anth/providers.json"
+          # responses: builtin OpenAI (openai_responses wire)
+          resp="$(mktemp -d)/home"; mkdir -p "$resp"
+          printf '%s\n' '{"model": "openai/gpt-5-mini", "provider": {"openai": {"credential": "openai", "enabled": true, "base_url": "https://api.openai.com/v1", "wire_api": "openai_responses"}}}' > "$resp/providers.json"
+          for home in "$chat" "$anth"; do
+            node -e 'const fs = require("fs"); fs.writeFileSync(process.argv[1], JSON.stringify({ deepseek: { type: "api_key", key: process.env.DEEPSEEK_API_KEY } }, null, 2));' "$home/auth.json"
+            chmod 600 "$home/auth.json"
+          done
+          node -e 'const fs = require("fs"); fs.writeFileSync(process.argv[1], JSON.stringify({ openai: { type: "api_key", key: process.env.OPENAI_API_KEY } }, null, 2));' "$resp/auth.json"
+          chmod 600 "$resp/auth.json"
+          echo "DEVO_LIVE_CHAT_HOME=$chat" >> "$GITHUB_ENV"
+          echo "DEVO_LIVE_ANTHROPIC_HOME=$anth" >> "$GITHUB_ENV"
+          echo "DEVO_LIVE_RESPONSES_HOME=$resp" >> "$GITHUB_ENV"
+      - name: Chat Completions wire (real DeepSeek)
+        working-directory: apps/tui
+        env:
+          DEVO_TUI_TEST_TIMEOUT_MS: "180000"
+        run: DEVO_HOME="$DEVO_LIVE_CHAT_HOME" node scripts/run-tmux-smoke.js T2
+      - name: Anthropic Messages wire (real DeepSeek)
+        working-directory: apps/tui
+        env:
+          DEVO_TUI_TEST_TIMEOUT_MS: "180000"
+        run: DEVO_HOME="$DEVO_LIVE_ANTHROPIC_HOME" node scripts/run-tmux-smoke.js T2
+      - name: Responses wire (real OpenAI)
+        # Optional second secret; skipped when absent.
+        if: secrets.OPENAI_API_KEY != ''
+        working-directory: apps/tui
+        env:
+          DEVO_TUI_TEST_TIMEOUT_MS: "180000"
+        run: DEVO_HOME="$DEVO_LIVE_RESPONSES_HOME" node scripts/run-tmux-smoke.js T2
+      - name: Interrupted-turn scenario (real DeepSeek, Chat Completions)
+        working-directory: apps/tui
+        env:
+          DEVO_TUI_TEST_TIMEOUT_MS: "180000"
+        run: DEVO_HOME="$DEVO_LIVE_CHAT_HOME" node scripts/run-tmux-smoke.js T3
 
   check:
     needs: changes

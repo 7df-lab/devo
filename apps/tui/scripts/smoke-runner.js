@@ -122,7 +122,18 @@ async function run() {
     if (ownedSession) mux(["kill-session", "-t", session], false);
     // The target is our own mkdtemp child, never the source credential folder.
     if (dirname(home) !== resolve(tmpdir())) throw new Error("Unexpected smoke home location");
-    rmSync(home, { recursive: true, force: true });
+    // The killed product can flush session files for a few beats after
+    // kill-session; a cleanup race must never fail a passing run, so retry
+    // briefly and then leave the temp dir to the OS.
+    for (let attempt = 0; attempt < 10; attempt++) {
+      try {
+        rmSync(home, { recursive: true, force: true });
+        break;
+      } catch (error) {
+        if (attempt === 9) console.error(`home cleanup left behind (${error.code ?? error.message}): ${home}`);
+        await sleep(500);
+      }
+    }
   }
 }
 
