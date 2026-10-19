@@ -100,7 +100,11 @@ impl Default for KernelSessionConfig {
         let bundle = devo_util_paths::runtime::RuntimeBundle::current();
         Self {
             python: bundle.as_ref().map_or_else(
-                || devo_util_paths::runtime::fallback_interpreter(std::env::var_os("PATH").as_deref()),
+                || {
+                    devo_util_paths::runtime::fallback_interpreter(
+                        std::env::var_os("PATH").as_deref(),
+                    )
+                },
                 |runtime| runtime.python.clone(),
             ),
             cwd: std::env::current_dir().unwrap_or_else(|_| PathBuf::from(".")),
@@ -656,12 +660,10 @@ impl KernelSession {
             cmd.env(key, value);
         }
 
-        let mut child = cmd
-            .spawn()
-            .map_err(|source| SpawnError::SpawnInterpreter {
-                python: config.python.clone(),
-                source,
-            })?;
+        let mut child = cmd.spawn().map_err(|source| SpawnError::SpawnInterpreter {
+            python: config.python.clone(),
+            source,
+        })?;
         let stdin = child
             .stdin
             .take()

@@ -141,7 +141,9 @@ mod tests {
         // Nothing found (or no PATH at all): keep the historical bare name so
         // the spawn error stays recognizable.
         assert_eq!(
-            fallback_interpreter(Some(join_paths(std::path::Path::new("/nonexistent")).as_os_str())),
+            fallback_interpreter(Some(
+                join_paths(std::path::Path::new("/nonexistent")).as_os_str()
+            )),
             PathBuf::from("python")
         );
         assert_eq!(fallback_interpreter(None), PathBuf::from("python"));

@@ -26,9 +26,7 @@ pub(crate) async fn run_doctor() -> Result<()> {
         .as_ref()
         .map_or_else(|| "node".into(), |runtime| runtime.node.clone());
     let python = bundle.as_ref().map_or_else(
-        || {
-            devo_util_paths::runtime::fallback_interpreter(std::env::var_os("PATH").as_deref())
-        },
+        || devo_util_paths::runtime::fallback_interpreter(std::env::var_os("PATH").as_deref()),
         |runtime| runtime.python.clone(),
     );
     use devo_util_paths::runtime_environment::{Interpreter, remove_interpreter_environment};
