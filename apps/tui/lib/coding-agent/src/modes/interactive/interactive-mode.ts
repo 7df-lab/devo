@@ -131,6 +131,7 @@ import {
 	builtinSlashCommandTakesArgument,
 	isBuiltinSlashCommandName,
 	parseSlashCommand,
+	PERMISSIONS_COMMAND_ENABLED,
 	resolveBuiltinSlashCommandName,
 } from "../../core/slash-commands.js";
 import {
@@ -1103,6 +1104,7 @@ export class InteractiveMode {
 		const slashCommands: SlashCommand[] = BUILTIN_SLASH_COMMANDS.filter(
 			(command) => command.name !== "fast" || this.currentModelSupportsFastMode(),
 		)
+			.filter((command) => command.name !== "permissions" || PERMISSIONS_COMMAND_ENABLED)
 			.filter((command) => !this.isExcludedBuiltinCommand(command.name))
 			.map((command) => ({
 				name: command.name,
@@ -4655,7 +4657,11 @@ export class InteractiveMode {
 				}
 				if (commandName === "permissions") {
 					this.editor.setText("");
-					await this.handlePermissionCommand(commandArgs);
+					if (PERMISSIONS_COMMAND_ENABLED) {
+						await this.handlePermissionCommand(commandArgs);
+					} else {
+						this.showStatus("/permissions is temporarily unavailable");
+					}
 					return;
 				}
 				if (commandName === "fast") {

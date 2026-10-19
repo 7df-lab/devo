@@ -3,6 +3,11 @@ import type { SourceInfo } from "./source-info.js";
 
 export type SlashCommandSource = "extension" | "prompt" | "skill";
 
+/** /permissions is temporarily hidden: OS sandboxing is disabled repo-wide and
+ *  new sessions default to full-access, so the profile selector has nothing to
+ *  switch. Flip to true to restore the command. */
+export const PERMISSIONS_COMMAND_ENABLED = false;
+
 export interface SlashCommandInfo {
 	name: string;
 	description?: string;
