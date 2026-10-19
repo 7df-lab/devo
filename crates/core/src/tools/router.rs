@@ -325,12 +325,20 @@ impl ToolRuntime {
             }
         }
 
-        let mut sandbox_profile = match &self.context.sandbox_profile_live {
-            Some(live) => live
-                .lock()
-                .expect("sandbox profile live mutex poisoned")
-                .clone(),
-            None => self.context.sandbox_profile.clone(),
+        // Sandbox temporarily disabled (SANDBOX_ENFORCEMENT_TEMPORARILY_DISABLED):
+        // spawn every tool process with full user permissions regardless of the
+        // session's configured, persisted, or live-updated profile. Restore the
+        // plain match below to re-enable enforcement.
+        let mut sandbox_profile = if devo_sandbox::SANDBOX_ENFORCEMENT_TEMPORARILY_DISABLED {
+            None
+        } else {
+            match &self.context.sandbox_profile_live {
+                Some(live) => live
+                    .lock()
+                    .expect("sandbox profile live mutex poisoned")
+                    .clone(),
+                None => self.context.sandbox_profile.clone(),
+            }
         };
         let mut already_bypassed_sandbox = sandbox_profile_is_inactive(sandbox_profile.as_deref());
         // `already_approved`: only user/session/auto-review approvals unlock

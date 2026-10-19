@@ -1021,11 +1021,16 @@ impl ServerRuntime {
     /// The session's sandbox profile for a command/exec spawn, or `None` for
     /// sessionless execs and sessions without a profile. Resolved through the
     /// session actor so PTY spawns enforce the same profile as tool-run shells.
+    /// Temporarily overridden: the sandbox is disabled repo-wide, so terminals
+    /// spawn bare even when the session carries a profile.
     async fn command_exec_sandbox_profile(
         &self,
         session_id: Option<SessionId>,
         cwd: &std::path::Path,
     ) -> Option<String> {
+        if devo_sandbox::SANDBOX_ENFORCEMENT_TEMPORARILY_DISABLED {
+            return None;
+        }
         let session = self.sessions.lock().await.get(&session_id?).cloned()?;
         session
             .shell_exec_context(cwd.to_path_buf())

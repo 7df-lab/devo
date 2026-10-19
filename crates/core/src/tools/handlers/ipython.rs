@@ -529,6 +529,7 @@ pub async fn ensure_kernel_with_restore_state(
         if k.workspace_root() == workspace
             && k.workspace_access() == access
             && (collaboration_mode != devo_protocol::CollaborationMode::Plan
+                || devo_sandbox::SANDBOX_ENFORCEMENT_TEMPORARILY_DISABLED
                 || k.fence_state() == devo_kernel::FenceState::Fenced)
         {
             return Ok((Arc::clone(k), None));
@@ -583,7 +584,16 @@ pub async fn ensure_kernel_with_restore_state(
     // for the kernel. The kernel crate owns the explicit-downgrade path when
     // the fence cannot be raised (unprovisioned sandbox, missing platform
     // wiring).
-    if let Some(fence) = resolve_kernel_fence(cwd, session_dir, collaboration_mode) {
+    //
+    // Sandbox temporarily disabled (SANDBOX_ENFORCEMENT_TEMPORARILY_DISABLED):
+    // kernels spawn bare with full user permissions. Restore the direct call
+    // to re-enable the OS fence.
+    let resolved_fence = if devo_sandbox::SANDBOX_ENFORCEMENT_TEMPORARILY_DISABLED {
+        None
+    } else {
+        resolve_kernel_fence(cwd, session_dir, collaboration_mode)
+    };
+    if let Some(fence) = resolved_fence {
         if collaboration_mode == devo_protocol::CollaborationMode::Plan {
             // A writable ancestor or descendant overlaps the workspace.
             // Sandbox grant unions cannot turn that path read-only.
@@ -619,6 +629,7 @@ pub async fn ensure_kernel_with_restore_state(
         .await
         .map_err(|e| ToolCallError::InternalError(e.to_string()))?;
     if collaboration_mode == devo_protocol::CollaborationMode::Plan
+        && !devo_sandbox::SANDBOX_ENFORCEMENT_TEMPORARILY_DISABLED
         && kernel.fence_state() != devo_kernel::FenceState::Fenced
     {
         return Err(ToolCallError::InternalError(format!(
