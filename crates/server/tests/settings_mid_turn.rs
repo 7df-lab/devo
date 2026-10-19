@@ -335,27 +335,8 @@ async fn mid_turn_tighten_to_default_triggers_approval_for_ipython_permission_re
         "subscription/create failed: {subscription_response}"
     );
 
-    // Start permissive: the first probe must run without any approval.
-    let settings_response = runtime
-        .handle_incoming(
-            connection_id,
-            json!({
-                "id": 4,
-                "method": "session/metadata/update",
-                "params": {
-                    "sessionId": session_id.to_string(),
-                    "expectedVersion": 1,
-                    "settings": { "permissionProfile": "fullAccess" }
-                }
-            }),
-        )
-        .await
-        .context("settings update response")?;
-    assert!(
-        settings_response.get("error").is_none(),
-        "settings update failed: {settings_response}"
-    );
-
+    // Start permissive (the temporary full-access default while the sandbox
+    // is disabled): the first probe must run without any approval.
     let turn_response = runtime
         .handle_incoming(
             connection_id,
@@ -416,7 +397,7 @@ async fn mid_turn_tighten_to_default_triggers_approval_for_ipython_permission_re
                 "method": "session/metadata/update",
                 "params": {
                     "sessionId": session_id.to_string(),
-                    "expectedVersion": 2,
+                    "expectedVersion": 1,
                     "settings": { "permissionProfile": "default" }
                 }
             }),

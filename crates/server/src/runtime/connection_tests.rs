@@ -4431,7 +4431,7 @@ async fn native_metadata_update_branches() -> Result<()> {
             serde_json::json!({
                 "sessionId": session_id.to_string(),
                 "expectedVersion": 1,
-                "settings": { "permissionProfile": "fullAccess" },
+                "settings": { "permissionProfile": "autoReview" },
             }),
         )
         .await;
@@ -4439,7 +4439,7 @@ async fn native_metadata_update_branches() -> Result<()> {
         json_result(&response, "rpc");
     assert_eq!(
         result.session.settings.permission_profile,
-        devo_protocol::native::model::PermissionProfile::FullAccess
+        devo_protocol::native::model::PermissionProfile::AutoReview
     );
     assert_eq!(result.session.version, 2);
     let rollout_path = env
@@ -4454,7 +4454,7 @@ async fn native_metadata_update_branches() -> Result<()> {
             .expect("session")
             .settings
             .permission_profile,
-        devo_protocol::native::model::PermissionProfile::FullAccess
+        devo_protocol::native::model::PermissionProfile::AutoReview
     );
 
     let conflict = env
@@ -4570,7 +4570,7 @@ async fn native_metadata_update_during_active_turn() -> Result<()> {
             serde_json::json!({
                 "sessionId": session_id.to_string(),
                 "expectedVersion": 1,
-                "settings": { "permissionProfile": "fullAccess" },
+                "settings": { "permissionProfile": "autoReview" },
             }),
         )
         .await;
@@ -4586,7 +4586,7 @@ async fn native_metadata_update_during_active_turn() -> Result<()> {
     let inline = stream.turn_inline.as_ref().expect("turn inline state");
     assert_eq!(
         inline.hook_context.config.permission_profile.preset,
-        devo_safety::PermissionPreset::FullAccess
+        devo_safety::PermissionPreset::AutoReview
     );
     drop(stream);
     open.store(true, std::sync::atomic::Ordering::SeqCst);

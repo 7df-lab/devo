@@ -243,7 +243,8 @@ base_instructions = "Catalog-only model instructions"
     assert_config_option_values(reasoning_effort_option, &["low", "medium", "high"])?;
     let mode_option = acp_config_option(&session_new_response["result"], "mode")?;
     assert_eq!(mode_option["name"], json!("Session Mode"));
-    assert_eq!(mode_option["currentValue"], json!("auto-review"));
+    // New sessions default to full-access while the sandbox is disabled.
+    assert_eq!(mode_option["currentValue"], json!("full-access"));
     assert_config_option_values(mode_option, &["default", "auto-review", "full-access"])?;
 
     let set_reasoning_effort_response = stdio_request_until(
@@ -300,7 +301,7 @@ base_instructions = "Catalog-only model instructions"
     assert!(acp_config_option_optional(&set_config_response["result"], "thought_level").is_none());
     assert_eq!(
         acp_config_option(&set_config_response["result"], "mode")?["currentValue"],
-        json!("auto-review")
+        json!("full-access")
     );
 
     let set_mode_response = stdio_request_until(
@@ -310,14 +311,14 @@ base_instructions = "Catalog-only model instructions"
         json!({
             "sessionId": session_id,
             "configId": "mode",
-            "value": "full-access"
+            "value": "auto-review"
         }),
         "ACP session/set_config_option mode response",
     )
     .await?;
     assert_eq!(
         acp_config_option(&set_mode_response["result"], "mode")?["currentValue"],
-        json!("full-access")
+        json!("auto-review")
     );
     assert_eq!(
         acp_model_config_option(&set_mode_response["result"])?["currentValue"],

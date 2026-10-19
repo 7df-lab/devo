@@ -114,6 +114,29 @@ pub(crate) async fn start_permission_prompt(prompt_request_id: u64) -> Result<Pe
     )
     .await?;
     let session_id = create_acp_session_id(&runtime, connection.connection_id, &cwd, 2).await?;
+    // New sessions default to full-access while the sandbox is disabled; these
+    // tests exercise the interactive permission flow, so pin the mode back to
+    // "default" through the ACP config option.
+    let set_mode = runtime
+        .handle_incoming(
+            connection.connection_id,
+            serde_json::json!({
+                "id": 50,
+                "method": "session/set_config_option",
+                "params": {
+                    "sessionId": session_id,
+                    "configId": "mode",
+                    "type": "string",
+                    "value": "default"
+                }
+            }),
+        )
+        .await
+        .context("session/set_config_option response")?;
+    assert!(
+        set_mode.get("error").is_none(),
+        "session/set_config_option failed: {set_mode}"
+    );
     assert_eq!(
         runtime
             .handle_incoming(

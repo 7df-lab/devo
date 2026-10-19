@@ -25,6 +25,12 @@ fn session_fence_does_not_grant_shared_temp_roots() {
 #[cfg(unix)]
 #[tokio::test]
 async fn owned_temp_does_not_hide_base_profile_plan_overlap() {
+    if devo_sandbox::SANDBOX_ENFORCEMENT_TEMPORARILY_DISABLED {
+        // No fence is requested while the sandbox is disabled, so the Plan
+        // overlap check never runs. Kept for the post-revert contract.
+        eprintln!("skip: OS sandbox temporarily disabled");
+        return;
+    }
     let workspace = tempfile::tempdir().expect("workspace under shared scratch");
     let artifacts = tempfile::tempdir().expect("artifacts");
     let error = match ensure_kernel_with_restore_state(
