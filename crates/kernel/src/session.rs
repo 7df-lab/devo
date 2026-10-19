@@ -99,9 +99,10 @@ impl Default for KernelSessionConfig {
     fn default() -> Self {
         let bundle = devo_util_paths::runtime::RuntimeBundle::current();
         Self {
-            python: bundle
-                .as_ref()
-                .map_or_else(|| PathBuf::from("python"), |runtime| runtime.python.clone()),
+            python: bundle.as_ref().map_or_else(
+                || devo_util_paths::runtime::fallback_interpreter(std::env::var_os("PATH").as_deref()),
+                |runtime| runtime.python.clone(),
+            ),
             cwd: std::env::current_dir().unwrap_or_else(|_| PathBuf::from(".")),
             python_path_entries: bundle
                 .as_ref()
@@ -121,6 +122,12 @@ pub enum SpawnError {
     Repl(#[from] ReplError),
     #[error("failed to spawn kernel: {0}")]
     Spawn(#[source] std::io::Error),
+    #[error("failed to spawn kernel interpreter `{python}`: {source}")]
+    SpawnInterpreter {
+        python: PathBuf,
+        #[source]
+        source: std::io::Error,
+    },
 }
 
 /// Collected output from one kernel request that waits for `done`.
@@ -649,7 +656,12 @@ impl KernelSession {
             cmd.env(key, value);
         }
 
-        let mut child = cmd.spawn().map_err(SpawnError::Spawn)?;
+        let mut child = cmd
+            .spawn()
+            .map_err(|source| SpawnError::SpawnInterpreter {
+                python: config.python.clone(),
+                source,
+            })?;
         let stdin = child
             .stdin
             .take()

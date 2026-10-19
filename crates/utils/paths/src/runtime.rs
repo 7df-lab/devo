@@ -67,6 +67,33 @@ fn runtime_root(root: &Path, kind: &str) -> PathBuf {
     root.join(format!("runtime/invalid-{kind}-reference"))
 }
 
+/// Interpreter used when no runtime bundle is installed (source builds).
+///
+/// Prefers a name that already exists on `PATH`: the historical `python`
+/// first, then `python3` — stock macOS ships no unversioned `python`, only
+/// `python3` from the Command Line Tools, so a bare `Command::new("python")`
+/// fails with ENOENT there. Windows keeps the bare `python` name: its
+/// `python3.exe` may be a Microsoft Store alias stub that opens the Store
+/// instead of running Python, so probing for it would be misleading.
+pub fn fallback_interpreter(path_var: Option<&std::ffi::OsStr>) -> PathBuf {
+    #[cfg(windows)]
+    {
+        let _ = path_var;
+        PathBuf::from("python")
+    }
+    #[cfg(not(windows))]
+    {
+        for name in ["python", "python3"] {
+            if let Some(paths) = path_var
+                && std::env::split_paths(paths).any(|dir| dir.join(name).is_file())
+            {
+                return PathBuf::from(name);
+            }
+        }
+        PathBuf::from("python")
+    }
+}
+
 #[cfg(test)]
 mod tests {
     use super::*;
@@ -79,6 +106,45 @@ mod tests {
             RuntimeBundle::from_executable(&temp.path().join("devo")),
             None
         );
+    }
+
+    #[test]
+    fn fallback_interpreter_prefers_existing_names_on_path() {
+        let with_python = tempfile::tempdir().unwrap();
+        std::fs::write(with_python.path().join("python"), "").unwrap();
+        let with_python3 = tempfile::tempdir().unwrap();
+        std::fs::write(with_python3.path().join("python3"), "").unwrap();
+
+        let join_paths = |dir: &std::path::Path| {
+            std::env::join_paths([dir, std::path::Path::new("/nonexistent")]).unwrap()
+        };
+
+        if cfg!(windows) {
+            // Windows never probes PATH: the python3.exe Store alias stub
+            // would satisfy an existence check without running Python.
+            assert_eq!(
+                fallback_interpreter(Some(join_paths(with_python.path()).as_os_str())),
+                PathBuf::from("python")
+            );
+        } else {
+            // Historical name wins when both exist (no behavior change on Linux).
+            assert_eq!(
+                fallback_interpreter(Some(join_paths(with_python.path()).as_os_str())),
+                PathBuf::from("python")
+            );
+            // macOS shape: only python3 exists.
+            assert_eq!(
+                fallback_interpreter(Some(join_paths(with_python3.path()).as_os_str())),
+                PathBuf::from("python3")
+            );
+        }
+        // Nothing found (or no PATH at all): keep the historical bare name so
+        // the spawn error stays recognizable.
+        assert_eq!(
+            fallback_interpreter(Some(join_paths(std::path::Path::new("/nonexistent")).as_os_str())),
+            PathBuf::from("python")
+        );
+        assert_eq!(fallback_interpreter(None), PathBuf::from("python"));
     }
 
     #[test]
