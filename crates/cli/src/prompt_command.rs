@@ -10,11 +10,9 @@ use devo_core::PresetModelCatalog;
 use devo_core::QueryEvent;
 use devo_core::TurnConfig;
 use devo_core::default_base_instructions;
-use devo_core::provider_request_model_map_for_binding;
-use devo_core::resolve_enabled_model_binding;
+use devo_core::provider_request_config;
 use devo_core::tools::ToolPlanConfig;
 use devo_core::tools::handlers;
-use devo_mcp::manager::RmcpMcpManager;
 use devo_provider::ModelProviderSDK;
 use devo_provider::ProviderRoute;
 use devo_provider::ProviderRouter;
@@ -54,14 +52,19 @@ pub(crate) async fn run_prompt(
         .load(Some(cwd.as_path()))
         .unwrap_or_else(|_| AppConfig::default());
     let resolved_provider =
-        devo_server::load_server_provider(&app_config, model_override, &home_dir)?;
-    let model_catalog = PresetModelCatalog::load_from_config(&app_config.provider.model_overrides)?;
+        devo_server::load_server_provider(&app_config, model_override, &home_dir).await?;
+    let model_catalog = PresetModelCatalog::load_from_provider_config_with_home(
+        &app_config.provider_catalog_config(),
+        &app_config.provider.model_overrides,
+        Some(home_dir.as_path()),
+    )?;
     let turn_config = prompt_turn_config(
         &app_config,
         &model_catalog,
         model_override,
         &resolved_provider.default_model,
-    );
+        Some(home_dir.as_path()),
+    )?;
     let selected_model = turn_config.model.slug.clone();
 
     let mut session_state = SessionState::new(
@@ -86,54 +89,6 @@ pub(crate) async fn run_prompt(
     );
     session_state.push_message(devo_core::Message::user(input.to_string()));
 
-    let registry = {
-        let mcp_manager = std::sync::Arc::new(RmcpMcpManager::new(
-            app_config
-                .mcp
-                .clone()
-                .with_code_search_workspace_cwd(cwd.clone()),
-            app_config.mcp_oauth_credentials_store.unwrap_or_default(),
-        ));
-        let tool_plan = ToolPlanConfig::from_app_config(&app_config);
-        let reg = handlers::build_registry_from_plan_with_mcp(&tool_plan, mcp_manager).await;
-        std::sync::Arc::new(reg)
-    };
-    let runtime = ToolRuntime::new_with_context(
-        std::sync::Arc::clone(&registry),
-        devo_core::tools::PermissionChecker::always_allow(),
-        devo_core::tools::ToolRuntimeContext {
-            session_id: session_state.id.clone(),
-            turn_id: None,
-            cwd: cwd.clone(),
-            agent_scope: devo_core::tools::ToolAgentScope::Parent,
-            collaboration_mode: devo_protocol::CollaborationMode::Build,
-            agent_coordinator: None,
-            client_filesystem: None,
-            file_read_ledger: std::sync::Arc::new(devo_core::tools::FileReadLedger::new()),
-            local_web_search: None,
-            hooks: (!app_config.hooks.is_empty()).then(|| devo_core::HookRuntimeContext {
-                runner: devo_core::HookRunner::new(app_config.hooks.clone()),
-                base: devo_core::HookBaseInput {
-                    session_id: session_state.id.clone(),
-                    transcript_path: String::new(),
-                    cwd: cwd.clone(),
-                    permission_mode: Some("yolo".to_string()),
-                    agent_id: None,
-                    agent_type: None,
-                },
-            }),
-            network_proxy: None,
-            network_no_proxy: None,
-            sandbox_profile: session_state.config.sandbox_profile.clone(),
-        },
-    );
-    let provider = Arc::new(RoutedPromptProvider::new(
-        Arc::clone(&resolved_provider.provider_router),
-        turn_config.provider_route.clone(),
-    ));
-
-    eprintln!("devo [prompt] model={selected_model} sending...");
-
     if output_format == PromptOutputFormat::Jsonl {
         write_jsonl(&PromptJsonlEvent::SessionStarted {
             session_id: session_state.id.as_str(),
@@ -146,7 +101,70 @@ pub(crate) async fn run_prompt(
         })?;
     }
 
-    let session_id_for_events = session_state.id.clone();
+    let tool_plan = ToolPlanConfig::from_app_config(&app_config);
+    let kernel = if app_config.tools.execution_surface == devo_core::ToolExecutionSurface::Rlm {
+        Some(
+            handlers::ensure_kernel(&None, &cwd, None, devo_protocol::CollaborationMode::Build)
+                .await?,
+        )
+    } else {
+        None
+    };
+    let registry = Arc::new(handlers::build_registry_from_plan(&tool_plan));
+    let runtime = Arc::new(ToolRuntime::new_with_context(
+        std::sync::Arc::clone(&registry),
+        crate::prompt_host::permission_checker(),
+        devo_core::tools::ToolRuntimeContext {
+            session_id: session_state.id.as_str().into(),
+            turn_id: None,
+            cwd: cwd.clone(),
+            agent_scope: devo_core::tools::ToolAgentScope::Parent,
+            collaboration_mode: devo_protocol::CollaborationMode::Build,
+            agent_coordinator: None,
+            client_filesystem: None,
+            file_read_ledger: std::sync::Arc::new(devo_core::tools::FileReadLedger::new()),
+            local_web_search: match &turn_config.web_search {
+                devo_core::ResolvedWebSearchConfig::Local(config) => Some(config.clone()),
+                _ => None,
+            },
+            hooks: (!app_config.hooks.is_empty()).then(|| devo_core::HookRuntimeContext {
+                runner: devo_core::HookRunner::new(app_config.hooks.clone()),
+                base: devo_core::HookBaseInput {
+                    session_id: session_state.id.as_str().into(),
+                    transcript_path: String::new(),
+                    cwd: cwd.clone(),
+                    permission_mode: Some("yolo".to_string()),
+                    agent_id: None,
+                    agent_type: None,
+                },
+            }),
+            network_proxy: None,
+            network_no_proxy: None,
+            sandbox_profile: session_state.config.sandbox_profile.clone(),
+            sandbox_profile_live: None,
+            kernel: kernel.clone(),
+            python_cell_first_wait_ms: None,
+            live_turn_settings: None,
+            python_cell_watch: None,
+            python_cell_completion: None,
+            session_dir: None,
+        },
+    ));
+    if let Some(kernel) = &kernel {
+        kernel
+            .set_host_handler(Some(crate::prompt_host::host_request_handler(Arc::clone(
+                &runtime,
+            ))))
+            .await;
+    }
+    let provider = Arc::new(RoutedPromptProvider::new(
+        Arc::clone(&resolved_provider.provider_router),
+        turn_config.provider_route.clone(),
+    ));
+
+    eprintln!("devo [prompt] model={selected_model} sending...");
+
+    let session_id_for_events = session_state.id.as_str().into();
     let result = devo_core::query(
         &mut session_state,
         &turn_config,
@@ -157,6 +175,12 @@ pub(crate) async fn run_prompt(
         devo_core::QueryOptions::default(),
     )
     .await;
+
+    if let Some(kernel) = &kernel
+        && let Err(err) = kernel.shutdown().await
+    {
+        eprintln!("devo [prompt] kernel shutdown failed: {err}");
+    }
 
     match result {
         Ok(()) => match latest_assistant_text(&session_state.messages) {
@@ -243,7 +267,8 @@ fn prompt_turn_config(
     model_catalog: &PresetModelCatalog,
     requested_model: Option<&str>,
     default_model: &str,
-) -> TurnConfig {
+    home_dir: Option<&Path>,
+) -> Result<TurnConfig> {
     let catalog_model = |model_slug: &str| {
         model_catalog
             .get(model_slug)
@@ -255,31 +280,80 @@ fn prompt_turn_config(
             })
     };
 
-    if let Some(binding) = resolve_enabled_model_binding(&app_config.provider, requested_model) {
-        let provider_request_models = devo_core::ProviderRequestModelMap::new(
-            provider_request_model_map_for_binding(&app_config.provider, &binding),
+    let provider_config = app_config.provider_catalog_config();
+    let effective = devo_core::effective_provider_catalog_with_home(&provider_config, home_dir)
+        .unwrap_or_else(|_| provider_config.clone());
+    let selected_model = requested_model
+        .or(effective.model.as_deref())
+        .or(Some(default_model));
+    let selection = if let Some(requested) = requested_model {
+        Some(effective.resolve_model(Some(requested)).map_err(|error| {
+            anyhow::anyhow!("cannot select requested model `{requested}`: {error}")
+        })?)
+    } else {
+        selected_model
+            .and_then(|model| effective.resolve_model(Some(model)).ok())
+            .or_else(|| effective.resolve_model(None).ok())
+    };
+    if let Some(selection) = selection {
+        let model_reference = format!("{}/{}", selection.provider_id, selection.model_id);
+        let mut model_config = effective
+            .providers
+            .get(&selection.provider_id)
+            .and_then(|provider| provider.models.get(&selection.model_id))
+            .cloned();
+        if let Some(model) = model_config.as_mut() {
+            model.migrate_reasoning_implementation_into_variants();
+        }
+        let reasoning_effort_selection = effective.reasoning_effort.clone().or_else(|| {
+            model_config
+                .as_ref()
+                .and_then(|model| model.default_reasoning_selection.clone())
+        });
+        let variant_id = model_config.as_ref().and_then(|model| {
+            model.resolve_turn_variant_id(
+                selection.variant_id.as_deref(),
+                reasoning_effort_selection.as_deref(),
+            )
+        });
+        let (request_defaults, request_headers) = provider_request_config(
+            &effective,
+            &selection.provider_id,
+            &selection.model_id,
+            variant_id.as_deref(),
         );
-        let reasoning_effort_selection = app_config
-            .provider
-            .model_reasoning_effort_selection
-            .clone()
-            .or(binding.default_reasoning_effort.clone());
+        let provider_request_models = effective
+            .providers
+            .get(&selection.provider_id)
+            .into_iter()
+            .flat_map(|provider| provider.models.keys())
+            .map(|model_id| {
+                (
+                    format!("{}/{model_id}", selection.provider_id),
+                    model_id.clone(),
+                )
+            })
+            .collect::<std::collections::HashMap<_, _>>();
+        let provider_request_models =
+            devo_core::ProviderRequestModelMap::new(provider_request_models)
+                .with_request_config(request_defaults, request_headers);
         let mut turn_config = TurnConfig::with_provider_route(
-            catalog_model(&binding.model_slug),
-            binding.request_model.clone(),
+            catalog_model(&model_reference),
+            selection.model_id,
             provider_request_models,
-            ProviderRoute::binding(binding.provider_id.clone(), binding.invocation_method),
+            ProviderRoute::connection(selection.provider_id.clone(), selection.wire_api),
             reasoning_effort_selection,
         );
-        turn_config.model_binding_id = Some(binding.binding_id);
-        return turn_config;
+        turn_config.model_binding_id = Some(model_reference);
+        turn_config.variant = variant_id;
+        return Ok(turn_config);
     }
 
     let selected_model = requested_model.unwrap_or(default_model);
-    TurnConfig::new(
+    Ok(TurnConfig::new(
         catalog_model(selected_model),
-        app_config.provider.model_reasoning_effort_selection.clone(),
-    )
+        provider_config.reasoning_effort.clone(),
+    ))
 }
 
 #[derive(Debug, Clone, PartialEq, Eq, Serialize)]
@@ -351,6 +425,13 @@ enum PromptJsonlEvent<'a> {
     },
     #[serde(rename = "item.updated")]
     ToolProgress {
+        session_id: &'a str,
+        item_type: &'static str,
+        tool_call_id: &'a str,
+        delta: &'a str,
+    },
+    #[serde(rename = "item.updated")]
+    ToolCallInputDelta {
         session_id: &'a str,
         item_type: &'static str,
         tool_call_id: &'a str,
@@ -450,14 +531,13 @@ impl PromptUsageDelta {
 
 fn jsonl_event_callback(
     output_format: PromptOutputFormat,
-    session_id: String,
+    session_id: devo_protocol::SessionId,
 ) -> Option<EventCallback> {
     if output_format != PromptOutputFormat::Jsonl {
         return None;
     }
 
     Some(Arc::new(move |event| {
-        let session_id = session_id.clone();
         Box::pin(async move {
             if let Err(error) = write_query_event_jsonl(session_id.as_str(), &event) {
                 eprintln!("devo [prompt] failed to write jsonl event: {error}");
@@ -490,12 +570,13 @@ fn write_query_event_jsonl(session_id: &str, event: &QueryEvent) -> Result<()> {
                 provider: status.provider.as_str(),
                 model: status.model.as_str(),
                 phase: match status.phase {
-                    devo_core::QueryProviderRetryPhase::Scheduled => "scheduled",
-                    devo_core::QueryProviderRetryPhase::Resumed => "resumed",
+                    devo_core::ModelQueryRetryPhase::Scheduled => "scheduled",
+                    devo_core::ModelQueryRetryPhase::Resumed => "resumed",
                 },
                 message: status.message.as_str(),
             })
         }
+        QueryEvent::ProviderQueryFailed { .. } => Ok(()),
         QueryEvent::ContextCompactionStarted => {
             write_jsonl(&PromptJsonlEvent::ContextCompactionStarted { session_id })
         }
@@ -508,6 +589,7 @@ fn write_query_event_jsonl(session_id: &str, event: &QueryEvent) -> Result<()> {
                 message,
             })
         }
+        QueryEvent::ContextEstimate { .. } | QueryEvent::ModelResponseCompleted => Ok(()),
         QueryEvent::UsageDelta { usage } => write_jsonl(&PromptJsonlEvent::UsageDelta {
             session_id,
             usage: PromptUsageDelta::new(usage),
@@ -519,6 +601,14 @@ fn write_query_event_jsonl(session_id: &str, event: &QueryEvent) -> Result<()> {
                 tool_call_id: id,
                 tool_name: name,
                 input,
+            })
+        }
+        QueryEvent::ToolUseInputDelta { id, partial_json } => {
+            write_jsonl(&PromptJsonlEvent::ToolCallInputDelta {
+                session_id,
+                item_type: "tool_call",
+                tool_call_id: id,
+                delta: partial_json,
             })
         }
         QueryEvent::ToolExecutionStart { .. } => Ok(()),
@@ -600,7 +690,8 @@ fn latest_assistant_text(messages: &[devo_core::Message]) -> Option<&str> {
                 | devo_core::ContentBlock::ProviderReasoning { .. }
                 | devo_core::ContentBlock::ToolUse { .. }
                 | devo_core::ContentBlock::HostedToolUse { .. }
-                | devo_core::ContentBlock::ToolResult { .. } => None,
+                | devo_core::ContentBlock::ToolResult { .. }
+                | devo_core::ContentBlock::Image { .. } => None,
             })
             .or_else(|| {
                 message.content.iter().find_map(|block| match block {
@@ -609,7 +700,8 @@ fn latest_assistant_text(messages: &[devo_core::Message]) -> Option<&str> {
                     | devo_core::ContentBlock::ProviderReasoning { .. }
                     | devo_core::ContentBlock::ToolUse { .. }
                     | devo_core::ContentBlock::HostedToolUse { .. }
-                    | devo_core::ContentBlock::ToolResult { .. } => None,
+                    | devo_core::ContentBlock::ToolResult { .. }
+                    | devo_core::ContentBlock::Image { .. } => None,
                 })
             })
     })

@@ -1,26 +1,24 @@
-import { createDevoClient, type DevoAcpTransport } from "@devo-ai/sdk/v2/client"
+import { createDevoClient, type DevoNativeTransport } from "@devo-ai/sdk/v2/client"
+import { ProtocolValidationError } from "@devo-ai/sdk/v2/protocol-validation"
 import { createLogger } from "./logger"
+import {
+	applyWatcherEvent,
+	type GlobalNativeEvent,
+	type SessionState as WatcherSessionState,
+} from "./notification-policy"
 import { setPermissionResponder, showNotification, updateBadgeCount } from "./notifications"
+import { recycleServerForProtocolMismatch } from "./devo-manager"
 
 const log = createLogger("notification-watcher")
 
-// ============================================================
-// Types — minimal, only what we need for notification decisions
-// ============================================================
-
-export interface SessionState {
-	status: string // "busy" | "idle" | "retry"
-	title: string
-	directory?: string
-	/** If set, this session is a sub-agent spawned by another session. */
-	parentID?: string
-}
+export type SessionState = WatcherSessionState
 
 // ============================================================
 // State
 // ============================================================
 
 let abortController: AbortController | null = null
+let watcherClient: ReturnType<typeof createDevoClient> | null = null
 
 /** Minimal session state for transition detection. */
 const sessions = new Map<string, SessionState>()
@@ -31,37 +29,55 @@ let pendingCount = 0
 /** Listeners notified whenever session or pending state changes. */
 const changeListeners = new Set<() => void>()
 
+/**
+ * True while draining subscription snapshot/replay. Those events look like
+ * live busy→idle completions and would toast every idle session on app open.
+ */
+let hydrating = false
+let hydrationEndTimer: ReturnType<typeof setImmediate> | null = null
+
 // ============================================================
 // Public API
 // ============================================================
 
 /**
- * Start watching the Devo server's ACP event stream
+ * Start watching the Devo server's Native event stream
  * for notification-worthy events.
  *
  * This runs in the main process (Node.js) and is never throttled
  * by Chromium's background tab restrictions or macOS App Nap.
  */
-export function startNotificationWatcher(transport: DevoAcpTransport): void {
+export function startNotificationWatcher(transport: DevoNativeTransport): void {
 	if (abortController) {
 		log.debug("Stopping existing watcher before restart")
 		abortController.abort()
 	}
+	watcherClient?.dispose()
+	watcherClient = null
 
 	abortController = new AbortController()
 	pendingCount = 0
 
 	const client = createDevoClient({ transport })
+	watcherClient = client
 	setPermissionResponder(async ({ sessionId, permissionId, response }) => {
-		await client.permission.respond({
-			sessionID: sessionId,
-			permissionID: permissionId,
-			response,
-		})
+		try {
+			await client.permission.respond({
+				sessionId: sessionId,
+				permissionId: permissionId,
+				response,
+			})
+		} catch (err) {
+			log.error("Permission reply failed", { sessionId, permissionId, response }, err)
+		}
 	})
 
 	log.info("Starting notification watcher")
-	connectWithRetry(client, abortController.signal)
+	void connectWithRetry(client, abortController.signal).catch((err) => {
+		if (!abortController?.signal.aborted) {
+			log.error("Notification watcher stopped unexpectedly", {}, err)
+		}
+	})
 }
 
 /**
@@ -72,8 +88,11 @@ export function stopNotificationWatcher(): void {
 		abortController.abort()
 		abortController = null
 	}
+	watcherClient?.dispose()
+	watcherClient = null
 	sessions.clear()
 	pendingCount = 0
+	beginHydration()
 	updateBadgeCount(0)
 	setPermissionResponder(null)
 	log.info("Notification watcher stopped")
@@ -112,7 +131,7 @@ export function onStateChanged(listener: () => void): () => void {
 }
 
 // ============================================================
-// ACP Connection + Retry Loop
+// Native Connection + Retry Loop
 // ============================================================
 
 async function connectWithRetry(client: ReturnType<typeof createDevoClient>, signal: AbortSignal): Promise<void> {
@@ -120,14 +139,27 @@ async function connectWithRetry(client: ReturnType<typeof createDevoClient>, sig
 
 	while (!signal.aborted) {
 		try {
-			await consumeAcpEvents(client, signal)
+			await consumeNativeEvents(client, signal)
 			// Stream ended normally (server closed connection)
 			if (!signal.aborted) {
-				log.warn("ACP event stream ended, reconnecting...")
+				log.warn("Native event stream ended, reconnecting...")
 			}
 		} catch (err) {
 			if (signal.aborted) break
-			log.error("ACP event stream error, reconnecting", { retryDelay }, err)
+			if (isProtocolValidationError(err)) {
+				// Our stdio child may be proxying to a stale singleton server
+				// whose wire shape predates this build's schema. Recycling shuts
+				// the singleton down and restarts our own server; restartServer()
+				// stops this watcher and starts a fresh one, so exit the loop.
+				log.error(
+					"Native protocol validation failed",
+					{ reason: describeProtocolMismatch(err) },
+					describeOffendingPayloadEntry(err),
+				)
+				const recycled = await recycleServerForProtocolMismatch(describeProtocolMismatch(err))
+				if (recycled) return
+			}
+			log.error("Native event stream error, reconnecting", { retryDelay }, err)
 		}
 
 		if (signal.aborted) break
@@ -138,174 +170,93 @@ async function connectWithRetry(client: ReturnType<typeof createDevoClient>, sig
 	}
 }
 
-async function consumeAcpEvents(client: ReturnType<typeof createDevoClient>, signal: AbortSignal): Promise<void> {
-	const result = await client.event.subscribe()
-	log.info("ACP event stream connected")
-	for await (const globalEvent of result.stream) {
-		if (signal.aborted) break
-		processGlobalEvent(globalEvent)
+function isProtocolValidationError(error: unknown): error is ProtocolValidationError {
+	if (error instanceof ProtocolValidationError) return true
+	return (
+		typeof error === "object" &&
+		error !== null &&
+		(error as { name?: unknown }).name === "ProtocolValidationError"
+	)
+}
+
+function describeProtocolMismatch(error: ProtocolValidationError): string {
+	return `${error.method} (${error.schemaName ?? error.direction})`
+}
+
+/**
+ * Extracts the replay entry an ajv failure pointed at (instancePath like
+ * `/replay/5/notification/method`) so the next occurrence is diagnosable from
+ * the log alone — the Electron log formatter renders nested objects as
+ * `[Object]`, hiding the offending method otherwise.
+ */
+function describeOffendingPayloadEntry(error: ProtocolValidationError): string {
+	const match = error.errors
+		.map((ajvError) => /^\/replay\/(\d+)\//.exec(ajvError.instancePath ?? ""))
+		.find(Boolean)
+	if (!match) return ""
+	const entry = (error.payload as { replay?: unknown[] } | null)?.replay?.[Number(match[1])]
+	if (entry === undefined) return ""
+	try {
+		return JSON.stringify(entry).slice(0, 800)
+	} catch {
+		return String(entry).slice(0, 800)
 	}
+}
+
+async function consumeNativeEvents(client: ReturnType<typeof createDevoClient>, signal: AbortSignal): Promise<void> {
+	beginHydration()
+	const result = await client.event.subscribe()
+	if (signal.aborted) return
+	log.info("Native event stream connected")
+	// Replay is already queued when subscribe() returns. Drain it as microtasks
+	// with hydrating=true, then enable live toasts on the next event-loop turn.
+	scheduleHydrationEnd()
+	try {
+		for await (const globalEvent of result.stream) {
+			if (signal.aborted) break
+			processGlobalEvent(globalEvent)
+		}
+	} finally {
+		beginHydration()
+	}
+}
+
+function beginHydration(): void {
+	hydrating = true
+	if (hydrationEndTimer !== null) {
+		clearImmediate(hydrationEndTimer)
+		hydrationEndTimer = null
+	}
+}
+
+function scheduleHydrationEnd(): void {
+	if (hydrationEndTimer !== null) clearImmediate(hydrationEndTimer)
+	hydrationEndTimer = setImmediate(() => {
+		hydrationEndTimer = null
+		hydrating = false
+		log.debug("Notification watcher hydration complete")
+	})
 }
 
 // ============================================================
 // Event Processing — only notification-relevant events
 // ============================================================
 
-interface GlobalAcpEvent {
-	directory?: string
-	payload?: {
-		type: string
-		properties: Record<string, unknown>
+function processGlobalEvent(globalEvent: GlobalNativeEvent): void {
+	const result = applyWatcherEvent(globalEvent, {
+		sessions,
+		pendingCount,
+		hydrating,
+	})
+	if (!result.stateChanged && result.notifications.length === 0) return
+
+	pendingCount = result.pendingCount
+	if (result.stateChanged) {
+		updateBadgeCount(pendingCount)
+		scheduleNotify()
 	}
-}
-
-function processGlobalEvent(globalEvent: GlobalAcpEvent): void {
-	const event = globalEvent.payload
-	if (!event) return
-
-	const eventType = event.type
-	const props = event.properties
-
-	const directory = globalEvent.directory
-
-	switch (eventType) {
-		case "permission.asked": {
-			const sessionId = props.sessionID as string
-			const permission = (props as { permission?: string }).permission
-			// Always count sub-agent permissions — they block the parent too.
-			// Attribute the notification to the root session so clicking it
-			// navigates to the parent where the user can respond.
-			const rootId = getRootSession(sessionId)
-			const notifySessionId = rootId
-			const rootTitle = sessions.get(rootId)?.title
-			const rootDir = sessions.get(rootId)?.directory ?? directory
-			pendingCount++
-			updateBadgeCount(pendingCount)
-			showNotification({
-				type: "permission",
-				sessionId: notifySessionId,
-				title: isSubAgent(sessionId)
-					? `Sub-agent needs permission${rootTitle ? ` — ${rootTitle}` : ""}`
-					: "Agent needs permission",
-				body: permission || "Approval required",
-				directory: rootDir,
-				meta: { permissionId: props.id as string },
-			})
-			scheduleNotify()
-			break
-		}
-
-		case "permission.replied": {
-			pendingCount = Math.max(0, pendingCount - 1)
-			updateBadgeCount(pendingCount)
-			scheduleNotify()
-			break
-		}
-
-		case "question.asked": {
-			const sessionId = props.sessionID as string
-			const questions = props.questions as Array<{ header?: string }> | undefined
-			const header = questions?.[0]?.header ?? "Question"
-			// Same bubbling logic as permission.asked.
-			const rootId = getRootSession(sessionId)
-			const rootTitle = sessions.get(rootId)?.title
-			const rootDir = sessions.get(rootId)?.directory ?? directory
-			pendingCount++
-			updateBadgeCount(pendingCount)
-			showNotification({
-				type: "question",
-				sessionId: rootId,
-				title: isSubAgent(sessionId)
-					? `Sub-agent has a question${rootTitle ? ` — ${rootTitle}` : ""}`
-					: "Agent has a question",
-				body: header,
-				directory: rootDir,
-				meta: { requestId: props.id as string },
-			})
-			scheduleNotify()
-			break
-		}
-
-		case "question.replied":
-		case "question.rejected": {
-			pendingCount = Math.max(0, pendingCount - 1)
-			updateBadgeCount(pendingCount)
-			scheduleNotify()
-			break
-		}
-
-		case "session.status": {
-			const sessionId = props.sessionID as string
-			const newStatusType = (props.status as { type: string })?.type
-			if (!sessionId || !newStatusType) break
-
-			const prev = sessions.get(sessionId)
-			const prevStatus = prev?.status
-
-			// Update tracked state
-			sessions.set(sessionId, {
-				status: newStatusType,
-				title: prev?.title ?? "",
-				directory: directory ?? prev?.directory,
-				parentID: prev?.parentID,
-			})
-			scheduleNotify()
-
-			// Detect busy/retry -> idle transition (agent completed)
-			if (
-				newStatusType === "idle" &&
-				(prevStatus === "busy" || prevStatus === "retry") &&
-				!isSubAgent(sessionId)
-			) {
-				const sessionTitle = sessions.get(sessionId)?.title
-				showNotification({
-					type: "completed",
-					sessionId,
-					title: "Agent finished",
-					body: sessionTitle || "Task completed",
-					directory,
-				})
-			}
-			break
-		}
-
-		case "session.error": {
-			const sessionId = props.sessionID as string
-			const error = props.error as { name?: string } | undefined
-			if (!sessionId) break
-			if (!isSubAgent(sessionId)) {
-				showNotification({
-					type: "error",
-					sessionId,
-					title: "Agent encountered an error",
-					body: error?.name ?? "Unknown error",
-					directory,
-				})
-			}
-			break
-		}
-
-		case "session.created":
-		case "session.updated": {
-			// Track session title, directory, and parentID for use in notification decisions
-			const info = (props.info ?? props.session) as
-				| { id?: string; title?: string; parentID?: string }
-				| undefined
-			if (info?.id) {
-				const existing = sessions.get(info.id)
-				sessions.set(info.id, {
-					status: existing?.status ?? "idle",
-					title: info.title ?? existing?.title ?? "",
-					directory: directory ?? existing?.directory,
-					parentID: info.parentID ?? existing?.parentID,
-				})
-				scheduleNotify()
-			}
-			break
-		}
-
-		// All other events (message.*, todo.*, etc.) are ignored —
-		// they're the renderer's domain.
+	for (const notification of result.notifications) {
+		showNotification(notification)
 	}
 }
 
@@ -328,29 +279,6 @@ function scheduleNotify(): void {
 			}
 		}
 	})
-}
-
-/** Check if a session is a sub-agent (has a parent session). */
-function isSubAgent(sessionId: string): boolean {
-	return !!sessions.get(sessionId)?.parentID
-}
-
-/**
- * Walk up the parentID chain to find the top-level (root) session for a given
- * session ID.  Returns the session ID itself when there is no parent.
- * Guards against cycles with a depth limit.
- */
-function getRootSession(sessionId: string): string {
-	let id = sessionId
-	const seen = new Set<string>()
-	while (true) {
-		if (seen.has(id)) break // cycle guard
-		seen.add(id)
-		const parentID = sessions.get(id)?.parentID
-		if (!parentID) break
-		id = parentID
-	}
-	return id
 }
 
 function sleep(ms: number, signal: AbortSignal): Promise<void> {

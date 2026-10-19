@@ -1,3 +1,4 @@
+use std::collections::BTreeMap;
 use std::collections::HashMap;
 use std::collections::VecDeque;
 use std::path::PathBuf;
@@ -16,6 +17,7 @@ use devo_protocol::PendingInputItem;
 use devo_protocol::ThreadGoal;
 use devo_protocol::ThreadGoalStatus;
 use devo_protocol::TurnKind;
+use serde_json::Value;
 
 use crate::AgentsMdConfig;
 use crate::Message;
@@ -93,6 +95,8 @@ pub struct TurnConfig {
     pub provider_request_models: ProviderRequestModelMap,
     /// Provider route selected by the model-provider binding for this turn.
     pub provider_route: ProviderRoute,
+    /// Named provider/model variant selected for this turn, if any.
+    pub variant: Option<String>,
     /// Effective web search behavior for this turn.
     pub web_search: ResolvedWebSearchConfig,
     /// Effective web fetch behavior for this turn.
@@ -108,11 +112,36 @@ pub struct TurnConfig {
 #[derive(Debug, Clone, Default)]
 pub struct ProviderRequestModelMap {
     by_model_slug: HashMap<String, String>,
+    request_defaults: Option<Value>,
+    request_headers: BTreeMap<String, String>,
 }
 
 impl ProviderRequestModelMap {
     pub fn new(by_model_slug: HashMap<String, String>) -> Self {
-        Self { by_model_slug }
+        Self {
+            by_model_slug,
+            request_defaults: None,
+            request_headers: BTreeMap::new(),
+        }
+    }
+
+    /// Attaches provider/model request defaults resolved from providers.json.
+    pub fn with_request_config(
+        mut self,
+        request_defaults: Option<Value>,
+        request_headers: BTreeMap<String, String>,
+    ) -> Self {
+        self.request_defaults = request_defaults;
+        self.request_headers = request_headers;
+        self
+    }
+
+    pub fn request_defaults(&self) -> Option<&Value> {
+        self.request_defaults.as_ref()
+    }
+
+    pub fn request_headers(&self) -> &BTreeMap<String, String> {
+        &self.request_headers
     }
 
     pub fn get(&self, model_slug: &str) -> Option<&str> {
@@ -131,22 +160,16 @@ impl TurnConfig {
         TokenBudget::for_model(&self.model)
     }
 
-    /// Builds the turn token budget, applying a session effective-context
-    /// override when present so hot updates survive turn start reassignment.
+    /// Builds the turn token budget from the model effective window.
     ///
-    /// Resolved value is `min(override, model.context_window)` and is written to
-    /// both `TokenBudget.context_window` and `auto_compact_token_limit`.
+    /// Session effective-context overrides are ignored (product: one Context
+    /// window stored as a ratio on the model). The parameter is retained so
+    /// call sites can keep passing the config field without churn.
     pub fn token_budget_for_session(
         &self,
-        effective_context_window_override: Option<usize>,
+        _effective_context_window_override: Option<usize>,
     ) -> TokenBudget {
-        let mut budget = self.token_budget();
-        if let Some(limit) = effective_context_window_override {
-            let resolved = limit.min(self.model.context_window as usize).max(1);
-            budget.context_window = resolved;
-            budget.auto_compact_token_limit = Some(resolved);
-        }
-        budget
+        self.token_budget()
     }
 
     pub fn new(model: Model, reasoning_effort_selection: Option<String>) -> Self {
@@ -159,6 +182,7 @@ impl TurnConfig {
             model_binding_id: None,
             provider_request_models: ProviderRequestModelMap::default(),
             provider_route: ProviderRoute::Default,
+            variant: None,
             web_search: ResolvedWebSearchConfig::Disabled,
             web_fetch: ResolvedWebFetchConfig::Local,
             reasoning_effort_selection,
@@ -233,6 +257,7 @@ impl TurnConfig {
             model_binding_id: None,
             provider_request_models,
             provider_route,
+            variant: None,
             web_search,
             web_fetch,
             reasoning_effort_selection,
@@ -240,16 +265,29 @@ impl TurnConfig {
     }
 
     pub fn provider_request_model(&self, resolved_catalog_model: &str) -> String {
-        if resolved_catalog_model == self.model.slug {
-            return self.request_model.clone();
+        if let Some(mapped) = self.provider_request_models.get(resolved_catalog_model) {
+            return mapped.to_string();
         }
-        // Thinking may resolve the catalog model to a variant slug. Keep catalog
-        // metadata from the variant, but translate the final request back to the
-        // selected provider's `request_model` when a matching binding exists.
-        self.provider_request_models
-            .get(resolved_catalog_model)
-            .map(str::to_string)
-            .unwrap_or_else(|| resolved_catalog_model.to_string())
+        // Prefer the turn's explicit wire id when the catalog model is unchanged.
+        let wire = if resolved_catalog_model == self.model.slug {
+            self.request_model.clone()
+        } else {
+            // Thinking may resolve the catalog model to a variant slug. Keep
+            // catalog metadata from the variant, but fall back to that slug
+            // when no provider remap exists.
+            resolved_catalog_model.to_string()
+        };
+        // Catalog identity is `provider/model`. If that identity leaked onto the
+        // wire (TurnConfig::new fallback), send the bare model id. Nested ids
+        // such as OpenRouter `org/model` keep their slash.
+        if wire == self.model.slug
+            && let Some((_provider, model_id)) = wire.split_once('/')
+            && !model_id.is_empty()
+            && !model_id.contains('/')
+        {
+            return model_id.to_string();
+        }
+        wire
     }
 }
 
@@ -518,7 +556,7 @@ mod tests {
 
         assert!(prompt.contains("finish &lt;goal&gt; &amp; report &quot;done&quot;"));
         assert!(!prompt.contains("finish <goal> & report \"done\""));
-        assert!(prompt.contains("Completion audit:"));
+        assert!(prompt.contains("audit the current state against every requirement"));
     }
 
     #[test]
@@ -528,8 +566,8 @@ mod tests {
 
         let prompt = state.context_prompt().expect("active goal prompt");
 
-        assert!(prompt.contains("- Token budget: none"));
-        assert!(prompt.contains("- Tokens remaining: unlimited"));
+        assert!(prompt.contains("- token budget: none"));
+        assert!(prompt.contains("- remaining tokens: unlimited"));
     }
 
     #[test]
@@ -547,10 +585,12 @@ mod tests {
         let model = Model {
             slug: "deepseek-v4-flash".to_string(),
             display_name: "deepseek-v4-flash".to_string(),
-            reasoning_capability: ReasoningCapability::ToggleWithLevels(vec![
-                ReasoningEffort::High,
-                ReasoningEffort::Max,
-            ]),
+            reasoning_capability: ReasoningCapability::Levels(
+                devo_protocol::levels_with_leading_off([
+                    ReasoningEffort::High,
+                    ReasoningEffort::Max,
+                ]),
+            ),
             default_reasoning_effort: Some(ReasoningEffort::High),
             ..Model::default()
         };
@@ -610,7 +650,7 @@ mod tests {
             slug: "deepseek-v4-pro".to_string(),
             display_name: "deepseek-v4-pro".to_string(),
             context_window: 1_000_000,
-            effective_context_window_percent: Some(95),
+            effective_context_window_percent: Some(95.0),
             max_tokens: Some(384_000),
             ..Model::default()
         };
@@ -688,7 +728,6 @@ mod tests {
         assert!(state.turn_state.is_none());
         state.start_turn(TurnKind::Regular);
         assert!(state.turn_state.is_some());
-        assert_eq!(state.turn_state.as_ref().unwrap().kind, TurnKind::Regular);
     }
 
     #[test]

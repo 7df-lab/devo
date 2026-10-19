@@ -10,28 +10,18 @@ use std::time::Duration;
 use anyhow::Context;
 use anyhow::Result;
 use async_trait::async_trait;
-use devo_core::AppConfigStore;
-use devo_core::BundledSkillsConfig;
-use devo_core::FileSystemSkillCatalog;
-use devo_core::PresetModelCatalog;
-use devo_core::ProviderVendorCatalog;
-use devo_core::SkillsConfig;
 use devo_core::tools::ToolRegistry;
-use devo_protocol::Model;
 use devo_protocol::ModelRequest;
 use devo_protocol::ModelResponse;
 use devo_protocol::RequestContent;
 use devo_protocol::ResponseContent;
 use devo_protocol::ResponseMetadata;
-use devo_protocol::ServerEvent;
 use devo_protocol::StopReason;
 use devo_protocol::StreamEvent;
 use devo_protocol::Usage;
 use devo_provider::ModelProviderSDK;
-use devo_provider::SingleProviderRouter;
 use devo_server::ClientTransportKind;
 use devo_server::ServerRuntime;
-use devo_server::ServerRuntimeDependencies;
 use futures::Stream;
 use futures::StreamExt;
 use futures::stream;
@@ -75,7 +65,7 @@ pub struct FailingProvider {
 #[async_trait]
 impl ModelProviderSDK for CapturingProvider {
     async fn completion(&self, _request: ModelRequest) -> Result<ModelResponse> {
-        anyhow::bail!("goal continuation test does not use non-streaming completion")
+        Ok(title_response())
     }
 
     async fn completion_stream(
@@ -106,7 +96,7 @@ impl ModelProviderSDK for CapturingProvider {
 #[async_trait]
 impl ModelProviderSDK for QueuedPriorityProvider {
     async fn completion(&self, _request: ModelRequest) -> Result<ModelResponse> {
-        anyhow::bail!("goal continuation test does not use non-streaming completion")
+        Ok(title_response())
     }
 
     async fn completion_stream(
@@ -143,7 +133,7 @@ impl ModelProviderSDK for QueuedPriorityProvider {
 #[async_trait]
 impl ModelProviderSDK for UsageProvider {
     async fn completion(&self, _request: ModelRequest) -> Result<ModelResponse> {
-        anyhow::bail!("goal continuation test does not use non-streaming completion")
+        Ok(title_response())
     }
 
     async fn completion_stream(
@@ -181,7 +171,7 @@ impl ModelProviderSDK for UsageProvider {
 #[async_trait]
 impl ModelProviderSDK for BudgetWrapupPendingProvider {
     async fn completion(&self, _request: ModelRequest) -> Result<ModelResponse> {
-        anyhow::bail!("goal continuation test does not use non-streaming completion")
+        Ok(title_response())
     }
 
     async fn completion_stream(
@@ -229,7 +219,7 @@ impl ModelProviderSDK for BudgetWrapupPendingProvider {
 #[async_trait]
 impl ModelProviderSDK for FailingProvider {
     async fn completion(&self, _request: ModelRequest) -> Result<ModelResponse> {
-        anyhow::bail!("goal continuation test does not use non-streaming completion")
+        Ok(title_response())
     }
 
     async fn completion_stream(
@@ -248,7 +238,7 @@ impl ModelProviderSDK for FailingProvider {
 #[async_trait]
 impl ModelProviderSDK for PendingProvider {
     async fn completion(&self, _request: ModelRequest) -> Result<ModelResponse> {
-        anyhow::bail!("goal continuation test does not use non-streaming completion")
+        Ok(title_response())
     }
 
     async fn completion_stream(
@@ -276,35 +266,11 @@ pub fn build_runtime_with_registry(
     provider: Arc<dyn ModelProviderSDK>,
     registry: Arc<ToolRegistry>,
 ) -> Result<Arc<ServerRuntime>> {
-    let db = Arc::new(devo_server::db::Database::open(
-        data_root.join("goal_continuation.db"),
-    )?);
-    Ok(ServerRuntime::new(
-        data_root.to_path_buf(),
-        ServerRuntimeDependencies::new(
-            Arc::clone(&provider),
-            Arc::new(SingleProviderRouter::new(provider)),
-            registry,
-            devo_server::empty_mcp_manager(),
-            "test-model".to_string(),
-            Arc::new(PresetModelCatalog::new(vec![Model {
-                slug: "test-model".to_string(),
-                display_name: "test-model".to_string(),
-                ..Model::default()
-            }])),
-            Arc::new(ProviderVendorCatalog::default()),
-            Box::new(FileSystemSkillCatalog::new(SkillsConfig {
-                bundled: Some(BundledSkillsConfig { enabled: false }),
-                ..SkillsConfig::default()
-            })),
-            devo_core::AgentsMdConfig::default(),
-            db,
-            Arc::new(std::sync::Mutex::new(AppConfigStore::load(
-                data_root.to_path_buf(),
-                None,
-            )?)),
-        ),
-    ))
+    Ok(devo_server::test_support::TestRuntime::new(provider)
+        .registry(registry)
+        .with_test_model()
+        .db_file("goal_continuation.db")
+        .runtime(data_root))
 }
 
 pub async fn initialize_connection(
@@ -327,6 +293,11 @@ pub async fn initialize_connection(
                         "name": "goal-test",
                         "title": "goal-test",
                         "version": "1.0.0"
+                    },
+                    "_meta": {
+                        "devo": {
+                            "protocol": "native"
+                        }
                     }
                 }
             }),
@@ -351,20 +322,136 @@ pub async fn start_session(
             connection_id,
             serde_json::json!({
                 "id": 10,
-                "method": "session/start",
+                "method": "session/new",
                 "params": {
                     "cwd": cwd,
-                    "ephemeral": false,
-                    "title": "Goal continuation",
-                    "model": "test-model"
+                    "idempotencyKey": "goal-continuation-session"
                 }
             }),
         )
         .await
-        .context("session/start response")?;
-    let response: devo_server::SuccessResponse<devo_server::SessionStartResult> =
-        serde_json::from_value(start_response)?;
-    Ok(response.result.session.session_id)
+        .context("session/new response")?;
+    let response: devo_server::SuccessResponse<
+        devo_protocol::native::rpc_session::SessionNewResult,
+    > = serde_json::from_value(start_response)?;
+    Ok(devo_protocol::SessionId::from(
+        response.result.session.id.as_str(),
+    ))
+}
+
+pub async fn set_session_mode(
+    runtime: &Arc<ServerRuntime>,
+    connection_id: u64,
+    session_id: devo_protocol::SessionId,
+    mode: &str,
+) -> Result<()> {
+    let response = runtime
+        .handle_incoming(
+            connection_id,
+            serde_json::json!({
+                "id": 7,
+                "method": "session/metadata/update",
+                "params": {
+                    "sessionId": session_id,
+                    "expectedVersion": 0,
+                    "settings": { "mode": mode }
+                }
+            }),
+        )
+        .await
+        .context("session/metadata/update mode response")?;
+    if response.get("error").is_some() {
+        anyhow::bail!("session/metadata/update failed: {response}");
+    }
+    tokio::time::sleep(Duration::from_millis(/*millis*/ 25)).await;
+    Ok(())
+}
+
+pub async fn create_goal(
+    runtime: &Arc<ServerRuntime>,
+    connection_id: u64,
+    session_id: devo_protocol::SessionId,
+    objective: &str,
+    token_budget: Option<u64>,
+    if_exists: devo_protocol::native::rpc_session::GoalIfExists,
+    idempotency_key: &str,
+) -> Result<devo_protocol::native::goal::Goal> {
+    let response = runtime
+        .handle_incoming(
+            connection_id,
+            serde_json::json!({
+                "id": idempotency_key,
+                "method": "session/goal/set",
+                "params": {
+                    "sessionId": session_id,
+                    "objective": objective,
+                    "tokenBudget": token_budget,
+                    "ifExists": if_exists,
+                    "idempotencyKey": idempotency_key
+                }
+            }),
+        )
+        .await
+        .context("session/goal/set response")?;
+    let response_value = response.clone();
+    let response: devo_server::SuccessResponse<
+        devo_protocol::native::rpc_session::SessionGoalSetResult,
+    > = serde_json::from_value(response)
+        .with_context(|| format!("decode session/goal/set response: {response_value}"))?;
+    Ok(response.result.goal)
+}
+
+pub async fn read_goal(
+    runtime: &Arc<ServerRuntime>,
+    connection_id: u64,
+    session_id: devo_protocol::SessionId,
+) -> Result<Option<devo_protocol::native::goal::Goal>> {
+    let response = runtime
+        .handle_incoming(
+            connection_id,
+            serde_json::json!({
+                "id": "goal-read",
+                "method": "session/goal/read",
+                "params": { "sessionId": session_id }
+            }),
+        )
+        .await
+        .context("session/goal/read response")?;
+    let response_value = response.clone();
+    let response: devo_server::SuccessResponse<
+        devo_protocol::native::rpc_session::SessionGoalReadResult,
+    > = serde_json::from_value(response)
+        .with_context(|| format!("decode session/goal/read response: {response_value}"))?;
+    Ok(response.result.goal)
+}
+
+pub async fn transition_goal(
+    runtime: &Arc<ServerRuntime>,
+    connection_id: u64,
+    session_id: devo_protocol::SessionId,
+    method: &str,
+    goal_id: &devo_protocol::native::ids::GoalId,
+) -> Result<devo_protocol::native::goal::Goal> {
+    let response = runtime
+        .handle_incoming(
+            connection_id,
+            serde_json::json!({
+                "id": format!("goal-transition-{method}"),
+                "method": method,
+                "params": {
+                    "sessionId": session_id,
+                    "expectedGoalId": goal_id
+                }
+            }),
+        )
+        .await
+        .with_context(|| format!("{method} response"))?;
+    let response_value = response.clone();
+    let response: devo_server::SuccessResponse<
+        devo_protocol::native::rpc_session::SessionGoalTransitionResult,
+    > = serde_json::from_value(response)
+        .with_context(|| format!("decode {method} response: {response_value}"))?;
+    Ok(response.result.goal)
 }
 
 pub async fn wait_for_notification(
@@ -374,10 +461,7 @@ pub async fn wait_for_notification(
     let expected = serde_json::json!(method);
     timeout(Duration::from_secs(/*secs*/ 5), async {
         while let Some(value) = notifications_rx.recv().await {
-            let value = legacy_event_from_acp_notification(value);
-            if value.get("method") == Some(&expected)
-                || notification_matches_native_acp_update(&value, method)
-            {
+            if value.get("method") == Some(&expected) {
                 return Ok(value);
             }
         }
@@ -392,21 +476,15 @@ pub async fn wait_for_approval_request(
 ) -> Result<serde_json::Value> {
     timeout(Duration::from_secs(/*secs*/ 5), async {
         while let Some(value) = notifications_rx.recv().await {
-            if value.get("method")
-                == Some(&serde_json::json!(
+            if matches!(
+                value.get("method").and_then(serde_json::Value::as_str),
+                Some(
                     devo_protocol::ACP_SESSION_REQUEST_PERMISSION_METHOD
-                ))
-            {
-                return Ok(value);
-            }
-            let value = legacy_event_from_acp_notification(value);
-            if value.get("method") == Some(&serde_json::json!("item/started"))
-                && value
-                    .get("params")
-                    .and_then(|params| params.get("item"))
-                    .and_then(|item| item.get("item_kind"))
-                    == Some(&serde_json::json!("approval_request"))
-            {
+                        | "approval/command/request"
+                        | "approval/fileChange/request"
+                        | "approval/permission/request"
+                )
+            ) {
                 return Ok(value);
             }
         }
@@ -451,7 +529,6 @@ pub async fn collect_until_turn_completed(
     timeout(Duration::from_secs(/*secs*/ 5), async {
         let mut values = Vec::new();
         while let Some(value) = notifications_rx.recv().await {
-            let value = legacy_event_from_acp_notification(value);
             let completed = value.get("method") == Some(&serde_json::json!("turn/completed"));
             values.push(value);
             if completed {
@@ -464,93 +541,46 @@ pub async fn collect_until_turn_completed(
     .context("timed out waiting for turn/completed")?
 }
 
-pub async fn pause_goal_and_interrupt_turn(
+pub async fn pause_goal_and_interrupt_session(
     runtime: &Arc<ServerRuntime>,
     connection_id: u64,
     session_id: devo_protocol::SessionId,
-    turn_id: devo_protocol::TurnId,
 ) -> Result<()> {
-    let _ = runtime
-        .handle_incoming(
-            connection_id,
-            serde_json::json!({
-                "id": 90,
-                "method": "_devo/goal/set",
-                "params": {
-                    "sessionId": session_id,
-                    "status": "paused"
-                }
-            }),
-        )
-        .await
-        .context("goal pause response")?;
+    let goal = read_goal(runtime, connection_id, session_id)
+        .await?
+        .context("goal to pause")?;
+    transition_goal(
+        runtime,
+        connection_id,
+        session_id,
+        "session/goal/pause",
+        &goal.id,
+    )
+    .await?;
     let _ = runtime
         .handle_incoming(
             connection_id,
             serde_json::json!({
                 "id": 91,
-                "method": "_devo/turn/interrupt",
+                "method": "session/interrupt",
                 "params": {
-                    "session_id": session_id,
-                    "turn_id": turn_id,
-                    "reason": "test cleanup"
+                    "scope": {
+                        "scope": "session",
+                        "sessionId": session_id
+                    }
                 }
             }),
         )
         .await
-        .context("turn/interrupt response")?;
+        .context("session/interrupt response")?;
     Ok(())
 }
 
 pub fn is_user_message_item(value: &serde_json::Value) -> bool {
-    let value = legacy_event_from_acp_notification(value.clone());
     matches!(
         value.get("method").and_then(serde_json::Value::as_str),
         Some("item/started" | "item/completed")
-    ) && value["params"]["item"]["item_kind"] == serde_json::json!("user_message")
-}
-
-fn legacy_event_from_acp_notification(value: serde_json::Value) -> serde_json::Value {
-    if value.get("method") != Some(&serde_json::json!("session/update")) {
-        return value;
-    }
-    let Ok(notification) =
-        serde_json::from_value::<devo_protocol::AcpSessionNotification>(value["params"].clone())
-    else {
-        return value;
-    };
-    let Some((method, event)) = devo_protocol::original_event_from_acp_notification(&notification)
-    else {
-        return value;
-    };
-    let params = match event {
-        ServerEvent::TurnCompleted(payload)
-        | ServerEvent::TurnInterrupted(payload)
-        | ServerEvent::TurnStarted(payload) => serde_json::to_value(payload),
-        ServerEvent::TurnFailed(payload) => serde_json::to_value(payload),
-        ServerEvent::ItemCompleted(payload) | ServerEvent::ItemStarted(payload) => {
-            serde_json::to_value(payload)
-        }
-        ServerEvent::ItemDelta {
-            delta_kind,
-            payload,
-        } => serde_json::to_value(serde_json::json!({
-            "delta_kind": delta_kind,
-            "payload": payload,
-        })),
-        other => serde_json::to_value(other),
-    }
-    .expect("serialize legacy event params");
-    serde_json::json!({
-        "method": method,
-        "params": params,
-    })
-}
-
-fn notification_matches_native_acp_update(value: &serde_json::Value, method: &str) -> bool {
-    value.get("method") == Some(&serde_json::json!("session/update"))
-        && method == "item/agentMessage/delta"
-        && value["params"]["update"]["sessionUpdate"] == serde_json::json!("agent_message_chunk")
+    ) && value["params"]["item"]["item"]["type"] == serde_json::json!("userMessage")
 }
 
 pub fn request_contains_text(request: &ModelRequest, needle: &str) -> bool {
@@ -562,7 +592,8 @@ pub fn request_contains_text(request: &ModelRequest, needle: &str) -> bool {
             RequestContent::ProviderReasoning { .. }
             | RequestContent::ToolUse { .. }
             | RequestContent::HostedToolUse { .. }
-            | RequestContent::ToolResult { .. } => false,
+            | RequestContent::ToolResult { .. }
+            | RequestContent::Image { .. } => false,
         })
     })
 }
@@ -576,7 +607,8 @@ pub fn request_last_message_contains_text(request: &ModelRequest, needle: &str) 
             RequestContent::ProviderReasoning { .. }
             | RequestContent::ToolUse { .. }
             | RequestContent::HostedToolUse { .. }
-            | RequestContent::ToolResult { .. } => false,
+            | RequestContent::ToolResult { .. }
+            | RequestContent::Image { .. } => false,
         })
     })
 }
@@ -589,4 +621,12 @@ fn text_response(id: &str, text: &str, stop_reason: StopReason) -> ModelResponse
         usage: Usage::default(),
         metadata: ResponseMetadata::default(),
     }
+}
+
+pub fn title_response() -> ModelResponse {
+    text_response(
+        "goal-title-response",
+        "Goal test title",
+        StopReason::EndTurn,
+    )
 }

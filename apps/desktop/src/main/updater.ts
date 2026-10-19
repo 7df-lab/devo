@@ -1,3 +1,4 @@
+import { execFileSync } from "node:child_process"
 import { app, BrowserWindow, shell } from "electron"
 import type { AppUpdater, UpdateInfo } from "electron-updater"
 
@@ -34,24 +35,31 @@ async function getAutoUpdater(): Promise<AppUpdater> {
 // ============================================================
 
 /**
- * Detect whether the running macOS .app bundle is properly code-signed
- * (i.e. signed with a real Apple Developer ID, not ad-hoc or unsigned).
+ * Detect whether codesign verifies the running packaged macOS executable.
  * Returns true on non-macOS platforms since signing isn't required there.
  */
-function detectCanAutoInstall(): boolean {
-	if (process.platform !== "darwin") return true
-	if (!app.isPackaged) return true
+export function detectCanAutoInstall({
+	platform = process.platform,
+	packaged = app.isPackaged,
+	getExecutablePath = () => app.getPath("exe"),
+	runCodesign = execFileSync,
+}: {
+	platform?: NodeJS.Platform
+	packaged?: boolean
+	getExecutablePath?: () => string
+	runCodesign?: (file: string, args: string[], options: { stdio: "pipe" }) => unknown
+} = {}): boolean {
+	if (platform !== "darwin" || !packaged) return true
 
 	try {
-		const { execSync } = require("node:child_process")
-		// codesign --verify exits 0 if valid signature, non-zero otherwise
-		execSync(`codesign --verify --deep --strict "${app.getPath("exe")}"`, {
-			encoding: "utf8",
+		// An ESM-safe import is required in the packaged main process. Pass the
+		// executable path as an argument rather than interpreting it in a shell.
+		runCodesign("codesign", ["--verify", "--deep", "--strict", getExecutablePath()], {
 			stdio: "pipe",
 		})
 		return true
 	} catch {
-		// Unsigned or ad-hoc signed — Squirrel.Mac will reject the install
+		// Verification failure (including missing codesign) blocks Squirrel install.
 		return false
 	}
 }

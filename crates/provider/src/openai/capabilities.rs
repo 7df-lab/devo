@@ -59,6 +59,7 @@ enum ModelMatcher {
 
 impl ModelMatcher {
     fn matches(self, model: &str) -> bool {
+        let model = model.rsplit_once('/').map_or(model, |(_, model)| model);
         match self {
             // Capability resolution uses the catalog slug, not the provider's
             // configurable wire model name. Avoid lowercasing the whole slug
@@ -124,6 +125,20 @@ const DEFAULT_RESPONSES: OpenAIRequestProfile = OpenAIRequestProfile::new(
 
 const OPENAI_PROFILE_RULES: &[ProfileRule] = &[
     ProfileRule {
+        matcher: ModelMatcher::Prefix("gpt-5"),
+        transport: OpenAITransport::Responses,
+        profile: OpenAIRequestProfile::new(
+            OpenAIReasoningMode::Effort,
+            RESPONSES_ROLES,
+            // GPT-5-class Responses backends (codex included) reject sampling
+            // overrides; only the reasoning effort is configurable.
+            false,
+            false,
+            false,
+            false,
+        ),
+    },
+    ProfileRule {
         matcher: ModelMatcher::Prefix("glm-"),
         transport: OpenAITransport::ChatCompletions,
         profile: OpenAIRequestProfile::new(
@@ -148,6 +163,18 @@ const OPENAI_PROFILE_RULES: &[ProfileRule] = &[
         ),
     },
     ProfileRule {
+        matcher: ModelMatcher::Prefix("kimi-"),
+        transport: OpenAITransport::ChatCompletions,
+        profile: OpenAIRequestProfile::new(
+            OpenAIReasoningMode::Thinking,
+            ROLES_WITHOUT_DEVELOPER,
+            true,
+            true,
+            true,
+            true,
+        ),
+    },
+    ProfileRule {
         matcher: ModelMatcher::Prefix("minimax-"),
         transport: OpenAITransport::ChatCompletions,
         profile: OpenAIRequestProfile::new(
@@ -160,7 +187,7 @@ const OPENAI_PROFILE_RULES: &[ProfileRule] = &[
         ),
     },
     ProfileRule {
-        matcher: ModelMatcher::Prefix("qwen-"),
+        matcher: ModelMatcher::Prefix("qwen"),
         transport: OpenAITransport::ChatCompletions,
         profile: OpenAIRequestProfile::new(
             OpenAIReasoningMode::Effort,
@@ -219,6 +246,36 @@ mod tests {
     fn resolve_request_profile_matches_prefix_case_insensitively() {
         let profile = resolve_request_profile(
             &ModelProfileKey::CatalogSlug("GLM-4.5".to_string()),
+            OpenAITransport::ChatCompletions,
+        );
+        assert_eq!(profile.reasoning_mode, OpenAIReasoningMode::Thinking);
+    }
+
+    #[test]
+    fn resolve_request_profile_matches_provider_catalog_slugs() {
+        let profile = resolve_request_profile(
+            &ModelProfileKey::CatalogSlug("deepseek/deepseek-v4-flash".to_string()),
+            OpenAITransport::ChatCompletions,
+        );
+        assert_eq!(
+            profile.reasoning_mode,
+            OpenAIReasoningMode::ThinkingWithEffort
+        );
+    }
+
+    #[test]
+    fn resolve_request_profile_matches_qwen3_models() {
+        let profile = resolve_request_profile(
+            &ModelProfileKey::CatalogSlug("ollama/qwen3:8b".to_string()),
+            OpenAITransport::ChatCompletions,
+        );
+        assert_eq!(profile.reasoning_mode, OpenAIReasoningMode::Effort);
+    }
+
+    #[test]
+    fn resolve_request_profile_matches_kimi_models() {
+        let profile = resolve_request_profile(
+            &ModelProfileKey::CatalogSlug("kimi/kimi-k2.6".to_string()),
             OpenAITransport::ChatCompletions,
         );
         assert_eq!(profile.reasoning_mode, OpenAIReasoningMode::Thinking);

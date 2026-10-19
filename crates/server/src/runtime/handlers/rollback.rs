@@ -7,9 +7,8 @@ use std::path::PathBuf;
 use std::sync::Arc;
 
 use chrono::Utc;
-use devo_core::SessionId;
-use devo_protocol::canonical::ids::RestorePlanId;
-use devo_protocol::canonical::rpc_session::{
+use devo_protocol::native::ids::RestorePlanId;
+use devo_protocol::native::rpc_session::{
     RestorePlan, SessionRollbackCommitParams, SessionRollbackCommitResult,
     SessionRollbackPreviewParams,
 };
@@ -70,13 +69,7 @@ impl ServerRuntime {
                 );
             }
         };
-        let Ok(session_id) = SessionId::try_from(params.session_id.as_str()) else {
-            return self.error_response(
-                request_id,
-                ProtocolErrorCode::InvalidParams,
-                "invalid session id",
-            );
-        };
+        let session_id = params.session_id;
         if self.runtime_active_turn_id(session_id).await.is_some() {
             return self.error_response(
                 request_id,
@@ -106,14 +99,13 @@ impl ServerRuntime {
                 "session does not exist",
             );
         };
-        let rollback_mode = legacy_rollback_mode(params.mode);
         let rebuilt = match self
             .build_runtime_session_from_user_turn_cut(
                 &source,
                 RuntimeSessionTurnCutOptions {
                     session_id,
                     user_turn_index: Some(params.user_turn_index),
-                    rollback_mode: rollback_mode.clone(),
+                    rollback_mode: params.mode,
                     cwd_override: None,
                     title_override: source.summary.title.clone(),
                     created_at: source.summary.created_at,
@@ -128,18 +120,19 @@ impl ServerRuntime {
         };
         let dropped_turn_ids =
             dropped_turn_ids(&source.persisted_turn_items, &rebuilt.persisted_turn_items);
-        let checkpoint = match source.record.as_ref() {
-            Some(record) => {
+        let checkpoint = match source.rollout_path.as_ref() {
+            Some(path) => {
                 let rollout_store = self.rollout_store.clone();
-                let record = record.clone();
+                let path = path.clone();
                 let checkpoints = tokio::task::spawn_blocking(move || {
-                    rollout_store.workspace_checkpoints(&record)
+                    rollout_store.workspace_checkpoints_at(&path)
                 })
                 .await;
                 match checkpoints {
                     Ok(Ok(checkpoints)) => dropped_turn_ids.first().and_then(|turn_id| {
+                        let legacy_turn_id = turn_id;
                         checkpoints.into_iter().rev().find(|checkpoint| {
-                            checkpoint.turn_id == *turn_id
+                            checkpoint.turn_id == *legacy_turn_id
                                 && checkpoint.backend.as_deref() == Some("git_ghost_commit")
                                 && checkpoint.workspace_root.is_some()
                         })
@@ -190,7 +183,7 @@ impl ServerRuntime {
         };
         let restore_plan_id = RestorePlanId::new();
         let public_plan = RestorePlan {
-            restore_plan_id: restore_plan_id.clone(),
+            restore_plan_id,
             affected_files,
             dropped_turn_count: u32::try_from(dropped_turn_ids.len()).unwrap_or(u32::MAX),
             workspace_version,
@@ -220,7 +213,7 @@ impl ServerRuntime {
                 owner_disconnected: false,
                 session_id,
                 user_turn_index: params.user_turn_index,
-                rollback_mode,
+                rollback_mode: params.mode,
                 history_fingerprint: history_fingerprint(&source.persisted_turn_items),
                 checkpoint,
                 public_plan: public_plan.clone(),
@@ -416,58 +409,58 @@ impl ServerRuntime {
         request_id: serde_json::Value,
         plan: &StoredRestorePlan,
         action: CommitAction,
-    ) -> Result<SessionRollbackCommitResult, CommitAttemptFailure> {
+    ) -> Result<SessionRollbackCommitResult, Box<CommitAttemptFailure>> {
         let retry_status = status_for_retry(&action);
         if self.runtime_active_turn_id(plan.session_id).await.is_some() {
-            return Err(CommitAttemptFailure {
+            return Err(Box::new(CommitAttemptFailure {
                 response: self.error_response(
                     request_id,
                     ProtocolErrorCode::TurnAlreadyRunning,
                     "cannot commit rollback while a turn is active",
                 ),
                 next_status: retry_status.clone(),
-            });
+            }));
         }
         let Some(session_handle) = self.session(plan.session_id).await else {
-            return Err(CommitAttemptFailure {
+            return Err(Box::new(CommitAttemptFailure {
                 response: self.error_response(
                     request_id,
                     ProtocolErrorCode::SessionNotFound,
                     "session does not exist",
                 ),
                 next_status: retry_status,
-            });
+            }));
         };
         let _state_change_guard = session_handle.lock_state_change().await;
         if self.runtime_active_turn_id(plan.session_id).await.is_some() {
-            return Err(CommitAttemptFailure {
+            return Err(Box::new(CommitAttemptFailure {
                 response: self.error_response(
                     request_id,
                     ProtocolErrorCode::TurnAlreadyRunning,
                     "cannot commit rollback while a turn is active",
                 ),
                 next_status: retry_status,
-            });
+            }));
         }
         let Some(source) = session_handle.export_runtime_session().await else {
-            return Err(CommitAttemptFailure {
+            return Err(Box::new(CommitAttemptFailure {
                 response: self.error_response(
                     request_id,
                     ProtocolErrorCode::SessionNotFound,
                     "session does not exist",
                 ),
                 next_status: retry_status,
-            });
+            }));
         };
         if history_fingerprint(&source.persisted_turn_items) != plan.history_fingerprint {
-            return Err(CommitAttemptFailure {
+            return Err(Box::new(CommitAttemptFailure {
                 response: self.error_response(
                     request_id,
                     ProtocolErrorCode::WorkspaceVersionConflict,
                     "session history changed after rollback preview",
                 ),
                 next_status: retry_status,
-            });
+            }));
         }
         if matches!(action, CommitAction::Full)
             && let Some(checkpoint) = plan.checkpoint.as_ref()
@@ -486,24 +479,24 @@ impl ServerRuntime {
             match workspace_matches {
                 Ok(true) => {}
                 Ok(false) => {
-                    return Err(CommitAttemptFailure {
+                    return Err(Box::new(CommitAttemptFailure {
                         response: self.error_response(
                             request_id,
                             ProtocolErrorCode::WorkspaceVersionConflict,
                             "workspace changed after rollback preview",
                         ),
                         next_status: RestorePlanStatus::Ready,
-                    });
+                    }));
                 }
                 Err(error) => {
-                    return Err(CommitAttemptFailure {
+                    return Err(Box::new(CommitAttemptFailure {
                         response: self.error_response(
                             request_id,
                             ProtocolErrorCode::InternalError,
                             format!("failed to validate workspace version: {error}"),
                         ),
                         next_status: RestorePlanStatus::Ready,
-                    });
+                    }));
                 }
             }
         }
@@ -526,24 +519,24 @@ impl ServerRuntime {
             {
                 Ok(true) => {}
                 Ok(false) => {
-                    return Err(CommitAttemptFailure {
+                    return Err(Box::new(CommitAttemptFailure {
                         response: self.error_response(
                             request_id,
                             ProtocolErrorCode::WorkspaceVersionConflict,
                             "workspace changed after the failed restore attempt",
                         ),
                         next_status: retry_status,
-                    });
+                    }));
                 }
                 Err(error) => {
-                    return Err(CommitAttemptFailure {
+                    return Err(Box::new(CommitAttemptFailure {
                         response: self.error_response(
                             request_id,
                             ProtocolErrorCode::InternalError,
                             format!("failed to validate recovery workspace version: {error}"),
                         ),
                         next_status: retry_status,
-                    });
+                    }));
                 }
             }
         }
@@ -553,22 +546,24 @@ impl ServerRuntime {
                 RuntimeSessionTurnCutOptions {
                     session_id: plan.session_id,
                     user_turn_index: Some(plan.user_turn_index),
-                    rollback_mode: plan.rollback_mode.clone(),
+                    rollback_mode: plan.rollback_mode,
                     cwd_override: None,
                     title_override: source.summary.title.clone(),
                     created_at: source.summary.created_at,
                 },
             )
             .await
-            .map_err(|message| CommitAttemptFailure {
-                response: self.error_response(
-                    request_id.clone(),
-                    ProtocolErrorCode::InvalidParams,
-                    message,
-                ),
-                next_status: retry_status.clone(),
+            .map_err(|message| {
+                Box::new(CommitAttemptFailure {
+                    response: self.error_response(
+                        request_id.clone(),
+                        ProtocolErrorCode::InvalidParams,
+                        message,
+                    ),
+                    next_status: retry_status.clone(),
+                })
             })?;
-        let record = source.record.clone();
+        let rollout_path = source.rollout_path.clone();
         let restored_file_count = match action {
             CommitAction::HistoryPending {
                 restored_file_count,
@@ -586,15 +581,17 @@ impl ServerRuntime {
                     plan.public_plan.restore_plan_id.as_str(),
                     checkpoint.turn_id,
                     &completed,
-                    record.as_ref(),
+                    rollout_path.as_deref(),
                 )
                 .await
-                .map_err(|response| CommitAttemptFailure {
-                    response,
-                    next_status: RestorePlanStatus::WorkspaceCompletionPending {
-                        completed,
-                        restored_file_count,
-                    },
+                .map_err(|response| {
+                    Box::new(CommitAttemptFailure {
+                        response,
+                        next_status: RestorePlanStatus::WorkspaceCompletionPending {
+                            completed,
+                            restored_file_count,
+                        },
+                    })
                 })?;
                 restored_file_count
             }
@@ -605,27 +602,29 @@ impl ServerRuntime {
                         plan.public_plan.restore_plan_id.as_str(),
                         checkpoint,
                         &plan.public_plan.affected_files,
-                        record.as_ref(),
+                        rollout_path.as_deref(),
                     )
                     .await
-                    .map_err(|failure| CommitAttemptFailure {
-                        response: failure.response,
-                        next_status: if let Some((completed, restored_file_count)) =
-                            failure.completion_pending
-                        {
-                            RestorePlanStatus::WorkspaceCompletionPending {
-                                completed,
-                                restored_file_count,
-                            }
-                        } else if let Some(expected_workspace_version) =
-                            failure.retry_workspace_version
-                        {
-                            RestorePlanStatus::WorkspaceRestoreRetry {
-                                expected_workspace_version,
-                            }
-                        } else {
-                            retry_status
-                        },
+                    .map_err(|failure| {
+                        Box::new(CommitAttemptFailure {
+                            response: failure.response,
+                            next_status: if let Some((completed, restored_file_count)) =
+                                failure.completion_pending
+                            {
+                                RestorePlanStatus::WorkspaceCompletionPending {
+                                    completed,
+                                    restored_file_count,
+                                }
+                            } else if let Some(expected_workspace_version) =
+                                failure.retry_workspace_version
+                            {
+                                RestorePlanStatus::WorkspaceRestoreRetry {
+                                    expected_workspace_version,
+                                }
+                            } else {
+                                retry_status
+                            },
+                        })
                     })?
                 } else {
                     0
@@ -633,16 +632,19 @@ impl ServerRuntime {
             }
         };
         let (retained_turn_ids, retained_item_ids) = retained_ids(&rebuilt.persisted_turn_items);
-        let latest_turn_id = rebuilt.latest_turn.as_ref().map(|turn| turn.turn_id);
-        if let Some(record) = record.as_ref()
-            && let Err(error) = self.rollout_store.append_session_rollback(
-                record,
+        let retained_turn_ids: Vec<_> = retained_turn_ids.to_vec();
+        let retained_item_ids: Vec<_> = retained_item_ids.to_vec();
+        let latest_turn_id = rebuilt.latest_turn.as_ref().map(|turn| turn.turn_id());
+        if let Some(rollout_path) = rollout_path.as_ref()
+            && let Err(error) = self.rollout_store.append_session_rollback_at(
+                rollout_path,
+                plan.session_id,
                 retained_turn_ids,
                 retained_item_ids,
                 latest_turn_id,
             )
         {
-            return Err(CommitAttemptFailure {
+            return Err(Box::new(CommitAttemptFailure {
                 response: self.error_response(
                     request_id,
                     ProtocolErrorCode::InternalError,
@@ -651,9 +653,34 @@ impl ServerRuntime {
                 next_status: RestorePlanStatus::HistoryPending {
                     restored_file_count,
                 },
-            });
+            }));
         }
-        rebuilt.record = record;
+        // The rollback moved the effective transcript tip back to the
+        // retained cut point, but the file's last sessionLeaf still names
+        // the pre-rollback tip — now a dropped item. Every file-derived tip
+        // (actor replace_state, resume) would adopt that dangling leaf, so
+        // the first post-rollback write parented onto a dropped item and
+        // the tree fragmented. Record the retained tip with a bumped epoch,
+        // exactly like session/tree/navigate does.
+        if let Some(rollout_path) = rollout_path.as_ref() {
+            let retained_tip = rebuilt.persisted_turn_items.last().map(|item| item.item_id);
+            let epoch = devo_core::read_canonical_history(rollout_path)
+                .map(|history| history.leaf_epoch.saturating_add(1))
+                .unwrap_or(1);
+            if let Err(error) = self.rollout_store.append_session_leaf_at(
+                rollout_path,
+                plan.session_id,
+                retained_tip,
+                epoch,
+            ) {
+                tracing::warn!(
+                    session_id = %plan.session_id,
+                    %error,
+                    "failed to persist post-rollback session leaf; file-derived tips stay on the pre-rollback leaf"
+                );
+            }
+        }
+        rebuilt.rollout_path = rollout_path;
         session_handle
             .replace_state(SessionActorState::from_runtime_session(rebuilt))
             .await;

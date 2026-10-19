@@ -3,7 +3,7 @@
  *
  * Shows live agent statuses grouped by project, pending action counts,
  * and quick-access actions. Rebuilds the context menu whenever session
- * state changes via the notification-watcher's ACP event stream.
+ * state changes via the notification-watcher's Native event stream.
  *
  * macOS features:
  * - Full-color tray icon that preserves the Devo black rounded-square mark
@@ -22,7 +22,7 @@ import {
 	onStateChanged,
 	type SessionState,
 } from "./notification-watcher"
-import { getAcpTransport, getServerUrl, onServerReady } from "./devo-manager"
+import { getNativeTransport, getServerUrl, onServerReady } from "./devo-manager"
 import { buildDevoTrayMenuTemplate, type DiscoveryCache } from "./tray-menu"
 
 const log = createLogger("tray")
@@ -212,7 +212,7 @@ function updateTrayTitle(
 	if (IS_MAC) {
 		// Show counts next to the tray icon
 		const busyCount = Array.from(liveSessions.values()).filter(
-			(s) => !s.parentID && (s.status === "busy" || s.status === "retry"),
+			(s) => !s.parentId && (s.status === "busy" || s.status === "retry"),
 		).length
 
 		let title = ""
@@ -226,9 +226,9 @@ function updateTrayTitle(
 	}
 
 	// Update tooltip with summary
-	const totalSessions = Array.from(liveSessions.values()).filter((s) => !s.parentID).length
+	const totalSessions = Array.from(liveSessions.values()).filter((s) => !s.parentId).length
 	const busyCount = Array.from(liveSessions.values()).filter(
-		(s) => !s.parentID && (s.status === "busy" || s.status === "retry"),
+		(s) => !s.parentId && (s.status === "busy" || s.status === "retry"),
 	).length
 
 	let tooltip = "Devo"
@@ -260,8 +260,9 @@ async function refreshDiscovery(): Promise<void> {
 }
 
 async function refreshDiscoveryForServer(): Promise<void> {
+	let client: ReturnType<typeof createDevoClient> | null = null
 	try {
-		const client = createDevoClient({ transport: getAcpTransport() })
+		client = createDevoClient({ transport: getNativeTransport() })
 		const [projectsResult, sessionsResult] = await Promise.all([
 			client.project.list(),
 			client.session.list({ roots: true }),
@@ -276,6 +277,8 @@ async function refreshDiscoveryForServer(): Promise<void> {
 		rebuildMenu()
 	} catch (err) {
 		log.warn("Failed to refresh discovery data for tray", err)
+	} finally {
+		client?.dispose()
 	}
 }
 

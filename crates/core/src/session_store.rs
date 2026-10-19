@@ -8,6 +8,7 @@ use crate::durable_record::DurableRecord;
 ///
 /// Server calls these methods to persist and replay session data.
 /// Core owns all persistence decisions: file layout, buffering, flush policy.
+#[allow(clippy::double_must_use)]
 #[async_trait]
 pub trait SessionStore: Send + Sync {
     /// Append one durable record. Blocks until the record is durable (fsync'd or batched).

@@ -7,10 +7,16 @@ fn main() {
         .strip_prefix(r"\\?\")
         .unwrap_or(&manifest_dir)
         .to_string();
-    let samples_dir = PathBuf::from(manifest_dir)
-        .join("src")
-        .join("assets")
-        .join("samples");
+    // Built-in skills ship from the bundled skill kit under crates/skills.
+    let samples_dir = PathBuf::from(&manifest_dir).join("assets/bundled");
+    let samples_dir = if samples_dir.is_dir() {
+        samples_dir
+    } else {
+        PathBuf::from(&manifest_dir)
+            .join("src")
+            .join("assets")
+            .join("samples")
+    };
 
     println!("cargo:rerun-if-changed={}", samples_dir.display());
     println!(

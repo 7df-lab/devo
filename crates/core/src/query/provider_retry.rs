@@ -12,12 +12,39 @@ use devo_provider::error::ProviderError;
 use super::event::EventCallback;
 use super::event::ProviderRetryStatus;
 use super::event::QueryEvent;
-use super::event::QueryProviderRetryPhase;
 use super::event::emit_query_event;
+use devo_protocol::native::event::ModelQueryRetryPhase;
 
 const MAX_RETRIES: usize = 5;
 const INITIAL_RETRY_BACKOFF_MS: u64 = 250;
 const RATE_LIMIT_RETRY_DELAY: Duration = Duration::from_secs(60);
+
+pub(crate) fn max_provider_retries() -> usize {
+    MAX_RETRIES
+}
+
+const CONTEXT_TOO_LONG_MARKERS: &[&str] = &[
+    "context_too_long",
+    "context length",
+    "context window",
+    "maximum context",
+    "max context",
+    "prompt is too long",
+    "prompt too long",
+    "too many tokens",
+    "token limit",
+    "exceeds the context",
+    "exceeded the context",
+    "input is too long",
+    "request too large",
+    "maximum number of tokens",
+    "this model's maximum context",
+    "please reduce the length",
+];
+
+fn contains_any(haystack: &str, needles: &[&str]) -> bool {
+    needles.iter().any(|needle| haystack.contains(needle))
+}
 
 #[derive(Debug, PartialEq, Eq)]
 pub(crate) enum ErrorClass {
@@ -84,14 +111,6 @@ pub(crate) fn classify_error(e: &anyhow::Error) -> ErrorClass {
     }
 
     if e.chain().any(|cause| {
-        cause
-            .downcast_ref::<devo_provider::timeout::StreamIdleTimeoutError>()
-            .is_some()
-    }) {
-        return ErrorClass::NetworkError;
-    }
-
-    if e.chain().any(|cause| {
         cause.downcast_ref::<reqwest::Error>().is_some_and(|error| {
             error.is_timeout()
                 || error.is_connect()
@@ -119,10 +138,10 @@ pub(crate) fn classify_error(e: &anyhow::Error) -> ErrorClass {
     }
 
     let msg = e.to_string().to_lowercase();
-    // TODO: Expand the error of ContextTooLong
-    if msg.contains("context_too_long") {
-        ErrorClass::ContextTooLong
-    } else if msg.contains("401")
+    if contains_any(&msg, CONTEXT_TOO_LONG_MARKERS) {
+        return ErrorClass::ContextTooLong;
+    }
+    if msg.contains("401")
         || msg.contains("authentication failure")
         || msg.contains("token timeout")
         || msg.contains("unauthorized")
@@ -156,6 +175,18 @@ pub(crate) fn classify_error(e: &anyhow::Error) -> ErrorClass {
             || msg.contains("jsonl"))
     {
         ErrorClass::FileContentAnomaly
+    } else if msg.contains("400")
+        || msg.contains("parameter error")
+        || msg.contains("invalid parameter")
+        || msg.contains("bad request")
+        || msg.contains("invalid_request")
+        || msg.contains("unknown variant")
+        || msg.contains("failed to deserialize")
+    {
+        // Client/parameter errors must win over "stream error" substrings —
+        // invalid_status_error messages look like
+        // "… stream error … Invalid status code: 400 Bad Request …".
+        ErrorClass::ParameterError
     } else if msg.contains("408")
         || msg.contains("request timeout")
         || msg.contains("request timed out")
@@ -207,12 +238,6 @@ pub(crate) fn classify_error(e: &anyhow::Error) -> ErrorClass {
         || msg.contains("failed to decode")
     {
         ErrorClass::NetworkError
-    } else if msg.contains("400")
-        || msg.contains("parameter error")
-        || msg.contains("invalid parameter")
-        || msg.contains("bad request")
-    {
-        ErrorClass::ParameterError
     } else if msg.starts_with('5')
         || msg.contains("500")
         || msg.contains("502")
@@ -275,17 +300,26 @@ pub(crate) async fn wait_for_provider_retry(
     model: &str,
     attempt: usize,
     backoff: Duration,
+    reason: &str,
 ) -> Result<(), AgentError> {
     let backoff_ms = backoff.as_millis().min(u128::from(u64::MAX)) as u64;
+    let reason = reason.trim();
+    let reason = if reason.is_empty() {
+        "Provider request failed"
+    } else {
+        reason
+    };
     emit_query_event(
         on_event,
         QueryEvent::ProviderRetryStatus(ProviderRetryStatus {
             provider: provider.to_string(),
             model: model.to_string(),
             attempt,
+            max_attempts: MAX_RETRIES,
             backoff_ms,
-            phase: QueryProviderRetryPhase::Scheduled,
-            message: format!("Retrying provider request in {:.1}s", backoff.as_secs_f64()),
+            phase: ModelQueryRetryPhase::Scheduled,
+            // Failure cause for UI disclosure; countdown is carried by backoff_ms.
+            message: reason.to_string(),
         }),
     )
     .await;
@@ -306,9 +340,10 @@ pub(crate) async fn wait_for_provider_retry(
             provider: provider.to_string(),
             model: model.to_string(),
             attempt,
+            max_attempts: MAX_RETRIES,
             backoff_ms: 0,
-            phase: QueryProviderRetryPhase::Resumed,
-            message: "Retrying provider request now".to_string(),
+            phase: ModelQueryRetryPhase::Resumed,
+            message: reason.to_string(),
         }),
     )
     .await;

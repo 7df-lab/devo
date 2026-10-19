@@ -1,0 +1,209 @@
+import { Container, Loader, Spacer, Text, type TUI } from "@earendil-works/pi-tui";
+import stripAnsi from "strip-ansi";
+import {
+	DEFAULT_MAX_BYTES,
+	DEFAULT_MAX_LINES,
+	type TruncationResult,
+	truncateTail,
+} from "../../../core/tools/truncate.js";
+import { theme } from "../theme/theme.js";
+import { DynamicBorder } from "./dynamic-border.js";
+import { keyText } from "./keybinding-hints.js";
+import { truncateToVisualLines } from "./visual-truncate.js";
+
+const PREVIEW_LINES = 20;
+
+export class BashExecutionComponent extends Container {
+	private command: string;
+	private outputLines: string[] = [];
+	private status: "running" | "complete" | "cancelled" | "error" = "running";
+	private exitCode: number | undefined = undefined;
+	private errorMessage: string | undefined = undefined;
+	private loader: Loader;
+	private truncationResult?: TruncationResult;
+	private fullOutputPath?: string;
+	private expanded = false;
+	private contentContainer: Container;
+
+	constructor(command: string, ui: TUI, excludeFromContext = false, options: { suppressLeadingSpace?: boolean } = {}) {
+		super();
+		this.command = command;
+
+		// Use dim border for excluded-from-context commands (!! prefix)
+		const colorKey = excludeFromContext ? "dim" : "bashMode";
+		const borderColor = (str: string) => theme.fg(colorKey, str);
+
+		// Keep tool activity tight against a preceding agent-message notification.
+		if (!options.suppressLeadingSpace) this.addChild(new Spacer(1));
+
+		this.addChild(new DynamicBorder(borderColor));
+
+		this.contentContainer = new Container();
+		this.addChild(this.contentContainer);
+
+		const header = new Text(theme.fg(colorKey, `$ ${command}`), 1, 0);
+		this.contentContainer.addChild(header);
+
+		this.loader = new Loader(
+			ui,
+			(spinner) => theme.fg("muted", spinner),
+			(text) => theme.fg("muted", text),
+			`Running... (${keyText("tui.select.cancel")} to cancel)`, // Plain text for loader
+		);
+		this.contentContainer.addChild(this.loader);
+
+		this.addChild(new DynamicBorder(borderColor));
+	}
+
+	/**
+	 * Set whether the output is expanded (shows full output) or collapsed (preview only).
+	 */
+	setExpanded(expanded: boolean): void {
+		this.expanded = expanded;
+		this.updateDisplay();
+	}
+
+	override invalidate(): void {
+		super.invalidate();
+		this.updateDisplay();
+	}
+
+	appendOutput(chunk: string): void {
+		// Note: binary data is already sanitized in tui-renderer.ts executeBashCommand
+		const clean = stripAnsi(chunk).replace(/\r\n/g, "\n").replace(/\r/g, "\n");
+
+		const newLines = clean.split("\n");
+		if (this.outputLines.length > 0 && newLines.length > 0) {
+			this.outputLines[this.outputLines.length - 1] += newLines[0];
+			this.outputLines.push(...newLines.slice(1));
+		} else {
+			this.outputLines.push(...newLines);
+		}
+
+		this.updateDisplay();
+	}
+
+	setComplete(
+		exitCode: number | undefined,
+		cancelled: boolean,
+		truncationResult?: TruncationResult,
+		fullOutputPath?: string,
+	): void {
+		this.exitCode = exitCode;
+		this.status = cancelled
+			? "cancelled"
+			: exitCode !== 0 && exitCode !== undefined && exitCode !== null
+				? "error"
+				: "complete";
+		this.truncationResult = truncationResult;
+		this.fullOutputPath = fullOutputPath;
+
+		this.loader.stop();
+
+		this.updateDisplay();
+	}
+
+	/** Mark the execution as failed before producing a result (e.g. spawn failure). */
+	setFailed(message: string): void {
+		this.errorMessage = message;
+		this.status = "error";
+		this.loader.stop();
+		this.updateDisplay();
+	}
+
+	private updateDisplay(): void {
+		// Apply truncation for LLM context limits (same limits as bash tool)
+		const fullOutput = this.outputLines.join("\n");
+		const contextTruncation = truncateTail(fullOutput, {
+			maxLines: DEFAULT_MAX_LINES,
+			maxBytes: DEFAULT_MAX_BYTES,
+		});
+
+		// Recompute wrapping from the render width so resizes and split panes cannot use stale columns.
+		// ConPTY / PowerShell Format-* often emit blank lines between every row (and leading
+		// newlines). Drop empty/whitespace-only lines so `$ cmd` sits flush on the listing.
+		const availableLines = (contextTruncation.content ? contextTruncation.content.split("\n") : []).filter(
+			(line) => line.trim().length > 0,
+		);
+
+		const previewLogicalLines = availableLines.slice(-PREVIEW_LINES);
+		const hiddenLineCount = availableLines.length - previewLogicalLines.length;
+
+		this.contentContainer.clear();
+
+		const header = new Text(theme.fg("bashMode", `$ ${this.command}`), 1, 0);
+		this.contentContainer.addChild(header);
+
+		if (availableLines.length > 0) {
+			if (this.expanded) {
+				const displayText = availableLines.map((line) => theme.fg("muted", line)).join("\n");
+				// No leading blank — Ctrl+O expand used to pad a full empty row at the top.
+				this.contentContainer.addChild(new Text(displayText, 1, 0));
+			} else {
+				// Use shared visual truncation utility with width-aware caching
+				const styledOutput = previewLogicalLines.map((line) => theme.fg("muted", line)).join("\n");
+				let cachedWidth: number | undefined;
+				let cachedLines: string[] | undefined;
+				this.contentContainer.addChild({
+					render: (width: number) => {
+						if (cachedLines === undefined || cachedWidth !== width) {
+							const result = truncateToVisualLines(styledOutput, PREVIEW_LINES, width, 0);
+							cachedLines = result.visualLines;
+							cachedWidth = width;
+						}
+						return cachedLines ?? [];
+					},
+					invalidate: () => {
+						cachedWidth = undefined;
+						cachedLines = undefined;
+					},
+				});
+			}
+		}
+
+		if (this.status === "running") {
+			this.contentContainer.addChild(this.loader);
+		} else {
+			const statusParts: string[] = [];
+
+			if (hiddenLineCount > 0 && !this.expanded) {
+				statusParts.push(theme.fg("muted", `... ${hiddenLineCount} more lines`));
+			}
+
+			if (this.status === "cancelled") {
+				statusParts.push(theme.fg("warning", "(cancelled)"));
+			} else if (this.status === "error") {
+				statusParts.push(
+					theme.fg(
+						"error",
+						this.errorMessage !== undefined ? `(failed: ${this.errorMessage})` : `(exit ${this.exitCode})`,
+					),
+				);
+			}
+
+			// Add truncation warning (context truncation, not preview truncation)
+			const wasTruncated = this.truncationResult?.truncated || contextTruncation.truncated;
+			if (wasTruncated && this.fullOutputPath) {
+				statusParts.push(theme.fg("warning", `Output truncated. Full output: ${this.fullOutputPath}`));
+			}
+
+			if (statusParts.length > 0) {
+				this.contentContainer.addChild(new Text(statusParts.join("\n"), 1, 0));
+			}
+		}
+	}
+
+	/**
+	 * Get the raw output for creating BashExecutionMessage.
+	 */
+	getOutput(): string {
+		return this.outputLines.join("\n");
+	}
+
+	/**
+	 * Get the command that was executed.
+	 */
+	getCommand(): string {
+		return this.command;
+	}
+}

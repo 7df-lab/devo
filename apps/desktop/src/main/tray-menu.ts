@@ -1,5 +1,6 @@
 import type { MenuItemConstructorOptions } from "electron"
 import type { Project, Session } from "@devo-ai/sdk/v2/client"
+import { isWorkingSessionStatus } from "./notification-policy"
 import type { SessionState } from "./notification-watcher"
 
 const MAX_RUNNING_INLINE = 3
@@ -26,18 +27,7 @@ interface TraySession {
 	title: string
 	directory: string
 	updatedAt: number
-	totalInputTokens: number
-	totalOutputTokens: number
-	totalTokens: number
-	totalCacheReadTokens: number
 	parentId?: string
-}
-
-interface UsageSummary {
-	inputTokens: number
-	outputTokens: number
-	totalTokens: number
-	cacheReadTokens: number
 }
 
 export function buildDevoTrayMenuTemplate(
@@ -76,8 +66,6 @@ export function buildDevoTrayMenuTemplate(
 		template.push(separator())
 	}
 
-	template.push(...buildUsageSection(discoverySessions))
-	template.push(separator())
 	template.push({
 		label: "New Chat",
 		click: options.onNewChat,
@@ -103,7 +91,7 @@ function buildRunningSection(
 ): MenuItemConstructorOptions[] {
 	const discoveryById = new Map(discoverySessions.map((session) => [session.id, session]))
 	const runningSessions = Array.from(liveSessions.entries())
-		.filter(([, state]) => !state.parentID)
+		.filter(([, state]) => !state.parentId && isWorkingSessionStatus(state.status))
 		.map(([sessionId, state]) => {
 			const discovered = discoveryById.get(sessionId)
 			return {
@@ -111,18 +99,9 @@ function buildRunningSection(
 				title: titleForSession(state.title || discovered?.title),
 				directory: state.directory || discovered?.directory || "",
 				updatedAt: discovered?.updatedAt ?? 0,
-				totalInputTokens: discovered?.totalInputTokens ?? 0,
-				totalOutputTokens: discovered?.totalOutputTokens ?? 0,
-				totalTokens: discovered?.totalTokens ?? 0,
-				totalCacheReadTokens: discovered?.totalCacheReadTokens ?? 0,
 			}
 		})
-		.sort((left, right) => {
-			const leftBusy = runningPriority(liveSessions.get(left.id)?.status)
-			const rightBusy = runningPriority(liveSessions.get(right.id)?.status)
-			if (leftBusy !== rightBusy) return leftBusy - rightBusy
-			return right.updatedAt - left.updatedAt
-		})
+		.sort((left, right) => right.updatedAt - left.updatedAt)
 
 	if (runningSessions.length === 0) return []
 
@@ -139,9 +118,13 @@ function buildRecentSection(
 	discoverySessions: TraySession[],
 	onNavigateToSession: (sessionId: string) => void,
 ): MenuItemConstructorOptions[] {
-	const liveSessionIds = new Set(liveSessions.keys())
+	const runningSessionIds = new Set(
+		Array.from(liveSessions.entries())
+			.filter(([, state]) => !state.parentId && isWorkingSessionStatus(state.status))
+			.map(([sessionId]) => sessionId),
+	)
 	const recentSessions = discoverySessions
-		.filter((session) => !liveSessionIds.has(session.id))
+		.filter((session) => !runningSessionIds.has(session.id))
 		.filter((session) => !session.parentId)
 		.sort((left, right) => right.updatedAt - left.updatedAt)
 
@@ -190,68 +173,20 @@ function sessionMenuItem(
 	}
 }
 
-function buildUsageSection(sessions: TraySession[]): MenuItemConstructorOptions[] {
-	const usage = summarizeUsage(sessions)
-	return [
-		{ label: "Usage", enabled: false },
-		{ label: `Tokens ${formatTokenCount(usage.totalTokens)}`, enabled: false },
-		{
-			label: `Input ${formatTokenCount(usage.inputTokens)} · Output ${formatTokenCount(
-				usage.outputTokens,
-			)}`,
-			enabled: false,
-		},
-		{ label: `Cache read ${formatTokenCount(usage.cacheReadTokens)}`, enabled: false },
-	]
-}
-
-function summarizeUsage(sessions: TraySession[]): UsageSummary {
-	return sessions.reduce(
-		(summary, session) => ({
-			inputTokens: summary.inputTokens + session.totalInputTokens,
-			outputTokens: summary.outputTokens + session.totalOutputTokens,
-			totalTokens: summary.totalTokens + session.totalTokens,
-			cacheReadTokens: summary.cacheReadTokens + session.totalCacheReadTokens,
-		}),
-		{
-			inputTokens: 0,
-			outputTokens: 0,
-			totalTokens: 0,
-			cacheReadTokens: 0,
-		},
-	)
-}
-
 function normalizeDiscoverySessions(discovery: DiscoveryCache | null): TraySession[] {
 	if (!discovery) return []
 
-	return discovery.sessions.map((session) => {
-		const totalInputTokens = numericSessionField(session, "totalInputTokens")
-		const totalOutputTokens = numericSessionField(session, "totalOutputTokens")
-		const totalTokens =
-			numericSessionField(session, "totalTokens") || totalInputTokens + totalOutputTokens
-
-		return {
-			id: String(session.id),
-			title: titleForSession(session.title),
-			directory: String(session.directory ?? ""),
-			updatedAt: Number(session.time?.updated ?? session.time?.created ?? 0),
-			parentId: session.parentID ? String(session.parentID) : undefined,
-			totalInputTokens,
-			totalOutputTokens,
-			totalTokens,
-			totalCacheReadTokens: numericSessionField(session, "totalCacheReadTokens"),
-		}
-	})
-}
-
-function numericSessionField(session: Session, field: string): number {
-	const value = session[field]
-	return typeof value === "number" && Number.isFinite(value) ? value : 0
+	return discovery.sessions.map((session) => ({
+		id: String(session.id),
+		title: titleForSession(session.title),
+		directory: String(session.directory ?? ""),
+		updatedAt: Number(session.time?.updated ?? session.time?.created ?? 0),
+		parentId: session.parentId ? String(session.parentId) : undefined,
+	}))
 }
 
 function titleForSession(title: unknown): string {
-	return typeof title === "string" && title.trim() ? title : "New chat"
+	return typeof title === "string" && title.trim() ? title : "New Chat"
 }
 
 function truncateTitle(title: string): string {
@@ -262,30 +197,6 @@ function truncateTitle(title: string): string {
 function projectNameFromDir(directory: string): string {
 	const parts = directory.split(/[\\/]/).filter(Boolean)
 	return parts.at(-1) ?? "/"
-}
-
-function runningPriority(status: string | undefined): number {
-	switch (status) {
-		case "busy":
-		case "retry":
-			return 0
-		case "idle":
-			return 1
-		case undefined:
-			return 2
-		default:
-			return 2
-	}
-}
-
-function formatTokenCount(tokens: number): string {
-	if (tokens >= 1_000_000) return `${formatOneDecimal(tokens / 1_000_000)}m`
-	if (tokens >= 1_000) return `${formatOneDecimal(tokens / 1_000)}k`
-	return String(tokens)
-}
-
-function formatOneDecimal(value: number): string {
-	return value.toFixed(1).replace(/\.0$/, "")
 }
 
 function separator(): MenuItemConstructorOptions {

@@ -3,12 +3,13 @@ use std::path::PathBuf;
 use std::pin::Pin;
 use std::sync::Arc;
 use std::sync::Mutex;
+use std::sync::atomic::AtomicUsize;
 
 use anyhow::Context;
 use anyhow::Result;
 use async_trait::async_trait;
 use devo_core::AppConfigStore;
-use devo_core::ProviderVendorCatalog;
+use futures::StreamExt;
 use futures::stream;
 use pretty_assertions::assert_eq;
 use serde_json::json;
@@ -19,20 +20,7 @@ use tokio::time::Duration;
 use tokio::time::timeout;
 
 use devo_core::BundledSkillsConfig;
-use devo_core::FileSystemSkillCatalog;
-use devo_core::PresetModelCatalog;
 use devo_core::SkillsConfig;
-use devo_core::tools::ToolCallError;
-use devo_core::tools::ToolRegistry;
-use devo_core::tools::ToolResult;
-use devo_core::tools::ToolResultContent;
-use devo_core::tools::json_schema::JsonSchema;
-use devo_core::tools::registry::ToolRegistryBuilder;
-use devo_core::tools::tool_handler::ToolHandler;
-use devo_core::tools::tool_spec::ToolExecutionMode;
-use devo_core::tools::tool_spec::ToolOutputMode;
-use devo_core::tools::tool_spec::ToolSpec;
-use devo_protocol::AcpNewSessionResult;
 use devo_protocol::ModelRequest;
 use devo_protocol::ModelResponse;
 use devo_protocol::RequestContent;
@@ -42,19 +30,15 @@ use devo_protocol::StopReason;
 use devo_protocol::StreamEvent;
 use devo_protocol::Usage;
 use devo_provider::ModelProviderSDK;
-use devo_provider::SingleProviderRouter;
-use devo_server::AcpSuccessResponse;
 use devo_server::ClientTransportKind;
 use devo_server::ErrorResponse;
 use devo_server::ProtocolErrorCode;
 use devo_server::ServerRuntime;
-use devo_server::ServerRuntimeDependencies;
-use devo_server::SkillChangedResult;
-use devo_server::SkillListResult;
 use devo_server::SkillRecord;
 use devo_server::SkillScope;
 use devo_server::SkillSource;
 use devo_server::SuccessResponse;
+use devo_server::test_support::TestRuntime;
 
 #[derive(Default)]
 struct CapturingProvider {
@@ -111,14 +95,12 @@ fn create_skill(root: &Path, name: &str, content: &str) -> PathBuf {
     skill_path
 }
 
-fn canonical_skill_path(path: &Path) -> PathBuf {
-    devo_core::normalize_canonical_path(
-        std::fs::canonicalize(path).expect("canonicalize skill path"),
-    )
+fn native_skill_path(path: &Path) -> PathBuf {
+    devo_core::normalize_native_path(std::fs::canonicalize(path).expect("canonicalize skill path"))
 }
 
-fn canonical_skill_base_dir(path: &Path) -> PathBuf {
-    canonical_skill_path(path)
+fn native_skill_base_dir(path: &Path) -> PathBuf {
+    native_skill_path(path)
         .parent()
         .expect("canonical skill base directory")
         .to_path_buf()
@@ -134,13 +116,7 @@ fn build_runtime(
     workspace_root: Option<PathBuf>,
     provider: Arc<dyn ModelProviderSDK>,
 ) -> Arc<ServerRuntime> {
-    build_runtime_with_registry(
-        data_root,
-        user_skill_root,
-        workspace_root,
-        provider,
-        Arc::new(ToolRegistry::new()),
-    )
+    build_runtime_with_registry(data_root, user_skill_root, workspace_root, provider)
 }
 
 fn build_runtime_with_registry(
@@ -148,42 +124,28 @@ fn build_runtime_with_registry(
     user_skill_root: PathBuf,
     workspace_root: Option<PathBuf>,
     provider: Arc<dyn ModelProviderSDK>,
-    registry: Arc<ToolRegistry>,
 ) -> Arc<ServerRuntime> {
     let workspace_skill_roots = workspace_root
         .iter()
         .map(|root| root.join(".devo").join("skills"))
         .collect::<Vec<_>>();
     write_test_config(data_root, &user_skill_root, &workspace_skill_roots);
-    let db_path = data_root.join("test_skills.db");
-    let db = Arc::new(devo_server::db::Database::open(db_path).expect("open test database"));
-    ServerRuntime::new(
-        data_root.to_path_buf(),
-        ServerRuntimeDependencies::new(
-            Arc::clone(&provider),
-            Arc::new(SingleProviderRouter::new(provider)),
-            registry,
-            devo_server::empty_mcp_manager(),
-            "test-model".to_string(),
-            Arc::new(PresetModelCatalog::default()),
-            Arc::new(ProviderVendorCatalog::default()),
-            Box::new(FileSystemSkillCatalog::new(SkillsConfig {
-                enabled: true,
-                user_roots: vec![user_skill_root],
-                workspace_roots: workspace_skill_roots,
-                watch_for_changes: false,
-                bundled: Some(BundledSkillsConfig { enabled: false }),
-                include_instructions: Some(true),
-                config: Vec::new(),
-            })),
-            devo_core::AgentsMdConfig::default(),
-            db,
-            Arc::new(std::sync::Mutex::new(
-                AppConfigStore::load(data_root.to_path_buf(), workspace_root.as_deref())
-                    .expect("load app config store"),
-            )),
-        ),
-    )
+    TestRuntime::new(provider)
+        .skills(SkillsConfig {
+            enabled: true,
+            user_roots: vec![user_skill_root],
+            workspace_roots: workspace_skill_roots,
+            watch_for_changes: false,
+            bundled: Some(BundledSkillsConfig { enabled: false }),
+            include_instructions: Some(true),
+            config: Vec::new(),
+        })
+        .config_store(Arc::new(Mutex::new(
+            AppConfigStore::load(data_root.to_path_buf(), workspace_root.as_deref())
+                .expect("load app config store"),
+        )))
+        .db_file("test_skills.db")
+        .runtime(data_root)
 }
 
 fn write_test_config(data_root: &Path, user_skill_root: &Path, workspace_skill_roots: &[PathBuf]) {
@@ -236,6 +198,7 @@ async fn initialize_connection(
                 "params": {
                     "protocolVersion": 1,
                     "clientCapabilities": {},
+                    "_meta": { "devo": { "protocol": "native" } },
                     "clientInfo": {
                         "name": "test",
                         "title": "test",
@@ -267,33 +230,34 @@ async fn start_session(
                 "method": "session/new",
                 "params": {
                     "cwd": cwd,
-                    "additionalDirectories": [],
-                    "mcpServers": []
+                    "idempotencyKey": "skills-integration-session"
                 }
             }),
         )
         .await
-        .context("session/start response")?;
-    let result: AcpSuccessResponse<AcpNewSessionResult> = serde_json::from_value(response.clone())
-        .with_context(|| format!("session/start response: {response}"))?;
-    let session_id = result.result.session_id;
+        .context("session/new response")?;
+    let result: SuccessResponse<devo_protocol::native::rpc_session::SessionNewResult> =
+        serde_json::from_value(response.clone())
+            .with_context(|| format!("session/new response: {response}"))?;
+    let session_id = devo_core::SessionId::from(result.result.session.id.as_str());
     let title_response = runtime
         .handle_incoming(
             connection_id,
             serde_json::json!({
                 "id": 3,
-                "method": "_devo/session/title/update",
+                "method": "session/metadata/update",
                 "params": {
-                    "session_id": session_id,
+                    "sessionId": session_id,
+                    "expectedVersion": 0,
                     "title": "Skills integration"
                 }
             }),
         )
         .await
-        .context("session/title/update response")?;
-    let _: SuccessResponse<devo_server::SessionTitleUpdateResult> =
+        .context("session/metadata/update response")?;
+    let _: SuccessResponse<devo_protocol::native::rpc_session::SessionMetadataUpdateResult> =
         serde_json::from_value(title_response.clone())
-            .with_context(|| format!("session/title/update response: {title_response}"))?;
+            .with_context(|| format!("session/metadata/update response: {title_response}"))?;
     Ok(session_id)
 }
 
@@ -364,7 +328,15 @@ async fn wait_for_approval_request(
 }
 
 fn is_approval_request_notification(value: &serde_json::Value) -> bool {
-    if value.get("method") == Some(&serde_json::json!("session/request_permission")) {
+    if matches!(
+        value.get("method").and_then(serde_json::Value::as_str),
+        Some(
+            "session/request_permission"
+                | "approval/command/request"
+                | "approval/fileChange/request"
+                | "approval/permission/request"
+        )
+    ) {
         return true;
     }
     let direct = value.get("method") == Some(&serde_json::json!("item/started"))
@@ -407,29 +379,11 @@ fn all_user_request_texts(request: &ModelRequest) -> Vec<String> {
                 RequestContent::ProviderReasoning { .. }
                 | RequestContent::ToolUse { .. }
                 | RequestContent::HostedToolUse { .. }
-                | RequestContent::ToolResult { .. } => None,
+                | RequestContent::ToolResult { .. }
+                | RequestContent::Image { .. } => None,
             })
         })
         .collect()
-}
-
-fn auto_review_registry(calls: Arc<std::sync::atomic::AtomicUsize>) -> Arc<ToolRegistry> {
-    let mut builder = ToolRegistryBuilder::new();
-    builder.register_handler("mutating_tool", Arc::new(RecordingMutatingTool { calls }));
-    builder.push_spec(ToolSpec {
-        name: "mutating_tool".into(),
-        description: "Mutates test state.".into(),
-        input_schema: JsonSchema::object(std::collections::BTreeMap::new(), None, None),
-        output_mode: ToolOutputMode::Text,
-        execution_mode: ToolExecutionMode::Mutating,
-        capability_tags: vec![devo_core::tools::ToolCapabilityTag::WriteFiles],
-        supports_parallel: false,
-        preparation_feedback: devo_core::tools::ToolPreparationFeedback::None,
-        display_name: None,
-        supports_cancellation: None,
-        supports_streaming: None,
-    });
-    Arc::new(builder.build())
 }
 
 async fn update_permissions_to_auto_review(
@@ -442,20 +396,21 @@ async fn update_permissions_to_auto_review(
             connection_id,
             serde_json::json!({
                 "id": 3,
-                "method": "_devo/session/permissions/update",
+                "method": "session/metadata/update",
                 "params": {
-                    "session_id": session_id,
-                    "preset": "auto-review"
+                    "sessionId": session_id,
+                    "expectedVersion": 0,
+                    "settings": { "permissionProfile": "autoReview" }
                 }
             }),
         )
         .await
-        .context("session/permissions/update response")?;
-    let result: SuccessResponse<devo_server::SessionPermissionsUpdateResult> =
+        .context("session/metadata/update response")?;
+    let result: SuccessResponse<devo_protocol::native::rpc_session::SessionMetadataUpdateResult> =
         serde_json::from_value(response)?;
     assert_eq!(
-        result.result.preset,
-        devo_protocol::PermissionPreset::AutoReview
+        result.result.session.settings.permission_profile,
+        devo_protocol::native::model::PermissionProfile::AutoReview
     );
     Ok(())
 }
@@ -470,12 +425,13 @@ async fn start_auto_review_turn(
             connection_id,
             serde_json::json!({
                 "id": 4,
-                "method": "_devo/turn/start",
+                "method": "turn/start",
                 "params": {
-                    "session_id": session_id,
+                    "sessionId": session_id,
                     "input": [
                         { "type": "text", "text": "Use the mutating tool." }
                     ],
+                    "idempotencyKey": format!("native-test-turn-{}", uuid::Uuid::new_v4()),
                     "model": null,
                     "thinking": null,
                     "sandbox": null,
@@ -486,103 +442,111 @@ async fn start_auto_review_turn(
         )
         .await
         .context("turn/start auto-review response")?;
-    let result: SuccessResponse<devo_server::TurnStartResult> =
+    let result: SuccessResponse<devo_protocol::native::rpc_turn::TurnStartResult> =
         serde_json::from_value(response.clone())
             .with_context(|| format!("turn/start response: {response}"))?;
-    assert_eq!(result.result.status(), devo_core::TurnStatus::Running);
+    assert_eq!(
+        result.result.turn.status,
+        devo_protocol::native::turn::TurnStatus::InProgress
+    );
     Ok(())
 }
 
-struct BlockingReadOnlyTool {
-    started: Arc<Notify>,
-    release: Arc<Notify>,
+/// True when a tool result for `call_id` reports an actual execution. The
+/// permission denial itself is recorded as an *error* tool result — that one
+/// must not count.
+fn executed_tool_result(value: &serde_json::Value, call_id: &str) -> bool {
+    let item = &value["params"]["item"]["item"];
+    item.get("type") == Some(&serde_json::json!("toolResult"))
+        && item["callId"] == serde_json::json!(call_id)
+        && item["isError"] != serde_json::json!(true)
 }
 
-#[async_trait]
-impl ToolHandler for BlockingReadOnlyTool {
-    fn spec(&self) -> &ToolSpec {
-        Box::leak(Box::new(ToolSpec {
-            name: "blocking_read".into(),
-            description: "blocking read test tool".into(),
-            input_schema: JsonSchema::object(Default::default(), None, None),
-            output_mode: ToolOutputMode::Text,
-            execution_mode: ToolExecutionMode::ReadOnly,
-            capability_tags: vec![],
-            supports_parallel: true,
-            preparation_feedback: devo_core::tools::ToolPreparationFeedback::None,
-            display_name: None,
-            supports_cancellation: None,
-            supports_streaming: None,
-        }))
-    }
+/// Newline-separated commands fail closed to an interactive approval under
+/// the default/autoReview profiles; harmless if a bug ever executes it.
+const PROBE_CODE: &str = "print('review-probe')";
 
-    async fn handle(
-        &self,
-        _ctx: devo_core::tools::ToolContext,
-        _input: serde_json::Value,
-        _progress: Option<devo_core::tools::ToolProgressSender>,
-    ) -> std::result::Result<ToolResult, ToolCallError> {
-        self.started.notify_one();
-        self.release.notified().await;
-        Ok(ToolResult::success(
-            ToolResultContent::Text("released".into()),
-            "released",
-        ))
-    }
-}
-
-struct RecordingMutatingTool {
-    calls: Arc<std::sync::atomic::AtomicUsize>,
-}
-
-#[async_trait]
-impl ToolHandler for RecordingMutatingTool {
-    fn spec(&self) -> &ToolSpec {
-        Box::leak(Box::new(ToolSpec {
-            name: "recording_write".into(),
-            description: "recording write test tool".into(),
-            input_schema: JsonSchema::object(Default::default(), None, None),
-            output_mode: ToolOutputMode::Text,
-            execution_mode: ToolExecutionMode::Mutating,
-            capability_tags: vec![],
-            supports_parallel: false,
-            preparation_feedback: devo_core::tools::ToolPreparationFeedback::None,
-            display_name: None,
-            supports_cancellation: None,
-            supports_streaming: None,
-        }))
-    }
-
-    async fn handle(
-        &self,
-        _ctx: devo_core::tools::ToolContext,
-        _input: serde_json::Value,
-        _progress: Option<devo_core::tools::ToolProgressSender>,
-    ) -> std::result::Result<ToolResult, ToolCallError> {
-        self.calls.fetch_add(1, std::sync::atomic::Ordering::SeqCst);
-        Ok(ToolResult::success(
-            ToolResultContent::Text("mutated".into()),
-            "mutated",
-        ))
-    }
-}
-
+/// Streams one `bash` tool call (the probe input), then plain text. The
+/// reviewer-side `completion` answers with the configured risk verdict.
 struct AutoReviewProvider {
-    decision: &'static str,
-    reviewer_calls: Arc<std::sync::atomic::AtomicUsize>,
-    stream_calls: Arc<std::sync::atomic::AtomicUsize>,
+    risk: &'static str,
+    tool_input: serde_json::Value,
+    reviewer_calls: Arc<AtomicUsize>,
+    completion_failures_remaining: Arc<AtomicUsize>,
+    stream_calls: Arc<AtomicUsize>,
+    stream_requests: Mutex<Vec<ModelRequest>>,
+    completion_requests: Mutex<Vec<ModelRequest>>,
+}
+
+impl AutoReviewProvider {
+    fn new(
+        risk: &'static str,
+        tool_input: serde_json::Value,
+        reviewer_calls: Arc<AtomicUsize>,
+        completion_failures_remaining: usize,
+    ) -> Arc<Self> {
+        Arc::new(Self {
+            risk,
+            tool_input,
+            reviewer_calls,
+            completion_failures_remaining: Arc::new(AtomicUsize::new(
+                completion_failures_remaining,
+            )),
+            stream_calls: Arc::new(AtomicUsize::new(0)),
+            stream_requests: Mutex::new(Vec::new()),
+            completion_requests: Mutex::new(Vec::new()),
+        })
+    }
 }
 
 #[async_trait]
 impl ModelProviderSDK for AutoReviewProvider {
-    async fn completion(&self, _request: ModelRequest) -> Result<ModelResponse> {
-        self.reviewer_calls
-            .fetch_add(1, std::sync::atomic::Ordering::SeqCst);
+    async fn completion(&self, request: ModelRequest) -> Result<ModelResponse> {
+        // Reviewer requests mirror the turn request (same tools array);
+        // title-polish requests carry no tools and are not reviewer calls.
+        let is_review = request
+            .tools
+            .as_ref()
+            .is_some_and(|tools| !tools.is_empty());
+        if is_review {
+            self.completion_requests
+                .lock()
+                .expect("completion request lock")
+                .push(request);
+            self.reviewer_calls
+                .fetch_add(1, std::sync::atomic::Ordering::SeqCst);
+        }
+        let mut remaining = self
+            .completion_failures_remaining
+            .load(std::sync::atomic::Ordering::SeqCst);
+        while remaining > 0 {
+            match self.completion_failures_remaining.compare_exchange(
+                remaining,
+                remaining - 1,
+                std::sync::atomic::Ordering::SeqCst,
+                std::sync::atomic::Ordering::SeqCst,
+            ) {
+                Ok(_) => {
+                    if !is_review {
+                        // Non-review completions must still succeed.
+                        return Ok(ModelResponse {
+                            id: "title-fallback".into(),
+                            content: vec![ResponseContent::Text("Generated title".into())],
+                            stop_reason: Some(StopReason::EndTurn),
+                            usage: Usage::default(),
+                            metadata: ResponseMetadata::default(),
+                        });
+                    }
+                    return Err(anyhow::anyhow!("test reviewer provider failure"));
+                }
+                Err(current) => remaining = current,
+            }
+        }
         Ok(ModelResponse {
             id: "review-1".into(),
             content: vec![ResponseContent::Text(format!(
-                r#"{{"decision":"{}","rationale":"test decision"}}"#,
-                self.decision
+                r#"{{"risk":"{}","rationale":"test decision"}}"#,
+                self.risk
             ))],
             stop_reason: Some(StopReason::EndTurn),
             usage: Usage::default(),
@@ -592,8 +556,12 @@ impl ModelProviderSDK for AutoReviewProvider {
 
     async fn completion_stream(
         &self,
-        _request: ModelRequest,
+        request: ModelRequest,
     ) -> Result<Pin<Box<dyn futures::Stream<Item = Result<StreamEvent>> + Send>>> {
+        self.stream_requests
+            .lock()
+            .expect("stream request lock")
+            .push(request);
         let stream_call = self
             .stream_calls
             .fetch_add(1, std::sync::atomic::Ordering::SeqCst);
@@ -602,20 +570,16 @@ impl ModelProviderSDK for AutoReviewProvider {
                 Ok(StreamEvent::ToolCallStart {
                     index: 0,
                     id: "tool-1".into(),
-                    name: "mutating_tool".into(),
-                    input: json!({}),
-                }),
-                Ok(StreamEvent::ToolCallInputDelta {
-                    index: 0,
-                    partial_json: "{}".into(),
+                    name: "ipython".into(),
+                    input: self.tool_input.clone(),
                 }),
                 Ok(StreamEvent::MessageDone {
                     response: ModelResponse {
                         id: "resp-1".into(),
                         content: vec![ResponseContent::ToolUse {
                             id: "tool-1".into(),
-                            name: "mutating_tool".into(),
-                            input: json!({}),
+                            name: "ipython".into(),
+                            input: self.tool_input.clone(),
                         }],
                         stop_reason: Some(StopReason::ToolUse),
                         usage: Usage::default(),
@@ -648,9 +612,18 @@ impl ModelProviderSDK for AutoReviewProvider {
     }
 }
 
-#[derive(Default)]
 struct SteerCapturingProvider {
     stream_requests: Mutex<Vec<ModelRequest>>,
+    release: Arc<Notify>,
+}
+
+impl SteerCapturingProvider {
+    fn new(release: Arc<Notify>) -> Arc<Self> {
+        Arc::new(Self {
+            stream_requests: Mutex::new(Vec::new()),
+            release,
+        })
+    }
 }
 
 #[async_trait]
@@ -674,33 +647,7 @@ impl ModelProviderSDK for SteerCapturingProvider {
             requests.push(request);
             requests.len()
         };
-        let events = if request_number == 1 {
-            vec![
-                Ok(StreamEvent::ToolCallStart {
-                    index: 0,
-                    id: "tool-1".into(),
-                    name: "blocking_wait".into(),
-                    input: json!({}),
-                }),
-                Ok(StreamEvent::ToolCallInputDelta {
-                    index: 0,
-                    partial_json: "{}".into(),
-                }),
-                Ok(StreamEvent::MessageDone {
-                    response: ModelResponse {
-                        id: "resp-1".into(),
-                        content: vec![ResponseContent::ToolUse {
-                            id: "tool-1".into(),
-                            name: "blocking_wait".into(),
-                            input: json!({}),
-                        }],
-                        stop_reason: Some(StopReason::ToolUse),
-                        usage: Usage::default(),
-                        metadata: ResponseMetadata::default(),
-                    },
-                }),
-            ]
-        } else {
+        let done_events = || {
             vec![
                 Ok(StreamEvent::TextDelta {
                     index: 0,
@@ -717,8 +664,42 @@ impl ModelProviderSDK for SteerCapturingProvider {
                 }),
             ]
         };
-
-        Ok(Box::pin(stream::iter(events)))
+        if request_number == 1 {
+            // Hold the first stream before any event so the test can steer
+            // while the turn is in flight; the Python cell then runs and the
+            // follow-up request picks up the injected steer + skill.
+            let release = Arc::clone(&self.release);
+            let mut events = vec![
+                Ok(StreamEvent::ToolCallStart {
+                    index: 0,
+                    id: "call-1".into(),
+                    name: "ipython".into(),
+                    input: json!({ "code": "print('steer-probe')" }),
+                }),
+                Ok(StreamEvent::MessageDone {
+                    response: ModelResponse {
+                        id: "resp-1".into(),
+                        content: vec![ResponseContent::ToolUse {
+                            id: "call-1".into(),
+                            name: "ipython".into(),
+                            input: json!({ "code": "print('steer-probe')" }),
+                        }],
+                        stop_reason: Some(StopReason::ToolUse),
+                        usage: Usage::default(),
+                        metadata: ResponseMetadata::default(),
+                    },
+                }),
+            ]
+            .into_iter();
+            let first = events.next().expect("tool call start event");
+            let stream = futures::stream::once(async move {
+                release.notified().await;
+                first
+            })
+            .chain(futures::stream::iter(events.collect::<Vec<_>>()));
+            return Ok(Box::pin(stream));
+        }
+        Ok(Box::pin(stream::iter(done_events())))
     }
 
     fn name(&self) -> &str {
@@ -754,59 +735,64 @@ async fn skills_list_returns_user_and_workspace_skills() -> Result<()> {
             connection_id,
             serde_json::json!({
                 "id": 3,
-                "method": "_devo/skills/list",
+                "method": "skill/list",
                 "params": {
                     "cwd": workspace_root,
+                    "forceReload": false,
                 }
             }),
         )
         .await
-        .context("skills/list response")?;
-    let result: SuccessResponse<SkillListResult> = serde_json::from_value(response.clone())
-        .with_context(|| format!("skills/list response: {response}"))?;
-    let canonical_rust_skill_path = canonical_skill_path(&rust_skill_path);
-    let canonical_team_skill_path = canonical_skill_path(&team_skill_path);
+        .context("skill/list response")?;
+    let result: devo_protocol::native::rpc_admin::SkillListResult =
+        serde_json::from_value(response["result"].clone())
+            .with_context(|| format!("skill/list response: {response}"))?;
+    let result_skills = result
+        .skills
+        .into_iter()
+        .map(SkillRecord::from)
+        .collect::<Vec<_>>();
+    let native_rust_skill_path = native_skill_path(&rust_skill_path);
+    let native_team_skill_path = native_skill_path(&team_skill_path);
 
     assert_eq!(
-        result.result,
-        SkillListResult {
-            skills: vec![
-                SkillRecord {
-                    id: "team-style".into(),
-                    name: "team-style".into(),
-                    description: skill_description(&canonical_team_skill_path),
-                    short_description: None,
-                    interface: None,
-                    dependencies: None,
-                    path: canonical_team_skill_path,
-                    enabled: true,
-                    source: SkillSource::Workspace {
-                        cwd: workspace_root,
-                    },
-                    scope: SkillScope::Repo,
-                    plugin_id: None,
+        result_skills,
+        vec![
+            SkillRecord {
+                id: "team-style".into(),
+                name: "team-style".into(),
+                description: skill_description(&native_team_skill_path),
+                short_description: None,
+                interface: None,
+                dependencies: None,
+                path: native_team_skill_path,
+                enabled: true,
+                source: SkillSource::Workspace {
+                    cwd: workspace_root,
                 },
-                SkillRecord {
-                    id: "rust-docs".into(),
-                    name: "rust-docs".into(),
-                    description: skill_description(&canonical_rust_skill_path),
-                    short_description: None,
-                    interface: None,
-                    dependencies: None,
-                    path: canonical_rust_skill_path,
-                    enabled: true,
-                    source: SkillSource::User,
-                    scope: SkillScope::User,
-                    plugin_id: None,
-                },
-            ],
-        }
+                scope: SkillScope::Repo,
+                plugin_id: None,
+            },
+            SkillRecord {
+                id: "rust-docs".into(),
+                name: "rust-docs".into(),
+                description: skill_description(&native_rust_skill_path),
+                short_description: None,
+                interface: None,
+                dependencies: None,
+                path: native_rust_skill_path,
+                enabled: true,
+                source: SkillSource::User,
+                scope: SkillScope::User,
+                plugin_id: None,
+            },
+        ]
     );
     Ok(())
 }
 
 #[tokio::test]
-async fn skills_changed_rediscovers_new_workspace_skill() -> Result<()> {
+async fn skill_list_force_reload_rediscovers_new_workspace_skill() -> Result<()> {
     let temp_dir = TempDir::new()?;
     let user_skill_root = temp_dir.path().join("user-skills");
     let workspace_root = temp_dir.path().join("workspace");
@@ -827,35 +813,40 @@ async fn skills_changed_rediscovers_new_workspace_skill() -> Result<()> {
             connection_id,
             serde_json::json!({
                 "id": 4,
-                "method": "_devo/skills/changed",
+                "method": "skill/list",
                 "params": {
                     "cwd": workspace_root.clone(),
+                    "forceReload": true,
                 }
             }),
         )
         .await
-        .context("first skills/changed response")?;
-    let first_result: SuccessResponse<SkillChangedResult> = serde_json::from_value(first_response)?;
-    let canonical_alpha_skill_path = canonical_skill_path(&alpha_skill_path);
+        .context("first skill/list response")?;
+    let first_result: devo_protocol::native::rpc_admin::SkillListResult =
+        serde_json::from_value(first_response["result"].clone())?;
+    let first_skills = first_result
+        .skills
+        .into_iter()
+        .map(SkillRecord::from)
+        .collect::<Vec<_>>();
+    let native_alpha_skill_path = native_skill_path(&alpha_skill_path);
     assert_eq!(
-        first_result.result,
-        SkillChangedResult {
-            skills: vec![SkillRecord {
-                id: "alpha".into(),
-                name: "alpha".into(),
-                description: skill_description(&canonical_alpha_skill_path),
-                short_description: None,
-                interface: None,
-                dependencies: None,
-                path: canonical_alpha_skill_path.clone(),
-                enabled: true,
-                source: SkillSource::Workspace {
-                    cwd: workspace_root.clone(),
-                },
-                scope: SkillScope::Repo,
-                plugin_id: None,
-            }],
-        }
+        first_skills,
+        vec![SkillRecord {
+            id: "alpha".into(),
+            name: "alpha".into(),
+            description: skill_description(&native_alpha_skill_path),
+            short_description: None,
+            interface: None,
+            dependencies: None,
+            path: native_alpha_skill_path.clone(),
+            enabled: true,
+            source: SkillSource::Workspace {
+                cwd: workspace_root.clone(),
+            },
+            scope: SkillScope::Repo,
+            plugin_id: None,
+        }]
     );
 
     let bravo_skill_path = create_skill(&workspace_skill_root, "bravo", "# Bravo\n\nSecond skill.");
@@ -864,53 +855,57 @@ async fn skills_changed_rediscovers_new_workspace_skill() -> Result<()> {
             connection_id,
             serde_json::json!({
                 "id": 5,
-                "method": "_devo/skills/changed",
+                "method": "skill/list",
                 "params": {
                     "cwd": workspace_root,
+                    "forceReload": true,
                 }
             }),
         )
         .await
-        .context("second skills/changed response")?;
-    let second_result: SuccessResponse<SkillChangedResult> =
-        serde_json::from_value(second_response)?;
-    let canonical_bravo_skill_path = canonical_skill_path(&bravo_skill_path);
+        .context("second skill/list response")?;
+    let second_result: devo_protocol::native::rpc_admin::SkillListResult =
+        serde_json::from_value(second_response["result"].clone())?;
+    let second_skills = second_result
+        .skills
+        .into_iter()
+        .map(SkillRecord::from)
+        .collect::<Vec<_>>();
+    let native_bravo_skill_path = native_skill_path(&bravo_skill_path);
     assert_eq!(
-        second_result.result,
-        SkillChangedResult {
-            skills: vec![
-                SkillRecord {
-                    id: "alpha".into(),
-                    name: "alpha".into(),
-                    description: skill_description(&canonical_alpha_skill_path),
-                    short_description: None,
-                    interface: None,
-                    dependencies: None,
-                    path: canonical_alpha_skill_path,
-                    enabled: true,
-                    source: SkillSource::Workspace {
-                        cwd: workspace_root.clone(),
-                    },
-                    scope: SkillScope::Repo,
-                    plugin_id: None,
+        second_skills,
+        vec![
+            SkillRecord {
+                id: "alpha".into(),
+                name: "alpha".into(),
+                description: skill_description(&native_alpha_skill_path),
+                short_description: None,
+                interface: None,
+                dependencies: None,
+                path: native_alpha_skill_path,
+                enabled: true,
+                source: SkillSource::Workspace {
+                    cwd: workspace_root.clone(),
                 },
-                SkillRecord {
-                    id: "bravo".into(),
-                    name: "bravo".into(),
-                    description: skill_description(&canonical_bravo_skill_path),
-                    short_description: None,
-                    interface: None,
-                    dependencies: None,
-                    path: canonical_bravo_skill_path,
-                    enabled: true,
-                    source: SkillSource::Workspace {
-                        cwd: workspace_root,
-                    },
-                    scope: SkillScope::Repo,
-                    plugin_id: None,
+                scope: SkillScope::Repo,
+                plugin_id: None,
+            },
+            SkillRecord {
+                id: "bravo".into(),
+                name: "bravo".into(),
+                description: skill_description(&native_bravo_skill_path),
+                short_description: None,
+                interface: None,
+                dependencies: None,
+                path: native_bravo_skill_path,
+                enabled: true,
+                source: SkillSource::Workspace {
+                    cwd: workspace_root,
                 },
-            ],
-        }
+                scope: SkillScope::Repo,
+                plugin_id: None,
+            },
+        ]
     );
     Ok(())
 }
@@ -940,13 +935,14 @@ async fn turn_start_resolves_skill_content_into_model_request() -> Result<()> {
             connection_id,
             serde_json::json!({
                 "id": 6,
-                "method": "_devo/turn/start",
+                "method": "turn/start",
                 "params": {
-                    "session_id": session_id,
+                    "sessionId": session_id,
                     "input": [
                         { "type": "text", "text": "Follow this skill." },
-                        { "type": "skill", "id": "rust-docs" }
+                        { "type": "skill", "name": "rust-docs" }
                     ],
+                    "idempotencyKey": format!("native-test-turn-{}", uuid::Uuid::new_v4()),
                     "model": null,
                     "thinking": null,
                     "sandbox": null,
@@ -957,10 +953,13 @@ async fn turn_start_resolves_skill_content_into_model_request() -> Result<()> {
         )
         .await
         .context("turn/start response")?;
-    let start_result: SuccessResponse<devo_server::TurnStartResult> =
+    let start_result: SuccessResponse<devo_protocol::native::rpc_turn::TurnStartResult> =
         serde_json::from_value(response.clone())
             .with_context(|| format!("turn/start response: {response}"))?;
-    assert_eq!(start_result.result.status(), devo_core::TurnStatus::Running);
+    assert_eq!(
+        start_result.result.turn.status,
+        devo_protocol::native::turn::TurnStatus::InProgress
+    );
 
     wait_for_turn_completed(&mut notifications_rx).await?;
 
@@ -972,7 +971,7 @@ async fn turn_start_resolves_skill_content_into_model_request() -> Result<()> {
         .cloned()
         .context("expected one streamed model request")?;
     let request_text = user_request_text(&captured_request)?;
-    let skill_base_dir = canonical_skill_base_dir(&skill_path);
+    let skill_base_dir = native_skill_base_dir(&skill_path);
 
     assert!(request_text.contains("Follow this skill."));
     assert!(request_text.contains("<skill id=\"rust-docs\" name=\"rust-docs\">"));
@@ -1000,12 +999,13 @@ async fn turn_start_rejects_missing_skill_references() -> Result<()> {
             connection_id,
             serde_json::json!({
                 "id": 7,
-                "method": "_devo/turn/start",
+                "method": "turn/start",
                 "params": {
-                    "session_id": session_id,
+                    "sessionId": session_id,
                     "input": [
-                        { "type": "skill", "id": "missing-skill" }
+                        { "type": "skill", "name": "missing-skill" }
                     ],
+                    "idempotencyKey": format!("native-test-turn-{}", uuid::Uuid::new_v4()),
                     "model": null,
                     "thinking": null,
                     "sandbox": null,
@@ -1023,93 +1023,232 @@ async fn turn_start_rejects_missing_skill_references() -> Result<()> {
     Ok(())
 }
 
+#[derive(Clone, Copy)]
+enum AutoReviewWait {
+    TurnCompleted,
+    UserApproval,
+}
+
+struct AutoReviewOutcome {
+    _temp_dir: TempDir,
+    provider: Arc<AutoReviewProvider>,
+    tool_calls: usize,
+    reviewer_calls: Arc<AtomicUsize>,
+}
+
+async fn run_auto_review(
+    risk: &'static str,
+    tool_input: impl FnOnce(&Path) -> serde_json::Value,
+    completion_failures: usize,
+    wait: AutoReviewWait,
+) -> Result<AutoReviewOutcome> {
+    let temp_dir = TempDir::new()?;
+    let user_skill_root = temp_dir.path().join("user-skills");
+    let workspace_root = temp_dir.path().join("workspace");
+    std::fs::create_dir_all(&workspace_root)?;
+    let reviewer_calls = Arc::new(AtomicUsize::new(0));
+    let provider = AutoReviewProvider::new(
+        risk,
+        tool_input(&workspace_root),
+        Arc::clone(&reviewer_calls),
+        completion_failures,
+    );
+    let runtime = build_runtime_with_registry(
+        temp_dir.path(),
+        user_skill_root,
+        Some(workspace_root.clone()),
+        Arc::clone(&provider) as Arc<dyn ModelProviderSDK>,
+    );
+    let (connection_id, mut notifications_rx) = initialize_connection(&runtime).await?;
+    let session_id = start_session(&runtime, connection_id, &workspace_root).await?;
+    update_permissions_to_auto_review(&runtime, connection_id, session_id).await?;
+    start_auto_review_turn(&runtime, connection_id, session_id).await?;
+    // Executions are observed as non-error toolResult items on the
+    // notification stream (the RLM turn registry has no injectable tools).
+    let mut seen = Vec::new();
+    match wait {
+        AutoReviewWait::TurnCompleted => loop {
+            let value = timeout(Duration::from_secs(5), notifications_rx.recv()).await;
+            let Ok(Some(value)) = value else {
+                anyhow::bail!("timed out waiting for turn/completed; seen: {seen:?}");
+            };
+            let completed = is_original_method(&value, "turn/completed");
+            seen.push(value);
+            if completed {
+                break;
+            }
+        },
+        AutoReviewWait::UserApproval => {
+            wait_for_approval_request(&mut notifications_rx).await?;
+        }
+    }
+    // The same toolResult item is broadcast more than once (updated +
+    // completed); one call id is one execution.
+    let tool_calls = usize::from(
+        seen.iter()
+            .any(|value| executed_tool_result(value, "tool-1")),
+    );
+    Ok(AutoReviewOutcome {
+        _temp_dir: temp_dir,
+        provider,
+        tool_calls,
+        reviewer_calls,
+    })
+}
+
+fn assert_auto_review_counts(outcome: &AutoReviewOutcome, reviewers: usize, tools: usize) {
+    assert_eq!(
+        outcome
+            .reviewer_calls
+            .load(std::sync::atomic::Ordering::SeqCst),
+        reviewers
+    );
+    assert_eq!(outcome.tool_calls, tools);
+}
+
 #[tokio::test]
 async fn auto_review_approval_executes_mutating_tool_without_user_prompt() -> Result<()> {
-    let temp_dir = TempDir::new()?;
-    let user_skill_root = temp_dir.path().join("user-skills");
-    let workspace_root = temp_dir.path().join("workspace");
-    let tool_calls = Arc::new(std::sync::atomic::AtomicUsize::new(0));
-    let reviewer_calls = Arc::new(std::sync::atomic::AtomicUsize::new(0));
-    let runtime = build_runtime_with_registry(
-        temp_dir.path(),
-        user_skill_root,
-        Some(workspace_root.clone()),
-        Arc::new(AutoReviewProvider {
-            decision: "approve",
-            reviewer_calls: Arc::clone(&reviewer_calls),
-            stream_calls: Arc::new(std::sync::atomic::AtomicUsize::new(0)),
-        }),
-        auto_review_registry(Arc::clone(&tool_calls)),
+    let outcome = run_auto_review(
+        "low",
+        |_| {
+            json!({
+                "code": PROBE_CODE,
+                "sandbox_permissions": "with_additional_permissions",
+                "additional_permissions": { "network": { "enabled": true } }
+            })
+        },
+        0,
+        AutoReviewWait::TurnCompleted,
+    )
+    .await?;
+    assert_auto_review_counts(&outcome, 1, 1);
+    let stream_requests = outcome
+        .provider
+        .stream_requests
+        .lock()
+        .expect("stream request lock");
+    let completion_requests = outcome
+        .provider
+        .completion_requests
+        .lock()
+        .expect("completion request lock");
+    assert_eq!(completion_requests.len(), 1);
+    assert!(!stream_requests.is_empty());
+    let turn = &stream_requests[0];
+    let review = &completion_requests[0];
+    assert_eq!(turn.system, review.system);
+    assert_eq!(turn.model, review.model);
+    assert_eq!(
+        turn.tools.as_ref().map(|tools| tools
+            .iter()
+            .map(|tool| tool.name.as_str())
+            .collect::<Vec<_>>()),
+        review.tools.as_ref().map(|tools| tools
+            .iter()
+            .map(|tool| tool.name.as_str())
+            .collect::<Vec<_>>())
     );
-    let (connection_id, mut notifications_rx) = initialize_connection(&runtime).await?;
-    let session_id = start_session(&runtime, connection_id, &workspace_root).await?;
-    update_permissions_to_auto_review(&runtime, connection_id, session_id).await?;
-
-    start_auto_review_turn(&runtime, connection_id, session_id).await?;
-    wait_for_turn_completed(&mut notifications_rx).await?;
-
-    assert_eq!(reviewer_calls.load(std::sync::atomic::Ordering::SeqCst), 1);
-    assert_eq!(tool_calls.load(std::sync::atomic::Ordering::SeqCst), 1);
+    assert_eq!(review.messages.len(), turn.messages.len() + 1);
+    for (expected, actual) in turn
+        .messages
+        .iter()
+        .zip(&review.messages[..turn.messages.len()])
+    {
+        assert_eq!(expected.role, actual.role);
+        assert_eq!(expected.content.len(), actual.content.len());
+    }
     Ok(())
 }
 
+/// Trace: L2-DES-SAFETY-002
 #[tokio::test]
-async fn auto_review_deny_blocks_mutating_tool() -> Result<()> {
-    let temp_dir = TempDir::new()?;
-    let user_skill_root = temp_dir.path().join("user-skills");
-    let workspace_root = temp_dir.path().join("workspace");
-    let tool_calls = Arc::new(std::sync::atomic::AtomicUsize::new(0));
-    let reviewer_calls = Arc::new(std::sync::atomic::AtomicUsize::new(0));
-    let runtime = build_runtime_with_registry(
-        temp_dir.path(),
-        user_skill_root,
-        Some(workspace_root.clone()),
-        Arc::new(AutoReviewProvider {
-            decision: "deny",
-            reviewer_calls: Arc::clone(&reviewer_calls),
-            stream_calls: Arc::new(std::sync::atomic::AtomicUsize::new(0)),
-        }),
-        auto_review_registry(Arc::clone(&tool_calls)),
-    );
-    let (connection_id, mut notifications_rx) = initialize_connection(&runtime).await?;
-    let session_id = start_session(&runtime, connection_id, &workspace_root).await?;
-    update_permissions_to_auto_review(&runtime, connection_id, session_id).await?;
-
-    start_auto_review_turn(&runtime, connection_id, session_id).await?;
-    wait_for_turn_completed(&mut notifications_rx).await?;
-
-    assert_eq!(reviewer_calls.load(std::sync::atomic::Ordering::SeqCst), 1);
-    assert_eq!(tool_calls.load(std::sync::atomic::Ordering::SeqCst), 0);
-    Ok(())
-}
-
-#[tokio::test]
-async fn auto_review_uncertain_falls_back_to_user_approval() -> Result<()> {
-    let temp_dir = TempDir::new()?;
-    let user_skill_root = temp_dir.path().join("user-skills");
-    let workspace_root = temp_dir.path().join("workspace");
-    let tool_calls = Arc::new(std::sync::atomic::AtomicUsize::new(0));
-    let reviewer_calls = Arc::new(std::sync::atomic::AtomicUsize::new(0));
-    let runtime = build_runtime_with_registry(
-        temp_dir.path(),
-        user_skill_root,
-        Some(workspace_root.clone()),
-        Arc::new(AutoReviewProvider {
-            decision: "uncertain",
-            reviewer_calls: Arc::clone(&reviewer_calls),
-            stream_calls: Arc::new(std::sync::atomic::AtomicUsize::new(0)),
-        }),
-        auto_review_registry(Arc::clone(&tool_calls)),
-    );
-    let (connection_id, mut notifications_rx) = initialize_connection(&runtime).await?;
-    let session_id = start_session(&runtime, connection_id, &workspace_root).await?;
-    update_permissions_to_auto_review(&runtime, connection_id, session_id).await?;
-
-    start_auto_review_turn(&runtime, connection_id, session_id).await?;
-    wait_for_approval_request(&mut notifications_rx).await?;
-
-    assert_eq!(reviewer_calls.load(std::sync::atomic::Ordering::SeqCst), 1);
-    assert_eq!(tool_calls.load(std::sync::atomic::Ordering::SeqCst), 0);
+async fn auto_review_executes_or_falls_back_by_risk() -> Result<()> {
+    struct Case {
+        risk: &'static str,
+        input: fn(&Path) -> serde_json::Value,
+        failures: usize,
+        wait: AutoReviewWait,
+        reviewers: usize,
+        tools: usize,
+    }
+    let probe = |_: &Path| {
+        json!({
+            "code": PROBE_CODE,
+            "sandbox_permissions": "with_additional_permissions",
+            "additional_permissions": { "network": { "enabled": true } }
+        })
+    };
+    let escalated = |_: &Path| {
+        json!({
+            "code": PROBE_CODE,
+            "sandbox_permissions": "require_escalated",
+            "justification": "approval test"
+        })
+    };
+    let additional = |workspace: &Path| {
+        json!({
+            "code": PROBE_CODE,
+            "sandbox_permissions": "with_additional_permissions",
+            "additional_permissions": {
+                "file_system": {
+                    "read": [workspace.join("external-input").display().to_string()]
+                }
+            }
+        })
+    };
+    for case in [
+        Case {
+            risk: "medium",
+            input: escalated,
+            failures: 0,
+            wait: AutoReviewWait::TurnCompleted,
+            reviewers: 1,
+            tools: 1,
+        },
+        Case {
+            risk: "low",
+            input: additional,
+            failures: 0,
+            wait: AutoReviewWait::TurnCompleted,
+            reviewers: 1,
+            tools: 1,
+        },
+        Case {
+            risk: "high",
+            input: probe,
+            failures: 0,
+            wait: AutoReviewWait::UserApproval,
+            reviewers: 1,
+            tools: 0,
+        },
+        Case {
+            risk: "medium",
+            input: probe,
+            failures: 0,
+            wait: AutoReviewWait::TurnCompleted,
+            reviewers: 1,
+            tools: 1,
+        },
+        Case {
+            risk: "low",
+            input: probe,
+            failures: 2,
+            wait: AutoReviewWait::UserApproval,
+            reviewers: 2,
+            tools: 0,
+        },
+        Case {
+            risk: "invalid",
+            input: probe,
+            failures: 0,
+            wait: AutoReviewWait::UserApproval,
+            reviewers: 1,
+            tools: 0,
+        },
+    ] {
+        let outcome = run_auto_review(case.risk, case.input, case.failures, case.wait).await?;
+        assert_auto_review_counts(&outcome, case.reviewers, case.tools);
+    }
     Ok(())
 }
 
@@ -1123,37 +1262,13 @@ async fn turn_steer_injects_resolved_skill_into_next_model_request() -> Result<(
         "steer-rust",
         "---\nname: steer-rust\ndescription: Rust steering\n---\nPrefer exhaustive matches and cargo tests.",
     );
-    let started = Arc::new(Notify::new());
     let release = Arc::new(Notify::new());
-    let mut builder = ToolRegistryBuilder::new();
-    builder.register_handler(
-        "blocking_wait",
-        Arc::new(BlockingReadOnlyTool {
-            started: Arc::clone(&started),
-            release: Arc::clone(&release),
-        }),
-    );
-    builder.push_spec(ToolSpec {
-        name: "blocking_wait".into(),
-        description: "Blocks until the integration test releases it.".into(),
-        input_schema: JsonSchema::object(std::collections::BTreeMap::new(), None, None),
-        output_mode: ToolOutputMode::Text,
-        execution_mode: ToolExecutionMode::ReadOnly,
-        capability_tags: vec![],
-        supports_parallel: true,
-        preparation_feedback: devo_core::tools::ToolPreparationFeedback::None,
-        display_name: None,
-        supports_cancellation: None,
-        supports_streaming: None,
-    });
-    let registry = Arc::new(builder.build());
-    let provider = Arc::new(SteerCapturingProvider::default());
+    let provider = SteerCapturingProvider::new(Arc::clone(&release));
     let runtime = build_runtime_with_registry(
         temp_dir.path(),
         user_skill_root,
         Some(workspace_root.clone()),
         provider.clone(),
-        registry,
     );
     let (connection_id, mut notifications_rx) = initialize_connection(&runtime).await?;
     let session_id = start_session(&runtime, connection_id, &workspace_root).await?;
@@ -1163,12 +1278,13 @@ async fn turn_steer_injects_resolved_skill_into_next_model_request() -> Result<(
             connection_id,
             serde_json::json!({
                 "id": 8,
-                "method": "_devo/turn/start",
+                "method": "turn/start",
                 "params": {
-                    "session_id": session_id,
+                    "sessionId": session_id,
                     "input": [
                         { "type": "text", "text": "Start with the tool." }
                     ],
+                    "idempotencyKey": format!("native-test-turn-{}", uuid::Uuid::new_v4()),
                     "model": null,
                     "thinking": null,
                     "sandbox": null,
@@ -1179,65 +1295,57 @@ async fn turn_steer_injects_resolved_skill_into_next_model_request() -> Result<(
         )
         .await
         .context("turn/start response for steering test")?;
-    let start_result: SuccessResponse<devo_server::TurnStartResult> =
+    let start_result: SuccessResponse<devo_protocol::native::rpc_turn::TurnStartResult> =
         serde_json::from_value(response.clone())
             .with_context(|| format!("turn/start response: {response}"))?;
-    let start_turn_id = start_result
-        .result
-        .turn_id()
-        .expect("turn/start should start steering test turn");
+    let start_turn_id = start_result.result.turn.id;
 
-    timeout(Duration::from_secs(5), started.notified())
-        .await
-        .context("timed out waiting for blocking tool to start")?;
+    // The first stream is parked inside the provider before its first event,
+    // keeping the turn in flight deterministically.
+    timeout(Duration::from_secs(10), async {
+        loop {
+            if !provider
+                .stream_requests
+                .lock()
+                .expect("stream request lock")
+                .is_empty()
+            {
+                return;
+            }
+            tokio::time::sleep(Duration::from_millis(10)).await;
+        }
+    })
+    .await
+    .context("first model request never arrived")?;
 
-    // Canonical flow: push the input onto the busy session queue, then
-    // promote the queued entry into the running turn as a steer.
-    let push_response = runtime
-        .handle_incoming(
-            connection_id,
-            serde_json::json!({
-                "id": 9,
-                "method": "session/queue/push",
-                "params": {
-                    "sessionId": session_id,
-                    "input": [
-                        { "type": "text", "text": "Apply this steer now." },
-                        { "type": "skill", "name": "steer-rust" }
-                    ],
-                    "idempotencyKey": "steer-skill-push"
-                }
-            }),
-        )
-        .await
-        .context("session/queue/push response")?;
-    let push_result: SuccessResponse<devo_protocol::canonical::rpc_turn::SessionQueuePushResult> =
-        serde_json::from_value(push_response.clone())
-            .with_context(|| format!("push_response: {push_response}"))?;
-    let devo_protocol::canonical::rpc_turn::SessionQueuePushResult::Queued { entry } =
-        push_result.result
-    else {
-        panic!("busy push must queue");
-    };
-
+    // Native flow: inject steer input directly into the running turn.
     let steer_response = runtime
         .handle_incoming(
             connection_id,
             serde_json::json!({
                 "id": 10,
-                "method": "session/queue/steer",
+                "method": "turn/steer",
                 "params": {
                     "sessionId": session_id,
-                    "queueItemId": entry.queue_item_id.as_str(),
-                    "expectedTurnId": start_turn_id.to_string()
+                    "expectedTurnId": start_turn_id.to_string(),
+                    "input": [
+                        { "type": "text", "text": "Apply this steer now." },
+                        { "type": "skill", "name": "steer-rust" }
+                    ],
+                    "idempotencyKey": "steer-skill"
                 }
             }),
         )
         .await
-        .context("session/queue/steer response")?;
-    let steer_result: SuccessResponse<devo_protocol::canonical::rpc_turn::SessionQueueSteerResult> =
+        .context("turn/steer response")?;
+    let steer_result: SuccessResponse<devo_protocol::native::rpc_turn::TurnSteerResult> =
         serde_json::from_value(steer_response)?;
-    assert!(!steer_result.result.item_id.as_str().is_empty());
+    let devo_protocol::native::rpc_turn::TurnSteerResult::Injected { item_id } =
+        steer_result.result
+    else {
+        panic!("expected Injected steer");
+    };
+    assert!(!item_id.as_str().is_empty());
 
     release.notify_one();
     wait_for_turn_completed(&mut notifications_rx).await?;
@@ -1250,7 +1358,7 @@ async fn turn_steer_injects_resolved_skill_into_next_model_request() -> Result<(
 
     let first_user_texts = all_user_request_texts(&captured_requests[0]);
     let second_user_texts = all_user_request_texts(&captured_requests[1]);
-    let skill_base_dir = canonical_skill_base_dir(&skill_path);
+    let skill_base_dir = native_skill_base_dir(&skill_path);
 
     assert!(
         first_user_texts

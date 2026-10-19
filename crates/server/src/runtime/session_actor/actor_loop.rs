@@ -5,23 +5,21 @@ use chrono::Utc;
 use devo_core::SessionTitleFinalSource;
 use devo_core::SessionTitleState;
 use devo_core::TurnConfig;
-use devo_core::TurnStatus;
+use devo_protocol::native::turn::TurnStatus;
 use tokio::sync::mpsc;
 
 use super::approval_scope::{
-    apply_approval_scope_to_state, apply_path_scope_to_permission_profile,
+    apply_approval_scope_to_state, apply_path_scope_to_permission_profile, credential_delivery_root,
 };
-use super::commands::SessionCommand;
+use super::commands::{ApprovalCheckpointSnapshot, SessionCommand};
 use super::snapshots::{
     HookContextSnapshot, PendingQueueSnapshot, QueuedTurnInputData, ShellExecContextSnapshot,
     TitleGenerationContext, TurnPersistenceSnapshot, TurnReservationSnapshot,
 };
 use super::state::SessionActorState;
-use super::turn::execute_turn_in_actor;
-use crate::SessionRuntimeStatus;
-use crate::persistence::build_turn_record;
 use crate::runtime::protocol_preset_from_safety;
 use crate::runtime::session_model_selection;
+use devo_protocol::native::session::SessionStatus;
 
 pub(super) async fn run_session_actor(
     mut state: SessionActorState,
@@ -30,56 +28,53 @@ pub(super) async fn run_session_actor(
 ) {
     while let Some(command) = mailbox.recv().await {
         match command {
-            SessionCommand::ExecuteTurn {
-                runtime: turn_runtime,
-                request,
-                reply,
-            } => {
-                let session_id = request.session_id;
-                execute_turn_in_actor(&mut state, turn_runtime.clone(), request).await;
-                // Interrupted turns must not auto-start continuation here: that would
-                // re-block the actor mailbox before the interrupting handler finishes
-                // (goal replace/clear/cancel). Failed turns still enter maybe_start so
-                // `pause_goal_continuation_after_failed_turn` can suppress looping.
-                // Explicit restarts go through goal handlers' maybe_start calls.
-                let should_auto_continue_goal = state.latest_turn.as_ref().is_some_and(|turn| {
-                    matches!(turn.status, TurnStatus::Completed | TurnStatus::Failed)
-                });
+            SessionCommand::CheckoutTurnWorkingSet { turn, reply } => {
+                let working = state.checkout_turn_working_set(&turn);
+                {
+                    let mut stream = working.state.stream.lock().await;
+                    stream.turn_inline = Some(super::turn_inline::TurnInlineState::new(
+                        &working.state,
+                        &turn,
+                    ));
+                }
+                let _ = reply.send(working);
+            }
+            SessionCommand::MergeTurn { working, reply } => {
+                state.merge_turn_working_set(*working);
                 let _ = reply.send(());
-                tokio::spawn(async move {
-                    turn_runtime
-                        .maybe_schedule_final_title_generation(session_id, None)
-                        .await;
-                    if turn_runtime.chain_queued_followup_turn(session_id).await {
-                        return;
-                    }
-                    if turn_runtime.spawn_next_turn_from_queue(session_id).await {
-                        return;
-                    }
-                    if turn_runtime
-                        .child_parent_and_path(session_id)
-                        .await
-                        .is_some()
-                        && turn_runtime.child_can_accept_next_turn(session_id).await
-                    {
-                        let _ = turn_runtime
-                            .drain_child_mailbox_into_user_turns(session_id)
-                            .await;
-                        return;
-                    }
-                    if should_auto_continue_goal {
-                        turn_runtime
-                            .maybe_start_goal_continuation_turn(session_id)
-                            .await;
-                    }
-                });
             }
             SessionCommand::GetSummary { reply } => {
                 let _ = reply.send(state.summary.clone());
             }
+            SessionCommand::GetNativeSession { reply } => {
+                let _ = reply.send(state.summary.native.clone());
+            }
             SessionCommand::GetSpawnSnapshot { reply } => {
                 let snapshot = state.spawn_snapshot();
                 let _ = reply.send(snapshot);
+            }
+            SessionCommand::GetTranscriptItems { reply } => {
+                // Include the active turn's in-flight items: while a turn is
+                // running they live in the turn-inline working set and only
+                // merge into the actor copy at turn end, so the merged copy
+                // alone would read as empty for a live child.
+                let mut items = state.persisted_turn_items.clone();
+                let inline_items = {
+                    let stream = state.stream.lock().await;
+                    stream
+                        .turn_inline
+                        .as_ref()
+                        .map(|inline| inline.persisted_turn_items.clone())
+                        .unwrap_or_default()
+                };
+                let existing: std::collections::HashSet<_> =
+                    items.iter().map(|item| item.item_id).collect();
+                items.extend(
+                    inline_items
+                        .into_iter()
+                        .filter(|item| !existing.contains(&item.item_id)),
+                );
+                let _ = reply.send(items);
             }
             SessionCommand::GetApprovalCacheSnapshot { reply } => {
                 let _ = reply.send(state.approval_cache_snapshot());
@@ -106,35 +101,26 @@ pub(super) async fn run_session_actor(
             SessionCommand::GetHookContextSnapshot { reply } => {
                 let _ = reply.send(HookContextSnapshot {
                     runtime_context: Arc::clone(&state.runtime_context),
-                    record: state.record.clone(),
+                    rollout_path: state.rollout_path.clone(),
                     summary: state.summary.clone(),
                     config: state.config.clone(),
                 });
             }
             SessionCommand::GetTurnPersistenceSnapshot { reply } => {
                 let _ = reply.send(TurnPersistenceSnapshot {
-                    record: state.record.clone(),
+                    rollout_path: state.rollout_path.clone(),
                 });
             }
             SessionCommand::GetShellExecContext { cwd, reply } => {
                 let _ = &cwd;
-                let tool_registry = state
-                    .tool_registry
-                    .clone()
-                    .unwrap_or_else(|| state.runtime_context.tool_registry());
                 let _ = reply.send(ShellExecContextSnapshot {
-                    permission_mode: state.core.config.permission_mode,
-                    permission_profile: state.core.config.permission_profile.clone(),
-                    runtime_context: Arc::clone(&state.runtime_context),
-                    tool_registry,
-                    file_read_ledger: Arc::clone(&state.file_read_ledger),
                     sandbox_profile: state.core.config.sandbox_profile.clone(),
                 });
             }
             SessionCommand::GetTitleGenerationContext { reply } => {
                 let _ = reply.send(TitleGenerationContext {
                     model_selection: session_model_selection(&state.summary).map(str::to_string),
-                    reasoning_effort_selection: state.summary.reasoning_effort_selection.clone(),
+                    reasoning_effort_selection: state.summary.settings.reasoning_effort.clone(),
                     title_state: state.summary.title_state.clone(),
                     runtime_context: Arc::clone(&state.runtime_context),
                 });
@@ -168,6 +154,12 @@ pub(super) async fn run_session_actor(
                     .pending_turn_queue
                     .lock()
                     .expect("pending turn queue mutex should not be poisoned");
+                tracing::debug!(
+                    session_id = %state.session_id(),
+                    queue_len = queue.len(),
+                    require_idle_session,
+                    "PopQueuedTurnInput"
+                );
                 let popped = queue.pop_front().and_then(pop_queued_turn_input_data);
                 let _ = reply.send(popped);
             }
@@ -179,28 +171,78 @@ pub(super) async fn run_session_actor(
                     .push_back(item);
             }
             SessionCommand::GetActiveTurnId { reply } => {
-                let _ = reply.send(state.active_turn.as_ref().map(|turn| turn.turn_id));
+                let _ = reply.send(state.active_turn.as_ref().map(|turn| turn.turn_id()));
             }
-            SessionCommand::GetRecord { reply } => {
-                let _ = reply.send(state.record.clone());
+            SessionCommand::GetApprovalCheckpointSnapshot { reply } => {
+                let snapshot = if state.active_turn.is_some() {
+                    let stream = state.stream.lock().await;
+                    let turn_config = stream
+                        .turn_inline
+                        .as_ref()
+                        .and_then(|inline| {
+                            inline
+                                .live_turn_settings
+                                .lock()
+                                .ok()
+                                .and_then(|live| live.turn_config.clone())
+                        })
+                        .or_else(|| {
+                            Some(
+                                state.runtime_context.resolve_turn_config(
+                                    state
+                                        .summary
+                                        .model_binding_id()
+                                        .or(state.summary.model_name()),
+                                    state.summary.settings.reasoning_effort.clone(),
+                                ),
+                            )
+                        });
+                    turn_config.map(|turn_config| ApprovalCheckpointSnapshot {
+                        messages: state.core.messages.clone(),
+                        turn_config,
+                        collaboration_mode: state.core.collaboration_mode,
+                    })
+                } else {
+                    None
+                };
+                let _ = reply.send(snapshot);
+            }
+            SessionCommand::MarkActiveTurnWaitingApproval { turn_id, reply } => {
+                let turn = state
+                    .active_turn
+                    .as_mut()
+                    .filter(|turn| turn.turn_id() == turn_id)
+                    .map(|turn| {
+                        turn.native.status = TurnStatus::WaitingApproval;
+                        turn.clone()
+                    });
+                if let Some(turn) = &turn {
+                    state.latest_turn = Some(turn.clone());
+                }
+                let _ = reply.send(turn);
+            }
+            SessionCommand::GetRolloutPath { reply } => {
+                let _ = reply.send(state.rollout_path.clone());
             }
             SessionCommand::PreparePersistItem { turn_id, reply } => {
                 let turn_kind = state
                     .active_turn
                     .as_ref()
-                    .filter(|turn| turn.turn_id == turn_id)
-                    .map(|turn| turn.kind.clone())
+                    .filter(|turn| turn.turn_id() == turn_id)
+                    .map(|turn| turn.native.kind)
                     .or_else(|| {
                         state
                             .latest_turn
                             .as_ref()
-                            .filter(|turn| turn.turn_id == turn_id)
-                            .map(|turn| turn.kind.clone())
+                            .filter(|turn| turn.turn_id() == turn_id)
+                            .map(|turn| turn.native.kind)
                     })
                     .unwrap_or_default();
                 let _ = reply.send(super::snapshots::PersistItemPrep {
                     turn_kind,
-                    record: state.record.clone(),
+                    rollout_path: state.rollout_path.clone(),
+                    transcript_leaf_id: state.transcript_leaf_id,
+                    leaf_epoch: state.leaf_epoch,
                 });
             }
             SessionCommand::TakeShutdownDeferredSnapshot { reply } => {
@@ -208,8 +250,9 @@ pub(super) async fn run_session_actor(
                 let _ = reply.send(super::snapshots::ShutdownDeferredSnapshot {
                     deferred_assistant: stream.deferred_assistant.clone(),
                     deferred_reasoning: stream.deferred_reasoning.clone(),
-                    active_turn_id: state.active_turn.as_ref().map(|turn| turn.turn_id),
-                    record: state.record.clone(),
+                    active_turn: state.active_turn.clone(),
+                    active_turn_id: state.active_turn.as_ref().map(|turn| turn.turn_id()),
+                    rollout_path: state.rollout_path.clone(),
                 });
             }
             SessionCommand::AllocateItemSeq { reply } => {
@@ -226,9 +269,6 @@ pub(super) async fn run_session_actor(
             }
             SessionCommand::TakeDeferredItems { reply } => {
                 let _ = reply.send(state.stream.lock().await.take_deferred_items());
-            }
-            SessionCommand::ResetTurnApprovalCache => {
-                state.turn_approval_cache = crate::execution::ApprovalGrantCache::default();
             }
             SessionCommand::TouchLastActivity => {
                 state.summary.last_activity_at = state.summary.last_activity_at.max(Utc::now());
@@ -250,6 +290,62 @@ pub(super) async fn run_session_actor(
                     &scope,
                     &pending,
                 );
+                // P2 (design doc §8/§9): a PathPrefix write approval is not
+                // just a cache/profile entry — deliver it as a credential to
+                // the fenced kernel so native I/O works from now on, with no
+                // kernel restart. Scope selection lives in
+                // `credential_delivery_root` (tested); Session-scope
+                // exact-file approvals deliberately stay mediated.
+                // Windows: session-SID ACE. Unix: dirfd over SCM_RIGHTS.
+                if let Some((root, access)) = credential_delivery_root(&scope, &pending)
+                    && let Some(kernel) = state.kernel.as_ref()
+                {
+                    #[cfg(windows)]
+                    if let Some(authority) = kernel.fence_credentials() {
+                        let delivered = match access {
+                            super::approval_scope::CredentialAccess::Write => {
+                                authority.grant_write_root(&root)
+                            }
+                            super::approval_scope::CredentialAccess::Read => {
+                                authority.grant_read_root(&root)
+                            }
+                        };
+                        match delivered {
+                            Ok(_) => tracing::info!(
+                                root = %root.display(),
+                                "session credential delivered: ACE for the fenced kernel \
+                                 (no restart)"
+                            ),
+                            Err(err) => tracing::warn!(
+                                %err,
+                                root = %root.display(),
+                                "session credential ACE delivery failed; \
+                                 the mediated fallback remains active"
+                            ),
+                        }
+                    }
+                    #[cfg(unix)]
+                    if let Some(channel) = kernel.grant_channel() {
+                        let access_str = match access {
+                            super::approval_scope::CredentialAccess::Write => "write",
+                            super::approval_scope::CredentialAccess::Read => "read",
+                        };
+                        match channel.grant(&root, access_str) {
+                            Ok(_) => tracing::info!(
+                                root = %root.display(),
+                                access = access_str,
+                                "session credential delivered: dirfd for the fenced kernel \
+                                 (no restart)"
+                            ),
+                            Err(err) => tracing::warn!(
+                                %err,
+                                root = %root.display(),
+                                "session credential dirfd delivery failed; \
+                                 the mediated fallback remains active"
+                            ),
+                        }
+                    }
+                }
             }
             SessionCommand::UpdateSummary { summary } => {
                 state.summary = summary;
@@ -265,7 +361,15 @@ pub(super) async fn run_session_actor(
                 title_state,
                 reply,
             } => {
-                if matches!(state.summary.title_state, SessionTitleState::Final(_)) {
+                let allow = match (&state.summary.title_state, &title_state) {
+                    (
+                        SessionTitleState::Final(SessionTitleFinalSource::Heuristic),
+                        SessionTitleState::Final(SessionTitleFinalSource::ModelGenerated),
+                    ) => true,
+                    (SessionTitleState::Final(_), _) => false,
+                    _ => true,
+                };
+                if !allow {
                     let _ = reply.send(None);
                     continue;
                 }
@@ -273,18 +377,13 @@ pub(super) async fn run_session_actor(
                 state.summary.title = Some(title.clone());
                 state.summary.title_state = title_state.clone();
                 state.summary.updated_at = updated_at;
-                if let Some(record) = state.record.as_mut() {
-                    record.title = Some(title);
-                    record.title_state = title_state;
-                    record.updated_at = updated_at;
-                }
                 let _ = reply.send(Some(state.summary.clone()));
             }
             SessionCommand::BeginActiveTurn { turn, turn_config } => {
                 let now = Utc::now();
                 apply_turn_config_to_session_summary(&mut state.summary, &turn_config);
                 ensure_session_context_locked(&mut state, &turn_config);
-                state.summary.status = SessionRuntimeStatus::ActiveTurn;
+                state.summary.set_status(SessionStatus::Active);
                 state.summary.updated_at = now;
                 state.summary.last_activity_at = now;
                 state.active_turn = Some(turn);
@@ -293,10 +392,10 @@ pub(super) async fn run_session_actor(
                 let cleared = state
                     .active_turn
                     .as_ref()
-                    .is_some_and(|active| active.turn_id == turn_id);
+                    .is_some_and(|active| active.turn_id() == turn_id);
                 if cleared {
                     state.active_turn = None;
-                    state.summary.status = SessionRuntimeStatus::Idle;
+                    state.summary.set_status(SessionStatus::Idle);
                     state.summary.updated_at = Utc::now();
                     state.summary.last_activity_at = state.summary.updated_at;
                 }
@@ -308,7 +407,7 @@ pub(super) async fn run_session_actor(
                     state.latest_turn = Some(latest_turn);
                 }
                 state.active_turn = None;
-                state.summary.status = SessionRuntimeStatus::Idle;
+                state.summary.set_status(SessionStatus::Idle);
                 state.summary.updated_at = now;
                 state.summary.last_activity_at = now;
             }
@@ -320,37 +419,74 @@ pub(super) async fn run_session_actor(
                 let now = Utc::now();
                 apply_turn_config_to_session_summary(&mut state.summary, &turn_config);
                 ensure_session_context_locked(&mut state, &turn_config);
-                state.summary.status = SessionRuntimeStatus::ActiveTurn;
+                state.summary.set_status(SessionStatus::Active);
                 state.summary.updated_at = now;
                 state.summary.last_activity_at = now;
                 state.active_turn = Some(turn);
-            }
-            SessionCommand::CompleteShellTurn {
-                turn,
-                is_error,
-                reply,
-            } => {
-                let mut final_turn = turn;
-                final_turn.completed_at = Some(Utc::now());
-                final_turn.status = if is_error {
-                    TurnStatus::Failed
-                } else {
-                    TurnStatus::Completed
-                };
-                state.latest_turn = Some(final_turn.clone());
-                state.active_turn = None;
-                state.summary.status = SessionRuntimeStatus::Idle;
-                state.summary.updated_at = Utc::now();
-                state.summary.last_activity_at = state.summary.updated_at;
-                let _ = reply.send(final_turn);
             }
             SessionCommand::UpdateCorePermissionMode { permission_mode } => {
                 state.core.config.permission_mode = permission_mode;
                 state.config.permission_mode = permission_mode;
             }
-            SessionCommand::UpdateRecordRolloutPath { rollout_path } => {
-                if let Some(record) = state.record.as_mut() {
-                    record.rollout_path = rollout_path;
+            SessionCommand::UpdateRolloutPath { rollout_path } => {
+                state.rollout_path = Some(rollout_path);
+            }
+            SessionCommand::SetTranscriptLeaf {
+                leaf_id,
+                epoch,
+                scoped_item_ids,
+                compaction_snapshot,
+            } => {
+                state.transcript_leaf_id = leaf_id;
+                state.leaf_epoch = epoch;
+                if let Some(ids) = scoped_item_ids {
+                    // Mirror load_session_from_rollout's path scoping for the
+                    // live actor: tree-visible rows survive only on the
+                    // navigated branch, unlisted rows (SubAgent, Warning, …)
+                    // follow their turn, and the prompt/history rebuild drops
+                    // the abandoned branch from the next turn's context.
+                    let keep: std::collections::HashSet<devo_protocol::native::ids::ItemId> =
+                        ids.into_iter().collect();
+                    let active_turn_ids: std::collections::HashSet<
+                        devo_protocol::native::ids::TurnId,
+                    > = state
+                        .persisted_turn_items
+                        .iter()
+                        .filter(|item| keep.contains(&item.item_id))
+                        .map(|item| item.turn_id)
+                        .collect();
+                    state.persisted_turn_items.retain(|item| {
+                        keep.contains(&item.item_id)
+                            || (!devo_core::is_tree_visible_item(&item.item)
+                                && active_turn_ids.contains(&item.turn_id))
+                    });
+                    let mut rebuilt_messages = Vec::new();
+                    let mut rebuilt_history = Vec::new();
+                    let mut tool_names = std::collections::HashMap::new();
+                    for item in &state.persisted_turn_items {
+                        crate::prompt_from_native_item::apply_native_item(
+                            &mut rebuilt_messages,
+                            &mut rebuilt_history,
+                            &mut tool_names,
+                            item.item.clone(),
+                        );
+                    }
+                    state.history_items = rebuilt_history;
+                    // The re-scope must not undo compaction: when the
+                    // snapshot's summary item survives the scope, rebuild the
+                    // prompt from the snapshot (compacted shape); only a
+                    // navigate to a leaf before the summary falls back to the
+                    // full scoped history, where the summary is gone.
+                    let prompt_messages = compaction_snapshot
+                        .as_ref()
+                        .and_then(|snapshot| {
+                            crate::persistence::build_prompt_messages_from_snapshot(
+                                &state.persisted_turn_items,
+                                snapshot,
+                            )
+                        })
+                        .unwrap_or(rebuilt_messages);
+                    state.core.set_prompt_messages(prompt_messages);
                 }
             }
             SessionCommand::ApplyParentUsageSnapshot { snapshot } => {
@@ -358,18 +494,20 @@ pub(super) async fn run_session_actor(
             }
             SessionCommand::InterruptActiveTurn { reply } => {
                 let now = Utc::now();
-                state.summary.status = SessionRuntimeStatus::Idle;
+                state.summary.set_status(SessionStatus::Idle);
                 state.summary.updated_at = now;
                 state.summary.last_activity_at = now;
-                state.summary.total_input_tokens = state.core.total_input_tokens;
-                state.summary.total_output_tokens = state.core.total_output_tokens;
-                state.summary.total_tokens = state.core.total_tokens;
-                state.summary.total_cache_creation_tokens = state.core.total_cache_creation_tokens;
-                state.summary.total_cache_read_tokens = state.core.total_cache_read_tokens;
+                state.summary.set_cumulative_usage(
+                    state.core.total_input_tokens,
+                    state.core.total_output_tokens,
+                    state.core.total_tokens,
+                    state.core.total_cache_creation_tokens,
+                    state.core.total_cache_read_tokens,
+                );
                 state.summary.prompt_token_estimate = state.core.prompt_token_estimate;
                 let interrupted = state.active_turn.take().map(|mut turn| {
-                    turn.status = TurnStatus::Interrupted;
-                    turn.completed_at = Some(now);
+                    turn.native.status = TurnStatus::Interrupted;
+                    turn.native.completed_at = Some(now);
                     state.latest_turn = Some(turn.clone());
                     turn
                 });
@@ -389,8 +527,14 @@ pub(super) async fn run_session_actor(
                 state.runtime_context = runtime_context;
                 state.core.cwd = cwd.clone();
                 state.summary.cwd = cwd;
+                state.summary.version = state.summary.version.saturating_add(1);
             }
-            SessionCommand::UpdateSessionMetadata {
+            SessionCommand::SetArchived { archived, reply } => {
+                state.summary.archived = archived;
+                state.summary.version = state.summary.version.saturating_add(1);
+                let _ = reply.send(state.summary.native.clone());
+            }
+            SessionCommand::UpdateSessionModelSettings {
                 model,
                 model_binding_id,
                 reasoning_effort_selection,
@@ -404,27 +548,40 @@ pub(super) async fn run_session_actor(
                     && reasoning_effort_selection.is_none()
                     && collaboration_mode.is_some();
                 if !mode_only_update {
-                    state.summary.model = model.clone();
-                    state.summary.model_binding_id = model_binding_id.clone();
-                    state.summary.reasoning_effort_selection = reasoning_effort_selection.clone();
+                    state.summary.model.model = model.clone().unwrap_or_default();
+                    state.summary.model.provider =
+                        model_binding_id.clone().unwrap_or_else(|| "unknown".into());
+                    state.summary.settings.reasoning_effort = reasoning_effort_selection.clone();
                 }
                 state.summary.updated_at = updated_at;
                 if let Some(mode) = collaboration_mode {
                     state.core.collaboration_mode = mode;
                     state.summary.collaboration_mode = mode;
                 }
-                if let Some(record) = state.record.as_mut() {
-                    if !mode_only_update {
-                        record.model = model;
-                        record.model_binding_id = model_binding_id;
-                        record.reasoning_effort_selection = reasoning_effort_selection;
-                    }
-                    if let Some(mode) = collaboration_mode {
-                        record.collaboration_mode = Some(mode);
-                    }
-                    record.updated_at = updated_at;
-                }
+                state.summary.version = state.summary.version.saturating_add(1);
                 let _ = reply.send(state.summary.clone());
+            }
+            SessionCommand::UpdateNativeSessionSettings {
+                auto_refine_enabled,
+                auto_refine_turn_interval,
+                python_cell_first_wait_ms,
+                reply,
+            } => {
+                if let Some(enabled) = auto_refine_enabled {
+                    state.summary.settings.auto_refine_enabled = Some(enabled);
+                }
+                if let Some(interval) = auto_refine_turn_interval {
+                    state.summary.settings.auto_refine_turn_interval = Some(interval.max(1));
+                }
+                if let Some(ms) = python_cell_first_wait_ms {
+                    state.summary.settings.python_cell_first_wait_ms = Some(ms);
+                }
+                state.summary.updated_at = Utc::now();
+                // Keep the actor version aligned with the settings-epoch bump
+                // the durable write already made, mirroring
+                // UpdateSessionModelSettings.
+                state.summary.version = state.summary.version.saturating_add(1);
+                let _ = reply.send(());
             }
             SessionCommand::ApplyPermissionProfile { profile, reply } => {
                 let sandbox = Some(profile.implied_sandbox_profile().to_string());
@@ -437,25 +594,25 @@ pub(super) async fn run_session_actor(
                 state.session_approval_cache = crate::execution::ApprovalGrantCache::default();
                 state.turn_approval_cache = crate::execution::ApprovalGrantCache::default();
                 let preset = protocol_preset_from_safety(profile.preset);
-                state.summary.permission_preset = Some(preset);
+                state.summary.set_permission_preset(preset);
                 let updated_at = Utc::now();
                 state.summary.updated_at = updated_at;
-                if let Some(record) = state.record.as_mut() {
-                    record.permission_preset = Some(preset);
-                    record.updated_at = updated_at;
-                }
+                // Keep actor version aligned with settings-epoch bumps on the
+                // rollout so session/read refresh does not under-report for
+                // the next metadata/update expectedVersion check.
+                state.summary.version = state.summary.version.saturating_add(1);
                 let _ = reply.send(());
             }
             SessionCommand::ApplyEffectiveContextWindow { limit, reply } => {
-                state.core.config.effective_context_window_override = Some(limit);
+                // Applied value is the model usable window; do not keep a
+                // sticky session override that could diverge from the model.
+                state.core.config.effective_context_window_override = None;
                 state.core.config.token_budget.context_window = limit;
                 state.core.config.token_budget.auto_compact_token_limit = Some(limit);
-                state.config.effective_context_window_override = Some(limit);
+                state.config.effective_context_window_override = None;
                 state.config.token_budget.context_window = limit;
                 state.config.token_budget.auto_compact_token_limit = Some(limit);
-                // Applied window is session-local runtime state derived from the
-                // global config preference; do not persist as a session override.
-                state.summary.effective_context_window = Some(limit as u64);
+                state.summary.settings.effective_context_window = Some(limit as u64);
                 let _ = reply.send(Ok(()));
             }
             SessionCommand::ApplySandboxProfile { profile, reply } => {
@@ -481,12 +638,6 @@ pub(super) async fn run_session_actor(
                 state.summary.title_state =
                     SessionTitleState::Final(SessionTitleFinalSource::UserRename);
                 state.summary.updated_at = updated_at;
-                if let Some(record) = state.record.as_mut() {
-                    record.title = Some(title);
-                    record.title_state =
-                        SessionTitleState::Final(SessionTitleFinalSource::UserRename);
-                    record.updated_at = updated_at;
-                }
                 let _ = reply.send(state.summary.clone());
             }
             SessionCommand::SetToolRegistry {
@@ -538,7 +689,7 @@ pub(super) async fn run_session_actor(
                 let now = Utc::now();
                 apply_turn_config_to_session_summary(&mut state.summary, &turn_config);
                 ensure_session_context_locked(&mut state, &turn_config);
-                state.summary.status = SessionRuntimeStatus::ActiveTurn;
+                state.summary.set_status(SessionStatus::Active);
                 state.summary.updated_at = now;
                 state.summary.last_activity_at = now;
                 state.active_turn = Some(turn);
@@ -557,40 +708,68 @@ pub(super) async fn run_session_actor(
                 reply,
             } => {
                 let result = (|| {
-                    let record = state
-                        .record
+                    let rollout_path = state
+                        .rollout_path
                         .as_ref()
-                        .context("missing session record for turn persistence")?;
-                    runtime.rollout_store.append_turn_deduped(
-                        record,
+                        .context("missing rollout path for turn persistence")?;
+                    runtime.rollout_store.append_turn_deduped_at(
+                        rollout_path,
+                        state.session_id(),
                         &mut state.session_context_recorded,
-                        build_turn_record(
+                        &turn.native,
+                        Some(crate::persistence::turn_persistence_extras_from_runtime(
                             &turn,
-                            None,
+                            /*session_context*/ None,
                             state.core.latest_turn_context.clone(),
-                            None,
-                            None,
-                        ),
+                            /*latest_query_usage*/ None,
+                            /*context_occupancy*/ None,
+                        )),
                         state.core.session_context.clone(),
                     )
                 })();
                 let _ = reply.send(result);
             }
             SessionCommand::Shutdown { reply } => {
-                let _ = reply.send(());
+                // Withdraw the session's delivered credentials (design doc
+                // §9): normal session end revokes every ACE this session was
+                // granted; crashed sessions are covered by the journal sweep.
+                #[cfg(windows)]
+                if let Some(kernel) = state.kernel.as_ref()
+                    && let Some(authority) = kernel.fence_credentials()
+                    && let Err(err) = authority.revoke_all()
+                {
+                    tracing::warn!(
+                        %err,
+                        "session credential revocation on shutdown failed; \
+                         the startup journal sweep will retry"
+                    );
+                }
+                let kernel = state.kernel.take();
+                let _ = reply.send(kernel);
                 break;
             }
         }
+        state.sync_native_runtime_fields();
     }
 }
 
 fn apply_turn_config_to_session_summary(
-    summary: &mut crate::session::SessionMetadata,
+    summary: &mut crate::runtime_session_summary::RuntimeSessionSummary,
     turn_config: &TurnConfig,
 ) {
-    summary.model = Some(turn_config.model.slug.clone());
-    summary.model_binding_id = turn_config.model_binding_id.clone();
-    summary.reasoning_effort_selection = turn_config.reasoning_effort_selection.clone();
+    let model = match &turn_config.provider_route {
+        devo_provider::ProviderRoute::Connection { provider_id, .. } => {
+            format!("{provider_id}/{}", turn_config.request_model)
+        }
+        devo_provider::ProviderRoute::Default => turn_config.model.slug.clone(),
+    };
+    summary.model.model = turn_config
+        .variant
+        .as_deref()
+        .map(|variant| format!("{model}/{variant}"))
+        .unwrap_or(model);
+    summary.model.provider = String::from("unknown");
+    summary.settings.reasoning_effort = turn_config.reasoning_effort_selection.clone();
 }
 
 /// Capture locked session context before the first durable turn start is written.
@@ -620,9 +799,14 @@ fn pop_queued_turn_input_data(
     match item.kind {
         devo_core::PendingInputKind::UserText { text } => Some(QueuedTurnInputData {
             queued_input_id: item.id,
+            client_user_message_id: client_user_message_id_from_pending_metadata(
+                item.metadata.as_ref(),
+            ),
             display_input: text.clone(),
             input_text: text,
             input_messages: Vec::new(),
+            input_images: Vec::new(),
+            input_image_paths: Vec::new(),
             collaboration_mode: collaboration_mode_from_pending_metadata(item.metadata.as_ref()),
             model_selection: model_selection_from_pending_metadata(item.metadata.as_ref()),
             subagent_usage_owner: subagent_usage_owner_from_pending_metadata(
@@ -633,20 +817,49 @@ fn pop_queued_turn_input_data(
             display_text,
             prompt_text,
             prompt_messages,
+            prompt_images,
+            input,
             ..
-        } => Some(QueuedTurnInputData {
-            queued_input_id: item.id,
-            display_input: display_text,
-            input_text: prompt_text,
-            input_messages: prompt_messages,
-            collaboration_mode: collaboration_mode_from_pending_metadata(item.metadata.as_ref()),
-            model_selection: model_selection_from_pending_metadata(item.metadata.as_ref()),
-            subagent_usage_owner: subagent_usage_owner_from_pending_metadata(
-                item.metadata.as_ref(),
-            ),
-        }),
+        } => {
+            let input_image_paths = input
+                .iter()
+                .filter_map(|item| match item {
+                    devo_protocol::native::item::UserInput::LocalImage { path, .. } => {
+                        Some(path.clone())
+                    }
+                    _ => None,
+                })
+                .collect();
+            Some(QueuedTurnInputData {
+                queued_input_id: item.id,
+                client_user_message_id: client_user_message_id_from_pending_metadata(
+                    item.metadata.as_ref(),
+                ),
+                display_input: display_text,
+                input_text: prompt_text,
+                input_messages: prompt_messages,
+                input_images: prompt_images,
+                input_image_paths,
+                collaboration_mode: collaboration_mode_from_pending_metadata(
+                    item.metadata.as_ref(),
+                ),
+                model_selection: model_selection_from_pending_metadata(item.metadata.as_ref()),
+                subagent_usage_owner: subagent_usage_owner_from_pending_metadata(
+                    item.metadata.as_ref(),
+                ),
+            })
+        }
         _ => None,
     }
+}
+
+fn client_user_message_id_from_pending_metadata(
+    metadata: Option<&serde_json::Value>,
+) -> Option<String> {
+    metadata
+        .and_then(|metadata| metadata.get("clientUserMessageId"))
+        .and_then(serde_json::Value::as_str)
+        .map(str::to_owned)
 }
 
 fn collaboration_mode_from_pending_metadata(
@@ -682,13 +895,16 @@ fn model_selection_from_pending_metadata(metadata: Option<&serde_json::Value>) -
 
 fn subagent_usage_owner_from_pending_metadata(
     metadata: Option<&serde_json::Value>,
-) -> Option<(devo_protocol::SessionId, Option<devo_core::TurnId>)> {
+) -> Option<(
+    devo_protocol::native::ids::SessionId,
+    Option<devo_protocol::native::ids::TurnId>,
+)> {
     let parent_session_id =
         string_field_from_pending_metadata(metadata, "devo_subagent_usage_parent_session_id")
-            .and_then(|value| devo_protocol::SessionId::try_from(value).ok())?;
+            .map(|value| devo_protocol::native::ids::SessionId::from_string(value.to_owned()))?;
     let parent_turn_id =
         string_field_from_pending_metadata(metadata, "devo_subagent_usage_parent_turn_id")
-            .and_then(|value| devo_core::TurnId::try_from(value).ok());
+            .map(|value| devo_protocol::native::ids::TurnId::from_string(value.to_owned()));
     Some((parent_session_id, parent_turn_id))
 }
 
@@ -703,12 +919,12 @@ mod tests {
     use super::pop_queued_turn_input_data;
 
     #[test]
-    fn pop_queued_turn_input_data_preserves_pending_input_id() {
+    fn pop_queued_turn_input_data_preserves_pending_and_client_message_ids() {
         let item = PendingInputItem::new(
             PendingInputKind::UserText {
                 text: "queued prompt".to_string(),
             },
-            None,
+            Some(serde_json::json!({"clientUserMessageId":"stable-message-1"})),
             Utc::now(),
         );
         let queued_input_id = item.id;
@@ -719,9 +935,12 @@ mod tests {
             popped,
             QueuedTurnInputData {
                 queued_input_id,
+                client_user_message_id: Some("stable-message-1".to_string()),
                 display_input: "queued prompt".to_string(),
                 input_text: "queued prompt".to_string(),
                 input_messages: Vec::new(),
+                input_images: Vec::new(),
+                input_image_paths: Vec::new(),
                 collaboration_mode: devo_protocol::CollaborationMode::default(),
                 model_selection: None,
                 subagent_usage_owner: None,

@@ -2,6 +2,7 @@ import { Button } from "@devo/ui/components/button"
 import { DownloadIcon, Loader2Icon } from "lucide-react"
 import { useEffect, useState } from "react"
 import { useUpdater } from "../../hooks/use-updater"
+import { SettingsHeader } from "./settings-header"
 import { SettingsRow } from "./settings-row"
 import { SettingsSection } from "./settings-section"
 
@@ -23,9 +24,7 @@ export function AboutSettings() {
 
 	return (
 		<div className="space-y-8">
-			<div>
-				<h2 className="text-xl font-semibold">About</h2>
-			</div>
+			<SettingsHeader title="About" />
 
 			<SettingsSection>
 				<SettingsRow label="Version" description={isDev ? "Development build" : undefined}>
@@ -34,7 +33,9 @@ export function AboutSettings() {
 				<SettingsRow
 					label="Updates"
 					description={
-						updater.status === "available"
+						isDev
+							? "Updates are available in installed builds."
+							: updater.status === "available"
 							? `Version ${updater.version} available`
 							: updater.status === "ready"
 								? "Update downloaded, restart to apply"
@@ -44,7 +45,7 @@ export function AboutSettings() {
 					}
 				>
 					{updater.status === "idle" && (
-						<Button variant="outline" size="sm" onClick={updater.checkForUpdates}>
+						<Button variant="outline" size="sm" disabled={isDev} onClick={updater.checkForUpdates}>
 							Check for updates
 						</Button>
 					)}

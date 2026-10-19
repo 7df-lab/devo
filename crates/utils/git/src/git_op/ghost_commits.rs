@@ -967,6 +967,45 @@ mod tests {
         run_git_in(repo, &["config", "core.autocrlf", "false"]);
     }
 
+    fn commit_initial(repo: &Path, tracked: &[(&str, &str)]) {
+        init_test_repo(repo);
+        let mut paths = Vec::with_capacity(tracked.len());
+        for (path, contents) in tracked {
+            let file_path = repo.join(path);
+            if let Some(parent) = file_path.parent() {
+                std::fs::create_dir_all(parent).expect("create tracked file parent");
+            }
+            std::fs::write(file_path, contents).expect("write tracked file");
+            paths.push(*path);
+        }
+        let mut add_args = vec!["add"];
+        add_args.extend(paths);
+        run_git_in(repo, &add_args);
+        run_git_in(
+            repo,
+            &[
+                "-c",
+                "user.name=Tester",
+                "-c",
+                "user.email=test@example.com",
+                "commit",
+                "-m",
+                "initial",
+            ],
+        );
+    }
+
+    fn path_has_default_ignored_name(path: &Path) -> bool {
+        path.components().any(|component| {
+            if let Component::Normal(name) = component {
+                name.to_str()
+                    .is_some_and(|name_str| DEFAULT_IGNORED_DIR_NAMES.contains(&name_str))
+            } else {
+                false
+            }
+        })
+    }
+
     fn create_sparse_file(path: &Path, bytes: i64) -> io::Result<()> {
         let file_len =
             u64::try_from(bytes).map_err(|_| io::Error::from(io::ErrorKind::InvalidInput))?;
@@ -980,20 +1019,11 @@ mod tests {
     fn create_and_restore_roundtrip() -> Result<(), GitToolingError> {
         let temp = tempfile::tempdir()?;
         let repo = temp.path();
-        init_test_repo(repo);
-        std::fs::write(repo.join("tracked.txt"), "initial\n")?;
-        std::fs::write(repo.join("delete-me.txt"), "to be removed\n")?;
-        run_git_in(repo, &["add", "tracked.txt", "delete-me.txt"]);
-        run_git_in(
+        commit_initial(
             repo,
             &[
-                "-c",
-                "user.name=Tester",
-                "-c",
-                "user.email=test@example.com",
-                "commit",
-                "-m",
-                "init",
+                ("tracked.txt", "initial\n"),
+                ("delete-me.txt", "to be removed\n"),
             ],
         );
 
@@ -1046,339 +1076,156 @@ mod tests {
         Ok(())
     }
 
+    fn git_path_in_commit(repo: &Path, commit: &GhostCommit, path: &str) -> bool {
+        Command::new("git")
+            .current_dir(repo)
+            .args(["cat-file", "-e", &format!("{}:{}", commit.id(), path)])
+            .status()
+            .map(|status| status.success())
+            .unwrap_or(false)
+    }
+
     #[test]
-    fn snapshot_ignores_large_untracked_files() -> Result<(), GitToolingError> {
+    fn large_untracked_snapshot_table() -> Result<(), GitToolingError> {
         let temp = tempfile::tempdir()?;
         let repo = temp.path();
-        init_test_repo(repo);
-
-        std::fs::write(repo.join("tracked.txt"), "contents\n")?;
-        run_git_in(repo, &["add", "tracked.txt"]);
-        run_git_in(
-            repo,
-            &[
-                "-c",
-                "user.name=Tester",
-                "-c",
-                "user.email=test@example.com",
-                "commit",
-                "-m",
-                "initial",
-            ],
-        );
+        commit_initial(repo, &[("tracked.txt", "contents\n")]);
 
         let big = repo.join("big.bin");
         let big_size = 2 * 1024 * 1024;
         create_sparse_file(&big, big_size)?;
-
-        let (ghost, report) = create_ghost_commit_with_report(
+        let (file_ghost, file_report) = create_ghost_commit_with_report(
             &CreateGhostCommitOptions::new(repo).ignore_large_untracked_files(/*bytes*/ 1024),
         )?;
-        assert!(ghost.parent().is_some());
         assert_eq!(
-            report.ignored_untracked_files,
+            file_report.ignored_untracked_files,
             vec![IgnoredUntrackedFile {
                 path: PathBuf::from("big.bin"),
                 byte_size: big_size,
             }]
         );
-
-        let exists_in_commit = Command::new("git")
-            .current_dir(repo)
-            .args(["cat-file", "-e", &format!("{}:big.bin", ghost.id())])
-            .status()
-            .map(|status| status.success())
-            .unwrap_or(false);
-        assert!(!exists_in_commit);
-
+        assert!(!git_path_in_commit(repo, &file_ghost, "big.bin"));
         std::fs::write(repo.join("ephemeral.txt"), "temp\n")?;
-        restore_ghost_commit(repo, &ghost)?;
-        assert!(
-            big.exists(),
-            "big.bin should be preserved during undo cleanup"
-        );
+        restore_ghost_commit(repo, &file_ghost)?;
+        assert!(big.exists());
         assert!(!repo.join("ephemeral.txt").exists());
-
-        Ok(())
-    }
-
-    #[test]
-    fn create_snapshot_reports_large_untracked_dirs() -> Result<(), GitToolingError> {
-        let temp = tempfile::tempdir()?;
-        let repo = temp.path();
-        init_test_repo(repo);
-
-        std::fs::write(repo.join("tracked.txt"), "contents\n")?;
-        run_git_in(repo, &["add", "tracked.txt"]);
-        run_git_in(
-            repo,
-            &[
-                "-c",
-                "user.name=Tester",
-                "-c",
-                "user.email=test@example.com",
-                "commit",
-                "-m",
-                "initial",
-            ],
-        );
 
         let models = repo.join("models");
         std::fs::create_dir(&models)?;
         let threshold = DEFAULT_IGNORE_LARGE_UNTRACKED_DIRS;
         for idx in 0..(threshold + 1) {
-            let file = models.join(format!("weights-{idx}.bin"));
-            std::fs::write(file, "data\n")?;
+            std::fs::write(models.join(format!("weights-{idx}.bin")), "data\n")?;
         }
-
-        let (ghost, report) =
+        let (dir_ghost, dir_report) =
             create_ghost_commit_with_report(&CreateGhostCommitOptions::new(repo))?;
-        assert!(ghost.parent().is_some());
         assert_eq!(
-            report.large_untracked_dirs,
+            dir_report.large_untracked_dirs,
             vec![LargeUntrackedDir {
                 path: PathBuf::from("models"),
                 file_count: threshold + 1,
             }]
         );
-
-        let exists_in_commit = Command::new("git")
-            .current_dir(repo)
-            .args([
-                "cat-file",
-                "-e",
-                &format!("{}:models/weights-0.bin", ghost.id()),
-            ])
-            .status()
-            .map(|status| status.success())
-            .unwrap_or(false);
-        assert!(!exists_in_commit);
-
+        assert!(!git_path_in_commit(
+            repo,
+            &dir_ghost,
+            "models/weights-0.bin"
+        ));
         std::fs::write(repo.join("ephemeral.txt"), "temp\n")?;
-        restore_ghost_commit(repo, &ghost)?;
-        assert!(
-            repo.join("models/weights-0.bin").exists(),
-            "ignored untracked directories should be preserved during undo cleanup"
-        );
+        restore_ghost_commit(repo, &dir_ghost)?;
+        assert!(repo.join("models/weights-0.bin").exists());
         assert!(!repo.join("ephemeral.txt").exists());
 
-        Ok(())
-    }
-
-    #[test]
-    fn restore_preserves_large_untracked_dirs_when_threshold_disabled()
-    -> Result<(), GitToolingError> {
-        let temp = tempfile::tempdir()?;
-        let repo = temp.path();
-        init_test_repo(repo);
-
-        std::fs::write(repo.join("tracked.txt"), "contents\n")?;
-        run_git_in(repo, &["add", "tracked.txt"]);
-        run_git_in(
-            repo,
-            &[
-                "-c",
-                "user.name=Tester",
-                "-c",
-                "user.email=test@example.com",
-                "commit",
-                "-m",
-                "initial",
-            ],
-        );
-
-        let models = repo.join("models");
-        std::fs::create_dir(&models)?;
-        let threshold: i64 = 2;
-        for idx in 0..(threshold + 1) {
-            let file = models.join(format!("weights-{idx}.bin"));
-            std::fs::write(file, "data\n")?;
+        let small_models = repo.join("small-models");
+        std::fs::create_dir(&small_models)?;
+        for idx in 0..3 {
+            std::fs::write(small_models.join(format!("weights-{idx}.bin")), "data\n")?;
         }
-
         let snapshot_config = GhostSnapshotConfig {
             ignore_large_untracked_files: Some(DEFAULT_IGNORE_LARGE_UNTRACKED_FILES),
-            ignore_large_untracked_dirs: Some(threshold),
+            ignore_large_untracked_dirs: Some(2),
             disable_warnings: false,
         };
-        let (ghost, _report) = create_ghost_commit_with_report(
+        let (restore_ghost, _) = create_ghost_commit_with_report(
             &CreateGhostCommitOptions::new(repo).ghost_snapshot(snapshot_config),
         )?;
-
         std::fs::write(repo.join("ephemeral.txt"), "temp\n")?;
         restore_ghost_commit_with_options(
             &RestoreGhostCommitOptions::new(repo)
                 .ignore_large_untracked_dirs(/*file_count*/ 0),
-            &ghost,
+            &restore_ghost,
         )?;
-
-        assert!(
-            repo.join("models/weights-0.bin").exists(),
-            "ignored untracked directories should be preserved during undo cleanup, even when the threshold is disabled at restore time"
-        );
+        assert!(repo.join("small-models/weights-0.bin").exists());
         assert!(!repo.join("ephemeral.txt").exists());
-
         Ok(())
     }
 
     #[test]
-    fn snapshot_ignores_default_ignored_directories() -> Result<(), GitToolingError> {
+    fn default_ignored_directories_snapshot_and_restore() -> Result<(), GitToolingError> {
         let temp = tempfile::tempdir()?;
         let repo = temp.path();
-        init_test_repo(repo);
-
-        std::fs::write(repo.join("tracked.txt"), "contents\n")?;
-        run_git_in(repo, &["add", "tracked.txt"]);
-        run_git_in(
-            repo,
-            &[
-                "-c",
-                "user.name=Tester",
-                "-c",
-                "user.email=test@example.com",
-                "commit",
-                "-m",
-                "initial",
-            ],
-        );
-
+        commit_initial(repo, &[("tracked.txt", "contents\n")]);
         let node_modules = repo.join("node_modules");
         std::fs::create_dir_all(node_modules.join("@scope/package/src"))?;
         for idx in 0..50 {
-            let file = node_modules.join(format!("file-{idx}.js"));
-            std::fs::write(file, "console.log('ignored');\n")?;
+            std::fs::write(
+                node_modules.join(format!("file-{idx}.js")),
+                "console.log('ignored');\n",
+            )?;
         }
         std::fs::write(
             node_modules.join("@scope/package/src/index.js"),
-            "console.log('nested ignored');\n",
+            "console.log('nested');\n",
         )?;
-
         let venv = repo.join(".venv");
         std::fs::create_dir_all(venv.join("lib/python/site-packages"))?;
         std::fs::write(
             venv.join("lib/python/site-packages/pkg.py"),
             "print('ignored')\n",
         )?;
-
         let (ghost, report) =
             create_ghost_commit_with_report(&CreateGhostCommitOptions::new(repo))?;
         assert!(ghost.parent().is_some());
-
         for file in ghost.preexisting_untracked_files() {
-            let components = file.components().collect::<Vec<_>>();
-            let mut has_default_ignored_component = false;
-            for component in components {
-                if let Component::Normal(name) = component
-                    && let Some(name_str) = name.to_str()
-                    && DEFAULT_IGNORED_DIR_NAMES
-                        .iter()
-                        .any(|ignored| ignored == &name_str)
-                {
-                    has_default_ignored_component = true;
-                    break;
-                }
-            }
             assert!(
-                !has_default_ignored_component,
-                "unexpected default-ignored file captured: {file:?}"
+                !path_has_default_ignored_name(file),
+                "captured file: {file:?}"
             );
         }
-
         for dir in ghost.preexisting_untracked_dirs() {
-            let components = dir.components().collect::<Vec<_>>();
-            let mut has_default_ignored_component = false;
-            for component in components {
-                if let Component::Normal(name) = component
-                    && let Some(name_str) = name.to_str()
-                    && DEFAULT_IGNORED_DIR_NAMES
-                        .iter()
-                        .any(|ignored| ignored == &name_str)
-                {
-                    has_default_ignored_component = true;
-                    break;
-                }
-            }
-            assert!(
-                !has_default_ignored_component,
-                "unexpected default-ignored dir captured: {dir:?}"
-            );
+            assert!(!path_has_default_ignored_name(dir), "captured dir: {dir:?}");
         }
-
         for entry in &report.large_untracked_dirs {
-            let components = entry.path.components().collect::<Vec<_>>();
-            let mut has_default_ignored_component = false;
-            for component in components {
-                if let Component::Normal(name) = component
-                    && let Some(name_str) = name.to_str()
-                    && DEFAULT_IGNORED_DIR_NAMES
-                        .iter()
-                        .any(|ignored| ignored == &name_str)
-                {
-                    has_default_ignored_component = true;
-                    break;
-                }
-            }
             assert!(
-                !has_default_ignored_component,
-                "unexpected default-ignored dir in large_untracked_dirs: {:?}",
+                !path_has_default_ignored_name(&entry.path),
+                "large dir: {:?}",
                 entry.path
             );
         }
 
-        Ok(())
-    }
-
-    #[test]
-    fn restore_preserves_default_ignored_directories() -> Result<(), GitToolingError> {
-        let temp = tempfile::tempdir()?;
-        let repo = temp.path();
-        init_test_repo(repo);
-
         std::fs::write(repo.join("tracked.txt"), "snapshot version\n")?;
-        run_git_in(repo, &["add", "tracked.txt"]);
-        run_git_in(
-            repo,
-            &[
-                "-c",
-                "user.name=Tester",
-                "-c",
-                "user.email=test@example.com",
-                "commit",
-                "-m",
-                "initial",
-            ],
-        );
-
-        let node_modules = repo.join("node_modules");
         std::fs::create_dir_all(node_modules.join("pkg"))?;
         std::fs::write(
             node_modules.join("pkg/index.js"),
             "console.log('before');\n",
         )?;
-
         let ghost = create_ghost_commit(&CreateGhostCommitOptions::new(repo))?;
-
         std::fs::write(repo.join("tracked.txt"), "snapshot delta\n")?;
         std::fs::write(node_modules.join("pkg/index.js"), "console.log('after');\n")?;
         std::fs::write(node_modules.join("pkg/extra.js"), "console.log('extra');\n")?;
         std::fs::write(repo.join("temp.txt"), "new file\n")?;
-
         restore_ghost_commit(repo, &ghost)?;
-
-        let tracked_after = std::fs::read_to_string(repo.join("tracked.txt"))?;
-        assert_eq!(tracked_after, "snapshot version\n");
-
-        let node_modules_exists = node_modules.exists();
-        assert!(node_modules_exists);
-
-        let files_under_node_modules: Vec<_> = WalkDir::new(&node_modules)
-            .into_iter()
-            .filter_map(Result::ok)
-            .filter(|entry| entry.file_type().is_file())
-            .collect();
-        assert!(!files_under_node_modules.is_empty());
-
+        assert_eq!(
+            std::fs::read_to_string(repo.join("tracked.txt"))?,
+            "snapshot version\n"
+        );
+        assert!(node_modules.exists());
+        assert!(
+            WalkDir::new(&node_modules)
+                .into_iter()
+                .filter_map(Result::ok)
+                .any(|e| e.file_type().is_file())
+        );
         assert!(!repo.join("temp.txt").exists());
-
         Ok(())
     }
 
@@ -1387,27 +1234,8 @@ mod tests {
     -> Result<(), GitToolingError> {
         let temp = tempfile::tempdir()?;
         let repo = temp.path();
-        init_test_repo(repo);
-
-        // Create a tracked src directory.
+        commit_initial(repo, &[("src/main.rs", "fn main() {}\n")]);
         let src = repo.join("src");
-        std::fs::create_dir(&src)?;
-        std::fs::write(src.join("main.rs"), "fn main() {}\n")?;
-        run_git_in(repo, &["add", "src/main.rs"]);
-        run_git_in(
-            repo,
-            &[
-                "-c",
-                "user.name=Tester",
-                "-c",
-                "user.email=test@example.com",
-                "commit",
-                "-m",
-                "initial",
-            ],
-        );
-
-        // Create a large untracked tree nested under the tracked src directory.
         let generated = src.join("generated").join("cache");
         std::fs::create_dir_all(&generated)?;
         let threshold = DEFAULT_IGNORE_LARGE_UNTRACKED_DIRS;
@@ -1428,17 +1256,11 @@ mod tests {
         );
         assert_eq!(entry.file_count, threshold + 1);
 
-        let exists_in_commit = Command::new("git")
-            .current_dir(repo)
-            .args([
-                "cat-file",
-                "-e",
-                &format!("{}:src/generated/cache/file-0.bin", ghost.id()),
-            ])
-            .status()
-            .map(|status| status.success())
-            .unwrap_or(false);
-        assert!(!exists_in_commit);
+        assert!(!git_path_in_commit(
+            repo,
+            &ghost,
+            "src/generated/cache/file-0.bin"
+        ));
 
         Ok(())
     }
@@ -1476,22 +1298,7 @@ mod tests {
     fn create_ghost_commit_uses_custom_message() -> Result<(), GitToolingError> {
         let temp = tempfile::tempdir()?;
         let repo = temp.path();
-        init_test_repo(repo);
-
-        std::fs::write(repo.join("tracked.txt"), "contents\n")?;
-        run_git_in(repo, &["add", "tracked.txt"]);
-        run_git_in(
-            repo,
-            &[
-                "-c",
-                "user.name=Tester",
-                "-c",
-                "user.email=test@example.com",
-                "commit",
-                "-m",
-                "initial",
-            ],
-        );
+        commit_initial(repo, &[("tracked.txt", "contents\n")]);
 
         let message = "custom message";
         let ghost = create_ghost_commit(&CreateGhostCommitOptions::new(repo).message(message))?;
@@ -1522,16 +1329,18 @@ mod tests {
     }
 
     #[test]
-    /// Restoring from a subdirectory affects only that subdirectory.
-    fn restore_from_subdirectory_restores_files_relatively() -> Result<(), GitToolingError> {
+    fn restore_from_subdirectory_and_ignored_parent_assets() -> Result<(), GitToolingError> {
         let temp = tempfile::tempdir()?;
         let repo = temp.path();
         init_test_repo(repo);
-
-        std::fs::create_dir_all(repo.join("workspace"))?;
         let workspace = repo.join("workspace");
+        let vscode_workspace = repo.join("devo-workspace");
+        std::fs::create_dir_all(&workspace)?;
+        std::fs::create_dir_all(&vscode_workspace)?;
         std::fs::write(repo.join("root.txt"), "root contents\n")?;
         std::fs::write(workspace.join("nested.txt"), "nested contents\n")?;
+        std::fs::write(repo.join(".gitignore"), ".vscode/\n")?;
+        std::fs::write(vscode_workspace.join("tracked.txt"), "snapshot version\n")?;
         run_git_in(repo, &["add", "."]);
         run_git_in(
             repo,
@@ -1548,261 +1357,158 @@ mod tests {
 
         std::fs::write(repo.join("root.txt"), "root modified\n")?;
         std::fs::write(workspace.join("nested.txt"), "nested modified\n")?;
-
-        let ghost = create_ghost_commit(&CreateGhostCommitOptions::new(&workspace))?;
-
+        let relative_ghost = create_ghost_commit(&CreateGhostCommitOptions::new(&workspace))?;
         std::fs::write(repo.join("root.txt"), "root after\n")?;
         std::fs::write(workspace.join("nested.txt"), "nested after\n")?;
-
-        restore_ghost_commit(&workspace, &ghost)?;
-
-        let root_after = std::fs::read_to_string(repo.join("root.txt"))?;
-        assert_eq!(root_after, "root after\n");
-        let nested_after = std::fs::read_to_string(workspace.join("nested.txt"))?;
-        assert_eq!(nested_after, "nested modified\n");
-        assert!(!workspace.join("devo-workspace").exists());
-
-        Ok(())
-    }
-
-    #[test]
-    /// Restoring from a subdirectory preserves ignored files in parent folders.
-    fn restore_from_subdirectory_preserves_parent_vscode() -> Result<(), GitToolingError> {
-        let temp = tempfile::tempdir()?;
-        let repo = temp.path();
-        init_test_repo(repo);
-
-        let workspace = repo.join("devo-workspace");
-        std::fs::create_dir_all(&workspace)?;
-        std::fs::write(repo.join(".gitignore"), ".vscode/\n")?;
-        std::fs::write(workspace.join("tracked.txt"), "snapshot version\n")?;
-        run_git_in(repo, &["add", "."]);
-        run_git_in(
-            repo,
-            &[
-                "-c",
-                "user.name=Tester",
-                "-c",
-                "user.email=test@example.com",
-                "commit",
-                "-m",
-                "initial",
-            ],
+        restore_ghost_commit(&workspace, &relative_ghost)?;
+        assert_eq!(
+            std::fs::read_to_string(repo.join("root.txt"))?,
+            "root after\n"
+        );
+        assert_eq!(
+            std::fs::read_to_string(workspace.join("nested.txt"))?,
+            "nested modified\n"
         );
 
-        std::fs::write(workspace.join("tracked.txt"), "snapshot delta\n")?;
-        let ghost = create_ghost_commit(&CreateGhostCommitOptions::new(&workspace))?;
-
-        std::fs::write(workspace.join("tracked.txt"), "post-snapshot\n")?;
+        std::fs::write(vscode_workspace.join("tracked.txt"), "snapshot delta\n")?;
+        let vscode_ghost = create_ghost_commit(&CreateGhostCommitOptions::new(&vscode_workspace))?;
+        std::fs::write(vscode_workspace.join("tracked.txt"), "post-snapshot\n")?;
         let vscode = repo.join(".vscode");
         std::fs::create_dir_all(&vscode)?;
         std::fs::write(vscode.join("settings.json"), "{\n  \"after\": true\n}\n")?;
-
-        restore_ghost_commit(&workspace, &ghost)?;
-
-        let tracked_after = std::fs::read_to_string(workspace.join("tracked.txt"))?;
-        assert_eq!(tracked_after, "snapshot delta\n");
-        assert!(vscode.join("settings.json").exists());
-        let settings_after = std::fs::read_to_string(vscode.join("settings.json"))?;
-        assert_eq!(settings_after, "{\n  \"after\": true\n}\n");
-
-        Ok(())
-    }
-
-    #[test]
-    /// Restoring from the repository root keeps ignored files intact.
-    fn restore_preserves_ignored_files() -> Result<(), GitToolingError> {
-        let temp = tempfile::tempdir()?;
-        let repo = temp.path();
-        init_test_repo(repo);
-
-        std::fs::write(repo.join(".gitignore"), ".vscode/\n")?;
-        std::fs::write(repo.join("tracked.txt"), "snapshot version\n")?;
-        let vscode = repo.join(".vscode");
-        std::fs::create_dir_all(&vscode)?;
-        std::fs::write(vscode.join("settings.json"), "{\n  \"before\": true\n}\n")?;
-        run_git_in(repo, &["add", ".gitignore", "tracked.txt"]);
-        run_git_in(
-            repo,
-            &[
-                "-c",
-                "user.name=Tester",
-                "-c",
-                "user.email=test@example.com",
-                "commit",
-                "-m",
-                "initial",
-            ],
+        restore_ghost_commit(&vscode_workspace, &vscode_ghost)?;
+        assert_eq!(
+            std::fs::read_to_string(vscode_workspace.join("tracked.txt"))?,
+            "snapshot delta\n"
+        );
+        assert_eq!(
+            std::fs::read_to_string(vscode.join("settings.json"))?,
+            "{\n  \"after\": true\n}\n"
         );
 
-        std::fs::write(repo.join("tracked.txt"), "snapshot delta\n")?;
-        let ghost = create_ghost_commit(&CreateGhostCommitOptions::new(repo))?;
-
+        std::fs::write(repo.join("tracked.txt"), "snapshot version\n")?;
+        let root_ghost = create_ghost_commit(&CreateGhostCommitOptions::new(repo))?;
         std::fs::write(repo.join("tracked.txt"), "post-snapshot\n")?;
-        std::fs::write(vscode.join("settings.json"), "{\n  \"after\": true\n}\n")?;
         std::fs::write(repo.join("temp.txt"), "new file\n")?;
-
-        restore_ghost_commit(repo, &ghost)?;
-
-        let tracked_after = std::fs::read_to_string(repo.join("tracked.txt"))?;
-        assert_eq!(tracked_after, "snapshot delta\n");
-        assert!(vscode.join("settings.json").exists());
-        let settings_after = std::fs::read_to_string(vscode.join("settings.json"))?;
-        assert_eq!(settings_after, "{\n  \"after\": true\n}\n");
+        restore_ghost_commit(repo, &root_ghost)?;
+        assert_eq!(
+            std::fs::read_to_string(repo.join("tracked.txt"))?,
+            "snapshot version\n"
+        );
         assert!(!repo.join("temp.txt").exists());
-
         Ok(())
     }
 
     #[test]
-    /// Restoring leaves ignored directories created after the snapshot untouched.
-    fn restore_preserves_new_ignored_directory() -> Result<(), GitToolingError> {
-        let temp = tempfile::tempdir()?;
-        let repo = temp.path();
-        init_test_repo(repo);
+    fn restore_preserves_post_snapshot_ignored_assets() -> Result<(), GitToolingError> {
+        struct Case {
+            name: &'static str,
+            gitignore: &'static str,
+            prepare: fn(&Path),
+            check: fn(&Path) -> Result<(), GitToolingError>,
+        }
+        fn prepare_vscode(repo: &Path) {
+            let vscode = repo.join(".vscode");
+            std::fs::create_dir_all(&vscode).expect("create vscode dir");
+            std::fs::write(vscode.join("settings.json"), "{\n  \"after\": true\n}\n")
+                .expect("write settings");
+        }
+        fn check_vscode(repo: &Path) -> Result<(), GitToolingError> {
+            let settings = repo.join(".vscode/settings.json");
+            assert!(settings.exists());
+            assert_eq!(
+                std::fs::read_to_string(settings)?,
+                "{\n  \"after\": true\n}\n"
+            );
+            Ok(())
+        }
+        fn prepare_ignored_file(repo: &Path) {
+            std::fs::write(repo.join("ignored.txt"), "created later\n").expect("write ignored");
+        }
+        fn check_ignored_file(repo: &Path) -> Result<(), GitToolingError> {
+            let ignored = repo.join("ignored.txt");
+            assert!(ignored.exists());
+            assert_eq!(std::fs::read_to_string(ignored)?, "created later\n");
+            Ok(())
+        }
+        fn prepare_removed_ignored(repo: &Path) {
+            std::fs::write(repo.join("ignored.txt"), "initial state\n").expect("write ignored");
+            std::fs::remove_file(repo.join("ignored.txt")).expect("remove ignored");
+        }
+        fn check_removed_ignored(repo: &Path) -> Result<(), GitToolingError> {
+            assert!(!repo.join("ignored.txt").exists());
+            Ok(())
+        }
+        fn prepare_glob_matches(repo: &Path) {
+            let dummy_dir = repo.join("dummy-dir");
+            std::fs::create_dir_all(&dummy_dir).expect("create dummy dir");
+            std::fs::write(dummy_dir.join("file1.txt"), "first\n").expect("write file1");
+            std::fs::write(dummy_dir.join("file2.txt"), "second\n").expect("write file2");
+        }
+        fn check_glob_matches(repo: &Path) -> Result<(), GitToolingError> {
+            let dummy_dir = repo.join("dummy-dir");
+            assert_eq!(
+                std::fs::read_to_string(dummy_dir.join("file1.txt"))?,
+                "first\n"
+            );
+            assert_eq!(
+                std::fs::read_to_string(dummy_dir.join("file2.txt"))?,
+                "second\n"
+            );
+            Ok(())
+        }
 
-        std::fs::write(repo.join(".gitignore"), ".vscode/\n")?;
-        std::fs::write(repo.join("tracked.txt"), "snapshot version\n")?;
-        run_git_in(repo, &["add", ".gitignore", "tracked.txt"]);
-        run_git_in(
-            repo,
-            &[
-                "-c",
-                "user.name=Tester",
-                "-c",
-                "user.email=test@example.com",
-                "commit",
-                "-m",
-                "initial",
-            ],
-        );
+        let cases = [
+            Case {
+                name: "new_ignored_directory",
+                gitignore: ".vscode/\n",
+                prepare: prepare_vscode,
+                check: check_vscode,
+            },
+            Case {
+                name: "new_ignored_file",
+                gitignore: "ignored.txt\n",
+                prepare: prepare_ignored_file,
+                check: check_ignored_file,
+            },
+            Case {
+                name: "removed_ignored_file",
+                gitignore: "ignored.txt\n",
+                prepare: prepare_removed_ignored,
+                check: check_removed_ignored,
+            },
+            Case {
+                name: "ignored_glob_matches",
+                gitignore: "dummy-dir/*.txt\n",
+                prepare: prepare_glob_matches,
+                check: check_glob_matches,
+            },
+        ];
 
-        let ghost = create_ghost_commit(&CreateGhostCommitOptions::new(repo))?;
-
-        let vscode = repo.join(".vscode");
-        std::fs::create_dir_all(&vscode)?;
-        std::fs::write(vscode.join("settings.json"), "{\n  \"after\": true\n}\n")?;
-
-        restore_ghost_commit(repo, &ghost)?;
-
-        assert!(vscode.exists());
-        let settings_after = std::fs::read_to_string(vscode.join("settings.json"))?;
-        assert_eq!(settings_after, "{\n  \"after\": true\n}\n");
-
-        Ok(())
-    }
-
-    #[test]
-    /// Restoring leaves ignored files created after the snapshot untouched.
-    fn restore_preserves_new_ignored_file() -> Result<(), GitToolingError> {
-        let temp = tempfile::tempdir()?;
-        let repo = temp.path();
-        init_test_repo(repo);
-
-        std::fs::write(repo.join(".gitignore"), "ignored.txt\n")?;
-        std::fs::write(repo.join("tracked.txt"), "snapshot version\n")?;
-        run_git_in(repo, &["add", ".gitignore", "tracked.txt"]);
-        run_git_in(
-            repo,
-            &[
-                "-c",
-                "user.name=Tester",
-                "-c",
-                "user.email=test@example.com",
-                "commit",
-                "-m",
-                "initial",
-            ],
-        );
-
-        let ghost = create_ghost_commit(&CreateGhostCommitOptions::new(repo))?;
-
-        let ignored = repo.join("ignored.txt");
-        std::fs::write(&ignored, "created later\n")?;
-
-        restore_ghost_commit(repo, &ghost)?;
-
-        assert!(ignored.exists());
-        let contents = std::fs::read_to_string(&ignored)?;
-        assert_eq!(contents, "created later\n");
-
-        Ok(())
-    }
-
-    #[test]
-    /// Restoring keeps deleted ignored files deleted when they were absent before the snapshot.
-    fn restore_respects_removed_ignored_file() -> Result<(), GitToolingError> {
-        let temp = tempfile::tempdir()?;
-        let repo = temp.path();
-        init_test_repo(repo);
-
-        std::fs::write(repo.join(".gitignore"), "ignored.txt\n")?;
-        std::fs::write(repo.join("tracked.txt"), "snapshot version\n")?;
-        let ignored = repo.join("ignored.txt");
-        std::fs::write(&ignored, "initial state\n")?;
-        run_git_in(repo, &["add", ".gitignore", "tracked.txt"]);
-        run_git_in(
-            repo,
-            &[
-                "-c",
-                "user.name=Tester",
-                "-c",
-                "user.email=test@example.com",
-                "commit",
-                "-m",
-                "initial",
-            ],
-        );
-
-        let ghost = create_ghost_commit(&CreateGhostCommitOptions::new(repo))?;
-
-        std::fs::remove_file(&ignored)?;
-
-        restore_ghost_commit(repo, &ghost)?;
-
-        assert!(!ignored.exists());
-
-        Ok(())
-    }
-
-    #[test]
-    /// Restoring leaves files matched by glob ignores intact.
-    fn restore_preserves_ignored_glob_matches() -> Result<(), GitToolingError> {
-        let temp = tempfile::tempdir()?;
-        let repo = temp.path();
-        init_test_repo(repo);
-
-        std::fs::write(repo.join(".gitignore"), "dummy-dir/*.txt\n")?;
-        std::fs::write(repo.join("tracked.txt"), "snapshot version\n")?;
-        run_git_in(repo, &["add", ".gitignore", "tracked.txt"]);
-        run_git_in(
-            repo,
-            &[
-                "-c",
-                "user.name=Tester",
-                "-c",
-                "user.email=test@example.com",
-                "commit",
-                "-m",
-                "initial",
-            ],
-        );
-
-        let ghost = create_ghost_commit(&CreateGhostCommitOptions::new(repo))?;
-
-        let dummy_dir = repo.join("dummy-dir");
-        std::fs::create_dir_all(&dummy_dir)?;
-        let file1 = dummy_dir.join("file1.txt");
-        let file2 = dummy_dir.join("file2.txt");
-        std::fs::write(&file1, "first\n")?;
-        std::fs::write(&file2, "second\n")?;
-
-        restore_ghost_commit(repo, &ghost)?;
-
-        assert!(file1.exists());
-        assert!(file2.exists());
-        assert_eq!(std::fs::read_to_string(file1)?, "first\n");
-        assert_eq!(std::fs::read_to_string(file2)?, "second\n");
+        for case in cases {
+            let temp = tempfile::tempdir()?;
+            let repo = temp.path();
+            init_test_repo(repo);
+            std::fs::write(repo.join(".gitignore"), case.gitignore)?;
+            std::fs::write(repo.join("tracked.txt"), "snapshot version\n")?;
+            run_git_in(repo, &["add", ".gitignore", "tracked.txt"]);
+            run_git_in(
+                repo,
+                &[
+                    "-c",
+                    "user.name=Tester",
+                    "-c",
+                    "user.email=test@example.com",
+                    "commit",
+                    "-m",
+                    "initial",
+                ],
+            );
+            let ghost = create_ghost_commit(&CreateGhostCommitOptions::new(repo))?;
+            (case.prepare)(repo);
+            restore_ghost_commit(repo, &ghost)?;
+            (case.check)(repo).expect(case.name);
+        }
 
         Ok(())
     }

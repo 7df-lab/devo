@@ -1,7 +1,7 @@
 use std::sync::Arc;
 
-use devo_core::TurnId;
-use devo_protocol::SessionId;
+use devo_protocol::native::ids::SessionId;
+use devo_protocol::native::ids::TurnId;
 
 use super::state::SpawnSnapshot;
 use crate::runtime::ServerRuntime;
@@ -35,6 +35,11 @@ impl ServerRuntime {
             return existing;
         }
         sessions.insert(session_id, handle.clone());
+        drop(sessions);
+        let runtime = self.runtime_arc();
+        tokio::spawn(async move {
+            runtime.rearm_title_polish_if_needed(session_id).await;
+        });
         handle
     }
 
@@ -43,6 +48,11 @@ impl ServerRuntime {
         session_id: SessionId,
     ) -> Option<super::SessionHandle> {
         let handle = self.sessions.lock().await.remove(&session_id)?;
+        // Drop in-memory waiters without rewriting Waiting items to Interrupted.
+        // App restart must still be able to restore unanswered questions.
+        self.session_interactive
+            .drain_pending_user_inputs_for_session(session_id)
+            .await;
         self.session_interactive.clear_session(session_id).await;
         self.active_turns.remove_session(session_id).await;
         Some(handle)
@@ -55,7 +65,7 @@ impl ServerRuntime {
     #[allow(dead_code)]
     pub(crate) async fn list_session_summaries_from_actors(
         &self,
-    ) -> Vec<crate::session::SessionMetadata> {
+    ) -> Vec<crate::runtime_session_summary::RuntimeSessionSummary> {
         let handles = self.list_session_handles().await;
         let mut summaries = Vec::with_capacity(handles.len());
         for handle in handles {
@@ -72,32 +82,77 @@ impl ServerRuntime {
         summaries
     }
 
-    /// Reads turn reservation state, preferring runtime caches while the session
-    /// actor is blocked in `ExecuteTurn`.
+    /// Reads turn reservation state, preferring runtime caches while a turn
+    /// task holds the working copy (shared queue Arcs stay usable without a
+    /// mailbox hop). Callers may mutate `pending_turn_queue` and
+    /// `steer_input_queue` through the returned shared mutexes.
     ///
-    /// `execute_turn_in_actor` runs inline, so its actor does not poll mailbox
-    /// commands until the turn finishes. This is the only synchronous fast path
-    /// for work that must remain responsive during an active turn. Callers may
-    /// mutate `pending_turn_queue` and `steer_input_queue` through the returned
-    /// shared mutexes; those mutexes are the per-session serialization point.
-    /// Do not replace this with a mailbox round-trip for queue, steer, or other
-    /// active-turn control paths.
+    /// Stream presence **or** runtime turn metadata means a turn is admitted.
+    /// Finalization clears `runtime_active_turn_id` before `MergeTurn`
+    /// returns; falling through to the mailbox in that window is safe because
+    /// the actor no longer runs unbounded turn I/O.
+    pub(crate) async fn active_turn_user_texts(
+        &self,
+        session_id: SessionId,
+        turn_id: TurnId,
+    ) -> Vec<String> {
+        let mut texts = self
+            .active_turns
+            .active_user_texts(session_id, turn_id)
+            .await;
+        let Some(stream) = self.active_stream_state(session_id).await else {
+            return texts;
+        };
+        let stream = stream.lock().await;
+        let Some(inline) = stream
+            .turn_inline
+            .as_ref()
+            .filter(|inline| inline.turn_id == turn_id)
+        else {
+            return texts;
+        };
+        for text in inline
+            .persisted_turn_items
+            .iter()
+            .filter(|item| item.turn_id == turn_id)
+            .filter_map(|item| match &item.item {
+                devo_protocol::native::item::Item::UserMessage { content, .. }
+                    if content.len() == 1 =>
+                {
+                    match &content[0] {
+                        devo_protocol::native::item::UserInput::Text { text } => Some(text.clone()),
+                        _ => None,
+                    }
+                }
+                _ => None,
+            })
+        {
+            if !texts.contains(&text) {
+                texts.push(text);
+            }
+        }
+        texts
+    }
+
     pub(crate) async fn session_turn_reservation_snapshot(
         &self,
         session_id: SessionId,
     ) -> Option<super::snapshots::TurnReservationSnapshot> {
-        if self.runtime_active_turn_id(session_id).await.is_some()
-            && self.active_stream_state(session_id).await.is_some()
-        {
+        let runtime_turn = self.active_turns.active_turn(session_id).await;
+        let stream_busy = self.active_stream_state(session_id).await.is_some();
+        if stream_busy || runtime_turn.is_some() {
             let handle = self.session(session_id).await?;
-            let spawn = self.active_spawn_snapshot_for_session(session_id).await?;
-            let active_turn = self.active_turns.active_turn_metadata(session_id).await?;
+            let Some(spawn) = self.active_spawn_snapshot_for_session(session_id).await else {
+                // Turn is admitted but the spawn snapshot is not available yet.
+                // Prefer None over a stale mailbox read of pre-admission state.
+                return None;
+            };
             return Some(super::snapshots::TurnReservationSnapshot {
                 max_turns: handle.max_turns(),
-                active_turn: Some(active_turn),
+                active_turn: spawn.parent_active_turn,
                 latest_turn: spawn.parent_latest_turn,
                 ephemeral: spawn.parent_summary.ephemeral,
-                parent_session_id: spawn.parent_summary.parent_session_id,
+                parent_session_id: spawn.parent_summary.parent_session_id(),
                 summary: spawn.parent_summary,
                 runtime_context: spawn.runtime_context,
                 pending_turn_queue: spawn.pending_turn_queue,
@@ -125,7 +180,7 @@ impl ServerRuntime {
             .await;
     }
 
-    /// Snapshot registered at turn start while the session actor is busy executing.
+    /// Snapshot registered at turn start for zero-hop control-plane access.
     pub(crate) async fn active_spawn_snapshot_for_session(
         &self,
         session_id: SessionId,
@@ -154,24 +209,24 @@ impl ServerRuntime {
         self.active_turns.stream_state(session_id).await
     }
 
-    pub(crate) async fn session_record_snapshot(
+    pub(crate) async fn session_rollout_path(
         &self,
         session_id: SessionId,
-    ) -> Option<devo_core::SessionRecord> {
+    ) -> Option<std::path::PathBuf> {
         if let Some(stream) = self.active_stream_state(session_id).await {
             let stream = stream.lock().await;
             if let Some(inline) = stream.turn_inline.as_ref() {
-                return inline.record.clone();
+                return inline.rollout_path.clone();
             }
         }
         let handle = self.session(session_id).await?;
-        handle.record().await.flatten()
+        handle.rollout_path().await.flatten()
     }
 
     pub(crate) async fn session_summary_snapshot(
         &self,
         session_id: SessionId,
-    ) -> Option<crate::session::SessionMetadata> {
+    ) -> Option<crate::runtime_session_summary::RuntimeSessionSummary> {
         if let Some(stream) = self.active_stream_state(session_id).await {
             let stream = stream.lock().await;
             if let Some(inline) = stream.turn_inline.as_ref() {
@@ -205,6 +260,7 @@ impl ServerRuntime {
 
     /// Reads a session's parent id, preferring the in-flight turn inline snapshot
     /// and agent-registry hierarchy over a mailbox round-trip.
+    #[allow(dead_code)]
     pub(crate) async fn session_parent_id_snapshot(
         &self,
         session_id: SessionId,
@@ -212,14 +268,14 @@ impl ServerRuntime {
         if let Some(stream) = self.active_stream_state(session_id).await {
             let stream = stream.lock().await;
             if let Some(inline) = stream.turn_inline.as_ref() {
-                return Some(inline.summary.parent_session_id);
+                return Some(inline.summary.parent_session_id());
             }
         }
         {
             let registries = self.agent_registries.lock().await;
             for registry in registries.values() {
-                if let Some(parent_id) = registry.child_to_parent.get(&session_id).copied() {
-                    return Some(Some(parent_id));
+                if let Some(parent_id) = registry.child_to_parent.get(&session_id) {
+                    return Some(Some(*parent_id));
                 }
             }
         }

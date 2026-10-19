@@ -2,6 +2,7 @@ import { readFileSync } from "node:fs"
 import { describe, expect, test } from "bun:test"
 
 const stackSource = readFileSync(new URL("./composer-status-stack.tsx", import.meta.url), "utf8")
+const queueHookSource = readFileSync(new URL("../../hooks/use-composer-queue.ts", import.meta.url), "utf8")
 const chatViewSource = readFileSync(new URL("./chat-view.tsx", import.meta.url), "utf8")
 const chatTurnSource = readFileSync(new URL("./chat-turn.tsx", import.meta.url), "utf8")
 const clientSource = readFileSync(
@@ -21,10 +22,16 @@ describe("ComposerStatusStack", () => {
 			editAction: stackSource.includes("PencilIcon"),
 			pauseAction: stackSource.includes("CirclePauseIcon"),
 			resumeAction: stackSource.includes("CirclePlayIcon"),
-			clearAction: stackSource.includes("Trash2Icon"),
+			clearAction: stackSource.includes('label="Cancel goal"') && stackSource.includes("XIcon"),
 			iconSizeMatchesDesktop: stackSource.includes("size-3.5") && stackSource.includes("stroke-[1.5]"),
+			noQueueNumbering: !stackSource.includes("{index + 1} ›"),
+			actionsAlwaysVisible: stackSource.includes('className="flex shrink-0 items-center gap-0.5"'),
+			noEditBanner: !stackSource.includes("ComposerEditBanner"),
 			composerPlacement: chatViewSource.includes("<ComposerStatusStack"),
-			mergedComposerShape: chatViewSource.includes("activeGoal && \"rounded-t-none"),
+			insideComposerCard:
+				chatViewSource.indexOf("<ComposerStatusStack") >
+					chatViewSource.indexOf('className="devo-composer') &&
+				!chatViewSource.includes("rounded-t-none"),
 		}).toEqual({
 			component: true,
 			requirementComment: true,
@@ -37,8 +44,11 @@ describe("ComposerStatusStack", () => {
 			resumeAction: true,
 			clearAction: true,
 			iconSizeMatchesDesktop: true,
+			noQueueNumbering: true,
+			actionsAlwaysVisible: true,
+			noEditBanner: true,
 			composerPlacement: true,
-			mergedComposerShape: true,
+			insideComposerCard: true,
 		})
 	})
 
@@ -51,11 +61,19 @@ describe("ComposerStatusStack", () => {
 			clearsGoal: chatViewSource.includes("client.goal.clear"),
 			editReusesGoalTrigger: chatViewSource.includes('setActiveTrigger("goal")'),
 			refreshesAfterGoalPrompt: chatViewSource.includes('if (trigger === "goal")'),
-			clientStatus: clientSource.includes('"goal/status"'),
-			clientSet: clientSource.includes('"goal/set"'),
-			clientPause: clientSource.includes('"goal/pause"'),
-			clientResume: clientSource.includes('"goal/resume"'),
-			clientClear: clientSource.includes('"goal/clear"'),
+			clientStatus: clientSource.includes('"session/goal/read"'),
+			clientPause: clientSource.includes('"session/goal/pause"'),
+			clientResume: clientSource.includes('"session/goal/resume"'),
+			clientClear: clientSource.includes('"session/goal/clear"'),
+			noLegacyGoalMethods: ![
+				"goal/create",
+				"goal/set",
+				"goal/status",
+				"goal/pause",
+				"goal/resume",
+				"goal/complete",
+				"goal/clear",
+			].some((method) => clientSource.includes(`"${method}"`)),
 		}).toEqual({
 			normalizesGoal: true,
 			loadsGoalStatus: true,
@@ -65,26 +83,54 @@ describe("ComposerStatusStack", () => {
 			editReusesGoalTrigger: true,
 			refreshesAfterGoalPrompt: true,
 			clientStatus: true,
-			clientSet: true,
 			clientPause: true,
 			clientResume: true,
 			clientClear: true,
+			noLegacyGoalMethods: true,
 		})
 	})
 
 	test("keeps queued follow-up controls out of transcript turns", () => {
 		expect({
-			requirementComment: chatTurnSource.includes("queue state belongs in the composer status stack"),
 			noSendNowProp: !chatTurnSource.includes("onSendNow"),
 			noSendNowLabel: !chatTurnSource.includes("Send now"),
 			noQueuedInference: !chatTurnSource.includes("isQueued = isWorking"),
 			noQueueLabel: !chatTurnSource.includes(">Queued<"),
+			queueLivesInComposerStatus: stackSource.includes("queued follow-up rows"),
 		}).toEqual({
-			requirementComment: true,
 			noSendNowProp: true,
 			noSendNowLabel: true,
 			noQueuedInference: true,
 			noQueueLabel: true,
+			queueLivesInComposerStatus: true,
+		})
+	})
+
+	test("wires composer queue controls through chat input", () => {
+		expect({
+			queueHook: chatViewSource.includes("useComposerQueue"),
+			queueItemsProp: chatViewSource.includes("queueItems={queueItems}"),
+			steerHandler: chatViewSource.includes("onSteerQueueItem={steerQueueItem}"),
+			editHandler: chatViewSource.includes("onEditQueueItem={handleEditQueueItem}"),
+			removeHandler: chatViewSource.includes("onRemoveQueueItem={removeQueueItem}"),
+			reorderHandler: chatViewSource.includes("onReorderQueueItem={reorderQueueItem}"),
+			queuePlaceholder: chatViewSource.includes("Add to queue"),
+			clientQueuePush: clientSource.includes('"session/queue/push"'),
+			clientTurnSteer: clientSource.includes('"turn/steer"'),
+			queueUpdatedEvent: clientSource.includes('"session.queue.updated"'),
+			editRemovesFromQueue: queueHookSource.includes("await removeQueueItem(item)"),
+		}).toEqual({
+			queueHook: true,
+			queueItemsProp: true,
+			steerHandler: true,
+			editHandler: true,
+			removeHandler: true,
+			reorderHandler: true,
+			queuePlaceholder: true,
+			clientQueuePush: true,
+			clientTurnSteer: true,
+			queueUpdatedEvent: true,
+			editRemovesFromQueue: true,
 		})
 	})
 })

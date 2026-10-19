@@ -3,31 +3,33 @@
  *
  * Desktop intentionally exposes only first-party composer commands here:
  * - /compact executes immediately
- * - /goal and /plan become footer trigger chips
+ * - /goal becomes a footer trigger chip
+ * - /plan switches to plan mode (footer badge only while plan mode is active)
  * - /research stays in the composer so the user can add a research question
  * - Keyboard navigation (Arrow keys, Enter/Tab, Escape)
+ *
+ * Shares the composer popover chrome with `@` mentions.
  */
 
-import { ScrollArea } from "@devo/ui/components/scroll-area"
-import { cn } from "@devo/ui/lib/utils"
 import fuzzysort from "fuzzysort"
 import {
+	GitBranchIcon,
 	GoalIcon,
 	ListTodoIcon,
 	type LucideIcon,
+	MessageCircleQuestionIcon,
 	MicroscopeIcon,
 	SparklesIcon,
 } from "lucide-react"
+import { forwardRef, memo, useCallback, useImperativeHandle, useMemo } from "react"
 import {
-	forwardRef,
-	memo,
-	useCallback,
-	useEffect,
-	useImperativeHandle,
-	useMemo,
-	useRef,
-	useState,
-} from "react"
+	ComposerPopover,
+	ComposerPopoverEmpty,
+	ComposerPopoverItem,
+	composerPopoverHintClass,
+	composerPopoverIconClass,
+	useComposerPopoverNavigation,
+} from "./composer-popover"
 
 // ============================================================
 // Types
@@ -64,9 +66,25 @@ interface SlashCommandPopoverProps {
 
 const CLIENT_COMMANDS: SlashCommand[] = [
 	{
+		name: "model",
+		description: "Choose a model or connect a provider",
+		icon: SparklesIcon,
+	},
+	{
 		name: "compact",
 		description: "Summarize conversation to save context",
 		icon: SparklesIcon,
+	},
+	{
+		name: "fork",
+		description: "Fork this session into a new branch",
+		icon: GitBranchIcon,
+	},
+	{
+		name: "side",
+		description: "Ask a one-turn side question (btw)",
+		icon: MessageCircleQuestionIcon,
+		insertText: "/side ",
 	},
 	{
 		name: "goal",
@@ -81,6 +99,11 @@ const CLIENT_COMMANDS: SlashCommand[] = [
 		insertText: "/plan ",
 	},
 	{
+		name: "skills",
+		description: "Browse and insert a skill",
+		icon: SparklesIcon,
+	},
+	{
 		name: "research",
 		description: "Run deep research on a question",
 		icon: MicroscopeIcon,
@@ -88,7 +111,8 @@ const CLIENT_COMMANDS: SlashCommand[] = [
 	},
 ]
 
-const commandIconClass = "size-3.5 shrink-0 stroke-[1.5] text-muted-foreground"
+/** Kept for sidebar / chip icon-stroke parity assertions. */
+const commandIconClass = composerPopoverIconClass
 
 // ============================================================
 // SlashCommandPopover
@@ -99,37 +123,16 @@ export const SlashCommandPopover = memo(
 		{ query, open, enabled, onSelect, onClose },
 		ref,
 	) {
-		const [activeIndex, setActiveIndex] = useState(0)
-		const listRef = useRef<HTMLDivElement>(null)
-
-		// --- Fuzzy filter ---
 		const flatList = useMemo<SlashCommand[]>(() => {
 			if (!query) return CLIENT_COMMANDS
-			const results = fuzzysort.go(query, CLIENT_COMMANDS, {
-				keys: ["name", "description"],
-				threshold: 0.3,
-			})
-			return results.map((r) => r.obj)
+			return fuzzysort
+				.go(query, CLIENT_COMMANDS, {
+					keys: ["name", "description"],
+					threshold: 0.3,
+				})
+				.map((result) => result.obj)
 		}, [query])
 
-		// Reset active index when options or query change
-		// biome-ignore lint/correctness/useExhaustiveDependencies: intentional — reset on options/query change
-		useEffect(() => {
-			setActiveIndex(0)
-		}, [flatList.length, query])
-
-		// Scroll active item into view
-		// biome-ignore lint/correctness/useExhaustiveDependencies: intentional — scroll when active index changes
-		useEffect(() => {
-			const list = listRef.current
-			if (!list) return
-			const active = list.querySelector("[data-active=true]")
-			if (active) {
-				active.scrollIntoView({ block: "nearest" })
-			}
-		}, [activeIndex])
-
-		// --- Handle selection ---
 		const handleSelect = useCallback(
 			(cmd: SlashCommand) => {
 				onSelect(cmd.insertText ?? `/${cmd.name}`)
@@ -137,72 +140,31 @@ export const SlashCommandPopover = memo(
 			[onSelect],
 		)
 
-		// --- Keyboard handler ---
-		const handleKeyDown = useCallback(
-			(e: React.KeyboardEvent): boolean => {
-				if (!open || !enabled || flatList.length === 0) return false
-
-				switch (e.key) {
-					case "ArrowDown": {
-						e.preventDefault()
-						setActiveIndex((i) => (i + 1) % flatList.length)
-						return true
-					}
-					case "ArrowUp": {
-						e.preventDefault()
-						setActiveIndex((i) => (i - 1 + flatList.length) % flatList.length)
-						return true
-					}
-					case "Tab":
-					case "Enter": {
-						e.preventDefault()
-						const selected = flatList[activeIndex]
-						if (selected) handleSelect(selected)
-						return true
-					}
-					case "Escape": {
-						e.preventDefault()
-						onClose()
-						return true
-					}
-					default:
-						return false
-				}
-			},
-			[open, enabled, flatList, activeIndex, handleSelect, onClose],
-		)
+		const { activeIndex, setActiveIndex, listRef, handleKeyDown } = useComposerPopoverNavigation({
+			items: flatList,
+			open,
+			enabled,
+			resetKey: query,
+			onSelect: handleSelect,
+			onClose,
+		})
 
 		useImperativeHandle(ref, () => ({ handleKeyDown }), [handleKeyDown])
 
-		if (!open || !enabled) return null
-
 		return (
-			<div
-				role="listbox"
-				className="absolute inset-x-0 bottom-full z-50 mb-2 origin-bottom-left overflow-hidden rounded-md border bg-popover shadow-md"
-				onMouseDown={(e) => e.preventDefault()}
-			>
-				{/* User requirement: keep this as a plain command list, without a search/header row. */}
-				<ScrollArea className="max-h-72 overflow-hidden [&>[data-slot=scroll-area-viewport]]:max-h-[inherit]">
-					<div ref={listRef} className="py-1">
-						{flatList.length === 0 && (
-							<div className="py-4 text-center text-sm text-muted-foreground">
-								No commands found
-							</div>
-						)}
+			<ComposerPopover open={open && enabled} listRef={listRef}>
+				{flatList.length === 0 && <ComposerPopoverEmpty>No commands found</ComposerPopoverEmpty>}
 
-						{flatList.map((cmd, idx) => (
-							<CommandItem
-								key={cmd.name}
-								command={cmd}
-								isActive={idx === activeIndex}
-								onSelect={() => handleSelect(cmd)}
-								onHover={() => setActiveIndex(idx)}
-							/>
-						))}
-					</div>
-				</ScrollArea>
-			</div>
+				{flatList.map((cmd, idx) => (
+					<CommandItem
+						key={cmd.name}
+						command={cmd}
+						isActive={idx === activeIndex}
+						onSelect={() => handleSelect(cmd)}
+						onHover={() => setActiveIndex(idx)}
+					/>
+				))}
+			</ComposerPopover>
 		)
 	}),
 )
@@ -225,23 +187,12 @@ const CommandItem = memo(function CommandItem({
 	const Icon = command.icon
 
 	return (
-		<button
-			type="button"
-			data-active={isActive}
-			className={cn(
-				"flex w-full items-center justify-between gap-2 px-3 py-1.5 text-left text-sm transition-colors",
-				isActive ? "bg-accent text-accent-foreground" : "hover:bg-muted",
+		<ComposerPopoverItem isActive={isActive} onSelect={onSelect} onHover={onHover}>
+			<Icon className={commandIconClass} aria-hidden="true" />
+			<span className="shrink-0">/{command.name}</span>
+			{command.description && (
+				<span className={composerPopoverHintClass}>{command.description}</span>
 			)}
-			onClick={onSelect}
-			onMouseEnter={onHover}
-		>
-			<div className="flex min-w-0 items-center gap-2">
-				<Icon className={commandIconClass} aria-hidden="true" />
-				<span className="font-medium">/{command.name}</span>
-				{command.description && (
-					<span className="truncate text-muted-foreground">{command.description}</span>
-				)}
-			</div>
-		</button>
+		</ComposerPopoverItem>
 	)
 })

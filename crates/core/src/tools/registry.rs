@@ -25,6 +25,7 @@ pub struct ToolRegistry {
     pub(crate) spec_index: HashMap<String, usize>,
     pub(crate) spec_exposure: HashMap<String, ToolExposure>,
     pub(crate) spec_search_text: HashMap<String, String>,
+    model_tool_allowlist: Option<Vec<String>>,
     pub(crate) unified_exec_store: Option<Arc<ProcessStore>>,
     pub(crate) loaded_deferred_tools: Arc<Mutex<LoadedDeferredTools>>,
 }
@@ -44,6 +45,7 @@ impl ToolRegistry {
             spec_index: HashMap::new(),
             spec_exposure: HashMap::new(),
             spec_search_text: HashMap::new(),
+            model_tool_allowlist: None,
             unified_exec_store: None,
             loaded_deferred_tools: Arc::new(Mutex::new(LoadedDeferredTools::default())),
         }
@@ -60,6 +62,10 @@ impl ToolRegistry {
 
     pub fn spec(&self, name: &str) -> Option<&ToolSpec> {
         self.spec_index.get(name).map(|&idx| &self.specs[idx])
+    }
+
+    pub fn model_tool_allowlist(&self) -> Option<&[String]> {
+        self.model_tool_allowlist.as_deref()
     }
 
     pub fn is_read_only(&self, name: &str) -> bool {
@@ -101,7 +107,7 @@ impl ToolRegistry {
             .map(|spec| ToolDefinition {
                 name: spec.name.clone(),
                 description: spec.description.clone(),
-                input_schema: unified_exec_input_schema(
+                input_schema: with_sandbox_permission_fields(
                     &spec.name,
                     spec.input_schema.to_json_value(),
                 ),
@@ -113,6 +119,13 @@ impl ToolRegistry {
     pub fn restricted_to_specs(&self, names: &[&str]) -> Self {
         let mut registry = ToolRegistry::new();
         registry.unified_exec_store = self.unified_exec_store.clone();
+        registry.model_tool_allowlist = self.model_tool_allowlist.as_ref().map(|allowlist| {
+            allowlist
+                .iter()
+                .filter(|name| names.contains(&name.as_str()))
+                .cloned()
+                .collect()
+        });
         registry.loaded_deferred_tools = Arc::clone(&self.loaded_deferred_tools);
 
         for spec in &self.specs {
@@ -211,8 +224,11 @@ impl ToolRegistry {
     }
 }
 
-fn unified_exec_input_schema(tool_name: &str, mut schema: serde_json::Value) -> serde_json::Value {
-    if tool_name != "exec_command" {
+fn with_sandbox_permission_fields(
+    tool_name: &str,
+    mut schema: serde_json::Value,
+) -> serde_json::Value {
+    if !super::tool_accepts_sandbox_escalation_fields(tool_name) {
         return schema;
     }
 
@@ -327,6 +343,7 @@ pub struct ToolRegistryBuilder {
     spec_index: HashMap<String, usize>,
     spec_exposure: HashMap<String, ToolExposure>,
     spec_search_text: HashMap<String, String>,
+    model_tool_allowlist: Option<Vec<String>>,
     unified_exec_store: Option<Arc<ProcessStore>>,
     loaded_deferred_tools: Arc<Mutex<LoadedDeferredTools>>,
 }
@@ -339,22 +356,52 @@ impl ToolRegistryBuilder {
             spec_index: HashMap::new(),
             spec_exposure: HashMap::new(),
             spec_search_text: HashMap::new(),
+            model_tool_allowlist: None,
             unified_exec_store: None,
             loaded_deferred_tools: Arc::new(Mutex::new(LoadedDeferredTools::default())),
         }
     }
 
+    /// Add a tool spec, or replace an existing spec with the same name.
+    ///
+    /// Replacing an explicitly exposed spec clears its previous exposure policy.
     pub fn push_spec(&mut self, spec: ToolSpec) {
         let name = spec.name.clone();
-        self.spec_index.insert(name, self.specs.len());
-        self.specs.push(spec);
+        if let Some(index) = self.spec_index.get(&name).copied() {
+            self.specs[index] = spec;
+        } else {
+            self.spec_index.insert(name.clone(), self.specs.len());
+            self.specs.push(spec);
+        }
+        self.spec_exposure.remove(&name);
     }
 
+    /// Add or replace a tool spec and its model-facing exposure policy.
+    ///
+    /// The latest registration for a name replaces earlier registrations.
     pub fn push_spec_with_exposure(&mut self, spec: ToolSpec, exposure: ToolExposure) {
         let name = spec.name.clone();
-        self.spec_index.insert(name, self.specs.len());
-        self.spec_exposure.insert(spec.name.clone(), exposure);
-        self.specs.push(spec);
+        if let Some(index) = self.spec_index.get(&name).copied() {
+            self.specs[index] = spec;
+        } else {
+            self.spec_index.insert(name.clone(), self.specs.len());
+            self.specs.push(spec);
+        }
+        self.spec_exposure.insert(name, exposure);
+    }
+
+    /// Keep only named tools discoverable and executable by model queries.
+    /// Handlers for hidden tools remain registered for internal host operations.
+    pub fn restrict_model_exposure_to(&mut self, names: &[&str]) {
+        self.model_tool_allowlist = Some(names.iter().map(|name| (*name).to_string()).collect());
+        for spec in &self.specs {
+            let exposure = if names.contains(&spec.name.as_str()) {
+                ToolExposure::Direct
+            } else {
+                ToolExposure::Hidden
+            };
+            self.spec_exposure.insert(spec.name.clone(), exposure);
+        }
     }
 
     pub fn set_search_text(&mut self, name: &str, search_text: String) {
@@ -379,7 +426,7 @@ impl ToolRegistryBuilder {
             .map(|spec| ToolDefinition {
                 name: spec.name.clone(),
                 description: spec.description.clone(),
-                input_schema: unified_exec_input_schema(
+                input_schema: with_sandbox_permission_fields(
                     &spec.name,
                     spec.input_schema.to_json_value(),
                 ),
@@ -412,6 +459,7 @@ impl ToolRegistryBuilder {
             spec_index: self.spec_index,
             spec_exposure: self.spec_exposure,
             spec_search_text: self.spec_search_text,
+            model_tool_allowlist: self.model_tool_allowlist,
             unified_exec_store: self.unified_exec_store,
             loaded_deferred_tools: self.loaded_deferred_tools,
         }
@@ -489,9 +537,10 @@ mod tests {
 
     fn test_ctx() -> ToolContext {
         ToolContext {
+            output_store: None,
             tool_call_id: devo_tools::ToolCallId("test-id".to_string()),
-            session_id: "test-session".to_string(),
-            turn_id: Some("test-turn".to_string()),
+            session_id: "test-session".into(),
+            turn_id: Some("test-turn".into()),
             workspace_root: PathBuf::from("~/user/devo"),
             budgets: ToolBudgets {
                 wall_time_limit_ms: Some(6_000),
@@ -505,7 +554,13 @@ mod tests {
             file_read_ledger: None,
             network_proxy: None,
             network_no_proxy: None,
+            sandbox_permission_overlay: None,
             sandbox_profile: None,
+            kernel: None,
+            python_cell_first_wait_ms: None,
+            python_cell_watch: None,
+            python_cell_completion: None,
+            session_dir: None,
         }
     }
 
@@ -548,6 +603,43 @@ mod tests {
         let registry = builder.build();
         assert!(registry.get("echo").is_some());
         assert!(registry.get("nonexistent").is_none());
+    }
+
+    #[test]
+    fn builder_replaces_duplicate_tool_spec_by_name() {
+        let mut builder = ToolRegistryBuilder::new();
+        builder.push_spec_with_exposure(
+            ToolSpec::new(
+                "duplicate_tool",
+                "original description",
+                JsonSchema::object(Default::default(), None, None),
+            ),
+            ToolExposure::Hidden,
+        );
+        builder.push_spec(ToolSpec::new(
+            "duplicate_tool",
+            "replacement description",
+            JsonSchema::object(Default::default(), None, None),
+        ));
+
+        let registry = builder.build();
+        let definitions = registry.tool_definitions();
+        assert_eq!(definitions.len(), 1);
+        assert_eq!(definitions[0].name, "duplicate_tool");
+        assert_eq!(definitions[0].description, "replacement description");
+        let prompt = registry.deferred_tool_prompt(
+            "test-session",
+            &LoadedDeferredTools::default(),
+            &DeferredLoadingConfig::default(),
+        );
+        assert_eq!(
+            prompt
+                .deferred
+                .iter()
+                .map(|tool| tool.name.as_str())
+                .collect::<Vec<_>>(),
+            vec!["duplicate_tool"]
+        );
     }
 
     #[test]
@@ -715,10 +807,19 @@ mod tests {
             )
             .expect("preloaded tool should be available");
 
-        assert_eq!(
-            summary,
-            "Already available 1 tool(s): web_search. Call these tools directly without loading."
+        assert!(
+            summary.starts_with(
+                "Already available 1 tool(s): web_search. Call these tools directly without loading."
+            ),
+            "unexpected summary: {summary}"
         );
+        // Preloaded tools stay accompanied by their full definition so
+        // deferred-tool gateways see the schema in-conversation.
+        assert!(
+            summary.contains("<function>"),
+            "missing definition: {summary}"
+        );
+        assert!(summary.contains("\"name\":\"web_search\""));
         let loaded_tools = registry.loaded_deferred_tools();
         let loaded_tools = loaded_tools.lock().expect("loaded tool state");
         assert!(!loaded_tools.is_loaded("session-1", "web_search"));
@@ -768,12 +869,11 @@ mod tests {
         );
     }
 
-    #[test]
-    fn registry_adds_permission_fields_for_exec_command() {
+    fn permission_field_presence(tool_name: &str) -> (bool, bool, bool, bool) {
         let mut builder = ToolRegistryBuilder::new();
         builder.push_spec(ToolSpec {
-            name: "exec_command".into(),
-            description: "exec".into(),
+            name: tool_name.into(),
+            description: "command".into(),
             input_schema: JsonSchema::object(Default::default(), None, None),
             output_mode: ToolOutputMode::Mixed,
             execution_mode: ToolExecutionMode::Mutating,
@@ -793,10 +893,38 @@ mod tests {
             .and_then(serde_json::Value::as_object)
             .expect("object schema should have properties");
 
-        assert!(properties.contains_key("sandbox_permissions"));
-        assert!(properties.contains_key("additional_permissions"));
-        assert!(properties.contains_key("justification"));
-        assert!(properties.contains_key("prefix_rule"));
+        (
+            properties.contains_key("sandbox_permissions"),
+            properties.contains_key("additional_permissions"),
+            properties.contains_key("justification"),
+            properties.contains_key("prefix_rule"),
+        )
+    }
+
+    /// Trace: L2-DES-SAFETY-002
+    /// Verifies: sandbox escalation fields are advertised on exec_command, shell_command, and bash.
+    #[test]
+    fn registry_adds_permission_fields_for_shell_family_command_tools() {
+        for tool_name in ["exec_command", "shell_command", "bash"] {
+            assert_eq!(
+                permission_field_presence(tool_name),
+                (true, true, true, true),
+                "{tool_name} should advertise sandbox escalation fields"
+            );
+        }
+    }
+
+    /// Trace: L2-DES-SAFETY-002
+    /// Verifies: write_stdin and non-command tools do not advertise sandbox escalation fields.
+    #[test]
+    fn registry_omits_permission_fields_for_non_spawn_tools() {
+        for tool_name in ["write_stdin", "read"] {
+            assert_eq!(
+                permission_field_presence(tool_name),
+                (false, false, false, false),
+                "{tool_name} should not advertise sandbox escalation fields"
+            );
+        }
     }
 
     #[tokio::test]

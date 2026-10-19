@@ -12,10 +12,12 @@
  */
 
 import { Button } from "@devo/ui/components/button"
+import { Dialog, DialogContent, DialogDescription, DialogFooter, DialogHeader, DialogTitle } from "@devo/ui/components/dialog"
 import { GitForkIcon, Loader2Icon, RotateCcwIcon, TrashIcon } from "lucide-react"
 import { useCallback, useEffect, useMemo, useRef, useState } from "react"
 import { useProjectList } from "../../hooks/use-agents"
 import { listWorktrees, removeWorktree, resetWorktree } from "../../services/worktree-service"
+import { SettingsHeader } from "./settings-header"
 import { SettingsSection } from "./settings-section"
 
 // ============================================================
@@ -37,7 +39,7 @@ interface WorktreeEntry {
 
 /** Extracts the last path segment as a display name */
 function dirName(dir: string): string {
-	return dir.split("/").filter(Boolean).pop() ?? dir
+	return dir.split(/[\\/]/).filter(Boolean).pop() ?? dir
 }
 
 // ============================================================
@@ -50,6 +52,8 @@ export function WorktreeSettings() {
 	const [loading, setLoading] = useState(true)
 	const [removing, setRemoving] = useState<string | null>(null)
 	const [resetting, setResetting] = useState<string | null>(null)
+	const [error, setError] = useState<string | null>(null)
+	const [pending, setPending] = useState<{ worktree: WorktreeEntry; action: "remove" | "reset" } | null>(null)
 
 	// Keep a ref so the stable callback always reads the latest project list
 	// without needing it as a dependency.
@@ -66,6 +70,7 @@ export function WorktreeSettings() {
 	const loadWorktrees = useCallback(async () => {
 		const currentProjects = projectsRef.current
 		setLoading(true)
+		setError(null)
 		try {
 			const results = await Promise.allSettled(
 				currentProjects.map(async (project) => {
@@ -81,14 +86,18 @@ export function WorktreeSettings() {
 			)
 
 			const entries: WorktreeEntry[] = []
+			const failures: string[] = []
 			for (const result of results) {
 				if (result.status === "fulfilled") {
 					entries.push(...result.value)
+				} else {
+					failures.push(String(result.reason))
 				}
 			}
-			setWorktrees(entries)
-		} catch {
-			// Silently fail
+			setWorktrees([...new Map(entries.map((entry) => [entry.directory, entry])).values()])
+			if (failures.length) setError(failures.join("; "))
+		} catch (error) {
+			setError(error instanceof Error ? error.message : "Failed to load worktrees")
 		} finally {
 			setLoading(false)
 		}
@@ -102,11 +111,13 @@ export function WorktreeSettings() {
 	const handleRemove = useCallback(
 		async (wt: WorktreeEntry) => {
 			setRemoving(wt.directory)
+			setError(null)
 			try {
 				await removeWorktree(wt.projectDir, wt.directory)
 				await loadWorktrees()
-			} catch {
-				// Silently fail
+				setPending(null)
+			} catch (error) {
+				setError(error instanceof Error ? error.message : "Failed to remove worktree")
 			} finally {
 				setRemoving(null)
 			}
@@ -117,11 +128,13 @@ export function WorktreeSettings() {
 	const handleReset = useCallback(
 		async (wt: WorktreeEntry) => {
 			setResetting(wt.directory)
+			setError(null)
 			try {
 				await resetWorktree(wt.projectDir, wt.directory)
 				await loadWorktrees()
-			} catch {
-				// Silently fail
+				setPending(null)
+			} catch (error) {
+				setError(error instanceof Error ? error.message : "Failed to reset worktree")
 			} finally {
 				setResetting(null)
 			}
@@ -135,18 +148,17 @@ export function WorktreeSettings() {
 
 	return (
 		<div className="space-y-8">
-			<div>
-				<h2 className="text-xl font-semibold">Worktrees</h2>
-				<p className="mt-1 text-sm text-muted-foreground">
-					Manage git worktrees created for isolated agent sessions.
-				</p>
-			</div>
+			<SettingsHeader
+				title="Worktrees"
+				description="Manage git worktrees created for isolated agent sessions."
+			/>
+			{error && !pending && <div role="alert" className="flex items-center gap-3 text-sm text-destructive"><span>{error}</span><Button size="sm" variant="outline" onClick={loadWorktrees}>Retry</Button></div>}
 
 			{/* Summary */}
 			<SettingsSection title="Overview">
 				<div className="flex items-center gap-2 px-4 py-3">
-					<GitForkIcon className="size-4 text-muted-foreground" aria-hidden="true" />
-					<span className="text-sm">
+					<GitForkIcon className="size-3.5 stroke-[1.5] text-muted-foreground" aria-hidden="true" />
+					<span className="text-sm tracking-tight">
 						{worktrees.length} worktree{worktrees.length !== 1 ? "s" : ""}
 						{projectCount > 0 && (
 							<span className="text-muted-foreground">
@@ -164,10 +176,10 @@ export function WorktreeSettings() {
 					<Loader2Icon className="size-5 animate-spin text-muted-foreground" />
 				</div>
 			) : worktrees.length === 0 ? (
-				<div className="rounded-lg border border-dashed border-border py-8 text-center">
-					<GitForkIcon className="mx-auto size-8 text-muted-foreground/30" aria-hidden="true" />
-					<p className="mt-2 text-sm text-muted-foreground">No worktrees</p>
-					<p className="text-xs text-muted-foreground/60">
+				<div className="rounded-xl border border-dashed border-border/50 py-10 text-center">
+					<GitForkIcon className="mx-auto size-7 text-muted-foreground/30" aria-hidden="true" />
+					<p className="mt-3 text-sm tracking-tight text-muted-foreground">No worktrees</p>
+					<p className="mt-1 text-xs text-muted-foreground/70">
 						Worktrees will appear here when you create sessions in worktree mode.
 					</p>
 				</div>
@@ -179,12 +191,27 @@ export function WorktreeSettings() {
 							worktree={wt}
 							isRemoving={removing === wt.directory}
 							isResetting={resetting === wt.directory}
-							onRemove={() => handleRemove(wt)}
-							onReset={() => handleReset(wt)}
+							onRemove={() => { setError(null); setPending({ worktree: wt, action: "remove" }) }}
+							onReset={() => { setError(null); setPending({ worktree: wt, action: "reset" }) }}
 						/>
 					))}
 				</SettingsSection>
 			)}
+			<Dialog open={!!pending} onOpenChange={(open) => { if (!open && !removing && !resetting) setPending(null) }}>
+				<DialogContent>
+					<DialogHeader><DialogTitle>{pending?.action === "remove" ? "Remove worktree?" : "Reset worktree?"}</DialogTitle>
+						<DialogDescription>{pending?.worktree.directory}. {pending?.action === "remove" ? "Remove this checkout from disk. Its Git branch remains available." : "Reset this checkout to the repository default branch."} Uncommitted changes must be saved first.</DialogDescription>
+					</DialogHeader>
+					{error && <p role="alert" className="text-sm text-destructive">{error}</p>}
+					<DialogFooter>
+						<Button variant="outline" disabled={!!removing || !!resetting} onClick={() => setPending(null)}>Cancel</Button>
+						<Button variant="destructive" disabled={!!removing || !!resetting} onClick={() => {
+							if (!pending) return
+							void (pending.action === "remove" ? handleRemove(pending.worktree) : handleReset(pending.worktree))
+						}}>{removing || resetting ? "Working…" : pending?.action === "remove" ? "Remove" : "Reset"}</Button>
+					</DialogFooter>
+				</DialogContent>
+			</Dialog>
 		</div>
 	)
 }
@@ -208,13 +235,15 @@ function WorktreeRow({
 }) {
 	return (
 		<div className="flex items-center gap-3 px-4 py-3">
-			<GitForkIcon className="size-4 shrink-0 text-muted-foreground" aria-hidden="true" />
+			<GitForkIcon className="size-3.5 shrink-0 stroke-[1.5] text-muted-foreground" aria-hidden="true" />
 
 			<div className="min-w-0 flex-1">
 				<div className="flex items-center gap-2">
-					<span className="truncate text-sm font-medium">{dirName(worktree.directory)}</span>
+					<span className="truncate text-sm tracking-tight">
+						{dirName(worktree.directory)}
+					</span>
 				</div>
-				<div className="flex items-center gap-2 text-xs text-muted-foreground/60">
+				<div className="flex items-center gap-2 text-xs text-muted-foreground">
 					<span>{worktree.projectName}</span>
 					<span>-</span>
 					<span className="truncate">{worktree.directory}</span>

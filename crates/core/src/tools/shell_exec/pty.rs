@@ -80,6 +80,7 @@ pub(crate) async fn run_with_pty(
     cancel_token: CancellationToken,
 ) -> anyhow::Result<FunctionToolOutput> {
     let ResolvedShellRun {
+        output_capture,
         shell,
         command_to_run,
         workdir,
@@ -88,6 +89,7 @@ pub(crate) async fn run_with_pty(
         yield_time_ms,
         max_output_tokens,
         sandbox_profile,
+        sandbox_permission_overlay,
     } = run;
 
     let pty_system = native_pty_system();
@@ -104,6 +106,7 @@ pub(crate) async fn run_with_pty(
     // or Linux `bwrap` carrying the full profile. Windows: launcher via plan.
     let plan = match SandboxLaunchPlan::prepare_pty(
         sandbox_profile.as_deref(),
+        sandbox_permission_overlay.as_ref(),
         &workdir,
         &shell,
         &command_to_run,
@@ -155,10 +158,24 @@ pub(crate) async fn run_with_pty(
     let mut exit_code = None;
     let mut timed_out = false;
     let mut cancelled = false;
+    // Wall-clock timing so the model can reason about slow or hung commands;
+    // captured at the decision instant, before kill-and-wait teardown can
+    // inflate the span (matches the pipe path's `duration_ms`).
+    let mut cancel_duration_ms = 0u64;
+    let mut timeout_duration_ms = 0u64;
 
     loop {
         while let Ok(chunk) = rx.try_recv() {
-            output.extend_from_slice(&chunk);
+            if let Some(Ok(capture)) = &output_capture {
+                let mut capture = capture.lock().expect("output capture lock");
+                if capture.append(&chunk).is_err() {
+                    capture.mark_incomplete();
+                }
+            }
+            let keep = chunk
+                .len()
+                .min((1024_usize * 1024).saturating_sub(output.len()));
+            output.extend_from_slice(&chunk[..keep]);
             if let Some(ref sender) = progress {
                 let text = String::from_utf8_lossy(&chunk).into_owned();
                 let _ = sender.send(text);
@@ -175,6 +192,9 @@ pub(crate) async fn run_with_pty(
 
         if started.elapsed() >= timeout {
             timed_out = true;
+            // Capture the span at the decision instant: kill-and-wait teardown
+            // time is not the command's runtime (matches the pipe path).
+            timeout_duration_ms = started.elapsed().as_millis() as u64;
             child.kill_and_wait();
             break;
         }
@@ -183,6 +203,7 @@ pub(crate) async fn run_with_pty(
             _ = tokio::time::sleep(Duration::from_millis(sleep_ms)) => {}
             _ = cancel_token.cancelled() => {
                 cancelled = true;
+                cancel_duration_ms = started.elapsed().as_millis() as u64;
                 child.kill_and_wait();
                 break;
             }
@@ -190,20 +211,40 @@ pub(crate) async fn run_with_pty(
     }
 
     while let Ok(chunk) = rx.try_recv() {
-        output.extend_from_slice(&chunk);
+        if let Some(Ok(capture)) = &output_capture {
+            let mut capture = capture.lock().expect("output capture lock");
+            if capture.append(&chunk).is_err() {
+                capture.mark_incomplete();
+            }
+        }
+        let keep = chunk
+            .len()
+            .min((1024_usize * 1024).saturating_sub(output.len()));
+        output.extend_from_slice(&chunk[..keep]);
     }
 
     let mut text = String::from_utf8_lossy(&output).into_owned();
     text = truncate_output(&text, max_output_tokens);
+    super::append_capture_notice(&mut text, &output_capture);
 
     if timed_out {
-        return Ok(FunctionToolOutput::error(format!(
-            "command timed out after {timeout_ms}ms\n{text}"
-        )));
+        return Ok(FunctionToolOutput::error_with_metadata(
+            format!("command timed out after {timeout_ms}ms\n{text}"),
+            json!({
+                "command": command_to_run,
+                "exit": serde_json::Value::Null,
+                "description": description,
+                "cwd": workdir,
+                "yield_time_ms": yield_time_ms,
+                "timeout_ms": timeout_ms,
+                "duration_ms": timeout_duration_ms,
+                "tty": true,
+            }),
+        ));
     }
     if cancelled {
         return Ok(FunctionToolOutput::error(format!(
-            "command cancelled\n{text}"
+            "command cancelled after {cancel_duration_ms}ms\n{text}"
         )));
     }
     child.disarm();
@@ -216,7 +257,18 @@ pub(crate) async fn run_with_pty(
         text.clone()
     };
     if is_error {
-        return Ok(FunctionToolOutput::error(content));
+        return Ok(FunctionToolOutput::error_with_metadata(
+            content,
+            json!({
+                "command": command_to_run,
+                "exit": exit_code,
+                "description": description,
+                "cwd": workdir,
+                "yield_time_ms": yield_time_ms,
+                "duration_ms": started.elapsed().as_millis() as u64,
+                "tty": true,
+            }),
+        ));
     }
 
     Ok(FunctionToolOutput::success_with_metadata(
@@ -227,6 +279,7 @@ pub(crate) async fn run_with_pty(
             "description": description,
             "cwd": workdir,
             "yield_time_ms": yield_time_ms,
+            "duration_ms": started.elapsed().as_millis() as u64,
             "tty": true,
         }),
     ))

@@ -18,7 +18,11 @@ use crate::deny::{
 use crate::paths::devo_home;
 #[cfg(all(feature = "enforce", unix))]
 use crate::paths::{DEVICE_DIRS, DEVICE_FILES};
-use crate::paths::{essential_writable_paths, essential_writable_paths_minimal};
+use crate::paths::{
+    essential_writable_paths, essential_writable_paths_minimal, temp_writable_paths,
+};
+#[cfg(all(feature = "enforce", unix))]
+use crate::permissions::SandboxPermissionOverlay;
 
 /// A resolved sandbox profile ready to be converted to a `CapabilitySet`.
 #[derive(Debug, Clone)]
@@ -64,6 +68,11 @@ pub enum ProfileName {
     Devbox,
     ReadOnly,
     Strict,
+    /// RLM kernel fence (design doc `rlm-permissions.md` §5.1, P4): unlike the
+    /// shell `workspace` profile it has **no default read** — the kernel reads
+    /// only the explicit system/interpreter roots, so any read outside them is
+    /// OS-refused and routes through the rlm front door (approval pipeline).
+    RlmKernel,
     Off,
     Custom(String),
 }
@@ -75,6 +84,7 @@ impl std::fmt::Display for ProfileName {
             Self::Devbox => write!(f, "devbox"),
             Self::ReadOnly => write!(f, "read-only"),
             Self::Strict => write!(f, "strict"),
+            Self::RlmKernel => write!(f, "rlm-kernel"),
             Self::Off => write!(f, "off"),
             Self::Custom(name) => write!(f, "{name}"),
         }
@@ -89,6 +99,7 @@ impl std::str::FromStr for ProfileName {
             "devbox" => Ok(Self::Devbox),
             "read-only" | "readonly" => Ok(Self::ReadOnly),
             "strict" => Ok(Self::Strict),
+            "rlm-kernel" => Ok(Self::RlmKernel),
             "off" | "none" => Ok(Self::Off),
             // Anything else is treated as a custom profile name.
             // Validation happens when we try to load it from config.
@@ -269,6 +280,15 @@ impl ProfileName {
         workspace: &Path,
         profile: &SandboxProfile,
     ) -> anyhow::Result<CapabilitySet> {
+        Self::capability_set_from_profile_with_overlay(workspace, profile, None)
+    }
+
+    #[cfg(all(feature = "enforce", unix))]
+    pub fn capability_set_from_profile_with_overlay(
+        workspace: &Path,
+        profile: &SandboxProfile,
+        overlay: Option<&SandboxPermissionOverlay>,
+    ) -> anyhow::Result<CapabilitySet> {
         let mut caps = CapabilitySet::new();
 
         // Default read access
@@ -285,7 +305,13 @@ impl ProfileName {
                 tracing::warn!(path = ?path, "Skipping non-UTF8 read_only path");
                 continue;
             };
-            caps = caps.allow_path(path_str, AccessMode::Read)?;
+            if profile.name == "rlm-kernel" && path.parent() == Some(Path::new("/proc")) {
+                // These are exact, safe procfs metadata files, not directory
+                // subtrees. Do not broaden the rule to their parent /proc.
+                caps.allow_file_mut(path, AccessMode::Read)?;
+            } else {
+                caps = caps.allow_path(path_str, AccessMode::Read)?;
+            }
         }
 
         // Read-write paths. nono/Landlock need the directory to exist at
@@ -310,8 +336,37 @@ impl ProfileName {
             if !p.exists() {
                 continue;
             }
-            if let Err(e) = caps.allow_file_mut(p, AccessMode::ReadWrite) {
-                tracing::warn!(path = dev, error = %e, "Could not allow device file");
+            // nono opens device rules read-only when applying Landlock. Linux
+            // exposes /dev/tty even without a controlling terminal, where open
+            // returns ENXIO and aborts the entire headless child sandbox. Omit
+            // only that unavailable optional device; retain every other rule.
+            #[cfg(target_os = "linux")]
+            if *dev == "/dev/tty"
+                && std::fs::File::open(p)
+                    .is_err_and(|error| error.raw_os_error() == Some(libc::ENXIO))
+            {
+                continue;
+            }
+            if profile.name == "rlm-kernel" && *dev == "/dev/fd" && cfg!(target_os = "linux") {
+                // /dev/fd points to /proc/self/fd. CapabilitySet canonicalizes
+                // it in the server *before* spawning the kernel, which would
+                // grant access to the server's open file descriptors instead.
+                continue;
+            }
+            if p.is_dir() {
+                // Some systems (e.g. Fedora) expose `/dev/fd` as a directory
+                // symlink to `/proc/self/fd`. Treat it like other device
+                // directories so bwrap gets a well-formed sandbox command.
+                match caps.clone().allow_path(dev, AccessMode::ReadWrite) {
+                    Ok(updated_caps) => caps = updated_caps,
+                    Err(e) => {
+                        tracing::warn!(path = dev, error = %e, "Could not allow device directory");
+                    }
+                }
+            } else {
+                if let Err(e) = caps.allow_file_mut(p, AccessMode::ReadWrite) {
+                    tracing::warn!(path = dev, error = %e, "Could not allow device file");
+                }
             }
         }
         // Device directories (e.g. /dev/pts for PTY slaves on Linux).
@@ -319,6 +374,24 @@ impl ProfileName {
             let p = Path::new(dev);
             if p.exists() && p.is_dir() {
                 caps = caps.allow_path(dev, AccessMode::ReadWrite)?;
+            }
+        }
+
+        if let Some(overlay) = overlay {
+            for path in &overlay.read_paths {
+                if !path.exists() {
+                    continue;
+                }
+                caps = caps.allow_path(path, AccessMode::Read)?;
+            }
+            for path in &overlay.write_paths {
+                if !path.exists() && std::fs::create_dir_all(path).is_err() {
+                    anyhow::bail!(
+                        "additional sandbox write path does not exist and could not be created: {}",
+                        path.display()
+                    );
+                }
+                caps = caps.allow_path(path, AccessMode::ReadWrite)?;
             }
         }
 
@@ -347,6 +420,11 @@ impl ProfileName {
             caps = caps.block_network();
             let managed_network = crate::managed_network::managed_network_context_from_env();
             caps = crate::managed_network::apply_managed_network_context(caps, &managed_network);
+        }
+        if overlay.is_some_and(|overlay| {
+            matches!(overlay.network, crate::SandboxNetworkPermission::Enabled)
+        }) {
+            caps = caps.set_network_mode(nono::NetworkMode::AllowAll);
         }
 
         Ok(caps)
@@ -455,6 +533,57 @@ impl ProfileName {
                     name: "strict".to_string(),
                     read_only: system_read,
                     read_write: essential_writable_paths(workspace)?,
+                    deny: vec![],
+                    default_read: false,
+                    restrict_network: true,
+                })
+            }
+
+            // RLM kernel fence (design doc §5.1): no default read. The kernel
+            // reads only what its interpreter needs — system trees carrying
+            // libc/libpython/stdlib plus the runtime pseudo-filesystems — and
+            // everything else (workspace, session artifacts, granted roots,
+            // the Python runtime prefix) arrives via the spawn overlay. Reads
+            // outside the fence are OS-refused so `rlm.read` escalates to the
+            // host instead of silently succeeding.
+            Self::RlmKernel => {
+                let system_read: Vec<PathBuf> = [
+                    "/usr", "/lib", "/lib64", "/bin", "/sbin",
+                    // Standalone runtime installs (uv/python-build standalones)
+                    "/opt", "/sys", "/dev",
+                    // macOS variants of the Linux trees above
+                    "/System", "/Library", "/private",
+                ]
+                .iter()
+                .map(PathBuf::from)
+                .filter(|p| p.exists())
+                .chain(
+                    // /proc is a shared process view outside bwrap. Giving
+                    // Landlock read permission on its root lets a same-UID
+                    // kernel read /proc/<server-pid>/environ (and fd, mem, …).
+                    // Grant only stable system metadata files. In particular,
+                    // never grant /proc/self: nono canonicalizes it in the
+                    // server before fork, turning it into /proc/<server-pid>.
+                    [
+                        "/proc/cpuinfo",
+                        "/proc/meminfo",
+                        "/proc/version",
+                        "/proc/stat",
+                        "/proc/uptime",
+                        "/proc/loadavg",
+                        "/proc/filesystems",
+                    ]
+                    .into_iter()
+                    .map(PathBuf::from)
+                    .filter(|p| p.is_file()),
+                )
+                .collect();
+                Ok(SandboxProfile {
+                    name: "rlm-kernel".to_string(),
+                    read_only: system_read,
+                    // Temp dirs stay writable for scratch work; the workspace
+                    // and session artifact dir ride the spawn overlay.
+                    read_write: temp_writable_paths(),
                     deny: vec![],
                     default_read: false,
                     restrict_network: true,
@@ -801,6 +930,46 @@ mod tests {
                 "{name}"
             );
         }
+    }
+
+    /// Trace: L2-DES-SAFETY-002
+    /// Verifies: additional permissions expand a profile without disabling its sandbox policy.
+    #[test]
+    #[cfg(all(feature = "enforce", unix))]
+    fn sandbox_overlay_adds_paths_and_network_access() {
+        let workspace = std::env::current_dir().unwrap();
+        let temp_root = std::env::temp_dir();
+        let suffix = std::process::id();
+        let read_path = temp_root.join(format!("devo-sandbox-overlay-input-{suffix}"));
+        let write_path = temp_root.join(format!("devo-sandbox-overlay-test-{suffix}"));
+        let _ = std::fs::remove_file(&read_path);
+        let _ = std::fs::remove_dir_all(&read_path);
+        let _ = std::fs::remove_dir_all(&write_path);
+        std::fs::create_dir_all(&read_path).expect("create input");
+        std::fs::create_dir_all(&write_path).expect("create output");
+        let read_path = std::fs::canonicalize(&read_path).expect("canonicalize input");
+        let write_path = std::fs::canonicalize(&write_path).expect("canonicalize output");
+        let overlay = SandboxPermissionOverlay {
+            network: crate::SandboxNetworkPermission::Enabled,
+            read_paths: vec![read_path.clone()],
+            write_paths: vec![write_path.clone()],
+        };
+
+        let profile = ProfileName::Strict
+            .resolve_profile(&workspace, &SandboxConfig::default())
+            .expect("resolve strict profile");
+        let caps = ProfileName::capability_set_from_profile_with_overlay(
+            &workspace,
+            &profile,
+            Some(&overlay),
+        )
+        .expect("build overlay capability set");
+
+        assert!(caps.path_covered_with_access(&read_path, AccessMode::Read));
+        assert!(caps.path_covered_with_access(&write_path, AccessMode::ReadWrite));
+        assert_eq!(*caps.network_mode(), nono::NetworkMode::AllowAll);
+        std::fs::remove_dir_all(&write_path).expect("remove output");
+        std::fs::remove_dir_all(&read_path).expect("remove input");
     }
 
     #[test]

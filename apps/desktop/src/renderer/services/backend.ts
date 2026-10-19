@@ -28,6 +28,7 @@ import type {
 	OpenInTargetsResult,
 	UpdateAutomationInput,
 } from "../../preload/api"
+import { MCP_CONFIG_OPEN_PATH } from "../../shared/mcp-config"
 import { createLogger } from "../lib/logger"
 
 const log = createLogger("backend")
@@ -41,6 +42,19 @@ const log = createLogger("backend")
  * The `devo` object is exposed via `contextBridge.exposeInMainWorld`.
  */
 export const isElectron = typeof window !== "undefined" && "devo" in window
+
+/** Prefer runtime checks — module-load `isElectron` can be wrong before preload binds. */
+export function canUseLocalWorkspaceGit(): boolean {
+	try {
+		return (
+			typeof window !== "undefined" &&
+			typeof window.devo?.git?.workspaceChangesSummary === "function" &&
+			typeof window.devo?.git?.workspaceFilePatch === "function"
+		)
+	} catch {
+		return false
+	}
+}
 
 // ============================================================
 // Backend API — same signatures regardless of runtime
@@ -252,6 +266,41 @@ export async function fetchDiffStat(directory: string): Promise<GitDiffStat> {
 	throw new Error("Git operations are only available in Electron mode")
 }
 
+export type LocalGitChangeScope = "uncommitted" | "staged" | "unstaged" | "branch"
+
+export type LocalWorkspaceFilePatchOptions = {
+	baseBranch?: string | null
+	ignoreWhitespace?: boolean
+	fileStatus?: string | null
+	checkpointId?: string | null
+	mergeBase?: string | null
+}
+
+/** Local Summary list for working-tree scopes (bypasses Devo stdio). */
+export async function fetchLocalWorkspaceChangesSummary(
+	directory: string,
+	scope: LocalGitChangeScope,
+	options?: { baseBranch?: string | null; ignoreWhitespace?: boolean },
+) {
+	if (!canUseLocalWorkspaceGit()) {
+		throw new Error("Local workspace changes require Electron git IPC")
+	}
+	return window.devo.git.workspaceChangesSummary(directory, scope, options)
+}
+
+/** Single-file patch for expand-on-demand (bypasses whole-tree Full). */
+export async function fetchLocalWorkspaceFilePatch(
+	directory: string,
+	scope: LocalGitChangeScope | "turn",
+	filePath: string,
+	options?: LocalWorkspaceFilePatchOptions,
+) {
+	if (!canUseLocalWorkspaceGit()) {
+		throw new Error("Local workspace file patch requires Electron git IPC")
+	}
+	return window.devo.git.workspaceFilePatch(directory, scope, filePath, options)
+}
+
 /**
  * Commits all changes (staged + unstaged) with the given message.
  */
@@ -361,6 +410,33 @@ export async function setOpenInPreferred(targetId: string): Promise<{ success: b
 		return window.devo.openIn.setPreferred(targetId)
 	}
 	throw new Error("Open-in targets are only available in Electron mode")
+}
+
+/**
+ * Ensures the user MCP config file exists and opens it with the General
+ * settings "Default open destination" app.
+ *
+ * Prefers dedicated preload methods when present. Falls back to the existing
+ * `openIn.open` bridge so this still works if the window was created before
+ * a newer `mcp` preload namespace was added.
+ */
+export async function openMcpConfigFile(): Promise<{ path?: string }> {
+	if (typeof window === "undefined" || !("devo" in window)) {
+		throw new Error("MCP config can only be edited in the desktop app")
+	}
+	if (typeof window.devo.mcp?.openConfig === "function") {
+		return window.devo.mcp.openConfig()
+	}
+	if (typeof window.devo.openIn.openMcpConfig === "function") {
+		return window.devo.openIn.openMcpConfig()
+	}
+	const { preferredTarget, availableTargets } = await window.devo.openIn.getTargets()
+	const targetId = preferredTarget ?? availableTargets[0]
+	if (!targetId) {
+		throw new Error("No app is available to open the MCP config file")
+	}
+	await window.devo.openIn.open(MCP_CONFIG_OPEN_PATH, targetId)
+	return {}
 }
 
 // ============================================================

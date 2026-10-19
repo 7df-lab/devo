@@ -2,6 +2,8 @@
  * Tests for the universal converter (cross-format conversions).
  */
 import { describe, expect, test } from "bun:test"
+import { tmpdir } from "node:os"
+import { join } from "node:path"
 import {
 	formatName,
 	fromCanonical,
@@ -12,6 +14,8 @@ import {
 import type { CursorScanResult } from "../../src/types/cursor"
 import type { ScanResult } from "../../src/types/scan-result"
 
+const projectPath = join(tmpdir(), "devo-cursor-conversion")
+
 describe("universalConvert", () => {
 	test("Claude Code -> Cursor: converts MCP servers", () => {
 		const ccScan: ScanResult = {
@@ -21,7 +25,7 @@ describe("universalConvert", () => {
 			},
 			projects: [
 				{
-					path: "/test/project",
+					path: projectPath,
 					agents: [],
 					commands: [],
 					skills: [],
@@ -43,7 +47,7 @@ describe("universalConvert", () => {
 
 		// Project MCP should be converted
 		expect(result.projectConfigs.size).toBe(1)
-		const projectConfig = result.projectConfigs.get("/test/project") as {
+		const projectConfig = result.projectConfigs.get(projectPath) as {
 			mcpServers: Record<string, { command: string; args: string[]; env: Record<string, string> }>
 		}
 		expect(projectConfig.mcpServers.TestServer.command).toBe("npx")
@@ -54,13 +58,13 @@ describe("universalConvert", () => {
 			global: { skills: [] },
 			projects: [
 				{
-					path: "/test/project",
+					path: projectPath,
 					agents: [],
 					commands: [],
 					skills: [],
 					projectMcpServers: {},
 					claudeMd: "# Project Instructions\n\nUse TypeScript.",
-					claudeMdPath: "/test/project/CLAUDE.md",
+					claudeMdPath: join(projectPath, "CLAUDE.md"),
 				},
 			],
 		}
@@ -70,7 +74,7 @@ describe("universalConvert", () => {
 		expect(result.rules.size).toBeGreaterThan(0)
 		const ruleEntries = [...result.rules.entries()]
 		const hasProjectRule = ruleEntries.some(([path]) =>
-			path.includes("/test/project/.cursor/rules/"),
+			path.includes(join(projectPath, ".cursor", "rules")),
 		)
 		expect(hasProjectRule).toBe(true)
 	})
@@ -80,10 +84,10 @@ describe("universalConvert", () => {
 			global: { skills: [] },
 			projects: [
 				{
-					path: "/test/project",
+					path: projectPath,
 					agents: [
 						{
-							path: "/test/project/.claude/agents/review.md",
+							path: join(projectPath, ".claude", "agents", "review.md"),
 							name: "review",
 							content: "---\nname: review\ndescription: Code reviewer\n---\n\nReview the code.",
 							frontmatter: { name: "review", description: "Code reviewer" },
@@ -101,7 +105,7 @@ describe("universalConvert", () => {
 
 		expect(result.agents.size).toBe(1)
 		const agentEntries = [...result.agents.entries()]
-		expect(agentEntries[0][0]).toContain(".cursor/agents/review.md")
+		expect(agentEntries[0][0]).toBe(join(projectPath, ".cursor", "agents", "review.md"))
 	})
 
 	test("Cursor -> Devo: converts MCP servers", () => {
@@ -133,10 +137,10 @@ describe("universalConvert", () => {
 			global: { skills: [], commands: [], agents: [] },
 			projects: [
 				{
-					path: "/test/project",
+					path: projectPath,
 					rules: [
 						{
-							path: "/test/project/.cursor/rules/always.mdc",
+							path: join(projectPath, ".cursor", "rules", "always.mdc"),
 							name: "always",
 							content: "---\nalwaysApply: true\n---\n\nAlways apply this.",
 							frontmatter: { alwaysApply: true },
@@ -164,10 +168,10 @@ describe("universalConvert", () => {
 			global: { skills: [], commands: [], agents: [] },
 			projects: [
 				{
-					path: "/test/project",
+					path: projectPath,
 					rules: [
 						{
-							path: "/test/project/.cursor/rules/main.mdc",
+							path: join(projectPath, ".cursor", "rules", "main.mdc"),
 							name: "main",
 							content: "---\nalwaysApply: true\n---\n\nUse tabs for indentation.",
 							frontmatter: { alwaysApply: true },
@@ -195,10 +199,10 @@ describe("universalConvert", () => {
 			global: { skills: [], commands: [], agents: [] },
 			projects: [
 				{
-					path: "/test/project",
+					path: projectPath,
 					rules: [
 						{
-							path: "/test/project/.cursor/rules/api.mdc",
+							path: join(projectPath, ".cursor", "rules", "api.mdc"),
 							name: "api",
 							content: '---\nglobs: "api/**/*.ts"\nalwaysApply: false\n---\n\nAPI-specific rules.',
 							frontmatter: { globs: "api/**/*.ts", alwaysApply: false },

@@ -35,7 +35,7 @@ impl JsonlSessionStore {
         }
     }
 
-    fn session_path(&self, session_id: SessionId) -> PathBuf {
+    fn session_path(&self, session_id: &SessionId) -> PathBuf {
         let sessions_dir = self.data_dir.join("sessions");
         sessions_dir.join(format!("{}.jsonl", session_id))
     }
@@ -65,7 +65,7 @@ impl SessionStore for JsonlSessionStore {
         record: DurableRecord,
     ) -> Result<u64, StoreError> {
         self.ensure_session_dir()?;
-        let path = self.session_path(session_id);
+        let path = self.session_path(&session_id);
         let lock = self.lock_for(&path);
         let _guard = lock.lock().unwrap();
 
@@ -102,7 +102,7 @@ impl SessionStore for JsonlSessionStore {
         session_id: SessionId,
         from_offset: u64,
     ) -> Result<ReplayStream, StoreError> {
-        let path = self.session_path(session_id);
+        let path = self.session_path(&session_id);
         if !path.exists() {
             return Err(StoreError {
                 code: StoreErrorCode::SessionNotFound,
@@ -170,7 +170,7 @@ impl SessionStore for JsonlSessionStore {
     }
 
     async fn flush(&self, session_id: SessionId) -> Result<(), StoreError> {
-        let path = self.session_path(session_id);
+        let path = self.session_path(&session_id);
         if !path.exists() {
             return Ok(());
         }
@@ -192,7 +192,7 @@ impl SessionStore for JsonlSessionStore {
     }
 
     async fn file_size(&self, session_id: SessionId) -> Result<u64, StoreError> {
-        let path = self.session_path(session_id);
+        let path = self.session_path(&session_id);
         if !path.exists() {
             return Err(StoreError {
                 code: StoreErrorCode::SessionNotFound,
@@ -423,7 +423,7 @@ mod tests {
             .unwrap();
 
         // Append garbage bytes to simulate truncation
-        let path = store.session_path(session_id);
+        let path = store.session_path(&session_id);
         let lock = store.lock_for(&path);
         {
             let _guard = lock.lock().unwrap();

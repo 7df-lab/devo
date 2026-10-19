@@ -8,11 +8,12 @@
 //! enough.
 
 use std::path::PathBuf;
+use std::sync::Arc;
 
-use devo_core::read_canonical_history;
-use devo_protocol::canonical::item::ItemEnvelope;
-use devo_protocol::canonical::page::{Page, PageParams};
-use devo_protocol::canonical::rpc_session::{SessionItemsListParams, SessionTurnsListParams};
+use devo_core::active_path_items;
+use devo_protocol::native::item::ItemEnvelope;
+use devo_protocol::native::page::{Page, PageParams};
+use devo_protocol::native::rpc_session::{SessionItemsListParams, SessionTurnsListParams};
 
 use super::super::*;
 
@@ -44,9 +45,22 @@ impl ServerRuntime {
             Ok(history) => history,
             Err(response) => return response,
         };
-        let page = match paginate(&history.turns, &params.page, |turn| {
-            u64::from(turn.sequence)
-        }) {
+        // Keep turn records consistent with the active-path item view above:
+        // turns whose items all sit on an abandoned branch are dead history.
+        let turns = match active_path_items(&history) {
+            Some(items) => {
+                let active_turn_ids: std::collections::HashSet<_> =
+                    items.iter().map(|item| item.turn_id).collect();
+                history
+                    .turns
+                    .iter()
+                    .filter(|turn| active_turn_ids.contains(&turn.id))
+                    .cloned()
+                    .collect::<Vec<_>>()
+            }
+            None => history.turns.clone(),
+        };
+        let page = match paginate(&turns, &params.page, |turn| u64::from(turn.sequence)) {
             Ok(page) => page,
             Err(message) => {
                 return self.error_response(request_id, ProtocolErrorCode::InvalidParams, message);
@@ -81,14 +95,15 @@ impl ServerRuntime {
             Ok(history) => history,
             Err(response) => return response,
         };
-        let items: Vec<ItemEnvelope> = match &params.turn_id {
-            Some(turn_id) => history
-                .items
-                .into_iter()
-                .filter(|item| item.turn_id == *turn_id)
-                .collect(),
-            None => history.items,
-        };
+        // The rollout is a linear journal: after a rewind it still holds the
+        // abandoned branch. Clients page this method to render the current
+        // conversation, so scope to the active path (linear fallback for
+        // tree-less histories — single-line sessions and forks).
+        let mut items: Vec<ItemEnvelope> =
+            active_path_items(&history).unwrap_or_else(|| history.items.clone());
+        if let Some(turn_id) = params.turn_id {
+            items.retain(|item| item.turn_id == turn_id);
+        }
         let page = match paginate(&items, &params.page, |item| item.seq) {
             Ok(page) => page,
             Err(message) => {
@@ -105,11 +120,11 @@ impl ServerRuntime {
     /// Resolves the session's rollout path and reads its canonical history.
     /// The error variant is a ready-made JSON-RPC error response (session
     /// not found, or a damaged/unreadable file).
-    async fn load_canonical_history(
+    pub(crate) async fn load_canonical_history(
         &self,
         request_id: &serde_json::Value,
-        session_id: devo_protocol::canonical::ids::SessionId,
-    ) -> Result<devo_core::CanonicalHistory, serde_json::Value> {
+        session_id: devo_protocol::native::ids::SessionId,
+    ) -> Result<Arc<devo_core::CanonicalHistory>, serde_json::Value> {
         let Some(rollout_path) = self.resolve_rollout_path(&session_id).await else {
             return Err(self.error_response(
                 request_id.clone(),
@@ -117,54 +132,89 @@ impl ServerRuntime {
                 "session does not exist",
             ));
         };
-        read_canonical_history(&rollout_path).map_err(|error| {
-            self.error_response(
-                request_id.clone(),
-                ProtocolErrorCode::InternalError,
-                format!("failed to read session history: {error}"),
-            )
-        })
+        self.history_cache
+            .load(session_id, rollout_path)
+            .await
+            .map_err(|error| {
+                self.error_response(
+                    request_id.clone(),
+                    ProtocolErrorCode::InternalError,
+                    format!("failed to read session history: {error}"),
+                )
+            })
     }
 
-    /// Finds the rollout file for a session, loaded or cold: a resumed/live
-    /// session knows its path; otherwise the SQLite index, then the
-    /// file-name scan. Ephemeral sessions have no persisted history and
-    /// resolve to `None` (reported as not found — they have no history to
-    /// page).
+    /// Finds the rollout file for a session, loaded or cold. Prefer durable
+    /// indexes (SQLite, file scan) so history reads never depend on a
+    /// mailbox round-trip. Fall back to the live actor record when the
+    /// session is loaded and the index has no path yet.
     pub(crate) async fn resolve_rollout_path(
         &self,
-        session_id: &devo_protocol::canonical::ids::SessionId,
+        session_id: &devo_protocol::native::ids::SessionId,
     ) -> Option<PathBuf> {
-        let legacy_id = SessionId::try_from(session_id.as_str()).ok()?;
-        if let Some(handle) = self.session(legacy_id).await
-            && let Some(record) = handle.record().await.flatten()
-        {
-            return Some(record.rollout_path);
-        }
-        if let Ok(Some(index)) = self.deps.db.get_session_index(&legacy_id)
+        if let Ok(Some(index)) = self.deps.db.get_session_index(session_id)
             && let Some(path) = index.rollout_path
         {
             return Some(path);
         }
-        self.rollout_store
-            .find_rollout_by_session_id(&legacy_id)
+        if let Some(path) = self
+            .rollout_store
+            .find_rollout_by_session_id(session_id)
             .ok()
             .flatten()
+        {
+            return Some(path);
+        }
+        if let Some(handle) = self.session(*session_id).await
+            && let Some(path) = handle.rollout_path().await.flatten()
+        {
+            return Some(path);
+        }
+        None
     }
 }
 
 /// Slices `items` (ascending by position) into one page.
 ///
-/// Cursor encoding: the decimal position of the previous page's last item
-/// (`sequence` for turns, `seq` for items); clients must treat it as
-/// opaque. `nextCursor` is the last returned item's position and is present
-/// iff more data remains. The limit defaults to 50 and clamps into
+/// A missing cursor starts forward pagination; a decimal cursor continues
+/// after that position. `tail` starts at the newest page and `before:<position>`
+/// continues toward older history. Both directions return chronological pages;
+/// clients treat returned continuation cursors as opaque. The limit defaults to 50 and clamps into
 /// `1..=200` — out-of-range limits never error (01 §4.2).
 fn paginate<T: Clone>(
     items: &[T],
     params: &PageParams,
     position: impl Fn(&T) -> u64,
 ) -> Result<Page<T>, String> {
+    // Native clients can open the recent tail without downloading the full
+    // transcript. Older pages retain chronological order within each page.
+    if params.cursor.as_deref() == Some("tail")
+        || params
+            .cursor
+            .as_deref()
+            .is_some_and(|cursor| cursor.starts_with("before:"))
+    {
+        let before = match params.cursor.as_deref() {
+            Some("tail") => None,
+            Some(cursor) => Some(
+                cursor["before:".len()..]
+                    .parse::<u64>()
+                    .map_err(|_| "malformed cursor".to_string())?,
+            ),
+            None => unreachable!("tail pagination requires a cursor"),
+        };
+        let limit = params
+            .limit
+            .unwrap_or(DEFAULT_PAGE_LIMIT)
+            .clamp(1, MAX_PAGE_LIMIT) as usize;
+        let end = before.map_or(items.len(), |before| {
+            items.partition_point(|item| position(item) < before)
+        });
+        let start = end.saturating_sub(limit);
+        let data = items[start..end].to_vec();
+        let next_cursor = (start > 0).then(|| format!("before:{}", position(&items[start])));
+        return Ok(Page { data, next_cursor });
+    }
     let after = match &params.cursor {
         Some(cursor) => cursor
             .parse::<u64>()
@@ -249,6 +299,86 @@ mod tests {
                 data: Vec::new(),
                 next_cursor: None,
             }
+        );
+    }
+
+    #[test]
+    fn tail_pages_walk_backwards_across_sequence_gaps() {
+        let items = [1u64, 3, 10, 20, 25];
+        let mut cursor = "tail".to_string();
+        for expected in [
+            Page {
+                data: vec![20, 25],
+                next_cursor: Some("before:20".into()),
+            },
+            Page {
+                data: vec![3, 10],
+                next_cursor: Some("before:3".into()),
+            },
+            Page {
+                data: vec![1],
+                next_cursor: None,
+            },
+        ] {
+            let actual =
+                paginate(&items, &params(Some(&cursor), Some(2)), |item| *item).expect("tail page");
+            assert_eq!(actual, expected);
+            cursor = actual.next_cursor.unwrap_or_default();
+        }
+    }
+
+    #[test]
+    fn tail_pages_clamp_limits_and_handle_empty_boundaries() {
+        let items: Vec<u64> = (1..=250).collect();
+        for (cursor, limit, expected) in [
+            (
+                "tail",
+                1000,
+                Page {
+                    data: (51..=250).collect(),
+                    next_cursor: Some("before:51".into()),
+                },
+            ),
+            (
+                "tail",
+                0,
+                Page {
+                    data: vec![250],
+                    next_cursor: Some("before:250".into()),
+                },
+            ),
+            (
+                "before:1",
+                10,
+                Page {
+                    data: vec![],
+                    next_cursor: None,
+                },
+            ),
+            (
+                "before:0",
+                10,
+                Page {
+                    data: vec![],
+                    next_cursor: None,
+                },
+            ),
+        ] {
+            assert_eq!(
+                paginate(&items, &params(Some(cursor), Some(limit)), |item| *item).expect("page"),
+                expected
+            );
+        }
+        assert_eq!(
+            paginate(&[] as &[u64], &params(Some("tail"), None), |item| *item).expect("empty tail"),
+            Page {
+                data: vec![],
+                next_cursor: None
+            }
+        );
+        assert_eq!(
+            paginate(&items, &params(Some("before:bad"), None), |item| *item),
+            Err("malformed cursor".into())
         );
     }
 }

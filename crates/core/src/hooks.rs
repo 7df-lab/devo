@@ -7,6 +7,7 @@ use std::sync::Arc;
 use devo_config::HookCommandConfig;
 use devo_config::HookEvent;
 use devo_config::HooksConfig;
+use devo_protocol::SessionId;
 use serde_json::Map;
 use serde_json::Value;
 use tracing::warn;
@@ -76,7 +77,7 @@ pub struct HookRuntimeContext {
 
 #[derive(Debug, Clone)]
 pub struct HookBaseInput {
-    pub session_id: String,
+    pub session_id: SessionId,
     pub transcript_path: String,
     pub cwd: PathBuf,
     pub permission_mode: Option<String>,
@@ -99,7 +100,7 @@ impl HookInput {
         );
         payload.insert(
             "session_id".to_string(),
-            Value::String(base.session_id.clone()),
+            Value::String(base.session_id.to_string()),
         );
         payload.insert(
             "transcript_path".to_string(),
@@ -332,7 +333,7 @@ mod tests {
         )]));
         let runner = HookRunner::new(config);
         let base = HookBaseInput {
-            session_id: "session".to_string(),
+            session_id: SessionId::from("session"),
             transcript_path: "rollout.jsonl".to_string(),
             cwd: std::env::current_dir().expect("current dir"),
             permission_mode: Some("interactive".to_string()),

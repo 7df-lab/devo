@@ -1,19 +1,16 @@
 import { useAtomValue } from "jotai"
 import { useCallback } from "react"
 import { connectionAtom } from "../atoms/connection"
-import { upsertMessageAtom } from "../atoms/messages"
-import { upsertPartAtom } from "../atoms/parts"
+import { upsertItemAtom } from "../atoms/messages"
 import { sessionFamily, upsertSessionAtom } from "../atoms/sessions"
 import { appStore } from "../atoms/store"
 import { createLogger } from "../lib/logger"
 import type {
 	FileAttachment,
-	FilePart,
 	FilePartInput,
 	QuestionAnswer,
+	PermissionResponse,
 	Session,
-	TextPart,
-	UserMessage,
 } from "../lib/types"
 import { getProjectClient } from "../services/connection-manager"
 
@@ -39,7 +36,7 @@ export function useAgentActions() {
 		if (!client) throw new Error("Not connected to Devo server")
 		log.debug("abort", { sessionId })
 		try {
-			await client.session.abort({ sessionID: sessionId })
+			await client.session.abort({ sessionId: sessionId })
 		} catch (err) {
 			log.error("abort failed", { sessionId }, err)
 			throw err
@@ -55,6 +52,7 @@ export function useAgentActions() {
 				model?: { providerID: string; modelID: string }
 				agent?: string
 				variant?: string
+				collaborationMode?: string
 				files?: FileAttachment[]
 			},
 		) => {
@@ -65,6 +63,7 @@ export function useAgentActions() {
 				agent: options?.agent,
 				model: options?.model,
 				variant: options?.variant,
+				collaborationMode: options?.collaborationMode,
 				hasFiles: !!(options?.files && options.files.length > 0),
 			})
 
@@ -75,51 +74,39 @@ export function useAgentActions() {
 			}
 			log.debug("sendPrompt: got client", { directory })
 
-			// Optimistic user message — include variant so it's available when
-			// re-initializing the session's toolbar state (the v1 UserMessage type
-			// doesn't have variant but the server stores it on user messages).
+			// Optimistic user message is added only when a turn starts immediately.
+			// Queued follow-ups stay in the composer queue strip, not the transcript.
 			const optimisticId = `optimistic-${Date.now()}`
-			const optimisticMessage: UserMessage & { variant?: string } = {
-				id: optimisticId,
-				sessionID: sessionId,
-				role: "user",
-				time: { created: Date.now() },
-				agent: options?.agent ?? "build",
-				model: options?.model ?? { providerID: "", modelID: "" },
-				variant: options?.variant,
-			}
-			appStore.set(upsertMessageAtom, optimisticMessage as UserMessage)
-			log.debug("sendPrompt: optimistic message set", { optimisticId })
-
-			// Optimistic text part
-			const optimisticTextPart: TextPart = {
-				id: `${optimisticId}-text`,
-				sessionID: sessionId,
-				messageID: optimisticId,
-				type: "text",
-				text,
-			}
-			appStore.set(upsertPartAtom, optimisticTextPart)
-
-			// Optimistic file parts
-			const files = options?.files ?? []
-			for (let i = 0; i < files.length; i++) {
-				const file = files[i]
-				const optimisticFilePart: FilePart = {
-					id: `${optimisticId}-file-${i}`,
-					sessionID: sessionId,
-					messageID: optimisticId,
-					type: "file",
-					mime: file.mediaType ?? "application/octet-stream",
-					filename: file.filename,
-					url: file.url,
+			const buildOptimistic = (turnId: string | undefined) => {
+				const content: Array<Record<string, unknown>> = [{ type: "text", text }]
+				for (const file of options?.files ?? []) {
+					content.push({
+						type: "file",
+						mime: file.mediaType ?? "application/octet-stream",
+						filename: file.filename,
+						url: file.url,
+					})
 				}
-				appStore.set(upsertPartAtom, optimisticFilePart)
+				appStore.set(upsertItemAtom, {
+					id: optimisticId,
+					sessionId,
+					turnId: turnId ?? "",
+					seq: Number.MAX_SAFE_INTEGER,
+					revision: 0,
+					createdAt: new Date().toISOString(),
+					updatedAt: new Date().toISOString(),
+					state: "completed",
+					item: {
+						type: "userMessage",
+						content,
+						entry: "turnStart",
+					},
+				})
 			}
 
 			// Build parts array for the API call
 			const parts: Array<{ type: "text"; text: string } | FilePartInput> = [{ type: "text", text }]
-			for (const file of files) {
+			for (const file of options?.files ?? []) {
 				parts.push({
 					type: "file",
 					mime: file.mediaType ?? "application/octet-stream",
@@ -136,16 +123,21 @@ export function useAgentActions() {
 			})
 			try {
 				const result = await client.session.promptAsync({
-					sessionID: sessionId,
+					sessionId: sessionId,
 					parts,
 					model: options?.model
 						? { providerID: options.model.providerID, modelID: options.model.modelID }
 						: undefined,
 					agent: options?.agent,
 					variant: options?.variant,
+					collaborationMode: options?.collaborationMode,
 				})
+				if (result.data?.outcome === "started") {
+					buildOptimistic(result.data.turnId)
+				}
 				log.debug("sendPrompt: promptAsync returned", {
 					sessionId,
+					outcome: result.data?.outcome,
 					result: JSON.stringify(result ?? null).slice(0, 200),
 				})
 			} catch (err) {
@@ -189,7 +181,7 @@ export function useAgentActions() {
 		}
 
 		try {
-			await client.session.update({ sessionID: sessionId, title })
+			await client.session.update({ sessionId: sessionId, title })
 		} catch (err) {
 			log.error("renameSession failed", { sessionId, title }, err)
 			throw err
@@ -201,7 +193,7 @@ export function useAgentActions() {
 		if (!client) throw new Error("Not connected to Devo server")
 		log.debug("deleteSession", { sessionId })
 		try {
-			await client.session.delete({ sessionID: sessionId })
+			await client.session.delete({ sessionId: sessionId })
 		} catch (err) {
 			log.error("deleteSession failed", { sessionId }, err)
 			throw err
@@ -213,15 +205,15 @@ export function useAgentActions() {
 			directory: string,
 			sessionId: string,
 			permissionId: string,
-			response: "once" | "always" | "reject",
+			response: PermissionResponse,
 		) => {
 			const client = getProjectClient(directory)
 			if (!client) throw new Error("Not connected to Devo server")
 			log.debug("respondToPermission", { sessionId, permissionId, response })
 			try {
 				await client.permission.respond({
-					sessionID: sessionId,
-					permissionID: permissionId,
+					sessionId: sessionId,
+					permissionId: permissionId,
 					response,
 				})
 			} catch (err) {
@@ -238,7 +230,7 @@ export function useAgentActions() {
 			if (!client) throw new Error("Not connected to Devo server")
 			log.debug("replyToQuestion", { requestId })
 			try {
-				await client.question.reply({ requestID: requestId, answers })
+				await client.question.reply({ requestId: requestId, answers })
 			} catch (err) {
 				log.error("replyToQuestion failed", { requestId }, err)
 				throw err
@@ -252,7 +244,7 @@ export function useAgentActions() {
 		if (!client) throw new Error("Not connected to Devo server")
 		log.debug("rejectQuestion", { requestId })
 		try {
-			await client.question.reject({ requestID: requestId })
+			await client.question.reject({ requestId: requestId })
 		} catch (err) {
 			log.error("rejectQuestion failed", { requestId }, err)
 			throw err
@@ -267,9 +259,9 @@ export function useAgentActions() {
 			const entry = appStore.get(sessionFamily(sessionId))
 			if (entry?.status?.type === "busy") {
 				log.debug("revert: aborting busy session first", { sessionId })
-				await client.session.abort({ sessionID: sessionId })
+				await client.session.abort({ sessionId: sessionId })
 			}
-			await client.session.revert({ sessionID: sessionId, messageID: messageId })
+			await client.session.revert({ sessionId: sessionId })
 		} catch (err) {
 			log.error("revert failed", { sessionId, messageId }, err)
 			throw err
@@ -281,7 +273,7 @@ export function useAgentActions() {
 		if (!client) throw new Error("Not connected to Devo server")
 		log.debug("unrevert", { sessionId })
 		try {
-			await client.session.unrevert({ sessionID: sessionId })
+			await client.session.unrevert({ sessionId: sessionId })
 		} catch (err) {
 			log.error("unrevert failed", { sessionId }, err)
 			throw err
@@ -295,7 +287,7 @@ export function useAgentActions() {
 			log.debug("executeCommand", { sessionId, command })
 			try {
 				await client.session.command({
-					sessionID: sessionId,
+					sessionId: sessionId,
 					command,
 					arguments: args,
 				})
@@ -312,37 +304,27 @@ export function useAgentActions() {
 		if (!client) throw new Error("Not connected to Devo server")
 		log.debug("summarize", { sessionId })
 		try {
-			await client.session.summarize({ sessionID: sessionId })
+			await client.session.summarize({ sessionId: sessionId })
 		} catch (err) {
 			log.error("summarize failed", { sessionId }, err)
 			throw err
 		}
 	}, [])
 
-	const deletePart = useCallback(
-		async (directory: string, sessionId: string, messageId: string, partId: string) => {
-			const client = getProjectClient(directory)
-			if (!client) throw new Error("Not connected to Devo server")
-			log.debug("deletePart", { sessionId, messageId, partId })
-			try {
-				await client.part.delete({ sessionID: sessionId, messageID: messageId, partID: partId })
-			} catch (err) {
-				log.error("deletePart failed", { sessionId, messageId, partId }, err)
-				throw err
-			}
-		},
-		[],
-	)
-
 	const forkSession = useCallback(
-		async (directory: string, sessionId: string, messageId?: string): Promise<Session> => {
+		async (
+			directory: string,
+			sessionId: string,
+			options?: { atTurnId?: string; cut?: "through" | "before" },
+		): Promise<Session> => {
 			const client = getProjectClient(directory)
 			if (!client) throw new Error("Not connected to Devo server")
-			log.debug("forkSession", { sessionId, messageId })
+			log.debug("forkSession", { sessionId, options })
 			try {
 				const result = await client.session.fork({
-					sessionID: sessionId,
-					messageID: messageId,
+					sessionId: sessionId,
+					atTurnId: options?.atTurnId,
+					cut: options?.cut,
 				})
 				const session = result.data as Session
 				if (session) {
@@ -351,7 +333,27 @@ export function useAgentActions() {
 				log.debug("forkSession succeeded", { forkedSessionId: session?.id })
 				return session
 			} catch (err) {
-				log.error("forkSession failed", { sessionId, messageId }, err)
+				log.error("forkSession failed", { sessionId, options }, err)
+				throw err
+			}
+		},
+		[],
+	)
+
+	const editMessage = useCallback(
+		async (directory: string, sessionId: string, messageId: string, text: string) => {
+			const client = getProjectClient(directory)
+			if (!client) throw new Error("Not connected to Devo server")
+			log.debug("editMessage", { sessionId, messageId, textLength: text.length })
+			try {
+				await client.session.editMessage({
+					sessionId: sessionId,
+					itemId: messageId,
+					text,
+				})
+				log.debug("editMessage succeeded", { sessionId, messageId })
+			} catch (err) {
+				log.error("editMessage failed", { sessionId, messageId }, err)
 				throw err
 			}
 		},
@@ -364,7 +366,6 @@ export function useAgentActions() {
 		createSession,
 		renameSession,
 		deleteSession,
-		deletePart,
 		respondToPermission,
 		replyToQuestion,
 		rejectQuestion,
@@ -373,5 +374,6 @@ export function useAgentActions() {
 		executeCommand,
 		summarize,
 		forkSession,
+		editMessage,
 	}
 }

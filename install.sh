@@ -3,19 +3,14 @@
 #
 # Usage:
 #   curl -fsSL https://raw.githubusercontent.com/7df-lab/devo/main/install.sh | sh
-#   curl -fsSL https://raw.githubusercontent.com/7df-lab/devo/main/install.sh | sh -s -- --version v0.1.2
+#   curl -fsSL https://raw.githubusercontent.com/7df-lab/devo/main/install.sh | sh -s -- --version v0.2.0
 
 set -eu
 
 APP="devo"
-CODE_SEARCH_MCP_APP="devo-code-search-mcp"
 REPO="7df-lab/devo"
 RG_APP="rg"
 RG_REPO="BurntSushi/ripgrep"
-CODE_SEARCH_MODEL_REPO="minishlab/potion-code-16M"
-CODE_SEARCH_MODEL_DIR_NAME="minishlab--potion-code-16M"
-CODE_SEARCH_MODEL_FILES="tokenizer.json model.safetensors config.json"
-CODE_SEARCH_LOCAL_MODELS_DIR="local-models"
 INSTALL_DIR_DEFAULT="${HOME}/.devo/bin"
 
 MUTED="$(printf '\033[0;2m')"
@@ -27,7 +22,6 @@ requested_version="${VERSION:-}"
 binary_path=""
 no_modify_path="false"
 offline_mode="false"
-install_code_search_model="${DEVO_INSTALL_CODE_SEARCH_MODEL:-}"
 install_dir="${DEVO_INSTALL_DIR:-$INSTALL_DIR_DEFAULT}"
 skip_app_install="false"
 
@@ -39,25 +33,23 @@ Usage: install.sh [options]
 
 Options:
     -h, --help              Display this help message
-    -v, --version <version> Install a specific version (for example: v0.1.2)
+    -v, --version <version> Install a specific version (for example: v0.2.0)
     -b, --binary <path>     Install from a local binary instead of downloading
         --install-dir <dir> Install into a custom directory
-        --install-code-search-model
-                            Download the local Hugging Face model used by code_search
         --offline           Install from assets placed next to install.sh without network access
         --no-modify-path    Don't modify shell config files
 
 Environment:
     VERSION                 Same as --version
     DEVO_INSTALL_DIR        Same as --install-dir
+    DEVO_RUNTIME_CACHE      Shared private runtime cache (default: XDG cache/devo/runtimes)
+    DEVO_RELEASE_BASE_URL   Release mirror/CDN base, followed by /<version>/<asset>
+    DEVO_RUNTIME_BASE_URL   Optional runtime CDN base, followed by /<runtime-asset>
     DEVO_SKIP_RG_INSTALL=1 Skip installing the ripgrep sidecar
-    DEVO_INSTALL_CODE_SEARCH_MODEL=1
-                            Download the local Hugging Face model used by code_search
 
 Examples:
     curl -fsSL https://raw.githubusercontent.com/7df-lab/devo/main/install.sh | sh
-    curl -fsSL https://raw.githubusercontent.com/7df-lab/devo/main/install.sh | sh -s -- --version v0.1.2
-    curl -fsSL https://raw.githubusercontent.com/7df-lab/devo/main/install.sh | sh -s -- --install-code-search-model
+    curl -fsSL https://raw.githubusercontent.com/7df-lab/devo/main/install.sh | sh -s -- --version v0.2.0
     sh ./install.sh --offline
     ./install.sh --binary ./target/release/devo
 EOF
@@ -112,10 +104,6 @@ while [ "$#" -gt 0 ]; do
                 die "Error: --install-dir requires a directory argument"
             fi
             ;;
-        --install-code-search-model)
-            install_code_search_model="1"
-            shift
-            ;;
         --offline)
             offline_mode="true"
             shift
@@ -147,9 +135,7 @@ is_truthy() {
     esac
 }
 
-should_install_code_search_model() {
-    is_truthy "$install_code_search_model"
-}
+
 
 normalize_version() {
     version="$1"
@@ -237,13 +223,6 @@ resolve_latest_ripgrep_version() {
     fi
 
     printf '%s\n' "$latest"
-}
-
-release_exists() {
-    version_tag="$1"
-
-    http_status="$(curl -sSL -o /dev/null -w '%{http_code}' "https://github.com/${REPO}/releases/tag/${version_tag}" || true)"
-    [ "$http_status" = "200" ]
 }
 
 path_contains() {
@@ -439,33 +418,11 @@ print_version_transition() {
 
 check_version() {
     expected_version="$1"
-    installed_path="$(existing_devo_path || true)"
-
-    if [ -z "$installed_path" ]; then
-        return
-    fi
-
-    installed_version="$(installed_devo_version "$installed_path")"
-
-    if [ "$installed_version" = "$expected_version" ]; then
-        print_message info "${MUTED}${APP} ${NC}${expected_version}${MUTED} is already installed at ${NC}${installed_path}"
-        skip_app_install="true"
-        if [ "${DEVO_SKIP_RG_INSTALL:-}" = "1" ] || [ -x "${install_dir}/${RG_APP}" ]; then
-            if ! should_install_code_search_model; then
-                exit 0
-            fi
-        else
-            print_message info "${MUTED}ripgrep sidecar is missing; continuing sidecar installation.${NC}"
+    if [ -x "$install_dir/devo" ] && bundle_complete "$install_dir"; then
+        if [ "$(installed_devo_version "$install_dir/devo")" = "$expected_version" ]; then
+            print_message info "Devo $expected_version and its runtimes are already installed."
+            skip_app_install="true"
         fi
-
-        if should_install_code_search_model; then
-            print_message info "${MUTED}code_search model install requested; continuing optional installation.${NC}"
-        fi
-        return
-    fi
-
-    if [ -n "$installed_version" ]; then
-        print_message info "${MUTED}Found existing ${APP} at ${NC}${installed_path}${MUTED} (${NC}${installed_version}${MUTED})${NC}"
     fi
 }
 
@@ -498,14 +455,168 @@ find_extracted_rg_binary() {
     printf '%s\n' "$found_binary"
 }
 
+bundle_complete() {
+    for component in runtime/manifest.json runtime/python-site/dill/__init__.py runtime/python-site/rlm/repl.py tui/src/index.js rg devo; do
+        [ -f "$1/$component" ] || return 1
+    done
+    for kind in node python; do
+        runtime_root="$1/runtime/$kind"
+        if [ -f "$1/runtime/$kind.path" ]; then
+            runtime_root="$(cat "$1/runtime/$kind.path")"
+            case "$runtime_root" in /*) ;; *) return 1 ;; esac
+        fi
+        case "$kind" in node) binary="bin/node" ;; python) binary="bin/python3" ;; esac
+        [ -x "$runtime_root/$binary" ] || return 1
+        if [ -f "$1/runtime/$kind.path" ]; then
+            cache_entry="$(dirname "$(dirname "$runtime_root")")"
+            [ -f "$cache_entry/.complete" ] && [ -f "$cache_entry/.binary.sha256" ] || return 1
+            [ "$(cat "$cache_entry/.complete")" = "$(basename "$cache_entry")" ] || return 1
+            [ "$(sha256_file "$runtime_root/$binary")" = "$(cat "$cache_entry/.binary.sha256")" ] || return 1
+        fi
+    done
+}
+
+# Custom install directories can contain other programs; only swap Devo-owned paths.
+install_bundle() (
+    bundle_source="$1"
+    bundle_complete "$bundle_source" || die "Incomplete Devo archive. Download the complete runtime bundle; the TUI requires its private Node and Python files."
+    mkdir -p "$install_dir"
+    bundle_stage="$(mktemp -d "$install_dir/.devo-install.XXXXXX")"
+    mkdir "$bundle_stage/new" "$bundle_stage/old"
+    bundle_changed=""
+    bundle_success="false"
+    rollback_bundle() {
+        if [ "$bundle_success" != "true" ]; then
+            for component in $bundle_changed; do
+                if [ -e "$install_dir/$component" ]; then rm -r "$install_dir/$component"; fi
+                if [ -e "$bundle_stage/old/$component" ]; then mv "$bundle_stage/old/$component" "$install_dir/$component"; fi
+            done
+        fi
+        rm -r "$bundle_stage"
+    }
+    trap rollback_bundle EXIT
+    bundle_components="runtime tui rg"
+    bundle_components="$bundle_components devo"
+    for component in $bundle_components; do cp -R "$bundle_source/$component" "$bundle_stage/new/$component"; done
+    for component in $bundle_components; do
+        if [ -e "$install_dir/$component" ]; then mv "$install_dir/$component" "$bundle_stage/old/$component"; fi
+        bundle_changed="$component $bundle_changed"
+        mv "$bundle_stage/new/$component" "$install_dir/$component"
+    done
+    bundle_success="true"
+)
+
 install_from_binary() {
     source_binary="$1"
-
     [ -f "$source_binary" ] || die "Binary not found at ${source_binary}"
-    mkdir -p "$install_dir"
-    cp "$source_binary" "${install_dir}/${APP}"
-    chmod 755 "${install_dir}/${APP}"
+    source_dir="$(dirname "$source_binary")"
+    if [ -f "$source_dir/runtime/manifest.json" ]; then
+        install_bundle "$source_dir"
+    else
+        print_message warning "Installing a development backend only. The terminal UI requires the full release bundle."
+        mkdir -p "$install_dir"
+        cp "$source_binary" "${install_dir}/${APP}"
+        chmod 755 "${install_dir}/${APP}"
+    fi
 }
+
+sha256_file() {
+    if command -v sha256sum >/dev/null 2>&1; then
+        sha256sum "$1" | awk '{print $1}'
+    elif command -v shasum >/dev/null 2>&1; then
+        shasum -a 256 "$1" | awk '{print $1}'
+    else
+        die "SHA-256 verification requires sha256sum or shasum."
+    fi
+}
+
+verify_archive_checksum() {
+    archive_file="$1"
+    checksum_file="$2"
+    asset_name="$3"
+    expected_checksum="$(awk -v name="$asset_name" '$2 == name { print $1; exit }' "$checksum_file")"
+    [ "${#expected_checksum}" -eq 64 ] || die "Missing SHA-256 for $asset_name"
+    actual_checksum="$(sha256_file "$archive_file")"
+    [ "$expected_checksum" = "$actual_checksum" ] || die "Release archive SHA-256 verification failed: $asset_name"
+}
+
+cached_runtime() (
+    kind="$1"; digest="$2"; asset="$3"; base_url="${DEVO_RUNTIME_BASE_URL:-$4}"
+    base_url="${base_url%/}"
+    cache="${DEVO_RUNTIME_CACHE:-${XDG_CACHE_HOME:-$HOME/.cache}/devo/runtimes}"
+    mkdir -p "$cache"
+    cache="$(cd "$cache" && pwd -P)"
+    destination="$cache/$digest"
+    lock="$cache/$digest.lock"
+    attempts=0
+    while ! mkdir "$lock" 2>/dev/null; do
+        attempts=$((attempts + 1))
+        [ "$attempts" -lt 300 ] || die "Timed out waiting for runtime cache lock: $lock"
+        if [ -f "$lock/pid" ]; then
+            owner="$(cat "$lock/pid")"
+            case "$owner" in ''|*[!0-9]*) ;; *)
+                if ! kill -0 "$owner" 2>/dev/null; then rm -f "$lock/pid"; rmdir "$lock" 2>/dev/null || true; fi ;;
+            esac
+        fi
+        sleep 1
+    done
+    stage=""
+    trap 'if [ -n "$stage" ]; then rm -rf "$stage"; fi; rm -f "$lock/pid"; rmdir "$lock"' EXIT
+    trap 'exit 1' INT TERM
+    printf '%s\n' "$$" > "$lock/pid"
+    case "$kind" in node) executable="bin/node" ;; python) executable="bin/python3" ;; esac
+    binary="$destination/runtime/$kind/$executable"
+    if [ -f "$destination/.complete" ] && [ "$(cat "$destination/.complete")" = "$digest" ] && [ -x "$binary" ] && [ -f "$destination/.binary.sha256" ]; then
+        if [ "$(sha256_file "$binary")" = "$(cat "$destination/.binary.sha256")" ]; then
+            printf 'Using cached %s runtime.\n' "$kind" >&2
+            printf '%s\n' "$destination/runtime/$kind"
+            exit 0
+        fi
+    fi
+    stage="$(mktemp -d "$cache/.stage.XXXXXX")"
+    printf 'Downloading %s runtime ...\n' "$kind" >&2
+    curl -fL --retry 3 --connect-timeout 20 "$base_url/$asset" -o "$stage/pack.tar.gz"
+    [ "$(sha256_file "$stage/pack.tar.gz")" = "$digest" ] || die "Runtime SHA-256 verification failed: $asset"
+    tar -xzf "$stage/pack.tar.gz" -C "$stage"
+    rm "$stage/pack.tar.gz"
+    [ -x "$stage/runtime/$kind/$executable" ] || die "Incomplete $kind runtime pack"
+    sha256_file "$stage/runtime/$kind/$executable" > "$stage/.binary.sha256"
+    printf '%s\n' "$digest" > "$stage/.complete"
+    if [ -e "$destination" ]; then mv "$destination" "$(mktemp -d "$cache/.damaged.XXXXXX")/previous"; fi
+    mv "$stage" "$destination"
+    stage=""
+    printf '%s\n' "$destination/runtime/$kind"
+)
+
+install_online_packs() (
+    index="$1"; base_url="$2"; work="$3"
+    awk 'NR==1 {if ($0!="devo-install-v1") exit 1; next}
+         NR>1 {if (NF!=3 || $1!=(NR==2?"app":NR==3?"node":"python") || length($2)!=64 || $2!~/^[a-f0-9]+$/ || $3!~/^[a-zA-Z0-9_.-]+[.]tar[.]gz$/) exit 1}
+         END {if (NR!=4) exit 1}' "$index" || die "Invalid runtime installation index"
+    # Download independent runtimes concurrently; collect both results before
+    # installing so no partial application becomes visible after a failure.
+    read -r _ node_digest node_asset <<EOF
+$(sed -n '3p' "$index")
+EOF
+    read -r _ python_digest python_asset <<EOF
+$(sed -n '4p' "$index")
+EOF
+    cached_runtime node "$node_digest" "$node_asset" "$base_url" > "$work/node-root" & node_pid=$!
+    cached_runtime python "$python_digest" "$python_asset" "$base_url" > "$work/python-root" & python_pid=$!
+    failed=0
+    wait "$node_pid" || failed=1
+    wait "$python_pid" || failed=1
+    [ "$failed" -eq 0 ] || die "Runtime installation failed; existing application was preserved."
+    read -r _ app_digest app_asset <<EOF
+$(sed -n '2p' "$index")
+EOF
+    curl -fL --retry 3 --connect-timeout 20 "$base_url/$app_asset" -o "$work/app.tar.gz"
+    [ "$(sha256_file "$work/app.tar.gz")" = "$app_digest" ] || die "App SHA-256 verification failed"
+    mkdir "$work/app"
+    tar -xzf "$work/app.tar.gz" -C "$work/app"
+    for kind in node python; do cp "$work/$kind-root" "$work/app/runtime/$kind.path"; done
+    install_bundle "$work/app"
+)
 
 download_and_install() {
     target="$1"
@@ -515,8 +626,8 @@ download_and_install() {
     require_command tar "Error: 'tar' is required but not installed."
     require_command find "Error: 'find' is required but not installed."
 
-    archive_name="${APP}-${version_tag}-${target}.tar.gz"
-    archive_url="https://github.com/${REPO}/releases/download/${version_tag}/${archive_name}"
+    release_origin="${DEVO_RELEASE_BASE_URL:-https://github.com/${REPO}/releases/download}"
+    base_url="${release_origin%/}/${version_tag}"
 
     print_message info ""
     print_message info "${MUTED}Installing ${NC}${APP} ${MUTED}version: ${NC}${version_tag}"
@@ -525,20 +636,33 @@ download_and_install() {
     tmp_dir="$(mktemp -d "${TMPDIR:-/tmp}/${APP}-install.XXXXXX")"
     trap 'rm -rf "$tmp_dir"' EXIT INT TERM
 
-    curl -fL --progress-bar "$archive_url" -o "$tmp_dir/$archive_name"
-    tar -xzf "$tmp_dir/$archive_name" -C "$tmp_dir"
-
-    extracted_binary="$(find_extracted_binary "$tmp_dir")"
-    extracted_mcp_binary="$(find_extracted_optional_binary "$tmp_dir" "$CODE_SEARCH_MCP_APP")"
-
-    mkdir -p "$install_dir"
-    install -m 755 "$extracted_binary" "${install_dir}/${APP}"
-    if [ -n "$extracted_mcp_binary" ]; then
-        install -m 755 "$extracted_mcp_binary" "${install_dir}/${CODE_SEARCH_MCP_APP}"
-        print_message info "${MUTED}Installed ${NC}${CODE_SEARCH_MCP_APP}${MUTED} sidecar${NC}"
-    else
-        print_message warning "Optional ${CODE_SEARCH_MCP_APP} binary was not found in the archive."
+    curl -fsSL --retry 3 "$base_url/SHA256SUMS.txt" -o "$tmp_dir/SHA256SUMS.txt"
+    # Public Linux names omit Rust's vendor field. Older releases retain it.
+    asset_target="$(printf '%s\n' "$target" | sed 's/-unknown-linux-/-linux-/')"
+    if [ "$asset_target" != "$target" ] && ! awk \
+        -v index_name="devo-tui-${version_tag}-${asset_target}.install.txt" \
+        -v archive="devo-tui-${version_tag}-${asset_target}.tar.gz" \
+        '$2 == index_name || $2 == archive { found = 1 } END { exit !found }' "$tmp_dir/SHA256SUMS.txt"; then
+        asset_target="$target"
     fi
+    archive_name="${APP}-tui-${version_tag}-${asset_target}.tar.gz"
+    index_name="devo-tui-${version_tag}-${asset_target}.install.txt"
+    status="$(curl -sSL --retry 3 --connect-timeout 20 -o "$tmp_dir/$index_name" -w '%{http_code}' "$base_url/$index_name")"
+    case "$status" in
+        200)
+            verify_archive_checksum "$tmp_dir/$index_name" "$tmp_dir/SHA256SUMS.txt" "$index_name"
+            install_online_packs "$tmp_dir/$index_name" "$base_url" "$tmp_dir"
+            ;;
+        404)
+            # Compatibility with releases created before runtime packs.
+            curl -fL --retry 3 --progress-bar "$base_url/$archive_name" -o "$tmp_dir/$archive_name"
+            verify_archive_checksum "$tmp_dir/$archive_name" "$tmp_dir/SHA256SUMS.txt" "$archive_name"
+            tar -xzf "$tmp_dir/$archive_name" -C "$tmp_dir"
+            extracted_binary="$(find_extracted_binary "$tmp_dir")"
+            install_bundle "$(dirname "$extracted_binary")"
+            ;;
+        *) die "Failed to fetch runtime installation index (HTTP $status)" ;;
+    esac
 
     rm -rf "$tmp_dir"
     trap - EXIT INT TERM
@@ -582,63 +706,7 @@ install_ripgrep_sidecar() {
     trap - EXIT INT TERM
 }
 
-code_search_model_dir() {
-    devo_home="${DEVO_HOME:-$HOME/.devo}"
-    printf '%s\n' "${devo_home}/${CODE_SEARCH_LOCAL_MODELS_DIR}/${CODE_SEARCH_MODEL_DIR_NAME}"
-}
 
-code_search_model_files_present() {
-    model_dir="$1"
-
-    for file in $CODE_SEARCH_MODEL_FILES; do
-        if [ ! -f "${model_dir}/${file}" ]; then
-            return 1
-        fi
-    done
-
-    return 0
-}
-
-install_code_search_model_files() {
-    if ! should_install_code_search_model; then
-        return
-    fi
-
-    require_command curl "Error: 'curl' is required but not installed."
-
-    model_dir="$(code_search_model_dir)"
-    mkdir -p "$model_dir"
-
-    if code_search_model_files_present "$model_dir"; then
-        print_message info "${MUTED}code_search model is already installed at ${NC}${model_dir}"
-        return
-    fi
-
-    print_message info ""
-    print_message info "${MUTED}Installing code_search model ${NC}${CODE_SEARCH_MODEL_REPO}${MUTED} into ${NC}${model_dir}"
-
-    for file in $CODE_SEARCH_MODEL_FILES; do
-        target_file="${model_dir}/${file}"
-        if [ -f "$target_file" ]; then
-            print_message info "${MUTED}Found existing ${NC}${target_file}"
-            continue
-        fi
-
-        url="https://huggingface.co/${CODE_SEARCH_MODEL_REPO}/resolve/main/${file}"
-        tmp_file="${target_file}.tmp.$$"
-        print_message info "${MUTED}Downloading ${NC}${file}"
-        if curl -fL --progress-bar "$url" -o "$tmp_file"; then
-            mv "$tmp_file" "$target_file"
-        else
-            rm -f "$tmp_file"
-            die "Failed to download code_search model file: ${file}"
-        fi
-    done
-
-    if ! code_search_model_files_present "$model_dir"; then
-        die "code_search model files were not fully installed at ${model_dir}"
-    fi
-}
 
 installer_asset_dir() {
     dir_name="$(dirname "$0")"
@@ -678,9 +746,13 @@ install_offline_devo() {
         return
     fi
 
-    archive_path="$(find_offline_file "$asset_dir" "${APP}-*-${target}.tar.gz" || true)"
+    asset_target="$(printf '%s\n' "$target" | sed 's/-unknown-linux-/-linux-/')"
+    archive_path="$(find_offline_file "$asset_dir" "${APP}-tui-v*-${asset_target}.tar.gz" || true)"
+    if [ -z "$archive_path" ] && [ "$asset_target" != "$target" ]; then
+        archive_path="$(find_offline_file "$asset_dir" "${APP}-tui-v*-${target}.tar.gz" || true)"
+    fi
     if [ -z "$archive_path" ]; then
-        die "Offline devo asset not found. Place ${APP}-*-${target}.tar.gz or ${APP} next to install.sh."
+        die "Offline devo asset not found. Place ${APP}-tui-*-${asset_target}.tar.gz or ${APP} next to install.sh."
     fi
 
     require_command tar "Error: 'tar' is required but not installed."
@@ -691,16 +763,12 @@ install_offline_devo() {
     tmp_dir="$(mktemp -d "${TMPDIR:-/tmp}/${APP}-offline-install.XXXXXX")"
     trap 'rm -rf "$tmp_dir"' EXIT INT TERM
 
+    if [ -f "$asset_dir/SHA256SUMS.txt" ]; then
+        verify_archive_checksum "$archive_path" "$asset_dir/SHA256SUMS.txt" "$(basename "$archive_path")"
+    fi
     tar -xzf "$archive_path" -C "$tmp_dir"
     extracted_binary="$(find_extracted_binary "$tmp_dir")"
-    extracted_mcp_binary="$(find_extracted_optional_binary "$tmp_dir" "$CODE_SEARCH_MCP_APP")"
-
-    mkdir -p "$install_dir"
-    install -m 755 "$extracted_binary" "${install_dir}/${APP}"
-    if [ -n "$extracted_mcp_binary" ]; then
-        install -m 755 "$extracted_mcp_binary" "${install_dir}/${CODE_SEARCH_MCP_APP}"
-        print_message info "${MUTED}Installed ${NC}${CODE_SEARCH_MCP_APP}${MUTED} sidecar${NC}"
-    fi
+    install_bundle "$(dirname "$extracted_binary")"
 
     rm -rf "$tmp_dir"
     trap - EXIT INT TERM
@@ -750,30 +818,6 @@ install_offline_ripgrep_sidecar() {
     trap - EXIT INT TERM
 }
 
-install_offline_code_search_model_files() {
-    asset_dir="$1"
-    model_dir="$(code_search_model_dir)"
-    nested_model_dir="${asset_dir}/${CODE_SEARCH_MODEL_DIR_NAME}"
-
-    if code_search_model_files_present "$nested_model_dir"; then
-        source_dir="$nested_model_dir"
-    elif code_search_model_files_present "$asset_dir"; then
-        source_dir="$asset_dir"
-    else
-        die "Offline code_search model files not found. Place ${CODE_SEARCH_MODEL_FILES} next to install.sh or under ${CODE_SEARCH_MODEL_DIR_NAME}/."
-    fi
-
-    mkdir -p "$model_dir"
-    print_message info "${MUTED}Installing code_search model from ${NC}${source_dir}${MUTED} into ${NC}${model_dir}"
-
-    for file in $CODE_SEARCH_MODEL_FILES; do
-        cp "${source_dir}/${file}" "${model_dir}/${file}"
-    done
-
-    if ! code_search_model_files_present "$model_dir"; then
-        die "code_search model files were not fully installed at ${model_dir}"
-    fi
-}
 
 
 print_banner() {
@@ -790,19 +834,18 @@ print_banner() {
 main() {
     print_banner
 
+
     if [ "$offline_mode" = "true" ]; then
         asset_dir="$(installer_asset_dir)"
         print_message info "${MUTED}Offline asset directory: ${NC}${asset_dir}"
         target="$(detect_target)"
         install_offline_devo "$asset_dir" "$target"
         install_offline_ripgrep_sidecar "$asset_dir"
-        install_offline_code_search_model_files "$asset_dir"
     elif [ -n "$binary_path" ]; then
         print_message info ""
         print_message info "${MUTED}Installing ${NC}${APP} ${MUTED}from local binary: ${NC}${binary_path}"
         install_from_binary "$binary_path"
         install_ripgrep_sidecar
-        install_code_search_model_files
     else
         target="$(detect_target)"
 
@@ -810,9 +853,6 @@ main() {
             version_tag="$(resolve_latest_version)"
         else
             version_tag="$(normalize_version "$requested_version")"
-            if ! release_exists "$version_tag"; then
-                die "Release ${version_tag} not found. See https://github.com/${REPO}/releases"
-            fi
         fi
 
         print_version_transition "$version_tag"
@@ -822,7 +862,6 @@ main() {
         fi
 
         install_ripgrep_sidecar
-        install_code_search_model_files
     fi
 
     print_path_hint "$install_dir"
@@ -835,7 +874,7 @@ main() {
     print_message info "${MUTED}${APP} is ready.${NC}"
     print_message info ""
     print_message info "  cd <project>    ${MUTED}# open your workspace${NC}"
-    print_message info "  devo onboard    ${MUTED}# first-run setup${NC}"
+    print_message info "  devo            ${MUTED}# first-run setup${NC}"
     print_message info ""
     print_message info "${MUTED}Docs: ${NC}https://github.com/${REPO}#readme"
 }

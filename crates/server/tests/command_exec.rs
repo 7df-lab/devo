@@ -10,14 +10,6 @@ use async_trait::async_trait;
 use base64::Engine;
 #[cfg(unix)]
 use base64::engine::general_purpose::STANDARD as BASE64_STANDARD;
-use devo_core::AgentsMdConfig;
-use devo_core::AppConfigStore;
-use devo_core::BundledSkillsConfig;
-use devo_core::FileSystemSkillCatalog;
-use devo_core::PresetModelCatalog;
-use devo_core::ProviderVendorCatalog;
-use devo_core::SkillsConfig;
-use devo_core::tools::ToolRegistry;
 #[cfg(unix)]
 use devo_protocol::CommandExecResult;
 use devo_protocol::ModelRequest;
@@ -26,11 +18,9 @@ use devo_protocol::ModelResponse;
 use devo_protocol::SessionId;
 use devo_protocol::StreamEvent;
 use devo_provider::ModelProviderSDK;
-use devo_provider::SingleProviderRouter;
 use devo_server::ClientTransportKind;
 use devo_server::ProtocolErrorCode;
 use devo_server::ServerRuntime;
-use devo_server::ServerRuntimeDependencies;
 use futures::Stream;
 use pretty_assertions::assert_eq;
 use tempfile::TempDir;
@@ -75,7 +65,7 @@ async fn sessionless_command_exec_streams_to_owner_without_session() -> Result<(
             owner_connection_id,
             serde_json::json!({
                 "id": 20,
-                "method": "_devo/command/exec",
+                "method": "command/exec",
                 "params": {
                     "process_id": "sessionless-1",
                     "cwd": data_root.path(),
@@ -102,12 +92,79 @@ async fn sessionless_command_exec_streams_to_owner_without_session() -> Result<(
         &mut owner_notifications_rx,
         "sessionless-1",
         /*session_id*/ None,
+        Some(0),
     )
     .await?;
     assert!(output.contains("sessionless-owned"));
 
     assert_no_notification(&mut other_notifications_rx).await?;
 
+    Ok(())
+}
+
+#[cfg(unix)]
+#[tokio::test]
+async fn session_interrupt_stops_sessionless_command_without_a_turn() -> Result<()> {
+    let data_root = TempDir::new()?;
+    let runtime = build_runtime(data_root.path())?;
+    let (connection_id, mut notifications_rx) =
+        initialize_connection(&runtime, "command-interrupt-owner").await?;
+
+    let response = runtime
+        .handle_incoming(
+            connection_id,
+            serde_json::json!({
+                "id": 22,
+                "method": "command/exec",
+                "params": {
+                    "process_id": "sessionless-interrupt-1",
+                    "cwd": data_root.path(),
+                    "program": {
+                        "type": "one_shot",
+                        "command": "sleep 60"
+                    },
+                    "size": null
+                }
+            }),
+        )
+        .await
+        .context("command/exec response")?;
+    let response: devo_server::SuccessResponse<CommandExecResult> =
+        serde_json::from_value(response)?;
+    assert_eq!(response.result.process_id, "sessionless-interrupt-1");
+
+    let interrupted = runtime
+        .handle_incoming(
+            connection_id,
+            serde_json::json!({
+                "id": 23,
+                "method": "session/interrupt",
+                "params": {
+                    "scope": {
+                        "scope": "command",
+                        "processId": "sessionless-interrupt-1"
+                    }
+                }
+            }),
+        )
+        .await
+        .context("session/interrupt response")?;
+    assert!(
+        interrupted.get("error").is_none(),
+        "session/interrupt failed: {interrupted}"
+    );
+    let interrupted: devo_server::SuccessResponse<
+        devo_protocol::native::rpc_session::SessionInterruptResult,
+    > = serde_json::from_value(interrupted)?;
+    assert!(interrupted.result.interrupted);
+
+    let _ = wait_for_command_exec_exit(
+        &mut notifications_rx,
+        "sessionless-interrupt-1",
+        /*session_id*/ None,
+        /*expected_exit_code*/ None,
+    )
+    .await?;
     Ok(())
 }
 
@@ -125,7 +182,7 @@ async fn sessionless_command_exec_requires_explicit_cwd() -> Result<()> {
             connection_id,
             serde_json::json!({
                 "id": 21,
-                "method": "_devo/command/exec",
+                "method": "command/exec",
                 "params": {
                     "process_id": "sessionless-missing-cwd",
                     "program": {
@@ -165,7 +222,7 @@ async fn session_bound_command_exec_resolves_session_cwd() -> Result<()> {
             connection_id,
             serde_json::json!({
                 "id": 23,
-                "method": "_devo/command/exec",
+                "method": "command/exec",
                 "params": {
                     "session_id": session_id,
                     "process_id": "session-bound-1",
@@ -188,41 +245,24 @@ async fn session_bound_command_exec_resolves_session_cwd() -> Result<()> {
         }
     );
 
-    let output =
-        wait_for_command_exec_exit(&mut notifications_rx, "session-bound-1", Some(session_id))
-            .await?;
+    let output = wait_for_command_exec_exit(
+        &mut notifications_rx,
+        "session-bound-1",
+        Some(session_id),
+        Some(0),
+    )
+    .await?;
     assert!(output.contains("session-bound"));
 
     Ok(())
 }
 
 fn build_runtime(data_root: &std::path::Path) -> Result<Arc<ServerRuntime>> {
-    let provider: Arc<dyn ModelProviderSDK> = Arc::new(UnusedProvider);
-    let db = Arc::new(devo_server::db::Database::open(
-        data_root.join("command_exec.db"),
-    )?);
-    Ok(ServerRuntime::new(
-        data_root.to_path_buf(),
-        ServerRuntimeDependencies::new(
-            Arc::clone(&provider),
-            Arc::new(SingleProviderRouter::new(provider)),
-            Arc::new(ToolRegistry::new()),
-            devo_server::empty_mcp_manager(),
-            "test-model".to_string(),
-            Arc::new(PresetModelCatalog::default()),
-            Arc::new(ProviderVendorCatalog::default()),
-            Box::new(FileSystemSkillCatalog::new(SkillsConfig {
-                bundled: Some(BundledSkillsConfig { enabled: false }),
-                ..SkillsConfig::default()
-            })),
-            AgentsMdConfig::default(),
-            db,
-            Arc::new(std::sync::Mutex::new(AppConfigStore::load(
-                data_root.to_path_buf(),
-                /*workspace_root*/ None,
-            )?)),
-        ),
-    ))
+    Ok(
+        devo_server::test_support::TestRuntime::new(Arc::new(UnusedProvider))
+            .db_file("command_exec.db")
+            .runtime(data_root),
+    )
 }
 
 async fn initialize_connection(
@@ -246,7 +286,8 @@ async fn initialize_connection(
                         "name": client_name,
                         "title": client_name,
                         "version": "1.0.0"
-                    }
+                    },
+                    "_meta": { "devo": { "protocol": "native" } }
                 }
             }),
         )
@@ -271,20 +312,19 @@ async fn start_session(
             connection_id,
             serde_json::json!({
                 "id": 22,
-                "method": "session/start",
+                "method": "session/new",
                 "params": {
                     "cwd": cwd,
-                    "ephemeral": false,
-                    "title": null,
-                    "model": "test-model"
+                    "idempotencyKey": "command-exec-session"
                 }
             }),
         )
         .await
-        .context("session/start response")?;
-    let response: devo_server::SuccessResponse<devo_server::SessionStartResult> =
-        serde_json::from_value(response)?;
-    Ok(response.result.session.session_id)
+        .context("session/new response")?;
+    let response: devo_server::SuccessResponse<
+        devo_protocol::native::rpc_session::SessionNewResult,
+    > = serde_json::from_value(response)?;
+    Ok(SessionId::from(response.result.session.id.as_str()))
 }
 
 #[cfg(unix)]
@@ -292,6 +332,7 @@ async fn wait_for_command_exec_exit(
     notifications_rx: &mut mpsc::Receiver<serde_json::Value>,
     process_id: &str,
     session_id: Option<SessionId>,
+    expected_exit_code: Option<i32>,
 ) -> Result<String> {
     let mut output = String::new();
     loop {
@@ -302,18 +343,19 @@ async fn wait_for_command_exec_exit(
         let payload = {
             let method = notification["method"].as_str();
             match method {
-                Some(method) if method.starts_with("_devo/") => {
-                    let inner_method = method
-                        .strip_prefix("_devo/")
-                        .expect("starts_with checked prefix");
-                    Some((inner_method, &notification["params"]))
+                Some(method @ ("command/exec/outputDelta" | "command/exec/exited")) => {
+                    Some((method, &notification["params"]))
                 }
                 Some("session/update") => {
                     let meta = &notification["params"]["_meta"];
                     let original_method = meta["devo/originalMethod"].as_str();
                     let original_event = &meta["devo/originalEvent"];
                     original_method.map(|method| {
-                        let event_payload = if original_event.get("process_id").is_some() {
+                        let event_payload = if original_event
+                            .get("processId")
+                            .or_else(|| original_event.get("process_id"))
+                            .is_some()
+                        {
                             original_event
                         } else {
                             match method {
@@ -333,26 +375,28 @@ async fn wait_for_command_exec_exit(
         };
         match payload {
             Some(("command/exec/outputDelta", params)) => {
-                if params["process_id"] != serde_json::json!(process_id) {
+                if params["processId"] != serde_json::json!(process_id) {
                     continue;
                 }
                 assert_notification_session(params, session_id);
                 assert_eq!(params["stream"], "pty");
-                let delta_base64 = params["delta_base64"]
+                let delta_base64 = params["deltaBase64"]
                     .as_str()
-                    .context("delta_base64 should be a string")?;
+                    .context("deltaBase64 should be a string")?;
                 let bytes = BASE64_STANDARD.decode(delta_base64)?;
                 output.push_str(&String::from_utf8_lossy(&bytes));
             }
             Some(("command/exec/exited", params)) => {
-                if params["process_id"] != serde_json::json!(process_id) {
+                if params["processId"] != serde_json::json!(process_id) {
                     continue;
                 }
                 assert_notification_session(params, session_id);
-                assert_eq!(params["exit_code"], 0);
+                if let Some(expected_exit_code) = expected_exit_code {
+                    assert_eq!(params["exitCode"], expected_exit_code);
+                }
                 return Ok(output);
             }
-            Some(("session/started", _)) if session_id.is_none() => {
+            Some(("session/created" | "session/started", _)) if session_id.is_none() => {
                 anyhow::bail!("sessionless command/exec unexpectedly created a session")
             }
             _ => {}
@@ -364,12 +408,12 @@ async fn wait_for_command_exec_exit(
 fn assert_notification_session(params: &serde_json::Value, session_id: Option<SessionId>) {
     match session_id {
         Some(session_id) => {
-            assert_eq!(params["session_id"], serde_json::json!(session_id));
+            assert_eq!(params["sessionId"], serde_json::json!(session_id));
         }
         None => {
             assert!(
-                params.get("session_id").is_none(),
-                "sessionless command/exec notification should omit session_id: {params}"
+                params.get("sessionId").is_none(),
+                "sessionless command/exec notification should omit sessionId: {params}"
             );
         }
     }

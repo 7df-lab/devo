@@ -1,5 +1,4 @@
 use async_trait::async_trait;
-use devo_protocol::CollaborationMode;
 use devo_protocol::RequestUserInputArgs;
 use devo_protocol::RequestUserInputQuestion;
 
@@ -49,12 +48,8 @@ impl ToolHandler for QuestionHandler {
         input: serde_json::Value,
         _progress: Option<ToolProgressSender>,
     ) -> Result<ToolResult, ToolCallError> {
-        if ctx.collaboration_mode != CollaborationMode::Plan {
-            return Err(ToolCallError::BlockedByMode("plan mode".to_string()));
-        }
-
         let args = request_user_input_args(input)?;
-        let turn_id = ctx.turn_id.clone().ok_or_else(|| {
+        let turn_id = ctx.turn_id.ok_or_else(|| {
             ToolCallError::ExecutionFailed("request_user_input requires an active turn".to_string())
         })?;
         let coordinator = ctx.agent_coordinator.clone().ok_or_else(|| {
@@ -63,12 +58,7 @@ impl ToolHandler for QuestionHandler {
             )
         })?;
         let response = coordinator
-            .request_user_input(
-                ctx.session_id.clone(),
-                turn_id,
-                ctx.tool_call_id.0.clone(),
-                args,
-            )
+            .request_user_input(ctx.session_id, turn_id, ctx.tool_call_id.0.clone(), args)
             .await?;
         Ok(ToolResult::success(
             ToolResultContent::Json(
@@ -144,14 +134,28 @@ fn request_user_input_args(
         serde_json::from_value(input)
             .map_err(|error| ToolCallError::InvalidInput(error.to_string()))
     } else if let Some(question) = input.get("question").and_then(serde_json::Value::as_str) {
+        let options = input.get("options").and_then(|v| v.as_array()).map(|opts| {
+            opts.iter()
+                .filter_map(|opt| {
+                    let label = opt.get("label")?.as_str()?.to_string();
+                    let description = opt
+                        .get("description")
+                        .and_then(|d| d.as_str())
+                        .unwrap_or("")
+                        .to_string();
+                    Some(devo_protocol::RequestUserInputOption { label, description })
+                })
+                .collect::<Vec<_>>()
+        });
+        let has_options = options.as_ref().is_some_and(|o| o.len() >= 2);
         Ok(RequestUserInputArgs {
             questions: vec![RequestUserInputQuestion {
                 id: "question".to_string(),
                 header: "Question".to_string(),
                 question: question.to_string(),
-                is_other: true,
+                is_other: !has_options,
                 is_secret: false,
-                options: None,
+                options: if has_options { options } else { None },
             }],
         })
     } else {
@@ -159,6 +163,14 @@ fn request_user_input_args(
             "missing 'questions' field".to_string(),
         ))
     }
+}
+
+/// Parse host_request / tool JSON into [`RequestUserInputArgs`].
+#[allow(dead_code)] // used by host_request / future skill wrappers
+pub fn parse_request_user_input_args(
+    input: serde_json::Value,
+) -> Result<RequestUserInputArgs, ToolCallError> {
+    request_user_input_args(input)
 }
 
 #[cfg(test)]
@@ -188,5 +200,57 @@ mod tests {
                 .expect("options description");
         assert!(options_description.contains("at least two meaningful choices"));
         assert!(options_description.contains("do not provide exactly one option"));
+    }
+
+    #[tokio::test]
+    async fn question_tool_is_available_in_build_mode() {
+        let handler = QuestionHandler::new();
+        let ctx = ToolContext {
+            output_store: None,
+            tool_call_id: crate::invocation::ToolCallId("call-1".into()),
+            session_id: "session-1".into(),
+            turn_id: Some("turn-1".into()),
+            workspace_root: std::env::temp_dir(),
+            budgets: crate::contracts::ToolBudgets {
+                output_limit_bytes: 1024,
+                wall_time_limit_ms: None,
+            },
+            cancel_token: tokio_util::sync::CancellationToken::new(),
+            agent_scope: crate::contracts::ToolAgentScope::Parent,
+            collaboration_mode: devo_protocol::CollaborationMode::Build,
+            agent_coordinator: None,
+            client_filesystem: None,
+            file_read_ledger: None,
+            network_proxy: None,
+            network_no_proxy: None,
+            sandbox_permission_overlay: None,
+            sandbox_profile: None,
+            kernel: None,
+            python_cell_first_wait_ms: None,
+            python_cell_watch: None,
+            python_cell_completion: None,
+            session_dir: None,
+        };
+
+        let error = handler
+            .handle(
+                ctx,
+                serde_json::json!({
+                    "questions": [{
+                        "id": "topic",
+                        "header": "Topic",
+                        "question": "Which topic?"
+                    }]
+                }),
+                None,
+            )
+            .await
+            .expect_err("missing coordinator should fail after the mode gate");
+
+        assert!(
+            !matches!(error, ToolCallError::BlockedByMode(_)),
+            "request_user_input must not require plan mode: {error}"
+        );
+        assert!(matches!(error, ToolCallError::ExecutionFailed(_)));
     }
 }

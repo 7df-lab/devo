@@ -45,6 +45,11 @@ pub struct SpawnAgentParams {
     pub tool_policy: AgentToolPolicy,
     #[serde(default)]
     pub ephemeral: bool,
+    /// Caller-requested child name. RLM `spawn(name=…)` addressing (messaging,
+    /// observation, delete) keys off this name, so it must be honored when
+    /// present; `None` keeps the generated adjective-noun nickname.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub nickname: Option<String>,
 }
 
 #[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize, JsonSchema, TS)]
@@ -54,6 +59,13 @@ pub struct SpawnAgentResult {
     pub agent_path: String,
     pub agent_nickname: String,
     pub status: String,
+    /// Directory holding the child's rollout/artifacts, when persisted.
+    /// RLM `rlm.spawn` handles require it to address child artifacts.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub session_dir: Option<String>,
+    /// Model binding the child runs with (inherited from the parent).
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub model: Option<String>,
 }
 
 /// Model-facing spawn result: address children by path or nickname, not session ids.
@@ -279,6 +291,7 @@ mod tests {
                 max_turns: None,
                 tool_policy: AgentToolPolicy::Inherit,
                 ephemeral: false,
+                nickname: Some("review".to_string()),
             },
             "result": SpawnAgentResult {
                 task_id: TaskId::from(child_session_id),
@@ -286,6 +299,8 @@ mod tests {
                 agent_path: "root/review".to_string(),
                 agent_nickname: "review".to_string(),
                 status: "running".to_string(),
+                session_dir: None,
+                model: None,
             },
             "wait": WaitAgentResult {
                 events: vec![ParentAgentOutputEvent {

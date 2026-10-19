@@ -1,0 +1,109 @@
+import os
+import unittest
+from importlib import import_module
+from pathlib import Path
+from tempfile import gettempdir
+from unittest.mock import patch
+
+import rlm
+
+harness = import_module("rlm.harness")
+mcp_base = import_module("rlm.mcp_base")
+
+
+class AgentDirectoryTests(unittest.TestCase):
+    def test_harness_and_mcp_defaults_use_devo_config_dir(self):
+        env = {
+            "DEVO_CODING_AGENT_DIR": "",
+            "DEVO_HOME": "",
+            "PI_CODING_AGENT_DIR": "",
+        }
+        home = Path(gettempdir()) / "devo-agent-dir-test"
+        expected = (home / ".devo").resolve()
+        with patch.dict(os.environ, env), patch.object(
+            Path, "home", return_value=home
+        ):
+            self.assertEqual(harness._agent_dir(), expected)
+            self.assertEqual(mcp_base._agent_dir(), expected)
+
+
+class RlmHostHelperTests(unittest.IsolatedAsyncioTestCase):
+    async def test_harness_followup_guidance_matches_recovered_child_contract(self):
+        session_dir = Path(gettempdir()) / "devo-recovered-child"
+        payload = {
+            "rlm_child_id": "child-id",
+            "active_session_id": "child-id",
+            "session_id": "child-id",
+            "session_name": "worker",
+            "session_dir": str(session_dir),
+            "status": "completed",
+        }
+
+        async def fake_host_request(request_type, request_payload=None):
+            self.assertEqual((request_type, request_payload), ("rlm.list_subagents", None))
+            return {"subagents": [payload]}
+
+        with patch.object(rlm, "host_request", new=fake_host_request):
+            children = await rlm.list_subagents()
+
+        self.assertEqual(children, [rlm.RLMSubagent(**{**payload, "session_dir": session_dir})])
+        overview = harness.HarnessState(in_memory=True).overview()
+        self.assertIn("receiver_name=child.session_name", overview)
+        self.assertIn("spawn handle uses handle.name", overview)
+        self.assertEqual(children[0].session_name, "worker")
+
+    async def test_helpers_use_typed_host_requests(self):
+        calls = []
+
+        async def fake_host_request(request_type, payload=None):
+            calls.append((request_type, payload))
+            return {"accepted": True}
+
+        with patch.object(rlm, "host_request", new=fake_host_request):
+            self.assertEqual(await rlm.rlm.web_search("  Rust docs  "), {"accepted": True})
+            self.assertEqual(
+                await rlm.rlm.web_fetch(" https://example.test ", format="text", timeout=12),
+                {"accepted": True},
+            )
+            self.assertEqual(
+                await rlm.rlm.update_plan(
+                    [{"step": "Inspect", "status": "in_progress"}],
+                    explanation="Starting",
+                ),
+                {"accepted": True},
+            )
+            self.assertEqual(
+                await rlm.rlm.request_user_input([{"id": "choice"}]),
+                {"accepted": True},
+            )
+
+        self.assertEqual(
+            calls,
+            [
+                ("web.search", {"query": "Rust docs"}),
+                (
+                    "web.fetch",
+                    {"url": "https://example.test", "format": "text", "timeout": 12},
+                ),
+                (
+                    "plan.update",
+                    {
+                        "plan": [{"step": "Inspect", "status": "in_progress"}],
+                        "explanation": "Starting",
+                    },
+                ),
+                ("question", {"questions": [{"id": "choice"}]}),
+            ],
+        )
+
+    async def test_search_rejects_empty_query_before_host_request(self):
+        async def fake_host_request(request_type, payload=None):
+            self.fail(f"unexpected host request: {request_type} {payload}")
+
+        with patch.object(rlm, "host_request", new=fake_host_request):
+            with self.assertRaises(ValueError):
+                await rlm.rlm.web_search("   ")
+
+
+if __name__ == "__main__":
+    unittest.main()

@@ -1,7 +1,9 @@
 import { afterEach, beforeEach, describe, expect, mock, test } from "bun:test"
 import type { DevoClient } from "@devo-ai/sdk/v2/client"
 import type { Event, Session } from "../lib/types"
-import { partsFamily, partStorageKey } from "../atoms/parts"
+import { serverUrlAtom } from "../atoms/connection"
+import { discoveryAtom } from "../atoms/discovery"
+import { itemsFamily } from "../atoms/messages"
 import { projectPaginationFamily, sessionFamily, upsertSessionAtom } from "../atoms/sessions"
 import { appStore } from "../atoms/store"
 
@@ -45,8 +47,17 @@ class FakeEventStream {
 }
 
 const streams = new Map<string, FakeEventStream>()
+type FakeClient = {
+	directory: string
+	stream: FakeEventStream
+	disposeCalls: number
+	disposed: boolean
+	dispose: () => void
+}
+const createdClients: FakeClient[] = []
 let activeManager: typeof import("./connection-manager") | null = null
 let listSessionsImpl: (client: DevoClient, options?: unknown) => Promise<Session[]> = async () => []
+let deleteSessionImpl: (client: DevoClient, sessionId: string) => Promise<void> = async () => {}
 let getSessionStatusesImpl: () => Promise<Record<string, { type: string }>> = async () => ({})
 
 function streamFor(directory: string): FakeEventStream {
@@ -58,23 +69,47 @@ function streamFor(directory: string): FakeEventStream {
 	return stream
 }
 
+function createFakeClient(directory: string): FakeClient {
+	const stream = new FakeEventStream()
+	let disposed = false
+	const client: FakeClient = {
+		directory,
+		stream,
+		disposeCalls: 0,
+		disposed: false,
+		dispose() {
+			client.disposeCalls++
+			if (disposed) return
+			disposed = true
+			client.disposed = true
+			client.stream.close()
+		},
+	}
+	streams.set(directory, stream)
+	createdClients.push(client)
+	return client
+}
+
 mock.module("./devo", () => ({
 	connectToServer: (_url: string, options?: { directory?: string }) =>
-		({ directory: options?.directory ?? "__base__" }) as unknown as DevoClient,
+		createFakeClient(options?.directory ?? "__base__") as unknown as DevoClient,
 	disposeAllInstances: () => {},
 	getSession: async () => null,
 	getSessionStatuses: async () => getSessionStatusesImpl(),
 	listProjects: async () => [],
 	projectsFromSessions: (sessions: Session[]) => sessions,
 	listSessions: async (client: DevoClient, options?: unknown) => listSessionsImpl(client, options),
+	deleteSession: async (client: DevoClient, sessionId: string) => deleteSessionImpl(client, sessionId),
 	subscribeToGlobalEvents: async (client: DevoClient) =>
-		streamFor(((client as unknown as { directory?: string }).directory) ?? "__base__"),
+		(client as unknown as FakeClient).stream,
 }))
 
 describe("connection manager project event bridge", () => {
 	beforeEach(() => {
 		streams.clear()
+		createdClients.length = 0
 		listSessionsImpl = async () => []
+		deleteSessionImpl = async () => {}
 		getSessionStatusesImpl = async () => ({})
 		;(globalThis as unknown as { window: Record<string, unknown> }).window = {}
 		;(globalThis as unknown as { requestAnimationFrame: (callback: FrameRequestCallback) => number }).requestAnimationFrame =
@@ -112,13 +147,105 @@ describe("connection manager project event bridge", () => {
 		streamFor(directory).push({
 			type: "session.status",
 			properties: {
-				sessionID: session.id,
+				sessionId: session.id,
 				status: { type: "busy" },
 			},
 		})
 		await new Promise((resolve) => setTimeout(resolve, 5))
 
 		expect(appStore.get(sessionFamily(session.id))?.status).toEqual({ type: "busy" })
+	})
+
+	test("an early folder read does not leave pagination loading before connection", async () => {
+        const directory = "/repo/early-folder-loading"
+        appStore.set(serverUrlAtom, null)
+        const manager = await import(`./connection-manager?case=${Date.now()}`)
+        activeManager = manager
+        await manager.loadProjectSessions(directory, undefined, { limit: 5, roots: true })
+        expect(appStore.get(projectPaginationFamily(directory))).toEqual({
+            loaded: false, loading: false, hasMore: true, currentLimit: 5,
+        })
+        await manager.connectToDevo("devo://stdio")
+        await manager.loadProjectSessions(directory, undefined, { limit: 5, roots: true })
+        expect(appStore.get(projectPaginationFamily(directory))).toEqual({
+            loaded: true, loading: false, hasMore: false, currentLimit: 5,
+        })
+    })
+
+	test("reconnects a project event stream after a backend restart", async () => {
+		const directory = "/repo/project-restart-bridge"
+		const session: Session = {
+			id: "restart-bridge-session",
+			directory,
+			title: "Restart bridge",
+			time: { created: 1, updated: 1 },
+		}
+		appStore.set(upsertSessionAtom, { session, directory })
+		const manager = await import(`./connection-manager?case=${Date.now()}`)
+		activeManager = manager
+		await manager.connectToDevo("devo://stdio")
+		const client = manager.getProjectClient(directory) as unknown as FakeClient
+		client.stream.push({
+			type: "session.status",
+			properties: { sessionId: session.id, status: { type: "busy" } },
+		})
+		await new Promise((resolve) => setTimeout(resolve, 20))
+		expect(appStore.get(sessionFamily(session.id))?.status).toEqual({ type: "busy" })
+		client.stream.close()
+		client.stream = new FakeEventStream()
+		streams.set(directory, client.stream)
+		client.stream.push({
+			type: "session.status",
+			properties: { sessionId: session.id, status: { type: "idle" } },
+		})
+		const deadline = Date.now() + 3000
+		while (appStore.get(sessionFamily(session.id))?.status.type !== "idle" && Date.now() < deadline) {
+			await new Promise((resolve) => setTimeout(resolve, 20))
+		}
+		expect(appStore.get(sessionFamily(session.id))?.status).toEqual({ type: "idle" })
+	})
+
+	test("disposes base and project clients on server replacement and disconnect", async () => {
+		const manager = await import(`./connection-manager?case=${Date.now()}`)
+		activeManager = manager
+		await manager.connectToDevo("devo://first")
+		const firstBaseClient = createdClients[0]
+		const firstProjectClient = manager.getProjectClient("/repo/client-lifecycle") as unknown as FakeClient
+
+		await manager.connectToDevo("devo://second")
+		expect(firstBaseClient.disposeCalls).toBe(1)
+		expect(firstProjectClient.disposeCalls).toBe(1)
+
+		const secondBaseClient = createdClients[2]
+		const secondProjectClient = manager.getProjectClient("/repo/client-lifecycle") as unknown as FakeClient
+		expect(secondProjectClient).not.toBe(firstProjectClient)
+
+		manager.disconnect()
+		expect(secondBaseClient.disposeCalls).toBe(1)
+		expect(secondProjectClient.disposeCalls).toBe(1)
+		manager.disconnect()
+		expect(createdClients.map((client) => client.disposeCalls)).toEqual([1, 1, 1, 1])
+	})
+
+	test("disposes prior-module clients during base and project getter recovery", async () => {
+		const previousManager = await import(`./connection-manager?previous=${Date.now()}`)
+		activeManager = previousManager
+		await previousManager.connectToDevo("devo://hmr")
+		const previousBaseClient = createdClients[0]
+		const previousProjectClient = previousManager.getProjectClient("/repo/hmr") as unknown as FakeClient
+
+		const baseRecoveryManager = await import(`./connection-manager?base-recovery=${Date.now()}`)
+		activeManager = baseRecoveryManager
+		const recoveredBaseClient = baseRecoveryManager.getBaseClient() as unknown as FakeClient
+		expect(previousBaseClient.disposeCalls).toBe(1)
+		expect(previousProjectClient.disposeCalls).toBe(1)
+
+		const projectRecoveryManager = await import(`./connection-manager?project-recovery=${Date.now()}`)
+		activeManager = projectRecoveryManager
+		const recoveredProjectClient = projectRecoveryManager.getProjectClient("/repo/hmr") as unknown as FakeClient
+		expect(recoveredBaseClient.disposeCalls).toBe(1)
+		expect(recoveredProjectClient).toBe(createdClients[4])
+		expect(createdClients).toHaveLength(5)
 	})
 
 	test("forwards project-scoped message part events into renderer state", async () => {
@@ -137,26 +264,34 @@ describe("connection manager project event bridge", () => {
 		expect(manager.getProjectClient(directory)).not.toBeNull()
 
 		streamFor(directory).push({
-			type: "message.part.updated",
+			type: "item.updated",
 			properties: {
-				part: {
-					id: "assistant-message-text",
-					sessionID: session.id,
-					messageID: "assistant-message",
-					type: "text",
-					text: "hello from project stream",
+				info: {
+					id: "assistant-message",
+					sessionId: session.id,
+					turnId: "turn-1",
+					seq: 1,
+					revision: 1,
+					createdAt: "2026-01-01T00:00:01.000Z",
+					updatedAt: "2026-01-01T00:00:01.000Z",
+					state: "running",
+					item: { type: "assistantMessage", text: "hello from project stream" },
 				},
 			},
 		})
 		await new Promise((resolve) => setTimeout(resolve, 5))
 
-		expect(appStore.get(partsFamily(partStorageKey(session.id, "assistant-message")))).toEqual([
+		expect(appStore.get(itemsFamily(session.id))).toEqual([
 			{
-				id: "assistant-message-text",
-				sessionID: session.id,
-				messageID: "assistant-message",
-				type: "text",
-				text: "hello from project stream",
+				id: "assistant-message",
+				sessionId: session.id,
+				turnId: "turn-1",
+				seq: 1,
+				revision: 1,
+				createdAt: "2026-01-01T00:00:01.000Z",
+				updatedAt: "2026-01-01T00:00:01.000Z",
+				state: "running",
+				item: { type: "assistantMessage", text: "hello from project stream" },
 			},
 		])
 	})
@@ -194,7 +329,12 @@ describe("connection manager project event bridge", () => {
 			title: `Session ${index + 1}`,
 			time: { created: 6 - index, updated: 6 - index },
 		}))
-		listSessionsImpl = async () => sessions
+		const deletedIds = new Set<string>()
+		listSessionsImpl = async (_client, options) => {
+			const remaining = sessions.filter((session) => !deletedIds.has(session.id))
+			const limit = (options as { limit?: number } | undefined)?.limit
+			return limit === undefined ? remaining : remaining.slice(0, limit)
+		}
 
 		const manager = await import(`./connection-manager?case=${Date.now()}`)
 		activeManager = manager
@@ -204,6 +344,7 @@ describe("connection manager project event bridge", () => {
 
 		expect(appStore.get(sessionFamily(sessions[5].id))).toBeNull()
 
+		deletedIds.add(sessions[0].id)
 		await manager.refillProjectSessionsAfterDelete(directory, sessions[0].id)
 
 		expect({
@@ -220,5 +361,171 @@ describe("connection manager project event bridge", () => {
 				loading: false,
 			},
 		})
+	})
+
+	test("loads another project's sessions even when discovery only returned one project", async () => {
+		const projectA = "/repo/alpha"
+		const projectB = "/repo/beta"
+		const sessionA: Session = {
+			id: "alpha-session",
+			directory: projectA,
+			title: "Alpha",
+			time: { created: 2, updated: 2 },
+		}
+		const sessionB: Session = {
+			id: "beta-session",
+			directory: projectB,
+			title: "Beta",
+			time: { created: 1, updated: 1 },
+		}
+		listSessionsImpl = async (client) => {
+			const directory = (client as { directory?: string }).directory
+			if (directory === "__base__") return [sessionA]
+			if (directory === projectB) return [sessionB]
+			if (directory === projectA) return [sessionA]
+			return []
+		}
+
+		const manager = await import(`./connection-manager?case=${Date.now()}`)
+		activeManager = manager
+		await manager.connectToDevo("devo://stdio")
+		await manager.loadAllProjects()
+		await manager.loadProjectSessions(projectB, undefined, { limit: 5, roots: true })
+
+		expect({
+			otherProject: appStore.get(sessionFamily(sessionB.id))?.session,
+			discoveryOnly: appStore.get(sessionFamily(sessionA.id)),
+		}).toEqual({
+			otherProject: sessionB,
+			discoveryOnly: null,
+		})
+	})
+
+	test("deletes every listed session when a project folder is removed", async () => {
+		const directory = "/repo/remove-folder"
+		const otherDirectory = "/repo/keep-folder"
+		const sessions: Session[] = [
+			{
+				id: "keep-1",
+				directory: otherDirectory,
+				title: "Keep",
+				time: { created: 3, updated: 3 },
+			},
+			{
+				id: "remove-1",
+				directory,
+				title: "Remove 1",
+				time: { created: 2, updated: 2 },
+			},
+			{
+				id: "remove-2",
+				directory,
+				title: "Remove 2",
+				time: { created: 1, updated: 1 },
+			},
+		]
+		const deletedIds: string[] = []
+		let listOptions: unknown
+		const remainingIds = new Set(sessions.map((session) => session.id))
+		listSessionsImpl = async (client, options) => {
+			listOptions = options
+			const clientDirectory = (client as { directory?: string }).directory
+			return sessions.filter((session) => {
+				if (!remainingIds.has(session.id)) return false
+				if (clientDirectory === "__base__") return true
+				return session.directory === clientDirectory
+			})
+		}
+		deleteSessionImpl = async (_client, sessionId) => {
+			deletedIds.push(sessionId)
+			remainingIds.delete(sessionId)
+		}
+
+		const manager = await import(`./connection-manager?case=${Date.now()}`)
+		activeManager = manager
+		await manager.connectToDevo("devo://stdio")
+		await manager.loadAllProjects()
+		const removedDirectoryClient = manager.getProjectClient(directory) as unknown as FakeClient
+		const removedDirectoryAliasClient = manager.getProjectClient(`${directory}/`) as unknown as FakeClient
+		for (const session of sessions) {
+			appStore.set(upsertSessionAtom, { session, directory: session.directory ?? "" })
+		}
+		appStore.set(discoveryAtom, {
+			loaded: true,
+			loading: false,
+			error: null,
+			phase: "ready",
+			projects: [
+				{
+					id: "remove-project",
+					name: "remove-folder",
+					worktree: directory,
+					path: { root: directory },
+					time: { created: 1, updated: 1 },
+					sandboxes: [],
+				},
+				{
+					id: "keep-project",
+					name: "keep-folder",
+					worktree: otherDirectory,
+					path: { root: otherDirectory },
+					time: { created: 1, updated: 1 },
+					sandboxes: [],
+				},
+			],
+		})
+
+		await manager.deleteProjectSessions(directory)
+		expect(removedDirectoryClient.disposeCalls).toBe(1)
+		expect(removedDirectoryAliasClient.disposeCalls).toBe(1)
+		const reopenedDirectoryClient = manager.getProjectClient(directory) as unknown as FakeClient
+		expect(reopenedDirectoryClient).not.toBe(removedDirectoryClient)
+		await manager.loadProjectSessions(directory)
+
+		expect({
+			listOptions,
+			deletedIds,
+			removedFirst: appStore.get(sessionFamily("remove-1")),
+			removedSecond: appStore.get(sessionFamily("remove-2")),
+			kept: appStore.get(sessionFamily("keep-1"))?.session,
+			pagination: appStore.get(projectPaginationFamily(directory)),
+			discoveredWorktrees: appStore.get(discoveryAtom).projects.map((project) => project.worktree),
+		}).toEqual({
+			listOptions: { roots: true },
+			deletedIds: ["remove-1", "remove-2"],
+			removedFirst: null,
+			removedSecond: null,
+			kept: sessions[0],
+			pagination: {
+				loaded: false,
+				currentLimit: 5,
+				hasMore: true,
+				loading: false,
+			},
+			discoveredWorktrees: [otherDirectory],
+		})
+	})
+
+	test("keeps a project client live when session deletion fails", async () => {
+		const directory = "/repo/remove-failure"
+		const session: Session = {
+			id: "failed-delete-session",
+			directory,
+			title: "Failed deletion",
+			time: { created: 1, updated: 1 },
+		}
+		listSessionsImpl = async () => [session]
+		deleteSessionImpl = async () => {
+			throw new Error("delete failed")
+		}
+
+		const manager = await import(`./connection-manager?case=${Date.now()}`)
+		activeManager = manager
+		await manager.connectToDevo("devo://stdio")
+		const client = manager.getProjectClient(directory) as unknown as FakeClient
+
+		await expect(manager.deleteProjectSessions(directory)).rejects.toThrow("delete failed")
+		expect(client.disposeCalls).toBe(0)
+		expect(manager.getProjectClient(directory)).toBe(client)
 	})
 })

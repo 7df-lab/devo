@@ -1,4 +1,4 @@
-import { app, BrowserWindow, dialog, ipcMain, nativeTheme, net, systemPreferences } from "electron"
+import { app, BrowserWindow, dialog, ipcMain, nativeTheme, net, shell, systemPreferences } from "electron"
 import {
 	acceptRun,
 	archiveRun,
@@ -31,7 +31,13 @@ import {
 	stashAndCheckout,
 	stashPop,
 } from "./git-service"
+import {
+	localWorkspaceChangesSummary,
+	localWorkspaceFilePatch,
+	type LocalGitChangeScope,
+} from "./git-workspace-changes"
 import { getResolvedChromeTier, resolveTitleBarOverlay } from "./liquid-glass"
+import { createProjectAgentsMd, listRuleFiles } from "./rules-files"
 import { createLogger } from "./logger"
 import { readModelState, updateModelRecent } from "./model-state"
 import { dismissNotification, updateBadgeCount } from "./notifications"
@@ -43,18 +49,26 @@ import {
 	restoreMigrationBackup,
 	scanProvider,
 } from "./onboarding"
+import { openUserMcpConfigFile } from "./mcp-config"
 import { getOpenInTargets, openInTarget, setPreferredTarget } from "./open-in-targets"
+import { isDesktopOAuthProviderId, loginDesktopOAuth, credentialSetParamsFromDesktopOAuth } from "./provider-oauth"
+import { MCP_CONFIG_OPEN_PATH } from "../shared/mcp-config"
 import {
 	ensureServer,
-	getAcpTrafficLogState,
+	getNativeTrafficLogState,
 	getServerUrl,
-	isAcpConnected,
-	requestAcp,
-	respondAcp,
+	isNativeConnected,
+	notifyNative,
+	requestNative,
+	respondNative,
 	restartServer,
 	stopServer,
-	subscribeAcp,
+	subscribeNative,
 } from "./devo-manager"
+import {
+	isSessionNotFoundError,
+	nativeIpcErrorEnvelope,
+} from "../shared/native-ipc-error"
 import { getOpaqueWindows, getSettings, onSettingsChanged, updateSettings } from "./settings-store"
 import { desktopTerminalManager } from "./terminal-manager"
 import {
@@ -66,6 +80,55 @@ import {
 } from "./updater"
 
 const log = createLogger("ipc")
+type OAuthAttempt = {
+	controller: AbortController
+	phase: "authorizing" | "saving"
+	finished: Promise<void>
+	finish: () => void
+}
+const oauthAttempts = new Map<number, OAuthAttempt>()
+const pendingOauthLogins = new Map<number, AbortController>()
+// Credential writes to one provider are ordered across renderer windows while their
+// RPCs are pending. If transport fails before the server write finishes, ordering
+// requires server-side support; do not blindly delete an unknown credential.
+const oauthCredentialWrites = new Map<string, Promise<void>>()
+
+function assertCurrentOAuth(senderId: number, attempt: OAuthAttempt): void {
+	if (attempt.controller.signal.aborted || oauthAttempts.get(senderId) !== attempt) {
+		throw new Error("Login cancelled")
+	}
+}
+
+async function persistDesktopOAuthCredential(
+	senderId: number,
+	attempt: OAuthAttempt,
+	providerId: string,
+	credential: Awaited<ReturnType<typeof loginDesktopOAuth>>,
+	onSaving: () => void,
+): Promise<void> {
+	assertCurrentOAuth(senderId, attempt)
+	const previous = oauthCredentialWrites.get(providerId)
+	let release!: () => void
+	const write = new Promise<void>((resolve) => {
+		release = resolve
+	})
+	oauthCredentialWrites.set(providerId, write)
+	try {
+		if (previous) await previous
+		assertCurrentOAuth(senderId, attempt)
+		// No await between entering the non-cancellable phase and dispatching the RPC.
+		// Cancel before here is accepted and cannot submit credential/set.
+		attempt.phase = "saving"
+		onSaving()
+		await requestNative(
+			"credential/set",
+			credentialSetParamsFromDesktopOAuth(providerId, credential),
+		)
+	} finally {
+		release()
+		if (oauthCredentialWrites.get(providerId) === write) oauthCredentialWrites.delete(providerId)
+	}
+}
 
 /** Read the opaque windows preference for use at window creation time. */
 export { getOpaqueWindows as getOpaqueWindowsPref } from "./settings-store"
@@ -174,7 +237,7 @@ function withLogging<TArgs extends unknown[], TResult>(
  * the Bun + Hono server on port 3100. Now they run in-process in Electron's
  * main process, communicating via IPC instead of HTTP.
  */
-export function registerIpcHandlers(): void {
+export function registerIpcHandlers({ recreateWindows }: { recreateWindows?: () => Promise<void> } = {}): void {
 	// --- App info ---
 
 	ipcMain.handle("app:info", () => ({
@@ -202,30 +265,130 @@ export function registerIpcHandlers(): void {
 	)
 
 	ipcMain.handle(
-		"acp:request",
+		"native:request",
 		withLogging(
-			"acp:request",
-			async (_, request: { method: string; params?: unknown; directory?: string }) =>
-				await requestAcp(request.method, request.params, request.directory),
+			"native:request",
+			async (_, request: { method: string; params?: unknown; directory?: string }) => {
+				try {
+					return await requestNative(request.method, request.params, request.directory)
+				} catch (err) {
+					// SessionNotFound is an expected race (stale route / deleted session).
+					// Returning an envelope avoids Electron treating the handler rejection
+					// as an unhandled promise rejection; the renderer transport rethrows.
+					if (isSessionNotFoundError(err)) {
+						log.debug("native:request session not found", {
+							method: request.method,
+							message: err instanceof Error ? err.message : String(err),
+						})
+						return nativeIpcErrorEnvelope(err)
+					}
+					throw err
+				}
+			},
 		),
 	)
 
 	ipcMain.handle(
-		"acp:respond",
+		"native:notify",
 		withLogging(
-			"acp:respond",
-			async (_, response: { id: number | string; result: unknown }) =>
-				await respondAcp(response.id, response.result),
+			"native:notify",
+			async (_, notification: { method: string; params?: unknown; directory?: string }) =>
+				await notifyNative(notification.method, notification.params, notification.directory),
 		),
 	)
 
-	ipcMain.handle("acp:connected", () => isAcpConnected())
+	ipcMain.handle(
+		"native:respond",
+		withLogging(
+			"native:respond",
+			async (_, response: { id: number | string; result: unknown }) =>
+				await respondNative(response.id, response.result),
+		),
+	)
 
-	ipcMain.handle("acp-traffic-log:state", () => getAcpTrafficLogState())
+	ipcMain.handle("native:connected", () => isNativeConnected())
 
-	subscribeAcp((event) => {
+	ipcMain.handle("native-traffic-log:state", () => getNativeTrafficLogState())
+
+	ipcMain.handle(
+		"provider-oauth:login",
+		withLogging(
+			"provider-oauth:login",
+			async (event, request: { providerId: string; enterpriseUrl?: string }) => {
+				if (!isDesktopOAuthProviderId(request.providerId)) {
+					throw new Error(`Unsupported OAuth provider: ${request.providerId}`)
+				}
+				const senderId = event.sender.id
+				const controller = new AbortController()
+				pendingOauthLogins.get(senderId)?.abort()
+				pendingOauthLogins.set(senderId, controller)
+				try {
+					const prior = oauthAttempts.get(senderId)
+					if (prior?.phase === "saving") await prior.finished
+					if (controller.signal.aborted || pendingOauthLogins.get(senderId) !== controller) {
+						throw new Error("Login cancelled")
+					}
+					pendingOauthLogins.delete(senderId)
+					// A new login may supersede an authorization, but never an in-flight save.
+					oauthAttempts.get(senderId)?.controller.abort()
+					let finish!: () => void
+					const finished = new Promise<void>((resolve) => {
+						finish = resolve
+					})
+					const attempt: OAuthAttempt = { controller, phase: "authorizing", finished, finish }
+					oauthAttempts.set(senderId, attempt)
+					try {
+						const credential = await loginDesktopOAuth(request.providerId, {
+							signal: controller.signal,
+							enterpriseUrl: request.enterpriseUrl,
+							onUpdate: (update) => {
+								if (!controller.signal.aborted && oauthAttempts.get(senderId) === attempt) {
+									event.sender.send("provider-oauth:update", update)
+								}
+							},
+						})
+						await persistDesktopOAuthCredential(
+							senderId,
+							attempt,
+							request.providerId,
+							credential,
+							() => {
+								try {
+									event.sender.send("provider-oauth:update", {
+										phase: "saving",
+										instructions: "Saving credential...",
+									})
+								} catch (error) {
+									log.warn("Could not send OAuth saving update", { senderId, error })
+								}
+							},
+						)
+					} finally {
+						controller.abort()
+						if (oauthAttempts.get(senderId) === attempt) oauthAttempts.delete(senderId)
+						finish()
+					}
+				} finally {
+					if (pendingOauthLogins.get(senderId) === controller) pendingOauthLogins.delete(senderId)
+				}
+			},
+		),
+	)
+
+	ipcMain.handle("provider-oauth:cancel", (event): boolean => {
+		const senderId = event.sender.id
+		pendingOauthLogins.get(senderId)?.abort()
+		pendingOauthLogins.delete(senderId)
+		const attempt = oauthAttempts.get(senderId)
+		if (attempt?.phase === "saving") return false
+		attempt?.controller.abort()
+		if (attempt) oauthAttempts.delete(senderId)
+		return true
+	})
+
+	subscribeNative((event) => {
 		for (const win of BrowserWindow.getAllWindows()) {
-			win.webContents.send("acp:event", event)
+			win.webContents.send("native:event", event)
 		}
 	})
 
@@ -377,6 +540,39 @@ export function registerIpcHandlers(): void {
 	)
 
 	ipcMain.handle(
+		"git:workspace-changes-summary",
+		withLogging(
+			"git:workspace-changes-summary",
+			async (
+				_,
+				directory: string,
+				scope: LocalGitChangeScope,
+				options?: { baseBranch?: string | null; ignoreWhitespace?: boolean },
+			) => await localWorkspaceChangesSummary(directory, scope, options ?? {}),
+		),
+	)
+
+	ipcMain.handle(
+		"git:workspace-file-patch",
+		withLogging(
+			"git:workspace-file-patch",
+			async (
+				_,
+				directory: string,
+				scope: LocalGitChangeScope | "turn",
+				filePath: string,
+				options?: {
+					baseBranch?: string | null
+					ignoreWhitespace?: boolean
+					fileStatus?: string | null
+					checkpointId?: string | null
+					mergeBase?: string | null
+				},
+			) => await localWorkspaceFilePatch(directory, scope, filePath, options ?? {}),
+		),
+	)
+
+	ipcMain.handle(
 		"git:remote-url",
 		withLogging(
 			"git:remote-url",
@@ -415,6 +611,31 @@ export function registerIpcHandlers(): void {
 		),
 	)
 
+	ipcMain.handle(
+		"rules:list",
+		withLogging("rules:list", (_, directories: string[]) =>
+			listRuleFiles(Array.isArray(directories) ? directories : []),
+		),
+	)
+
+	ipcMain.handle(
+		"rules:open",
+		withLogging("rules:open", async (_, filePath: string) => {
+			const error = await shell.openPath(filePath)
+			if (error) throw new Error(error)
+		}),
+	)
+
+	ipcMain.handle(
+		"rules:create",
+		withLogging("rules:create", (_, directory: string) => createProjectAgentsMd(directory)),
+	)
+
+	ipcMain.handle(
+		"mcp:open-config",
+		withLogging("mcp:open-config", async () => await openUserMcpConfigFile()),
+	)
+
 	// --- Fetch proxy (bypasses Chromium connection limits) ---
 
 	ipcMain.handle("fetch:request", withLogging("fetch:request", handleFetchProxy))
@@ -427,8 +648,12 @@ export function registerIpcHandlers(): void {
 		"open-in:open",
 		withLogging(
 			"open-in:open",
-			async (_, directory: string, targetId: string, persistPreferred?: boolean) =>
-				await openInTarget(directory, targetId, { persistPreferred }),
+			async (_, directory: string, targetId: string, persistPreferred?: boolean) => {
+				if (directory === MCP_CONFIG_OPEN_PATH) {
+					return await openUserMcpConfigFile()
+				}
+				await openInTarget(directory, targetId, { persistPreferred })
+			},
 		),
 	)
 
@@ -452,7 +677,13 @@ export function registerIpcHandlers(): void {
 		return { success: true }
 	})
 
-	ipcMain.handle("app:relaunch", () => {
+	ipcMain.handle("app:relaunch", async () => {
+		if (!app.isPackaged) {
+			// Keep electron-vite and its staged runtime alive during development.
+			if (!recreateWindows) throw new Error("Development window recreation is unavailable")
+			await recreateWindows()
+			return
+		}
 		app.relaunch()
 		app.exit(0)
 	})

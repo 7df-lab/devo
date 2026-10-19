@@ -10,7 +10,7 @@ use devo_protocol::CollaborationMode;
 use devo_protocol::Message;
 use devo_protocol::Model;
 use devo_protocol::ReasoningEffort;
-use devo_protocol::UserInput;
+use devo_protocol::native::item::UserInput;
 
 use crate::SessionState;
 use crate::TurnConfig;
@@ -150,14 +150,33 @@ impl SessionContext {
         }
     }
 
-    pub fn build_system_prompt(&self) -> String {
-        let base = self.base_instructions.trim();
-        let mode_prompt = crate::collaboration_mode_prompts::mode_introductions_prompt();
-        if base.is_empty() {
-            mode_prompt
-        } else {
-            format!("{base}\n\n{mode_prompt}")
+    pub fn build_system_prompt(&self, collaboration_mode: CollaborationMode) -> String {
+        // Product / RLM path: REPL doctrine (cwd + skills already in
+        // the RLM base). Append only the active collaboration-mode instructions
+        // to limit prompt tokens. Environment, workspace instructions, and
+        // available_skills stay on the user-prefix path via `prefix_user_inputs`.
+        let cwd = self
+            .environment
+            .cwd
+            .display()
+            .to_string()
+            .replace('\\', "/");
+        let mut base =
+            crate::build_rlm_base_prompt(&crate::RlmPromptOptions::root(cwd, "not persisted"));
+        // Allow catalog/custom model instructions as additional guidance only
+        // when they differ from the legacy static default (avoid double doctrine).
+        let catalog = self.base_instructions.trim();
+        if !catalog.is_empty() && catalog != crate::default_base_instructions().trim() {
+            base.push_str("\n\n# Additional Guidance\n\n");
+            base.push_str(catalog);
         }
+        let mode_prompt =
+            crate::collaboration_mode_prompts::mode_introductions_prompt(collaboration_mode);
+        if !mode_prompt.trim().is_empty() {
+            base.push_str("\n\n");
+            base.push_str(mode_prompt.trim());
+        }
+        base
     }
 
     pub fn prefix_user_inputs(&self) -> Vec<UserInput> {
@@ -169,7 +188,6 @@ impl SessionContext {
         {
             inputs.push(UserInput::Text {
                 text: text.trim().to_string(),
-                text_elements: Vec::new(),
             });
         }
         if let Some(text) = self
@@ -183,16 +201,13 @@ impl SessionContext {
                     text: text.clone(),
                 }
                 .render(),
-                text_elements: Vec::new(),
             });
         }
         inputs.push(UserInput::Text {
             text: self.environment.render(),
-            text_elements: Vec::new(),
         });
         inputs.push(UserInput::Text {
             text: self.language.render(),
-            text_elements: Vec::new(),
         });
         inputs
     }
@@ -468,7 +483,7 @@ mod tests {
     use std::path::Path;
     use std::path::PathBuf;
 
-    use devo_protocol::UserInput;
+    use devo_protocol::native::item::UserInput;
     use pretty_assertions::assert_eq;
 
     use super::AgentsMdDiffFragment;
@@ -508,7 +523,6 @@ mod tests {
             vec![
                 UserInput::Text {
                     text: "<available_skills>skills</available_skills>".to_string(),
-                    text_elements: Vec::new(),
                 },
                 UserInput::Text {
                     text: UserInstructions {
@@ -516,15 +530,12 @@ mod tests {
                         text: "workspace".to_string(),
                     }
                     .render(),
-                    text_elements: Vec::new(),
                 },
                 UserInput::Text {
                     text: context.environment.render(),
-                    text_elements: Vec::new(),
                 },
                 UserInput::Text {
                     text: context.language.render(),
-                    text_elements: Vec::new(),
                 },
             ]
         );
@@ -714,7 +725,7 @@ mod tests {
     }
 
     #[test]
-    fn session_context_system_prompt_uses_stable_mode_introductions() {
+    fn session_context_system_prompt_uses_rlm_base_plus_mode_introductions() {
         let context = SessionContext::capture(
             &Model {
                 base_instructions: "base instructions".into(),
@@ -726,11 +737,19 @@ mod tests {
             /*available_skills*/ None,
         );
 
-        assert_eq!(
-            context.build_system_prompt(),
-            format!(
-                "base instructions\n\n{}",
-                crate::collaboration_mode_prompts::mode_introductions_prompt()
+        let prompt = context.build_system_prompt(devo_protocol::CollaborationMode::Build);
+        assert!(prompt.contains("Python REPL"), "expected RLM base doctrine");
+        assert!(prompt.contains("# Additional Guidance"));
+        assert!(prompt.contains("base instructions"));
+        assert!(
+            prompt.contains(
+                crate::collaboration_mode_prompts::mode_introductions_prompt(
+                    devo_protocol::CollaborationMode::Build
+                )
+                .trim()
+                .lines()
+                .next()
+                .unwrap_or("collaboration_mode")
             )
         );
     }

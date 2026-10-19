@@ -281,6 +281,7 @@ pub(crate) async fn spawn_windows_sandbox_session_legacy(
     timeout_ms: Option<u64>,
     additional_deny_read_paths: &[AbsolutePathBuf],
     additional_deny_write_paths: &[AbsolutePathBuf],
+    session_credential_sid: Option<&str>,
     tty: bool,
     stdin_open: bool,
     use_private_desktop: bool,
@@ -320,6 +321,7 @@ pub(crate) async fn spawn_windows_sandbox_session_legacy(
         devo_home,
         cwd,
         capability_roots,
+        session_credential_sid,
     )?;
     allow_null_device_for_workspace_write(common.uses_write_capabilities);
 

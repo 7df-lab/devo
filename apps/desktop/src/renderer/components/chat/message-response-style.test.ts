@@ -10,8 +10,32 @@ const uiStylesSource = readFileSync(
 	"utf8",
 )
 const rendererCssSource = readFileSync(new URL("../../index.css", import.meta.url), "utf8")
+const activitySource = readFileSync(new URL("./turn-activity.tsx", import.meta.url), "utf8")
+const activityCssSource = readFileSync(new URL("../../turn-activity.css", import.meta.url), "utf8")
 
 describe("MessageResponse markdown surfaces", () => {
+	test("wires Inter Variable, Noto Sans SC Variable, and IBM Plex Mono into theme font tokens", () => {
+		expect({
+			sansInter: uiStylesSource.includes('"Inter Variable"'),
+			sansNoto: uiStylesSource.includes('"Noto Sans SC Variable"'),
+			monoPlex: uiStylesSource.includes('"IBM Plex Mono"'),
+			rendererImportsInter: rendererCssSource.includes("@fontsource-variable/inter"),
+			rendererImportsNoto: rendererCssSource.includes("@fontsource-variable/noto-sans-sc"),
+			rendererImportsPlex: rendererCssSource.includes("@fontsource/ibm-plex-mono"),
+			markdownReadingSurface: rendererCssSource.includes(
+				"Transcript markdown — European minimal reading surface",
+			),
+		}).toEqual({
+			sansInter: true,
+			sansNoto: true,
+			monoPlex: true,
+			rendererImportsInter: true,
+			rendererImportsNoto: true,
+			rendererImportsPlex: true,
+			markdownReadingSurface: true,
+		})
+	})
+
 	test("uses desktop dark theme surfaces for streamdown markdown cells", () => {
 		expect({
 			responseClass: messageSource.includes("devo-message-response"),
@@ -26,6 +50,28 @@ describe("MessageResponse markdown surfaces", () => {
 		})
 	})
 
+	test("keeps transcript markdown size aligned with chrome and mid-weight strong for CJK", () => {
+		expect({
+			markdownBodySize: rendererCssSource.includes("font-size: 0.875rem;"),
+			strongWeight: rendererCssSource.includes(
+				'.devo-message-response [data-streamdown="strong"]',
+			),
+			strongUsesMidWeight: /\[data-streamdown="strong"\]\s*\{[^}]*font-weight:\s*530/.test(
+				rendererCssSource,
+			),
+			strongDisablesSynthesis: /\[data-streamdown="strong"\]\s*\{[^}]*font-synthesis:\s*none/.test(
+				rendererCssSource,
+			),
+			cjkNotoNote: rendererCssSource.includes("Noto Sans SC Variable"),
+		}).toEqual({
+			markdownBodySize: true,
+			strongWeight: true,
+			strongUsesMidWeight: true,
+			strongDisablesSynthesis: true,
+			cjkNotoNote: true,
+		})
+	})
+
 	test("keeps transcript markdown headings visually compact", () => {
 		expect({
 			requirementComment: messageSource.includes(
@@ -33,7 +79,7 @@ describe("MessageResponse markdown surfaces", () => {
 			),
 			headingComponents: messageSource.includes("const transcriptMarkdownComponents"),
 			headingStyle: messageSource.includes(
-				"my-2 border-0 pb-0 text-sm font-semibold leading-6 text-foreground",
+				"mt-3 mb-1 border-0 p-0 text-[14px] font-[530] leading-snug tracking-normal text-foreground first:mt-0",
 			),
 			markdownRulesHidden: messageSource.includes("hr: TranscriptMarkdownRule"),
 			markdownRulesRequirementComment: messageSource.includes(
@@ -53,6 +99,8 @@ describe("MessageResponse markdown surfaces", () => {
 	test("keeps streamdown code block actions in the language header row", () => {
 		expect({
 			headerPadding: rendererCssSource.includes('[data-streamdown="code-block-header"]'),
+			compactHeaderHeight: rendererCssSource.includes("height: 1.5rem;"),
+			compactBodyPadding: rendererCssSource.includes("padding: 0.45rem 0.7rem;"),
 			actionsSiblingSelector: rendererCssSource.includes(
 				'> div:has(> [data-streamdown="code-block-actions"])',
 			),
@@ -60,6 +108,8 @@ describe("MessageResponse markdown surfaces", () => {
 			actionsStillClickable: rendererCssSource.includes("pointer-events: auto;"),
 		}).toEqual({
 			headerPadding: true,
+			compactHeaderHeight: true,
+			compactBodyPadding: true,
 			actionsSiblingSelector: true,
 			actionsAbsolute: true,
 			actionsStillClickable: true,
@@ -71,14 +121,34 @@ describe("MessageResponse markdown surfaces", () => {
 			controlsConfig: messageSource.includes("const transcriptMarkdownControls"),
 			tableFullscreenDisabled: messageSource.includes("fullscreen: false"),
 			controlsPassedToStreamdown: messageSource.includes("controls={transcriptMarkdownControls}"),
-			tableCopyNotDisabled: !messageSource.includes("copy: false"),
-			tableDownloadNotDisabled: !messageSource.includes("download: false"),
+			tableCopyNotDisabled: !/table:\s*\{[^}]*copy:\s*false/.test(messageSource),
+			codeDownloadDisabled: /code:\s*\{[^}]*download:\s*false/.test(messageSource),
 		}).toEqual({
 			controlsConfig: true,
 			tableFullscreenDisabled: true,
 			controlsPassedToStreamdown: true,
 			tableCopyNotDisabled: true,
-			tableDownloadNotDisabled: true,
+			codeDownloadDisabled: true,
+		})
+	})
+
+	test("uses a lighter Streamdown plugin set while streaming", () => {
+		expect({
+			streamingProp: messageSource.includes("streaming?: boolean"),
+			streamingPlugins: messageSource.includes("streamdownPluginsStreaming"),
+			disablesAnimatedWhileStreaming: messageSource.includes(
+				"animated={streaming ? false : animated}",
+			),
+			streamingClass: messageSource.includes("devo-message-response--streaming"),
+			streamFadeCss: rendererCssSource.includes("devo-stream-surface-in"),
+			streamTailCss: rendererCssSource.includes("devo-stream-tail-in"),
+		}).toEqual({
+			streamingProp: true,
+			streamingPlugins: true,
+			disablesAnimatedWhileStreaming: true,
+			streamingClass: true,
+			streamFadeCss: true,
+			streamTailCss: true,
 		})
 	})
 
@@ -103,6 +173,32 @@ describe("MessageResponse markdown surfaces", () => {
 			cjkPluginSource: true,
 			mathPluginSource: true,
 			mermaidPluginSource: true,
+		})
+	})
+
+	test("renders thinking Markdown and Python tool input as code blocks", () => {
+		expect({
+			thinkingUsesMarkdown: activitySource.includes('className="devo-reasoning-response"'),
+			reasoningKeepsMutedCompactStyle: rendererCssSource.includes(
+				".devo-message-response.devo-reasoning-response",
+			),
+			pythonToolUsesCodeBlock: activitySource.includes('<CodeBlock code={code} language="python"'),
+			pythonCodeClass: activitySource.includes('className="devo-activity-code"'),
+			pythonCodeWrapsLongLines: /devo-activity-code code\s*\{[^}]*white-space:\s*pre-wrap/.test(
+				activityCssSource,
+			),
+			pythonCodeUsesCompactType: /devo-activity-code pre\s*\{[^}]*font-size:\s*0\.8125rem/.test(
+				activityCssSource,
+			),
+			pythonCopyHasAccessibleName: activitySource.includes('aria-label="Copy Python code"'),
+		}).toEqual({
+			thinkingUsesMarkdown: true,
+			reasoningKeepsMutedCompactStyle: true,
+			pythonToolUsesCodeBlock: true,
+			pythonCodeClass: true,
+			pythonCodeWrapsLongLines: true,
+			pythonCodeUsesCompactType: true,
+			pythonCopyHasAccessibleName: true,
 		})
 	})
 })

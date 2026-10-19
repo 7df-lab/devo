@@ -14,8 +14,16 @@ contextBridge.exposeInMainWorld("devo", {
 	getAppInfo: () => ipcRenderer.invoke("app:info"),
 
 	appMenu: {
-		popup: (id: "edit" | "view" | "window", position?: { x: number; y: number }) =>
+		popup: (id: "file" | "edit" | "view" | "window", position?: { x: number; y: number }) =>
 			ipcRenderer.invoke("app-menu:popup", { id, ...position }),
+		onAction: (callback: (action: "new-agent" | "open-folder" | "new-terminal") => void) => {
+			const listener = (_event: unknown, action: "new-agent" | "open-folder" | "new-terminal") =>
+				callback(action)
+			ipcRenderer.on("app-menu:action", listener)
+			return () => {
+				ipcRenderer.removeListener("app-menu:action", listener)
+			}
+		},
 	},
 
 	// --- Window chrome / liquid glass ---
@@ -56,23 +64,43 @@ contextBridge.exposeInMainWorld("devo", {
 		}
 	},
 
-	acp: {
+	native: {
 		request: (request: { method: string; params?: unknown; directory?: string }) =>
-			ipcRenderer.invoke("acp:request", request),
+			ipcRenderer.invoke("native:request", request),
+		notify: (notification: { method: string; params?: unknown; directory?: string }) =>
+			ipcRenderer.invoke("native:notify", notification),
 		respond: (response: { id: number | string; result: unknown }) =>
-			ipcRenderer.invoke("acp:respond", response),
-		connected: () => ipcRenderer.invoke("acp:connected"),
+			ipcRenderer.invoke("native:respond", response),
+		connected: () => ipcRenderer.invoke("native:connected"),
 		subscribe: (callback: (event: unknown) => void) => {
 			const listener = (_event: unknown, value: unknown) => callback(value)
-			ipcRenderer.on("acp:event", listener)
+			ipcRenderer.on("native:event", listener)
 			return () => {
-				ipcRenderer.removeListener("acp:event", listener)
+				ipcRenderer.removeListener("native:event", listener)
 			}
 		},
 	},
 
-	acpTraffic: {
-		getState: () => ipcRenderer.invoke("acp-traffic-log:state"),
+	nativeTraffic: {
+		getState: () => ipcRenderer.invoke("native-traffic-log:state"),
+	},
+
+	providerOAuth: {
+		login: (providerId: string, enterpriseUrl?: string) =>
+			ipcRenderer.invoke("provider-oauth:login", { providerId, enterpriseUrl }),
+		cancel: () => ipcRenderer.invoke("provider-oauth:cancel"),
+		onUpdate: (
+			callback: (update: { url?: string; instructions: string; userCode?: string; phase?: "saving" }) => void,
+		) => {
+			const listener = (
+				_event: unknown,
+				update: { url?: string; instructions: string; userCode?: string; phase?: "saving" },
+			) => callback(update)
+			ipcRenderer.on("provider-oauth:update", listener)
+			return () => {
+				ipcRenderer.removeListener("provider-oauth:update", listener)
+			}
+		},
 	},
 
 	terminal: {
@@ -157,6 +185,23 @@ contextBridge.exposeInMainWorld("devo", {
 		stashPop: (directory: string) => ipcRenderer.invoke("git:stash-pop", directory),
 		getRoot: (directory: string) => ipcRenderer.invoke("git:root", directory),
 		diffStat: (directory: string) => ipcRenderer.invoke("git:diff-stat", directory),
+		workspaceChangesSummary: (
+			directory: string,
+			scope: "uncommitted" | "staged" | "unstaged" | "branch",
+			options?: { baseBranch?: string | null; ignoreWhitespace?: boolean },
+		) => ipcRenderer.invoke("git:workspace-changes-summary", directory, scope, options),
+		workspaceFilePatch: (
+			directory: string,
+			scope: "uncommitted" | "staged" | "unstaged" | "branch" | "turn",
+			filePath: string,
+			options?: {
+				baseBranch?: string | null
+				ignoreWhitespace?: boolean
+				fileStatus?: string | null
+				checkpointId?: string | null
+				mergeBase?: string | null
+			},
+		) => ipcRenderer.invoke("git:workspace-file-patch", directory, scope, filePath, options),
 		commitAll: (directory: string, message: string) =>
 			ipcRenderer.invoke("git:commit-all", directory, message),
 		push: (directory: string, remote?: string) => ipcRenderer.invoke("git:push", directory, remote),
@@ -188,6 +233,7 @@ contextBridge.exposeInMainWorld("devo", {
 		open: (directory: string, targetId: string, persistPreferred?: boolean) =>
 			ipcRenderer.invoke("open-in:open", directory, targetId, persistPreferred),
 		setPreferred: (targetId: string) => ipcRenderer.invoke("open-in:set-preferred", targetId),
+		openMcpConfig: () => ipcRenderer.invoke("mcp:open-config"),
 	},
 
 	// --- Native theme (syncs OS chrome to app color scheme) ---
@@ -211,6 +257,16 @@ contextBridge.exposeInMainWorld("devo", {
 
 	/** Opens a native folder picker dialog. Returns the selected path, or null if cancelled. */
 	pickDirectory: () => ipcRenderer.invoke("dialog:open-directory"),
+
+	rules: {
+		list: (directories: string[]) => ipcRenderer.invoke("rules:list", directories),
+		open: (filePath: string) => ipcRenderer.invoke("rules:open", filePath),
+		create: (directory: string) => ipcRenderer.invoke("rules:create", directory),
+	},
+
+	mcp: {
+		openConfig: () => ipcRenderer.invoke("mcp:open-config"),
+	},
 
 	desktopFolders: {
 		stat: (directories: string[]) => ipcRenderer.invoke("desktop-folders:stat", directories),

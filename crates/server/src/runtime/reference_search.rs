@@ -14,26 +14,21 @@ use devo_file_search::FileSearchOptions;
 use devo_file_search::FileSearchSession;
 use devo_file_search::FileSearchSnapshot;
 use devo_file_search::SessionReporter;
-use devo_protocol::ReferenceSearchCancelParams;
-use devo_protocol::ReferenceSearchCancelResult;
-use devo_protocol::ReferenceSearchId;
-use devo_protocol::ReferenceSearchResult;
-use devo_protocol::ReferenceSearchResultKind;
-use devo_protocol::ReferenceSearchSnapshot;
-use devo_protocol::ReferenceSearchStartParams;
-use devo_protocol::ReferenceSearchStartResult;
-use devo_protocol::ReferenceSearchUpdateParams;
-use devo_protocol::ReferenceSearchUpdateResult;
+use devo_protocol::native::rpc_search::{
+    SearchId, SearchResult, SearchResultKind, SearchSnapshot, SearchStartParams, SearchStartResult,
+    SearchUpdateParams, SearchUpdateResult,
+};
 use devo_util_fuzzy::fuzzy_match;
 use tokio::sync::mpsc;
 
 use super::ServerRuntime;
 use crate::ProtocolErrorCode;
-use crate::ServerEvent;
 use crate::SkillRecord;
+use crate::SkillScope;
 use crate::SuccessResponse;
 use crate::session_context::SessionRuntimeContext;
 use devo_core::McpServerRecord;
+use devo_protocol::native::event::ServerNotification;
 
 const REFERENCE_FILE_LIMIT: usize = 20;
 
@@ -67,12 +62,12 @@ struct McpReferenceSource {
 
 #[derive(Debug, Clone)]
 struct ReferenceSearchFileUpdate {
-    search_id: ReferenceSearchId,
+    search_id: SearchId,
     snapshot: FileSearchSnapshot,
 }
 
 struct ReferenceSearchReporter {
-    search_id: ReferenceSearchId,
+    search_id: SearchId,
     update_tx: mpsc::UnboundedSender<ReferenceSearchFileUpdate>,
 }
 
@@ -88,29 +83,30 @@ impl SessionReporter for ReferenceSearchReporter {
 }
 
 impl ServerRuntime {
-    pub(super) async fn handle_reference_search_start(
+    /// Native `search/start` (L2-DES-APP-008): connection-local composer
+    /// search using the canonical search model end-to-end.
+    pub(super) async fn handle_native_search_start(
         self: &Arc<Self>,
         connection_id: u64,
         request_id: serde_json::Value,
         params: serde_json::Value,
     ) -> serde_json::Value {
-        let params = match serde_json::from_value::<ReferenceSearchStartParams>(params) {
+        let params = match serde_json::from_value::<SearchStartParams>(params) {
             Ok(params) => params,
             Err(error) => {
                 return self.error_response(
                     request_id,
                     ProtocolErrorCode::InvalidParams,
-                    format!("invalid search/start params: {error}"),
+                    format!("invalid canonical search/start params: {error}"),
                 );
             }
         };
-
         match self.start_reference_search(connection_id, params).await {
             Ok(snapshot) => serde_json::to_value(SuccessResponse {
                 id: request_id,
-                result: ReferenceSearchStartResult { snapshot },
+                result: SearchStartResult { snapshot },
             })
-            .expect("serialize search/start response"),
+            .expect("serialize canonical search/start response"),
             Err(error) => self.error_response(
                 request_id,
                 ProtocolErrorCode::InternalError,
@@ -119,28 +115,28 @@ impl ServerRuntime {
         }
     }
 
-    pub(super) async fn handle_reference_search_update(
+    /// Native `search/update` (L2-DES-APP-008).
+    pub(super) async fn handle_native_search_update(
         self: &Arc<Self>,
         request_id: serde_json::Value,
         params: serde_json::Value,
     ) -> serde_json::Value {
-        let params = match serde_json::from_value::<ReferenceSearchUpdateParams>(params) {
+        let params = match serde_json::from_value::<SearchUpdateParams>(params) {
             Ok(params) => params,
             Err(error) => {
                 return self.error_response(
                     request_id,
                     ProtocolErrorCode::InvalidParams,
-                    format!("invalid search/update params: {error}"),
+                    format!("invalid canonical search/update params: {error}"),
                 );
             }
         };
-
         match self.update_reference_search(params).await {
             Ok(snapshot) => serde_json::to_value(SuccessResponse {
                 id: request_id,
-                result: ReferenceSearchUpdateResult { snapshot },
+                result: SearchUpdateResult { snapshot },
             })
-            .expect("serialize search/update response"),
+            .expect("serialize canonical search/update response"),
             Err(error) => self.error_response(
                 request_id,
                 ProtocolErrorCode::InternalError,
@@ -149,43 +145,46 @@ impl ServerRuntime {
         }
     }
 
-    pub(super) async fn handle_reference_search_cancel(
+    /// Native `search/cancel` (L2-DES-APP-008).
+    pub(super) async fn handle_native_search_cancel(
         &self,
         request_id: serde_json::Value,
         params: serde_json::Value,
     ) -> serde_json::Value {
-        let params = match serde_json::from_value::<ReferenceSearchCancelParams>(params) {
+        let params = match serde_json::from_value::<
+            devo_protocol::native::rpc_search::SearchCancelParams,
+        >(params)
+        {
             Ok(params) => params,
             Err(error) => {
                 return self.error_response(
                     request_id,
                     ProtocolErrorCode::InvalidParams,
-                    format!("invalid search/cancel params: {error}"),
+                    format!("invalid canonical search/cancel params: {error}"),
                 );
             }
         };
-
         self.reference_searches
             .lock()
             .await
             .remove(&params.search_id);
         serde_json::to_value(SuccessResponse {
             id: request_id,
-            result: ReferenceSearchCancelResult::default(),
+            result: devo_protocol::native::rpc_search::SearchCancelResult {},
         })
-        .expect("serialize search/cancel response")
+        .expect("serialize canonical search/cancel response")
     }
 
     async fn start_reference_search(
         self: &Arc<Self>,
         connection_id: u64,
-        params: ReferenceSearchStartParams,
-    ) -> anyhow::Result<ReferenceSearchSnapshot> {
+        params: SearchStartParams,
+    ) -> anyhow::Result<SearchSnapshot> {
         let cwd = params
             .cwd
             .unwrap_or_else(|| std::env::current_dir().unwrap_or_else(|_| PathBuf::from(".")));
         let runtime_context = self.deps.context_for_workspace(&cwd).await?;
-        let search_id = ReferenceSearchId::new();
+        let search_id = SearchId::new();
         let (update_tx, update_rx) = mpsc::unbounded_channel();
         let reporter = Arc::new(ReferenceSearchReporter {
             search_id: search_id.clone(),
@@ -232,8 +231,8 @@ impl ServerRuntime {
 
     async fn update_reference_search(
         &self,
-        params: ReferenceSearchUpdateParams,
-    ) -> anyhow::Result<ReferenceSearchSnapshot> {
+        params: SearchUpdateParams,
+    ) -> anyhow::Result<SearchSnapshot> {
         let mut searches = self.reference_searches.lock().await;
         let Some(state) = searches.get_mut(&params.search_id) else {
             anyhow::bail!("reference search session not found: {}", params.search_id);
@@ -294,18 +293,12 @@ impl ServerRuntime {
             state.snapshot(&update.search_id)
         };
 
-        let (method, event) = if snapshot.file_search_complete {
-            (
-                "search/completed",
-                ServerEvent::ReferenceSearchCompleted(snapshot),
-            )
+        let notification = if snapshot.file_search_complete {
+            ServerNotification::SearchCompleted(snapshot)
         } else {
-            (
-                "search/updated",
-                ServerEvent::ReferenceSearchUpdated(snapshot),
-            )
+            ServerNotification::SearchUpdated(snapshot)
         };
-        self.emit_connection_local_to_connection(connection_id, method, event)
+        self.emit_connection_local_notification(connection_id, notification)
             .await;
     }
 
@@ -315,7 +308,7 @@ impl ServerRuntime {
             .lock()
             .expect("app config store mutex should not be poisoned")
             .effective_config()
-            .mcp
+            .mcp_runtime
             .servers
             .iter()
             .map(mcp_source)
@@ -328,8 +321,8 @@ impl ReferenceSearchState {
         self.connection_id
     }
 
-    fn snapshot(&self, search_id: &ReferenceSearchId) -> ReferenceSearchSnapshot {
-        ReferenceSearchSnapshot {
+    fn snapshot(&self, search_id: &SearchId) -> SearchSnapshot {
+        SearchSnapshot {
             search_id: search_id.clone(),
             query: self.query.clone(),
             results: reference_results(
@@ -346,9 +339,11 @@ impl ReferenceSearchState {
 }
 
 fn skill_sources(skills: &[SkillRecord]) -> Vec<SkillReferenceSource> {
+    // Composer `@` only surfaces workspace (repo) skills — not global / system /
+    // plugin / multi-agent catalog entries.
     skills
         .iter()
-        .filter(|skill| skill.enabled)
+        .filter(|skill| skill.enabled && skill.scope == SkillScope::Repo)
         .map(skill_source)
         .collect()
 }
@@ -399,7 +394,7 @@ fn reference_results(
     skill_sources: &[SkillReferenceSource],
     mcp_sources: &[McpReferenceSource],
     file_matches: &[FileMatch],
-) -> Vec<ReferenceSearchResult> {
+) -> Vec<SearchResult> {
     let filter = query.trim();
     let mut results = Vec::new();
     results.extend(skill_results(filter, skill_sources));
@@ -408,7 +403,7 @@ fn reference_results(
     results
 }
 
-fn skill_results(filter: &str, sources: &[SkillReferenceSource]) -> Vec<ReferenceSearchResult> {
+fn skill_results(filter: &str, sources: &[SkillReferenceSource]) -> Vec<SearchResult> {
     let mut matches = sources
         .iter()
         .filter_map(|source| {
@@ -417,8 +412,8 @@ fn skill_results(filter: &str, sources: &[SkillReferenceSource]) -> Vec<Referenc
             Some((
                 source,
                 match_indices.score,
-                ReferenceSearchResult {
-                    kind: ReferenceSearchResultKind::Skill,
+                SearchResult {
+                    kind: SearchResultKind::Skill,
                     display_name: source.display_name.clone(),
                     description: source.description.clone(),
                     insert_text: source.insert_text.clone(),
@@ -438,9 +433,10 @@ fn skill_results(filter: &str, sources: &[SkillReferenceSource]) -> Vec<Referenc
     matches.into_iter().map(|(_, _, result)| result).collect()
 }
 
-fn mcp_results(filter: &str, sources: &[McpReferenceSource]) -> Vec<ReferenceSearchResult> {
+fn mcp_results(filter: &str, sources: &[McpReferenceSource]) -> Vec<SearchResult> {
     let mut matches = sources
         .iter()
+        .filter(|source| source.enabled)
         .filter_map(|source| {
             let match_indices = reference_match_indices(
                 filter,
@@ -450,16 +446,16 @@ fn mcp_results(filter: &str, sources: &[McpReferenceSource]) -> Vec<ReferenceSea
             Some((
                 source,
                 match_indices.score,
-                ReferenceSearchResult {
-                    kind: ReferenceSearchResultKind::Mcp,
+                SearchResult {
+                    kind: SearchResultKind::Mcp,
                     display_name: source.display_name.clone(),
                     description: Some(source.id.clone()),
                     insert_text: format!("@mcp:{}", source.id),
                     mention_path: Some(format!("mcp://server/{}", source.id)),
                     file_path: None,
                     match_indices: match_indices.indices,
-                    is_disabled: !source.enabled,
-                    disabled_reason: (!source.enabled).then(|| "disabled".to_string()),
+                    is_disabled: false,
+                    disabled_reason: None,
                 },
             ))
         })
@@ -471,7 +467,7 @@ fn mcp_results(filter: &str, sources: &[McpReferenceSource]) -> Vec<ReferenceSea
     matches.into_iter().map(|(_, _, result)| result).collect()
 }
 
-fn file_results(file_matches: &[FileMatch]) -> Vec<ReferenceSearchResult> {
+fn file_results(file_matches: &[FileMatch]) -> Vec<SearchResult> {
     file_matches
         .iter()
         .filter_map(|file_match| {
@@ -487,8 +483,8 @@ fn file_results(file_matches: &[FileMatch]) -> Vec<ReferenceSearchResult> {
                 .unwrap_or(display_name.as_str());
             let insert_text = format!("@{basename}");
 
-            Some(ReferenceSearchResult {
-                kind: ReferenceSearchResultKind::File,
+            Some(SearchResult {
+                kind: SearchResultKind::File,
                 display_name: display_name.clone(),
                 description: None,
                 insert_text,
@@ -574,6 +570,96 @@ mod tests {
     }
 
     #[test]
+    fn skill_sources_keep_only_enabled_repo_skills() {
+        let skills = [
+            SkillRecord {
+                id: "repo".into(),
+                name: "repo-skill".into(),
+                description: "workspace".into(),
+                short_description: None,
+                interface: None,
+                dependencies: None,
+                path: PathBuf::from(".devo/skills/repo-skill/SKILL.md"),
+                enabled: true,
+                source: crate::SkillSource::Workspace {
+                    cwd: PathBuf::from("."),
+                },
+                scope: SkillScope::Repo,
+                plugin_id: None,
+            },
+            SkillRecord {
+                id: "user".into(),
+                name: "create-skill".into(),
+                description: "global".into(),
+                short_description: None,
+                interface: None,
+                dependencies: None,
+                path: PathBuf::from("/home/user/.devo/skills/create-skill/SKILL.md"),
+                enabled: true,
+                source: crate::SkillSource::User,
+                scope: SkillScope::User,
+                plugin_id: None,
+            },
+            SkillRecord {
+                id: "system".into(),
+                name: "multi-agent".into(),
+                description: "system".into(),
+                short_description: None,
+                interface: None,
+                dependencies: None,
+                path: PathBuf::from("/system/skills/multi-agent/SKILL.md"),
+                enabled: true,
+                source: crate::SkillSource::System,
+                scope: SkillScope::System,
+                plugin_id: None,
+            },
+            SkillRecord {
+                id: "disabled-repo".into(),
+                name: "disabled-repo".into(),
+                description: "off".into(),
+                short_description: None,
+                interface: None,
+                dependencies: None,
+                path: PathBuf::from(".devo/skills/disabled-repo/SKILL.md"),
+                enabled: false,
+                source: crate::SkillSource::Workspace {
+                    cwd: PathBuf::from("."),
+                },
+                scope: SkillScope::Repo,
+                plugin_id: None,
+            },
+        ];
+
+        assert_eq!(
+            skill_sources(&skills)
+                .into_iter()
+                .map(|source| source.display_name)
+                .collect::<Vec<_>>(),
+            vec!["repo-skill".to_string()]
+        );
+    }
+
+    #[test]
+    fn mcp_results_omit_disabled_servers() {
+        let sources = [
+            mcp("docs", "Docs"),
+            McpReferenceSource {
+                id: "off".to_string(),
+                display_name: "Off".to_string(),
+                enabled: false,
+            },
+        ];
+
+        assert_eq!(
+            mcp_results("", &sources)
+                .into_iter()
+                .map(|result| result.display_name)
+                .collect::<Vec<_>>(),
+            vec!["Docs".to_string()]
+        );
+    }
+
+    #[test]
     fn empty_query_orders_skill_mcp_then_file() {
         let results = reference_results(
             "",
@@ -588,9 +674,9 @@ mod tests {
                 .map(|result| (result.kind, result.display_name))
                 .collect::<Vec<_>>(),
             vec![
-                (ReferenceSearchResultKind::Skill, "openai-docs".to_string()),
-                (ReferenceSearchResultKind::Mcp, "Docs".to_string()),
-                (ReferenceSearchResultKind::File, "src/main.rs".to_string()),
+                (SearchResultKind::Skill, "openai-docs".to_string()),
+                (SearchResultKind::Mcp, "Docs".to_string()),
+                (SearchResultKind::File, "src/main.rs".to_string()),
             ]
         );
     }
@@ -610,10 +696,10 @@ mod tests {
                 .map(|result| (result.kind, result.display_name))
                 .collect::<Vec<_>>(),
             vec![
-                (ReferenceSearchResultKind::Skill, "docs-skill".to_string()),
-                (ReferenceSearchResultKind::Mcp, "Docs".to_string()),
+                (SearchResultKind::Skill, "docs-skill".to_string()),
+                (SearchResultKind::Mcp, "Docs".to_string()),
                 (
-                    ReferenceSearchResultKind::File,
+                    SearchResultKind::File,
                     "docs/tui-chat-composer.md".to_string(),
                 ),
             ]
@@ -629,7 +715,7 @@ mod tests {
                 .into_iter()
                 .map(|result| (result.kind, result.display_name))
                 .collect::<Vec<_>>(),
-            vec![(ReferenceSearchResultKind::File, "apps".to_string())]
+            vec![(SearchResultKind::File, "apps".to_string())]
         );
     }
 
@@ -639,7 +725,7 @@ mod tests {
 
         assert_eq!(results.len(), 1);
         let result = &results[0];
-        assert_eq!(result.kind, ReferenceSearchResultKind::File);
+        assert_eq!(result.kind, SearchResultKind::File);
         assert_eq!(result.display_name, "crates/tui/src/interactive.rs");
         assert_eq!(result.insert_text, "@interactive.rs");
         assert_eq!(
@@ -650,7 +736,7 @@ mod tests {
 
     #[test]
     fn stale_file_snapshot_does_not_mutate_state() {
-        let search_id = ReferenceSearchId::new();
+        let search_id = SearchId::new();
         let mut state = ReferenceSearchState {
             connection_id: 1,
             query: "new".to_string(),

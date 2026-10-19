@@ -17,14 +17,14 @@ import {
 import { SlashCommandPopover, type SlashCommandPopoverHandle } from "./chat/slash-command-popover"
 import { Tooltip, TooltipContent, TooltipTrigger } from "@devo/ui/components/tooltip"
 import { useNavigate, useParams } from "@tanstack/react-router"
-import { useAtomValue } from "jotai"
+import { useAtom, useAtomValue } from "jotai"
 import {
 	GitForkIcon,
 	MonitorIcon,
 	PlusIcon,
 } from "lucide-react"
 import { useCallback, useEffect, useMemo, useRef, useState } from "react"
-import { projectModelsAtom, setProjectModelAtom } from "../atoms/preferences"
+import { projectModelsAtom, lastProjectDirectoryAtom, setProjectModelAtom } from "../atoms/preferences"
 import {
 	removeSessionAtom,
 	setSessionBranchAtom,
@@ -49,12 +49,22 @@ import {
 } from "../hooks/use-devo-data"
 import { useAgentActions } from "../hooks/use-server"
 import { persistRuntimeModelConfigOption, persistRuntimeModelSelection } from "../lib/model-config-options"
-import { resolveSelectedProjectDirectory } from "../lib/project-selection"
+import { resolveSelectedProjectDirectory, navigateToNewChat } from "../lib/project-selection"
 import type { FileAttachment } from "../lib/types"
+import { getProjectClient } from "../services/connection-manager"
 import { createWorktree, randomWorktreeName } from "../services/worktree-service"
 import { BranchPicker } from "./branch-picker"
+import { ComposerModeChip } from "./chat/composer-mode-chip"
+import { ComposerPermissionPicker } from "./chat/composer-permission-picker"
+import {
+	DEFAULT_COMPOSER_PERMISSION_PROFILE,
+	type ComposerPermissionProfile,
+	stashComposerPermissionForSession,
+} from "./chat/composer-permission"
+import { goalPromptText, parseComposerSlash } from "./chat/composer-slash"
 import { PromptAttachmentPreview } from "./chat/prompt-attachments"
 import { PromptToolbar, StatusBar } from "./chat/prompt-toolbar"
+import { SkillPickerDialog } from "./chat/skill-picker-dialog"
 import { NewChatProjectPicker } from "./new-chat-project-picker"
 
 // ============================================================
@@ -207,6 +217,7 @@ function AttachButton({ disabled }: { disabled?: boolean }) {
 			tooltip="Attach files"
 			onClick={() => attachments.openFileDialog()}
 			disabled={disabled}
+			className="size-8 rounded-full bg-muted/80 text-muted-foreground hover:bg-muted hover:text-foreground"
 		>
 			<PlusIcon className="size-4" />
 		</PromptInputButton>
@@ -219,8 +230,9 @@ export function NewChat() {
 	const { createSession, sendPrompt } = useAgentActions()
 	const navigate = useNavigate()
 	const { startFromScratch, useExistingFolder } = useDesktopProjectActions()
+	const [lastProjectDirectory, setLastProjectDirectory] = useAtom(lastProjectDirectoryAtom)
 
-	const [selectedDirectory, setSelectedDirectory] = useState<string>("")
+	const [selectedDirectory, setSelectedDirectory] = useState<string>(() => lastProjectDirectory ?? "")
 	const [launching, setLaunching] = useState(false)
 	const [error, setError] = useState<string | null>(null)
 	const [worktreeMode, setWorktreeMode] = useState<"local" | "worktree">("local")
@@ -238,6 +250,12 @@ export function NewChat() {
 	const [selectedModel, setSelectedModel] = useState<ModelRef | null>(null)
 	const [selectedAgent, setSelectedAgent] = useState<string | null>(null)
 	const [selectedVariant, setSelectedVariant] = useState<string | undefined>(undefined)
+	const [collaborationMode, setCollaborationMode] = useState<"build" | "plan">("build")
+	const [activeTrigger, setActiveTrigger] = useState<"goal" | null>(null)
+	const [permissionProfile, setPermissionProfile] =
+		useState<ComposerPermissionProfile>(DEFAULT_COMPOSER_PERMISSION_PROFILE)
+	const [modelPickerOpen, setModelPickerOpen] = useState(false)
+	const [skillPickerOpen, setSkillPickerOpen] = useState(false)
 
 	// Slash command and mention popover state
 	const [slashOpen, setSlashOpen] = useState(false)
@@ -250,20 +268,16 @@ export function NewChat() {
 	const slashPopoverRef = useRef<SlashCommandPopoverHandle>(null)
 	const mentionPopoverRef = useRef<MentionPopoverHandle>(null)
 
-	// Project model preferences are a UI fallback for older local state.
+	// Native preferences own model/effort defaults, shared with Settings.
+	// Local project state only restores the agent preference.
 	const projectModels = useAtomValue(projectModelsAtom)
 	const prevDirectoryRef = useRef<string>("")
 	useEffect(() => {
 		if (!selectedDirectory || selectedDirectory === prevDirectoryRef.current) return
 		prevDirectoryRef.current = selectedDirectory
 		const stored = projectModels[selectedDirectory]
-		if (stored?.providerID && stored?.modelID) {
-			setSelectedModel(stored)
-			setSelectedVariant(stored.variant)
-		} else {
-			setSelectedModel(null)
-			setSelectedVariant(undefined)
-		}
+		setSelectedModel(null)
+		setSelectedVariant(undefined)
 		// Restore the per-project agent preference (null = use config default)
 		setSelectedAgent(stored?.agent ?? null)
 	}, [selectedDirectory, projectModels])
@@ -277,19 +291,14 @@ export function NewChat() {
 		(project: (typeof projects)[number]) => {
 			manuallySelectedDirectoryRef.current = project.directory
 			setSelectedDirectory(project.directory)
+			setLastProjectDirectory(project.directory)
 			navigate({
 				to: "/project/$projectSlug",
 				params: { projectSlug: project.slug },
 			})
 		},
-		[navigate],
+		[navigate, setLastProjectDirectory],
 	)
-
-	const handleClearProject = useCallback(() => {
-		manuallySelectedDirectoryRef.current = null
-		setSelectedDirectory("")
-		if (projectSlug) navigate({ to: "/" })
-	}, [navigate, projectSlug])
 
 	const handleUseExistingFolder = useCallback(async () => {
 		const folder = await useExistingFolder?.()
@@ -311,6 +320,7 @@ export function NewChat() {
 			if (!model) return
 			addRecentModel(model)
 			if (!selectedDirectory) return
+			setError(null)
 			void persistRuntimeModelSelection(selectedDirectory, model).catch((err) => {
 				console.error("Failed to persist model selection:", err)
 				setError("Failed to save model setting")
@@ -323,6 +333,7 @@ export function NewChat() {
 		(variant: string | undefined) => {
 			setSelectedVariant(variant)
 			if (!variant || !selectedDirectory) return
+			setError(null)
 			void persistRuntimeModelConfigOption(selectedDirectory, "thought_level", variant).catch((err) => {
 				console.error("Failed to persist reasoning effort selection:", err)
 				setError("Failed to save reasoning effort setting")
@@ -345,7 +356,7 @@ export function NewChat() {
 	const handleBranchChanged = useCallback(
 		(_branch: string) => {
 			// VCS hook polls every 30s, but we want immediate UI update.
-			// The ACP vcs.branch.updated event will also fire eventually.
+			// The Native vcs.branch.updated event will also fire eventually.
 			reloadVcs()
 		},
 		[reloadVcs],
@@ -361,9 +372,42 @@ export function NewChat() {
 		setMentionQuery("")
 	}, [])
 
+	const applyComposerSlash = useCallback((text: string): boolean => {
+		const parsed = parseComposerSlash(text)
+		if (!parsed) return false
+		switch (parsed.name) {
+			case "plan":
+				setCollaborationMode("plan")
+				controllerRef.current?.setText("")
+				return true
+			case "goal":
+				setActiveTrigger("goal")
+				controllerRef.current?.setText("")
+				return true
+			case "model":
+				setModelPickerOpen(true)
+				controllerRef.current?.setText("")
+				return true
+			case "skills":
+				setSkillPickerOpen(true)
+				controllerRef.current?.setText("")
+				return true
+			case "compact":
+			case "fork":
+				controllerRef.current?.setText("")
+				return true
+			case "side":
+				controllerRef.current?.setText("/side ")
+				return true
+			case "research":
+				return false
+		}
+	}, [])
+
 	const handleSlashSelect = useCallback(
 		(command: string) => {
 			handleSlashClose()
+			if (applyComposerSlash(command)) return
 			const ctrl = controllerRef.current
 			if (!ctrl) return
 			ctrl.setText(command)
@@ -375,7 +419,7 @@ export function NewChat() {
 				}
 			})
 		},
-		[handleSlashClose],
+		[applyComposerSlash, handleSlashClose],
 	)
 
 	// Insert a selected mention into the prompt textarea
@@ -408,10 +452,17 @@ export function NewChat() {
 	// Delegate keyboard events to open popovers before the composer handles Enter.
 	const handleTextareaKeyDown = useCallback(
 		(e: React.KeyboardEvent<HTMLTextAreaElement>) => {
+			if (e.key === "Tab" && e.shiftKey) {
+				e.preventDefault()
+				handleSlashClose()
+				handleMentionClose()
+				setCollaborationMode((mode) => (mode === "plan" ? "build" : "plan"))
+				return
+			}
 			if (slashPopoverRef.current?.handleKeyDown(e)) return
 			if (mentionPopoverRef.current?.handleKeyDown(e)) return
 		},
-		[],
+		[handleMentionClose, handleSlashClose],
 	)
 
 	// Resolve active agent for model resolution
@@ -472,9 +523,15 @@ export function NewChat() {
 					!!manuallySelectedDirectoryRef.current &&
 					manuallySelectedDirectoryRef.current === currentDirectory,
 				unavailableDirectories: projectSlug ? undefined : unavailableProjectDirectories,
+				lastUsedDirectory: lastProjectDirectory,
 			}),
 		)
-	}, [projectSlug, projects, unavailableProjectDirectories])
+	}, [projectSlug, projects, unavailableProjectDirectories, lastProjectDirectory])
+
+	useEffect(() => {
+		if (!selectedDirectory) return
+		setLastProjectDirectory(selectedDirectory)
+	}, [selectedDirectory, setLastProjectDirectory])
 
 	// ---
 	// Launch helpers
@@ -482,16 +539,36 @@ export function NewChat() {
 
 	/** Persist the model + variant + agent for this project so new sessions remember it. */
 	const persistProjectModel = useCallback(() => {
-		if (!effectiveModel || !selectedDirectory) return
+		// Only an explicit selection (or the project preference it was seeded
+		// from) may persist — a fallback-resolved model would poison the
+		// preference with slugs/defaults the user never chose.
+		if (!selectedModel || !selectedDirectory) return
 		appStore.set(setProjectModelAtom, {
 			directory: selectedDirectory,
 			model: {
-				...effectiveModel,
+				...selectedModel,
 				variant: selectedVariant,
 				agent: selectedAgent ?? undefined,
 			},
 		})
-	}, [effectiveModel, selectedDirectory, selectedVariant, selectedAgent])
+	}, [selectedModel, selectedDirectory, selectedVariant, selectedAgent])
+
+	const persistLaunchSettings = useCallback(
+		async (directory: string, sessionId: string) => {
+			const client = getProjectClient(directory)
+			if (!client?.session?.updateSettings) return
+			try {
+				await client.session.updateSettings({
+					sessionId: sessionId,
+					permissionProfile,
+					mode: collaborationMode,
+				})
+			} catch (err) {
+				console.error("Failed to persist launch session settings:", err)
+			}
+		},
+		[collaborationMode, permissionProfile],
+	)
 
 	/** Navigate to the chat view for a given session. */
 	const navigateToSession = useCallback(
@@ -520,13 +597,16 @@ export function NewChat() {
 			}
 
 			persistProjectModel()
+			stashComposerPermissionForSession(session.id, permissionProfile)
+			await persistLaunchSettings(selectedDirectory, session.id)
 			navigateToSession(session.id)
 
 			await sendPrompt(selectedDirectory, session.id, promptText, {
-				model: effectiveModel ?? undefined,
+				model: selectedModel ?? undefined,
 				agent: selectedAgent ?? undefined,
 				variant: selectedVariant,
 				files,
+				collaborationMode,
 			})
 			clearDraft()
 		},
@@ -534,12 +614,14 @@ export function NewChat() {
 			selectedDirectory,
 			createSession,
 			sendPrompt,
-			effectiveModel,
+			selectedModel,
 			selectedAgent,
 			selectedVariant,
 			clearDraft,
 			persistProjectModel,
+			persistLaunchSettings,
 			navigateToSession,
+			collaborationMode,
 			vcs,
 		],
 	)
@@ -614,23 +696,27 @@ export function NewChat() {
 						branch: result.branchName,
 					})
 
+					stashComposerPermissionForSession(session.id, permissionProfile)
+					await persistLaunchSettings(sdkDirectory, session.id)
+
 					// Navigate to the real session, then clean up the stub
 					navigateToSession(session.id)
 					appStore.set(removeSessionAtom, stubId)
 
 					// Phase 3: Send the prompt
 					await sendPrompt(sdkDirectory, session.id, promptText, {
-						model: effectiveModel ?? undefined,
+						model: selectedModel ?? undefined,
 						agent: selectedAgent ?? undefined,
 						variant: selectedVariant,
 						files,
+						collaborationMode,
 					})
 				} catch (err) {
 					console.error("Worktree launch failed:", err)
 					// Remove the stub and navigate back to new chat
 					appStore.set(removeSessionAtom, stubId)
 					setError(`Worktree setup failed: ${err instanceof Error ? err.message : "Unknown error"}`)
-					navigate({ to: "/" })
+					navigateToNewChat(navigate, projects, selectedProject?.slug, lastProjectDirectory)
 				}
 			}
 
@@ -640,29 +726,34 @@ export function NewChat() {
 			selectedDirectory,
 			createSession,
 			sendPrompt,
-			effectiveModel,
+			selectedModel,
 			selectedAgent,
 			selectedVariant,
 			clearDraft,
 			persistProjectModel,
+			persistLaunchSettings,
 			navigateToSession,
+			collaborationMode,
 			navigate,
+			projects,
+			selectedProject,
+			lastProjectDirectory,
 		],
 	)
 
 	const handleLaunch = useCallback(
 		async (promptText: string, files?: FileAttachment[]) => {
 			if (!selectedDirectory || !promptText) return
+			if (applyComposerSlash(promptText)) return
+			const launchText = activeTrigger === "goal" ? goalPromptText(promptText) : promptText
 			setLaunching(true)
 			setError(null)
 			try {
 				if (worktreeMode === "worktree") {
-					// Worktree mode navigates immediately and runs setup in the background.
-					// The launching state is cleared right away since the chat view takes over.
-					launchWorktree(promptText, files)
+					launchWorktree(launchText, files)
 					setLaunching(false)
 				} else {
-					await launchLocal(promptText, files)
+					await launchLocal(launchText, files)
 				}
 			} catch (err) {
 				setError(err instanceof Error ? err.message : "Failed to create session")
@@ -670,7 +761,14 @@ export function NewChat() {
 				setLaunching(false)
 			}
 		},
-		[selectedDirectory, worktreeMode, launchLocal, launchWorktree],
+		[
+			selectedDirectory,
+			worktreeMode,
+			launchLocal,
+			launchWorktree,
+			applyComposerSlash,
+			activeTrigger,
+		],
 	)
 
 	const hasToolbar = providers
@@ -679,13 +777,13 @@ export function NewChat() {
 		<div className="relative flex h-full flex-col items-center justify-center px-0 py-8 sm:px-8">
 			<div className="w-full max-w-3xl">
 				<div className="mb-6 text-center">
-					<h1 className="select-none text-[34px] font-normal leading-tight tracking-normal text-foreground">
+					<h1 className="select-none text-[32px] font-normal leading-tight tracking-[-0.03em] text-foreground">
 						What should we work on?
 					</h1>
 				</div>
 
 				<div
-					className="devo-composer-shell bg-muted/30 shadow-[0_12px_48px_rgba(0,0,0,0.07)]"
+					className="devo-composer-shell bg-background shadow-[0_8px_32px_rgba(0,0,0,0.05)]"
 					data-popover-open={slashOpen || mentionOpen ? "true" : undefined}
 				>
 					<PromptInputProvider key={draftKey} initialInput={draft}>
@@ -748,6 +846,27 @@ export function NewChat() {
 								<PromptInputFooter className="px-4 pb-2">
 									<PromptInputTools>
 										<AttachButton disabled={launching || !selectedDirectory} />
+										<ComposerPermissionPicker
+											value={permissionProfile}
+											onChange={setPermissionProfile}
+											disabled={launching || !selectedDirectory}
+										/>
+										{collaborationMode === "plan" && (
+											<ComposerModeChip
+												variant="plan"
+												disabled={launching}
+												onRemove={() => setCollaborationMode("build")}
+											/>
+										)}
+										{activeTrigger === "goal" && (
+											<ComposerModeChip
+												variant="goal"
+												disabled={launching}
+												onRemove={() => setActiveTrigger(null)}
+											/>
+										)}
+									</PromptInputTools>
+									<div className="ml-auto flex min-w-0 items-center gap-0.5">
 										{hasToolbar && (
 											<PromptToolbar
 												agents={devoAgents ?? []}
@@ -758,13 +877,15 @@ export function NewChat() {
 												effectiveModel={effectiveModel}
 												hasModelOverride={!!selectedModel}
 												onSelectModel={handleModelSelect}
+												modelPickerOpen={modelPickerOpen}
+												onModelPickerOpenChange={setModelPickerOpen}
 												selectedVariant={selectedVariant}
 												onSelectVariant={handleVariantSelect}
 												disabled={launching || !selectedDirectory}
 											/>
 										)}
-									</PromptInputTools>
-									<PromptInputSubmit disabled={launching || !selectedDirectory} />
+										<PromptInputSubmit disabled={launching || !selectedDirectory} />
+									</div>
 								</PromptInputFooter>
 							</PromptInput>
 						</div>
@@ -777,7 +898,6 @@ export function NewChat() {
 								selectedProject={selectedProject}
 								selectedDirectory={selectedDirectory}
 								onSelectProject={handleSelectProject}
-								onClearProject={handleClearProject}
 								onStartFromScratch={startFromScratch}
 								onUseExistingFolder={useExistingFolder ? handleUseExistingFolder : undefined}
 							/>
@@ -814,6 +934,18 @@ export function NewChat() {
 					)}
 				</div>
 			</div>
+			<SkillPickerDialog
+				directory={selectedDirectory || null}
+				onOpenChange={setSkillPickerOpen}
+				onSelect={(skillName) => {
+					const ctrl = controllerRef.current
+					if (!ctrl) return
+					const current = ctrl.getText()
+					const insertion = `$${skillName} `
+					ctrl.setText(current.trim() ? `${current} ${insertion}` : insertion)
+				}}
+				open={skillPickerOpen}
+			/>
 		</div>
 	)
 }

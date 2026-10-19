@@ -18,6 +18,8 @@ devo-client = { workspace = true }
 devo-core = { workspace = true }
 devo-execpolicy = { workspace = true }
 devo-file-search = { workspace = true }
+devo-harness = { workspace = true }
+devo-kernel = { workspace = true }
 devo-mcp = { workspace = true }
 devo-protocol = { workspace = true }
 devo-provider = { workspace = true }
@@ -31,8 +33,11 @@ devo-util-shell-command = { workspace = true }
 diffy = { workspace = true }
 futures = { workspace = true }
 fs2 = { workspace = true }
+jsonrepair = { workspace = true }
 lru = { workspace = true }
+libc = { workspace = true }
 rusqlite = { workspace = true }
+reqwest = { workspace = true }
 serde = { workspace = true }
 serde_json = { workspace = true }
 sha2 = { workspace = true }
@@ -46,6 +51,7 @@ toml = { workspace = true }
 tracing = { workspace = true }
 tracing-subscriber = { workspace = true }
 uuid = { workspace = true }
+windows-sys = { workspace = true, features = ["Win32_Storage_FileSystem"] }
 
 [dev-dependencies]
 async-trait = { workspace = true }

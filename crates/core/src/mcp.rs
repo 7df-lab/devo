@@ -17,7 +17,7 @@ pub use devo_config::McpTrustPolicy;
 
 pub const DIRECT_MCP_TOOL_EXPOSURE_THRESHOLD: usize = 100;
 
-const MCP_TOOL_PREFIX: &str = "mcp__";
+pub(crate) const MCP_TOOL_PREFIX: &str = "mcp__";
 const MCP_UI_META_KEY: &str = "ui";
 const MCP_UI_VISIBILITY_META_KEY: &str = "visibility";
 const MCP_UI_MODEL_VISIBILITY: &str = "model";
@@ -228,6 +228,7 @@ pub fn sanitize_model_name(value: &str) -> String {
     }
 }
 
+#[allow(clippy::double_must_use)]
 #[async_trait]
 pub trait McpManager: Send + Sync {
     async fn statuses(&self) -> Result<Vec<McpServerStatus>, McpError>;

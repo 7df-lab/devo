@@ -11,13 +11,13 @@ path = "src/main.rs"
 
 [dependencies]
 devo-core = { workspace = true }
+devo-kernel = { workspace = true }
 devo-mcp = { workspace = true }
 devo-protocol = { workspace = true }
 devo-provider = { workspace = true }
 devo-safety = { workspace = true }
 devo-server = { workspace = true }
 devo-tasks = { workspace = true }
-devo-tui = { workspace = true }
 devo-util-paths = { workspace = true }
 devo-windows-sandbox = { workspace = true }
 devo-arg0 = { workspace = true }

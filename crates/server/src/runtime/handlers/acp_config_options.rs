@@ -15,7 +15,7 @@ use devo_protocol::AcpSessionConfigSelectOption;
 use devo_protocol::AcpSessionConfigSelectOptions;
 use devo_protocol::Model;
 use devo_protocol::PermissionPreset;
-use devo_protocol::SessionId;
+use devo_protocol::native::ids::SessionId;
 
 const ACP_MODE_CONFIG_ID: &str = "mode";
 pub(crate) const ACP_MODEL_CONFIG_ID: &str = "model";
@@ -53,6 +53,12 @@ impl ServerRuntime {
         &self,
         params: AcpSetConfigOptionParams,
     ) -> Result<Vec<AcpSessionConfigOption>, (AcpErrorCode, String)> {
+        let Some(value) = params.value.string_value().map(str::to_owned) else {
+            return Err((
+                AcpErrorCode::InvalidParams,
+                "boolean session config options are not supported".to_string(),
+            ));
+        };
         let Some(session_arc) = self.sessions.lock().await.get(&params.session_id).cloned() else {
             return Err((
                 AcpErrorCode::ServerError,
@@ -78,32 +84,33 @@ impl ServerRuntime {
                 );
                 let value_is_allowed = match &model_option {
                     AcpSessionConfigOption::Select { options, .. } => {
-                        select_options_contain_value(options, &params.value)
+                        select_options_contain_value(options, &value)
                     }
+                    AcpSessionConfigOption::Boolean { .. } => false,
                 };
                 if !value_is_allowed {
                     return Err((
                         AcpErrorCode::InvalidParams,
                         format!(
                             "invalid value '{}' for session config option '{}'",
-                            params.value, params.config_id
+                            value, params.config_id
                         ),
                     ));
                 }
 
                 let mut turn_config = snapshot.runtime_context.resolve_turn_config(
-                    Some(params.value.as_str()),
-                    snapshot.summary.reasoning_effort_selection.clone(),
+                    Some(value.as_str()),
+                    snapshot.summary.settings.reasoning_effort.clone(),
                 );
                 turn_config.reasoning_effort_selection = current_reasoning_effort_value(
                     &turn_config.model,
-                    snapshot.summary.reasoning_effort_selection.as_deref(),
+                    snapshot.summary.settings.reasoning_effort.as_deref(),
                 );
 
                 let updated = session_arc
-                    .update_session_metadata(
-                        Some(turn_config.model.slug.clone()),
-                        turn_config.model_binding_id.clone(),
+                    .update_session_model_settings(
+                        Some(value.clone()),
+                        None,
                         turn_config.reasoning_effort_selection.clone(),
                         None,
                     )
@@ -122,8 +129,12 @@ impl ServerRuntime {
                             "session actor unavailable".to_string(),
                         )
                     })?;
-                if let Some(record) = updated_snapshot.record.as_ref()
-                    && let Err(error) = self.rollout_store.append_session_meta(record)
+                if let Some(rollout_path) = updated_snapshot.rollout_path.as_ref()
+                    && let Err(error) = self.rollout_store.append_session_meta_at(
+                        rollout_path,
+                        &updated_snapshot.summary.native,
+                        /*extras*/ None,
+                    )
                 {
                     return Err((AcpErrorCode::ServerError, error.to_string()));
                 }
@@ -149,29 +160,30 @@ impl ServerRuntime {
                 };
                 let value_is_allowed = match &reasoning_effort_option {
                     AcpSessionConfigOption::Select { options, .. } => {
-                        select_options_contain_value(options, &params.value)
+                        select_options_contain_value(options, &value)
                     }
+                    AcpSessionConfigOption::Boolean { .. } => false,
                 };
                 if !value_is_allowed {
                     return Err((
                         AcpErrorCode::InvalidParams,
                         format!(
                             "invalid value '{}' for session config option '{}'",
-                            params.value, params.config_id
+                            value, params.config_id
                         ),
                     ));
                 }
 
                 let mut turn_config = snapshot.runtime_context.resolve_turn_config(
                     session_model_selection(&snapshot.summary),
-                    Some(params.value.clone()),
+                    Some(value.clone()),
                 );
-                turn_config.reasoning_effort_selection = Some(params.value.clone());
+                turn_config.reasoning_effort_selection = Some(value.clone());
 
                 let updated = session_arc
-                    .update_session_metadata(
-                        Some(turn_config.model.slug.clone()),
-                        turn_config.model_binding_id.clone(),
+                    .update_session_model_settings(
+                        Some(canonical_model_selection(&turn_config)),
+                        None,
                         turn_config.reasoning_effort_selection.clone(),
                         None,
                     )
@@ -190,8 +202,12 @@ impl ServerRuntime {
                             "session actor unavailable".to_string(),
                         )
                     })?;
-                if let Some(record) = updated_snapshot.record.as_ref()
-                    && let Err(error) = self.rollout_store.append_session_meta(record)
+                if let Some(rollout_path) = updated_snapshot.rollout_path.as_ref()
+                    && let Err(error) = self.rollout_store.append_session_meta_at(
+                        rollout_path,
+                        &updated_snapshot.summary.native,
+                        /*extras*/ None,
+                    )
                 {
                     return Err((AcpErrorCode::ServerError, error.to_string()));
                 }
@@ -206,12 +222,12 @@ impl ServerRuntime {
                 )
             }
             ACP_MODE_CONFIG_ID => {
-                let Some(preset) = permission_preset_from_value(&params.value) else {
+                let Some(preset) = permission_preset_from_value(&value) else {
                     return Err((
                         AcpErrorCode::InvalidParams,
                         format!(
                             "invalid value '{}' for session config option '{}'",
-                            params.value, params.config_id
+                            value, params.config_id
                         ),
                     ));
                 };
@@ -245,17 +261,14 @@ impl ServerRuntime {
                 )
             }
             ACP_SANDBOX_PROFILE_CONFIG_ID => {
-                match session_arc
-                    .apply_sandbox_profile(params.value.clone())
-                    .await
-                {
+                match session_arc.apply_sandbox_profile(value.clone()).await {
                     Some(Ok(_)) => {}
                     Some(Err(error)) => {
                         return Err((
                             AcpErrorCode::InvalidParams,
                             format!(
                                 "invalid value '{}' for session config option '{}': {error}",
-                                params.value, params.config_id
+                                value, params.config_id
                             ),
                         ));
                     }
@@ -308,7 +321,7 @@ impl ServerRuntime {
 
 fn acp_config_options_for_session(
     runtime_context: &SessionRuntimeContext,
-    summary: &SessionMetadata,
+    summary: &crate::runtime_session_summary::RuntimeSessionSummary,
     config: &SessionConfig,
 ) -> Vec<AcpSessionConfigOption> {
     let mut options = acp_model_and_reasoning_options_for_session(runtime_context, summary);
@@ -318,11 +331,11 @@ fn acp_config_options_for_session(
 
 fn acp_model_and_reasoning_options_for_session(
     runtime_context: &SessionRuntimeContext,
-    summary: &SessionMetadata,
+    summary: &crate::runtime_session_summary::RuntimeSessionSummary,
 ) -> Vec<AcpSessionConfigOption> {
     let turn_config = runtime_context.resolve_turn_config(
         session_model_selection(summary),
-        summary.reasoning_effort_selection.clone(),
+        summary.settings.reasoning_effort.clone(),
     );
     acp_model_and_reasoning_options_for_context(runtime_context, &turn_config)
 }
@@ -383,17 +396,18 @@ fn acp_mode_config_option_for_session(config: &SessionConfig) -> AcpSessionConfi
             })
             .collect(),
         ),
+        meta: None,
     }
 }
 
 fn acp_model_config_option_for_session(
     runtime_context: &SessionRuntimeContext,
-    summary: &SessionMetadata,
+    summary: &crate::runtime_session_summary::RuntimeSessionSummary,
     _config: &SessionConfig,
 ) -> AcpSessionConfigOption {
     let turn_config = runtime_context.resolve_turn_config(
         session_model_selection(summary),
-        summary.reasoning_effort_selection.clone(),
+        summary.settings.reasoning_effort.clone(),
     );
     acp_model_config_option_for_turn_config(runtime_context, &turn_config)
 }
@@ -402,10 +416,7 @@ fn acp_model_config_option_for_turn_config(
     runtime_context: &SessionRuntimeContext,
     turn_config: &TurnConfig,
 ) -> AcpSessionConfigOption {
-    let current_value = turn_config
-        .model_binding_id
-        .clone()
-        .unwrap_or_else(|| turn_config.model.slug.clone());
+    let current_value = canonical_model_selection(turn_config);
     let config = runtime_context
         .config_store
         .lock()
@@ -413,40 +424,72 @@ fn acp_model_config_option_for_turn_config(
         .effective_config()
         .clone();
 
+    let provider_catalog = config.provider_catalog_config();
     let mut options = Vec::new();
     let mut seen_values = BTreeSet::new();
-    for (binding_id, binding) in &config.provider.model_bindings {
-        if !binding.enabled || !seen_values.insert(binding_id.clone()) {
+    for (provider_id, provider) in &provider_catalog.providers {
+        if provider.enabled == Some(false) {
             continue;
         }
-        let model_display_name = runtime_context
-            .model_catalog
-            .get(&binding.model_slug)
-            .map(|model| model.display_name.as_str())
-            .and_then(non_empty_str);
-        let name = binding
-            .display_name
+        let provider_name = provider
+            .name
             .as_deref()
             .and_then(non_empty_str)
-            .or(model_display_name)
-            .unwrap_or(binding.model_slug.as_str())
-            .to_string();
-        let provider_name = config
-            .provider
-            .providers
-            .get(&binding.provider)
-            .map(|provider| provider.name.as_str())
-            .and_then(non_empty_str)
-            .unwrap_or(binding.provider.as_str());
-        options.push(AcpSessionConfigSelectOption {
-            value: binding_id.clone(),
-            name,
-            description: Some(format!(
-                "{provider_name}: {} via {}",
-                binding.request_model, binding.invocation_method
-            )),
-            meta: None,
-        });
+            .unwrap_or(provider_id.as_str());
+        let provider_wire_api = provider
+            .wire_api
+            .unwrap_or(devo_protocol::ProviderWireApi::OpenAIChatCompletions);
+        for (model_id, model) in &provider.models {
+            if model.enabled == Some(false) {
+                continue;
+            }
+            let model_value = format!("{provider_id}/{model_id}");
+            if !seen_values.insert(model_value.clone()) {
+                continue;
+            }
+            let model_display_name = runtime_context
+                .model_catalog
+                .get(&model_value)
+                .map(|model| model.display_name.as_str())
+                .and_then(non_empty_str);
+            let name = model
+                .name
+                .as_deref()
+                .and_then(non_empty_str)
+                .or(model_display_name)
+                .unwrap_or(model_id.as_str())
+                .to_string();
+            let wire_api = model.wire_api.unwrap_or(provider_wire_api);
+            options.push(AcpSessionConfigSelectOption {
+                value: model_value.clone(),
+                name: name.clone(),
+                description: Some(format!("{provider_name}: {model_id} via {wire_api}")),
+                meta: None,
+            });
+
+            for (variant_id, variant) in &model.variants {
+                if variant.disabled {
+                    continue;
+                }
+                let value = format!("{model_value}/{variant_id}");
+                if !seen_values.insert(value.clone()) {
+                    continue;
+                }
+                let variant_name = variant
+                    .label
+                    .clone()
+                    .filter(|label| !label.trim().is_empty())
+                    .unwrap_or_else(|| variant_id.replace(['-', '_'], " "));
+                options.push(AcpSessionConfigSelectOption {
+                    value,
+                    name: format!("{name} ({variant_name})"),
+                    description: Some(format!(
+                        "{provider_name}: {variant_id} variant for {model_id}"
+                    )),
+                    meta: None,
+                });
+            }
+        }
     }
 
     if !seen_values.contains(&current_value) {
@@ -470,16 +513,31 @@ fn acp_model_config_option_for_turn_config(
         )),
         current_value,
         options: AcpSessionConfigSelectOptions::Ungrouped(options),
+        meta: None,
     }
+}
+
+fn canonical_model_selection(turn_config: &TurnConfig) -> String {
+    let base = match &turn_config.provider_route {
+        devo_provider::ProviderRoute::Connection { provider_id, .. } => {
+            format!("{provider_id}/{}", turn_config.request_model)
+        }
+        devo_provider::ProviderRoute::Default => turn_config.model.slug.clone(),
+    };
+    turn_config
+        .variant
+        .as_deref()
+        .map(|variant| format!("{base}/{variant}"))
+        .unwrap_or(base)
 }
 
 fn acp_reasoning_effort_config_option_for_session(
     runtime_context: &SessionRuntimeContext,
-    summary: &SessionMetadata,
+    summary: &crate::runtime_session_summary::RuntimeSessionSummary,
 ) -> Option<AcpSessionConfigOption> {
     let turn_config = runtime_context.resolve_turn_config(
         session_model_selection(summary),
-        summary.reasoning_effort_selection.clone(),
+        summary.settings.reasoning_effort.clone(),
     );
     acp_reasoning_effort_config_option_for_turn_config(&turn_config)
 }
@@ -530,6 +588,7 @@ fn acp_reasoning_effort_config_option_for_turn_config(
         )),
         current_value,
         options: AcpSessionConfigSelectOptions::Ungrouped(options),
+        meta: None,
     })
 }
 

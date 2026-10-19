@@ -1,15 +1,16 @@
 import { describe, expect, test } from "bun:test"
-import { createDevoClient, type DevoAcpTransport, type DevoAcpTransportEvent } from "./client"
-import type { AcpSessionConfigOption, AcpSessionNotification } from "./generated"
+import { createDevoClient, type DevoNativeTransport, type DevoNativeTransportEvent } from "./client"
+import type { SessionConfigOption } from "./native-client-support"
 import type {
+	ProviderInfo,
+	ProviderModelInfo,
+	ProviderUpsertParams,
 	ProviderValidateParams,
-	ProviderVendor,
-	ProviderVendorUpsertParams,
-} from "./generated/protocol"
+} from "./generated/native"
 
-class FakeTransport implements DevoAcpTransport {
+class FakeTransport implements DevoNativeTransport {
 	readonly requests: Array<{ method: string; params: unknown; directory?: string }> = []
-	private listeners: Array<(event: DevoAcpTransportEvent) => void> = []
+	private listeners: Array<(event: DevoNativeTransportEvent) => void> = []
 
 	constructor(
 		private readonly handler: (
@@ -26,7 +27,7 @@ class FakeTransport implements DevoAcpTransport {
 
 	async respond(): Promise<void> {}
 
-	subscribe(listener: (event: DevoAcpTransportEvent) => void): () => void {
+	subscribe(listener: (event: DevoNativeTransportEvent) => void): () => void {
 		this.listeners.push(listener)
 		return () => {
 			this.listeners = this.listeners.filter((item) => item !== listener)
@@ -37,17 +38,43 @@ class FakeTransport implements DevoAcpTransport {
 		return true
 	}
 
-	emitSessionUpdate(params: unknown): void {
-		for (const listener of this.listeners) {
-			listener({ type: "notification", method: "session/update", params })
-		}
-	}
 }
 
 const initializeResult = {
 	protocolVersion: 1,
 	agentCapabilities: {},
 	authMethods: [],
+}
+
+const modelPreferences = {
+	model: "test-openai",
+	availableModels: [
+		{
+			value: "test-openai",
+			label: "Test OpenAI",
+			description: "OpenAI: test-model",
+			availableEfforts: [
+				{ value: "low", label: "Low" },
+				{ value: "medium", label: "Medium" },
+				{ value: "high", label: "High" },
+			],
+		},
+		{
+			value: "alt-openai",
+			label: "Alt OpenAI",
+			description: "OpenAI: alt-model",
+			availableEfforts: [
+				{ value: "high", label: "High" },
+				{ value: "max", label: "Max" },
+			],
+		},
+	],
+	availableEfforts: [
+		{ value: "low", label: "Low" },
+		{ value: "medium", label: "Medium" },
+		{ value: "high", label: "High" },
+	],
+	reasoningEffort: "medium",
 }
 
 const configOptions = [
@@ -62,44 +89,41 @@ const configOptions = [
 			{ value: "alt-openai", name: "Alt OpenAI", description: "OpenAI: alt-model" },
 		],
 	},
-] satisfies AcpSessionConfigOption[]
+] satisfies SessionConfigOption[]
 
-const providerVendor = {
+const provider = {
+	id: "openai",
 	name: "openai",
-	base_url: "https://api.openai.com/v1",
+	baseUrl: "https://api.openai.com/v1",
 	credential: "openai_api_key",
-	headers: null,
-	wire_apis: ["openai_chat_completions"],
+	wireApis: ["openai_chat_completions"],
+	models: {
+		"gpt-4o": {
+			name: "GPT-4o",
+			wireApi: "openai_chat_completions",
+		} satisfies ProviderModelInfo,
+	},
 	enabled: true,
-} satisfies ProviderVendor
+} satisfies ProviderInfo
 
 const providerValidateParams = {
-	provider_vendor: providerVendor,
-	model_binding: {
-		binding_id: "openai-gpt-4o",
-		model_slug: "gpt-4o",
-		provider: "openai",
-		request_model: "gpt-4o",
-		display_name: "GPT-4o",
-		invocation_method: "openai_chat_completions",
-		default_reasoning_effort: null,
-		enabled: true,
-	},
-	api_key: "secret",
+	provider,
+	model: "gpt-4o",
+	apiKey: "secret",
 } satisfies ProviderValidateParams
 
 const providerUpsertParams = {
 	...providerValidateParams,
-	default_model_binding: "openai-gpt-4o",
-} satisfies ProviderVendorUpsertParams
+	defaultModel: "openai/gpt-4o",
+} satisfies ProviderUpsertParams
 
-describe("ACP desktop SDK config option cache", () => {
-	test("loads cold-start config options from model/config when no session cache exists", async () => {
+describe("Native desktop SDK config option cache", () => {
+	test("loads cold-start config options from model/preferences/read when no session cache exists", async () => {
 		const transport = new FakeTransport((method, params) => {
 			if (method === "initialize") return initializeResult
-			if (method === "model/config") {
+			if (method === "model/preferences/read") {
 				expect(params).toEqual({ cwd: "/repo" })
-				return { configOptions }
+				return { preferences: modelPreferences }
 			}
 			throw new Error(`unexpected request ${method}`)
 		})
@@ -109,52 +133,33 @@ describe("ACP desktop SDK config option cache", () => {
 		const config = await client.config.get()
 
 		expect(providers.data.default).toEqual({ session: "test-openai" })
+		expect(Object.keys(providers.data.providers[0].models["test-openai"].variants)).toEqual([
+			"low",
+			"medium",
+			"high",
+		])
+		expect(Object.keys(providers.data.providers[0].models["alt-openai"].variants)).toEqual([
+			"high",
+			"max",
+		])
+		expect(providers.data.providers[0].models["test-openai"].currentVariant).toBe("medium")
+		expect(providers.data.providers[0].models["alt-openai"].currentVariant).toBeUndefined()
 		expect(config.data).toEqual({ model: "session/test-openai" })
 		expect(transport.requests.map((request) => request.method)).toEqual([
 			"initialize",
-			"model/config",
+			"model/preferences/read",
 		])
 	})
 
-	test("keeps session model options when a live config update is empty", async () => {
-		const transport = new FakeTransport((method) => {
-			if (method === "initialize") return initializeResult
-			if (method === "session/new") return { sessionId: "s1", configOptions }
-			if (method === "model/config") throw new Error("model/config should not be called")
-			throw new Error(`unexpected request ${method}`)
-		})
-		const client = createDevoClient({ directory: "/repo", transport })
-
-		await client.session.create()
-		const before = await client.config.providers()
-		transport.emitSessionUpdate({
-			sessionId: "s1",
-			update: {
-				sessionUpdate: "config_option_update",
-				configOptions: [],
-			},
-		} satisfies AcpSessionNotification)
-		const after = await client.config.providers()
-
-		expect(after.data).toEqual(before.data)
-	})
-
 	test("persists cold-start model config options through the runtime API", async () => {
-		const updatedConfigOptions = [
-			{
-				...configOptions[0],
-				currentValue: "alt-openai",
-			},
-		] satisfies AcpSessionConfigOption[]
 		const transport = new FakeTransport((method, params) => {
 			if (method === "initialize") return initializeResult
-			if (method === "model/config/set") {
+			if (method === "model/preferences/write") {
 				expect(params).toEqual({
 					cwd: "/repo",
-					configId: "model",
-					value: "alt-openai",
+					patch: { model: "alt-openai" },
 				})
-				return { configOptions: updatedConfigOptions }
+				return { preferences: { ...modelPreferences, model: "alt-openai" } }
 			}
 			throw new Error(`unexpected request ${method}`)
 		})
@@ -166,15 +171,21 @@ describe("ACP desktop SDK config option cache", () => {
 		expect((await client.config.get()).data).toEqual({ model: "session/alt-openai" })
 		expect(transport.requests.map((request) => request.method)).toEqual([
 			"initialize",
-			"model/config/set",
+			"model/preferences/write",
 		])
 	})
 
-	test("lists provider vendors through the server provider API", async () => {
+	test("lists provider Connections and templates through the server provider API", async () => {
 		const transport = new FakeTransport((method, params) => {
+			if (method === "initialize") return initializeResult
 			if (method === "provider/list") {
 				expect(params).toEqual({})
-				return { provider_vendors: [providerVendor] }
+				return {
+					providers: [provider],
+					templateProviderIds: [],
+					connectedProviderIds: ["openai"],
+					connectionModels: { openai: { "gpt-4o": provider.models["gpt-4o"] } },
+				}
 			}
 			throw new Error(`unexpected request ${method}`)
 		})
@@ -182,15 +193,21 @@ describe("ACP desktop SDK config option cache", () => {
 
 		const result = await client.provider.list()
 
-		expect(result.data).toEqual({ provider_vendors: [providerVendor] })
-		expect(transport.requests.map((request) => request.method)).toEqual(["provider/list"])
+		expect(result.data).toEqual({
+			providers: [provider],
+			templateProviderIds: [],
+			connectedProviderIds: ["openai"],
+			connectionModels: { openai: { "gpt-4o": provider.models["gpt-4o"] } },
+		})
+		expect(transport.requests.map((request) => request.method)).toEqual(["initialize", "provider/list"])
 	})
 
 	test("validates provider candidates through the server provider API", async () => {
 		const transport = new FakeTransport((method, params) => {
+			if (method === "initialize") return initializeResult
 			if (method === "provider/validate") {
 				expect(params).toEqual(providerValidateParams)
-				return { reply_preview: "OK" }
+				return { replyPreview: "OK" }
 			}
 			throw new Error(`unexpected request ${method}`)
 		})
@@ -198,37 +215,33 @@ describe("ACP desktop SDK config option cache", () => {
 
 		const result = await client.provider.validate(providerValidateParams)
 
-		expect(result.data).toEqual({ reply_preview: "OK" })
-		expect(transport.requests.map((request) => request.method)).toEqual(["provider/validate"])
+		expect(result.data).toEqual({ replyPreview: "OK" })
+		expect(transport.requests.map((request) => request.method)).toEqual(["initialize", "provider/validate"])
 	})
 
-	test("upserts provider vendors and clears cached model config", async () => {
-		let modelConfigCalls = 0
-		const updatedConfigOptions = [
-			{
-				type: "select",
-				id: "model",
-				name: "Model",
-				category: "model",
-				currentValue: "openai-gpt-4o",
-				options: [
-					{ value: "openai-gpt-4o", name: "GPT-4o", description: "OpenAI: gpt-4o" },
-				],
-			},
-		] satisfies AcpSessionConfigOption[]
+	test("upserts a provider Connection and clears cached model config", async () => {
+		let modelPreferencesReadCalls = 0
+		const updatedPreferences = {
+			model: "openai-gpt-4o",
+			availableModels: [
+				{ value: "openai-gpt-4o", label: "GPT-4o", description: "OpenAI: gpt-4o" },
+			],
+			availableEfforts: [],
+		}
 		const transport = new FakeTransport((method, params) => {
 			if (method === "initialize") return initializeResult
-			if (method === "model/config") {
-				modelConfigCalls += 1
+			if (method === "model/preferences/read") {
+				modelPreferencesReadCalls += 1
 				return {
-					configOptions: modelConfigCalls === 1 ? configOptions : updatedConfigOptions,
+					preferences:
+						modelPreferencesReadCalls === 1 ? modelPreferences : updatedPreferences,
 				}
 			}
 			if (method === "provider/upsert") {
 				expect(params).toEqual(providerUpsertParams)
 				return {
-					provider_vendor: providerVendor,
-					model_binding: providerUpsertParams.model_binding,
+					provider,
+					defaultModel: "openai/gpt-4o",
 				}
 			}
 			throw new Error(`unexpected request ${method}`)
@@ -241,9 +254,71 @@ describe("ACP desktop SDK config option cache", () => {
 		expect((await client.config.get()).data).toEqual({ model: "session/openai-gpt-4o" })
 		expect(transport.requests.map((request) => request.method)).toEqual([
 			"initialize",
-			"model/config",
+			"model/preferences/read",
 			"provider/upsert",
-			"model/config",
+			"model/preferences/read",
+		])
+	})
+})
+
+
+describe("Native default model preferences", () => {
+	test("saving effort without a chat never creates or resumes a session", async () => {
+		const transport = new FakeTransport((method, params) => {
+			if (method === "initialize") return initializeResult
+			if (method === "model/preferences/write") {
+				expect(params).toEqual({ cwd: "/repo", patch: { reasoningEffort: "high" } })
+				return { preferences: { ...modelPreferences, reasoningEffort: "high" } }
+			}
+			throw new Error(`unexpected request ${method}`)
+		})
+		const client = createDevoClient({ directory: "/repo", transport })
+		await client.model.preferences.write({ patch: { reasoningEffort: "high" } })
+		expect((await client.config.providers()).data.providers[0].models["test-openai"].currentVariant).toBe("high")
+		expect(transport.requests.map(request => request.method)).toEqual(["initialize", "model/preferences/write"])
+	})
+
+	test("rapid model and effort choices write in order without session startup", async () => {
+		let finishModel!: () => void
+		const held = new Promise<void>(resolve => { finishModel = resolve })
+		let started!: () => void
+		const firstStarted = new Promise<void>(resolve => { started = resolve })
+		const writes: unknown[] = []
+		const transport = new FakeTransport(async (method, params) => {
+			if (method === "initialize") return initializeResult
+			if (method !== "model/preferences/write") throw new Error(`unexpected request ${method}`)
+			writes.push(params)
+			if (writes.length === 1) { started(); await held }
+			return { preferences: { ...modelPreferences, model: "alt-openai", reasoningEffort: "max" } }
+		})
+		const client = createDevoClient({ directory: "/repo", transport })
+		const model = client.model.preferences.write({ patch: { model: "alt-openai" } })
+		await firstStarted
+		const effort = client.model.preferences.write({ patch: { reasoningEffort: "max" } })
+		await Promise.resolve()
+		expect(writes).toEqual([{ cwd: "/repo", patch: { model: "alt-openai" } }])
+		finishModel()
+		await Promise.all([model, effort])
+		expect(writes).toEqual([
+			{ cwd: "/repo", patch: { model: "alt-openai" } },
+			{ cwd: "/repo", patch: { reasoningEffort: "max" } },
+		])
+		expect(transport.requests.map(request => request.method)).toEqual(["initialize", "model/preferences/write", "model/preferences/write"])
+	})
+
+	test("failed saves remain visible and the next choice can retry", async () => {
+		let attempt = 0
+		const transport = new FakeTransport(method => {
+			if (method === "initialize") return initializeResult
+			if (method !== "model/preferences/write") throw new Error(`unexpected request ${method}`)
+			if (++attempt === 1) throw new Error("Preference write failed")
+			return { preferences: modelPreferences }
+		})
+		const client = createDevoClient({ transport })
+		await expect(client.model.preferences.write({ patch: { reasoningEffort: "high" } })).rejects.toThrow("Preference write failed")
+		await client.model.preferences.write({ patch: { reasoningEffort: "medium" } })
+		expect(transport.requests.filter(request => request.method === "model/preferences/write").map(request => request.params)).toEqual([
+			{ patch: { reasoningEffort: "high" } }, { patch: { reasoningEffort: "medium" } },
 		])
 	})
 })

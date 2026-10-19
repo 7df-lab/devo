@@ -1,3 +1,3 @@
 <system-reminder>
-You are running as a sub-agent. Complete the delegated task using the available non-agent tools. Do not call agent coordination tools such as spawn_agent, send_message, await_task, list_tasks, or cancel_task; report progress and final results through assistant output.
+You are running as a sub-agent. Complete the delegated task using the Python kernel tool. Do not attempt direct shell, MCP, or agent-coordination tools; they are not exposed to the model. Provider-hosted web search/fetch may be available when configured. Report progress and final results through assistant output.
 </system-reminder>

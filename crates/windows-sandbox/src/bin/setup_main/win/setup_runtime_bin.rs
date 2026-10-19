@@ -98,7 +98,10 @@ fn runtime_paths(local_app_data: Option<PathBuf>, user_profile: Option<PathBuf>)
             third_party_openai_codex_root.join("runtimes"),
         ]);
         let devo_desktop_root = local_app_data.join("Devo");
-        runtime_paths.extend([devo_desktop_root.join("bin"), devo_desktop_root.join("runtimes")]);
+        runtime_paths.extend([
+            devo_desktop_root.join("bin"),
+            devo_desktop_root.join("runtimes"),
+        ]);
     }
     // The managed primary runtime is installed outside the LocalAppData runtime roots.
     if let Some(user_profile) = user_profile {

@@ -69,6 +69,7 @@ fn windows_wrapper_args_round_trip() {
         deny_read_paths_override.as_slice(),
         deny_write_paths_override.as_slice(),
         Path::new(r"C:\Users\me\.codex"),
+        Some("S-1-5-21-901-902-903-904"),
     );
 
     assert_eq!(args[0], DEVO_WINDOWS_SANDBOX_ARG1);
@@ -86,6 +87,8 @@ fn windows_wrapper_args_round_trip() {
     assert!(args.contains(&WRITE_ROOTS_JSON_FLAG.to_string()));
     assert!(args.contains(&DENY_READ_PATHS_JSON_FLAG.to_string()));
     assert!(args.contains(&DENY_WRITE_PATHS_JSON_FLAG.to_string()));
+    assert!(args.contains(&"--session-credential-sid".to_string()));
+    assert!(args.contains(&"S-1-5-21-901-902-903-904".to_string()));
 
     let parsed =
         parse_windows_sandbox_wrapper_args(args[1..].to_vec()).expect("parse wrapper args");
@@ -107,4 +110,8 @@ fn windows_wrapper_args_round_trip() {
     assert_eq!(parsed.write_roots_override, Some(write_roots_override));
     assert_eq!(parsed.deny_read_paths_override, deny_read_paths_override);
     assert_eq!(parsed.deny_write_paths_override, deny_write_paths_override);
+    assert_eq!(
+        parsed.session_credential_sid.as_deref(),
+        Some("S-1-5-21-901-902-903-904")
+    );
 }

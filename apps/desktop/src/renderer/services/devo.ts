@@ -6,8 +6,8 @@ import type {
 	WorkspaceDiffDetail,
 } from "@devo-ai/sdk/v2/client"
 import { createDevoClient } from "@devo-ai/sdk/v2/client"
-import { stableId } from "@devo-ai/sdk/v2/acp-client-support"
-import type { Event, DevoProject, QuestionAnswer, Session, SessionStatus } from "../lib/types"
+import { stableId } from "@devo-ai/sdk/v2/native-client-support"
+import type { Event, DevoProject, PermissionResponse, QuestionAnswer, Session, SessionStatus } from "../lib/types"
 import { createLogger } from "../lib/logger"
 import { workspacePatchFilesFromView } from "../lib/workspace-diff"
 
@@ -34,7 +34,7 @@ export interface ConnectOptions {
 }
 
 /**
- * Creates a Devo client over the preload ACP bridge.
+ * Creates a Devo client over the preload Native bridge.
  */
 export function connectToServer(url: string, options?: ConnectOptions): DevoClient {
 	void url
@@ -150,7 +150,7 @@ export async function sendPrompt(
 	},
 ): Promise<void> {
 	await client.session.promptAsync({
-		sessionID: sessionId,
+		sessionId: sessionId,
 		parts: [{ type: "text", text }],
 		model:
 			options?.providerID && options?.modelID
@@ -166,7 +166,7 @@ export async function sendPrompt(
  * Abort a running session.
  */
 export async function abortSession(client: DevoClient, sessionId: string): Promise<void> {
-	await client.session.abort({ sessionID: sessionId })
+	await client.session.abort({ sessionId: sessionId })
 }
 
 /**
@@ -177,14 +177,14 @@ export async function renameSession(
 	sessionId: string,
 	title: string,
 ): Promise<void> {
-	await client.session.update({ sessionID: sessionId, title })
+	await client.session.update({ sessionId: sessionId, title })
 }
 
 /**
  * Delete a session.
  */
 export async function deleteSession(client: DevoClient, sessionId: string): Promise<void> {
-	await client.session.delete({ sessionID: sessionId })
+	await client.session.delete({ sessionId: sessionId })
 }
 
 /**
@@ -193,7 +193,7 @@ export async function deleteSession(client: DevoClient, sessionId: string): Prom
  */
 export async function getSession(client: DevoClient, sessionId: string): Promise<Session | null> {
 	try {
-		const result = await client.session.get({ sessionID: sessionId })
+		const result = await client.session.get({ sessionId: sessionId })
 		return (result.data as Session) ?? null
 	} catch {
 		return null
@@ -232,16 +232,22 @@ export async function getWorkspaceChanges(
 		turnId?: string
 		diffDetail?: WorkspaceDiffDetail
 		maxDiffBytes?: number
+		ignoreWhitespace?: boolean
+		paths?: string[]
+		includeFileSides?: boolean
 	},
 ): Promise<WorkspaceChangesReadResult> {
 	const result = await client.workspace.changes.read({
-		sessionID: params.sessionId,
+		sessionId: params.sessionId,
 		scopes: params.scopes,
 		cwd: params.cwd,
 		baseBranch: params.baseBranch,
-		turnID: params.turnId,
+		turnId: params.turnId,
 		diffDetail: params.diffDetail,
 		maxDiffBytes: params.maxDiffBytes,
+		ignoreWhitespace: params.ignoreWhitespace,
+		paths: params.paths,
+		includeFileSides: params.includeFileSides,
 	})
 	return result.data as WorkspaceChangesReadResult
 }
@@ -253,11 +259,11 @@ export async function respondToPermission(
 	client: DevoClient,
 	sessionId: string,
 	permissionId: string,
-	response: "once" | "always" | "reject",
+	response: PermissionResponse,
 ): Promise<void> {
 	await client.permission.respond({
-		sessionID: sessionId,
-		permissionID: permissionId,
+		sessionId: sessionId,
+		permissionId: permissionId,
 		response,
 	})
 }
@@ -270,20 +276,20 @@ export async function replyToQuestion(
 	requestId: string,
 	answers: QuestionAnswer[],
 ): Promise<void> {
-	await client.question.reply({ requestID: requestId, answers })
+	await client.question.reply({ requestId: requestId, answers })
 }
 
 /**
  * Reject a question request from the AI assistant.
  */
 export async function rejectQuestion(client: DevoClient, requestId: string): Promise<void> {
-	await client.question.reject({ requestID: requestId })
+	await client.question.reject({ requestId: requestId })
 }
 
 /**
  * Dispose a specific project instance on the Devo server.
  * This forces the server to re-read all config, agents, skills, etc. from disk
- * for that project. The resulting `server.instance.disposed` ACP event triggers
+ * for that project. The resulting `server.instance.disposed` Native event triggers
  * automatic query invalidation in the UI.
  */
 export async function disposeInstance(client: DevoClient): Promise<void> {
@@ -294,14 +300,14 @@ export async function disposeInstance(client: DevoClient): Promise<void> {
  * Dispose all instances on the Devo server (global reload).
  * Forces re-initialization of all project instances, re-reading all config
  * files, agents, skills, commands, etc. from disk. The resulting
- * `global.disposed` ACP event triggers automatic query invalidation in the UI.
+ * `global.disposed` Native event triggers automatic query invalidation in the UI.
  */
 export async function disposeAllInstances(client: DevoClient): Promise<void> {
 	await client.global.dispose()
 }
 
 /**
- * Global event from the /global/event ACP event stream.
+ * Global event from the Native event stream.
  * Wraps each Event with the directory it belongs to.
  */
 export interface GlobalEvent {
@@ -310,7 +316,7 @@ export interface GlobalEvent {
 }
 
 /**
- * Subscribe to global ACP events from the server.
+ * Subscribe to global Native events from the server.
  * Uses `/global/event` which streams events from ALL projects,
  * each tagged with their directory. This avoids the per-directory
  * scoping issue where `/event` only returns events for one Instance.
@@ -322,19 +328,12 @@ export async function subscribeToGlobalEvents(
 	return result.stream as AsyncIterable<GlobalEvent>
 }
 
-/**
- * Revert a session to a specific message (undo).
- * Rolls back filesystem changes and marks messages after the revert point.
- */
+/** Request a session revert to its current server-selected undo point. */
 export async function revertSession(
 	client: DevoClient,
 	sessionId: string,
-	messageId: string,
 ): Promise<Session> {
-	const result = await client.session.revert({
-		sessionID: sessionId,
-		messageID: messageId,
-	})
+	const result = await client.session.revert({ sessionId: sessionId })
 	return result.data as Session
 }
 
@@ -343,8 +342,7 @@ export async function revertSession(
  * Restores previously reverted messages and filesystem state.
  */
 export async function unrevertSession(client: DevoClient, sessionId: string): Promise<Session> {
-	const result = await client.session.unrevert({
-		sessionID: sessionId,
+	const result = await client.session.unrevert({ sessionId: sessionId,
 	})
 	return result.data as Session
 }
@@ -360,7 +358,7 @@ export async function executeCommand(
 	args: string,
 ): Promise<void> {
 	await client.session.command({
-		sessionID: sessionId,
+		sessionId: sessionId,
 		command,
 		arguments: args,
 	})
@@ -393,18 +391,18 @@ function filePathsFromReferenceSnapshot(snapshot: ReferenceSearchSnapshot): stri
 }
 
 /**
- * Fork a session, optionally at a specific message boundary.
- * Copies all messages up to (but not including) the given messageId.
- * If no messageId is provided, copies the entire conversation.
+ * Fork a session, optionally through a specific user turn.
+ * When `atTurnId` is omitted, forks at the session tip.
  */
 export async function forkSession(
 	client: DevoClient,
 	sessionId: string,
-	messageId?: string,
+	options?: { atTurnId?: string; cut?: "through" | "before" },
 ): Promise<Session> {
 	const result = await client.session.fork({
-		sessionID: sessionId,
-		messageID: messageId,
+		sessionId: sessionId,
+		atTurnId: options?.atTurnId,
+		cut: options?.cut,
 	})
 	return result.data as Session
 }
@@ -413,7 +411,7 @@ export async function forkSession(
  * Summarize/compact a session conversation.
  */
 export async function summarizeSession(client: DevoClient, sessionId: string): Promise<void> {
-	await client.session.summarize({ sessionID: sessionId })
+	await client.session.summarize({ sessionId: sessionId })
 }
 
 /**
@@ -421,7 +419,7 @@ export async function summarizeSession(client: DevoClient, sessionId: string): P
  */
 export async function getSessionMessages(client: DevoClient, sessionId: string) {
 	const result = await client.session.messages({
-		sessionID: sessionId,
+		sessionId: sessionId,
 	})
 	return result.data ?? []
 }

@@ -8,7 +8,7 @@ import { Database } from "bun:sqlite"
 import { afterEach, describe, expect, test } from "bun:test"
 import { mkdir, rm } from "node:fs/promises"
 import { tmpdir } from "node:os"
-import { join } from "node:path"
+import { join, sep } from "node:path"
 import type { ConvertedSession } from "../../src/types/conversion-result"
 import { writeHistorySessionsDetailed } from "../../src/writer/history"
 
@@ -333,10 +333,10 @@ describe("writeHistorySessionsDetailed (legacy)", () => {
 		expect(result.totalProcessed).toBe(1)
 
 		// Should have written project, session, message, and part files
-		const projectFiles = result.filesWritten.filter((f) => f.includes("/project/"))
-		const sessionFiles = result.filesWritten.filter((f) => f.includes("/session/"))
-		const messageFiles = result.filesWritten.filter((f) => f.includes("/message/"))
-		const partFiles = result.filesWritten.filter((f) => f.includes("/part/"))
+		const projectFiles = result.filesWritten.filter((f) => f.includes(`${sep}project${sep}`))
+		const sessionFiles = result.filesWritten.filter((f) => f.includes(`${sep}session${sep}`))
+		const messageFiles = result.filesWritten.filter((f) => f.includes(`${sep}message${sep}`))
+		const partFiles = result.filesWritten.filter((f) => f.includes(`${sep}part${sep}`))
 		expect(projectFiles).toHaveLength(1)
 		expect(sessionFiles).toHaveLength(1)
 		expect(messageFiles).toHaveLength(1)

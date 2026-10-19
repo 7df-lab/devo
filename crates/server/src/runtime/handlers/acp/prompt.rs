@@ -2,7 +2,7 @@
 //!
 //! Portable ACP clients submit turns through blocking `session/prompt`: the JSON-RPC
 //! response is deferred until the turn reaches a terminal state, while progress is
-//! streamed on `session/update`. Devo's TUI uses `_devo/turn/start` instead; this
+//! streamed on `session/update`. Devo's TUI uses Native `turn/start` instead; this
 //! module serves external ACP integrations.
 
 use super::super::acp_slash_commands::AcpSlashCommandPromptResult;
@@ -61,7 +61,7 @@ impl ServerRuntime {
         }
         // --- Start a regular turn from ACP prompt content ---------------------
         let session_id = params.session_id;
-        let input = match input_items_from_acp_prompt(params.prompt) {
+        let input = match user_inputs_from_acp_prompt(params.prompt) {
             Ok(input) => input,
             Err(error) => {
                 return Some(acp_error_response(
@@ -134,12 +134,11 @@ impl ServerRuntime {
     /// work" primitive. Prefer it over adding per-feature cancel RPCs.
     ///
     /// Manual `/compact` is admitted as an active `ManualCompaction` turn, so
-    /// cancel routes through `turn/interrupt` like any other active turn (and
+    /// cancel routes through the shared turn-cancellation application service (and
     /// dual-emits `session/compaction/failed` with `"compaction canceled"`).
     /// Idle sessions are an idempotent no-op.
     ///
-    /// Turn-scoped automatic compaction still rides the turn cancel token
-    /// under `turn/interrupt`.
+    /// Turn-scoped automatic compaction still rides the turn cancel token.
     pub(crate) async fn handle_acp_session_cancel(self: &Arc<Self>, params: serde_json::Value) {
         let params: AcpCancelParams = match serde_json::from_value(params) {
             Ok(params) => params,
@@ -153,7 +152,7 @@ impl ServerRuntime {
             let runtime = Arc::clone(self);
             tokio::spawn(async move {
                 let _ = runtime
-                    .handle_turn_interrupt(
+                    .interrupt_turn(
                         serde_json::Value::Null,
                         serde_json::to_value(TurnInterruptParams {
                             session_id: params.session_id,
@@ -229,52 +228,45 @@ mod tests {
     use super::*;
 
     #[test]
-    fn acp_stop_reason_maps_terminal_turn_metadata() {
-        let mut turn = TurnMetadata {
-            turn_id: TurnId::new(),
-            session_id: SessionId::new(),
-            sequence: 1,
-            status: TurnStatus::Completed,
-            kind: devo_protocol::TurnKind::Regular,
-            model: "test-model".to_string(),
-            model_binding_id: None,
-            reasoning_effort_selection: None,
-            reasoning_effort: None,
-            request_model: "test-model".to_string(),
-            request_thinking: None,
-            started_at: chrono::Utc::now(),
-            completed_at: Some(chrono::Utc::now()),
-            usage: None,
-            stop_reason: Some(devo_core::StopReason::MaxTokens),
-            failure_reason: None,
-        };
+    fn acp_stop_reason_maps_terminal_turn_snapshot() {
         assert_eq!(
-            acp_stop_reason_from_terminal_turn(TerminalTurnSnapshot::from_turn(&turn)),
+            acp_stop_reason_from_terminal_turn(TerminalTurnSnapshot {
+                status: TurnStatus::Completed,
+                stop_reason: Some(devo_core::StopReason::MaxTokens),
+                failure_reason: None,
+            }),
             AcpStopReason::MaxTokens
         );
-
-        turn.status = TurnStatus::Failed;
-        turn.stop_reason = None;
-        turn.failure_reason = Some(devo_protocol::TurnFailureReason::MaxTurnRequests);
         assert_eq!(
-            acp_stop_reason_from_terminal_turn(TerminalTurnSnapshot::from_turn(&turn)),
+            acp_stop_reason_from_terminal_turn(TerminalTurnSnapshot {
+                status: TurnStatus::Failed,
+                stop_reason: None,
+                failure_reason: Some(devo_protocol::TurnFailureReason::MaxTurnRequests),
+            }),
             AcpStopReason::MaxTurnRequests
         );
-
-        turn.status = TurnStatus::Interrupted;
         assert_eq!(
-            acp_stop_reason_from_terminal_turn(TerminalTurnSnapshot::from_turn(&turn)),
+            acp_stop_reason_from_terminal_turn(TerminalTurnSnapshot {
+                status: TurnStatus::Interrupted,
+                stop_reason: None,
+                failure_reason: None,
+            }),
             AcpStopReason::Cancelled
         );
-        turn.status = TurnStatus::Failed;
-        turn.failure_reason = None;
         assert_eq!(
-            acp_stop_reason_from_terminal_turn(TerminalTurnSnapshot::from_turn(&turn)),
+            acp_stop_reason_from_terminal_turn(TerminalTurnSnapshot {
+                status: TurnStatus::Failed,
+                stop_reason: None,
+                failure_reason: None,
+            }),
             AcpStopReason::Refusal
         );
-        turn.status = TurnStatus::Completed;
         assert_eq!(
-            acp_stop_reason_from_terminal_turn(TerminalTurnSnapshot::from_turn(&turn)),
+            acp_stop_reason_from_terminal_turn(TerminalTurnSnapshot {
+                status: TurnStatus::Completed,
+                stop_reason: None,
+                failure_reason: None,
+            }),
             AcpStopReason::EndTurn
         );
     }

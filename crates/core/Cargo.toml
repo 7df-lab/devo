@@ -8,7 +8,9 @@ version.workspace = true
 [dependencies]
 devo-config = { workspace = true }
 devo-execpolicy = { workspace = true }
+devo-kernel = { workspace = true }
 devo-network-proxy = { workspace = true }
+devo-rmcp-client = { workspace = true }
 devo-protocol = { workspace = true }
 devo-provider = { workspace = true }
 devo-safety = { workspace = true }
@@ -28,8 +30,10 @@ diffy = { workspace = true }
 futures = { workspace = true }
 iana-time-zone = { workspace = true }
 portable-pty = "0.9"
+process-wrap = { version = "9.1", default-features = false, features = ["tokio1"] }
 rand = { workspace = true }
 regex = { workspace = true }
+rmcp = { workspace = true, features = ["client"] }
 reqwest = { workspace = true }
 serde = { workspace = true }
 serde_json = { workspace = true }

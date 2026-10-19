@@ -10,11 +10,15 @@ mod provider_retry;
 mod stream_consumer;
 mod turn_continuation;
 
+pub use devo_protocol::native::event::ModelQueryRetryPhase;
 pub use event::EventCallback;
+pub use event::LiveTurnSettings;
 pub use event::ProviderRetryStatus;
 pub use event::QueryEvent;
 pub use event::QueryOptions;
-pub use event::QueryProviderRetryPhase;
+pub use event::SharedLastModelRequest;
+pub use event::SharedLiveGoal;
+pub use event::SharedLiveTurnSettings;
 
 pub(crate) use event::emit_query_event;
 pub use prompt_estimate::RawContextBreakdown;
@@ -44,6 +48,7 @@ use devo_protocol::HostedToolDefinition;
 use devo_protocol::HostedWebFetchTool;
 use devo_protocol::HostedWebSearchTool;
 use devo_protocol::ModelRequest;
+use devo_protocol::ProviderWireApi;
 use devo_protocol::RequestContent;
 use devo_protocol::RequestMessage;
 use devo_protocol::ResolvedReasoningRequest;
@@ -62,7 +67,6 @@ use crate::tools::ToolAgentScope;
 use crate::tools::ToolContent;
 use crate::tools::ToolRegistry;
 use crate::tools::ToolRuntime;
-use crate::tools::deferred_loading::is_subagent_agent_coordination_tool;
 use devo_provider::ModelProviderSDK;
 
 use crate::AgentError;
@@ -92,12 +96,22 @@ use crate::response_item::message_to_response_items;
 
 const SUBAGENT_MODE_REMINDER: &str = include_str!("../../prompts/subagent_mode_reminder.md");
 
+fn supports_provider_hosted_web_search(wire_api: ProviderWireApi) -> bool {
+    matches!(
+        wire_api,
+        ProviderWireApi::AnthropicMessages | ProviderWireApi::OpenAIResponses
+    )
+}
+
 fn hosted_tools_for_web_capabilities(
     web_search: &devo_config::ResolvedWebSearchConfig,
     web_fetch: devo_config::ResolvedWebFetchConfig,
+    wire_api: ProviderWireApi,
 ) -> Vec<HostedToolDefinition> {
     let mut hosted_tools = Vec::new();
-    if matches!(web_search, devo_config::ResolvedWebSearchConfig::Provider) {
+    if matches!(web_search, devo_config::ResolvedWebSearchConfig::Provider)
+        && supports_provider_hosted_web_search(wire_api)
+    {
         hosted_tools.push(HostedToolDefinition::WebSearch(HostedWebSearchTool::new()));
     }
     if web_fetch.is_provider() {
@@ -110,7 +124,11 @@ fn hosted_tools_for_web_capabilities(
 fn hosted_tools_for_web_search(
     web_search: &devo_config::ResolvedWebSearchConfig,
 ) -> Vec<HostedToolDefinition> {
-    hosted_tools_for_web_capabilities(web_search, devo_config::ResolvedWebFetchConfig::Disabled)
+    hosted_tools_for_web_capabilities(
+        web_search,
+        devo_config::ResolvedWebFetchConfig::Disabled,
+        ProviderWireApi::AnthropicMessages,
+    )
 }
 
 /// Compact session messages using LLM-backed summarization.
@@ -121,6 +139,7 @@ fn hosted_tools_for_web_search(
 /// - [`CompactionKind::Proactive`]: forced compaction after provider
 ///   `context_too_long`; keeps from the latest user message onward.
 struct CompactionModelRequest<'a> {
+    journal: Option<&'a dyn crate::durable_execution::ToolIntentJournal>,
     provider: &'a Arc<dyn ModelProviderSDK>,
     model_slug: &'a str,
     request_model: &'a str,
@@ -162,13 +181,28 @@ async fn summarize_and_compact(
     emit_query_event(on_event, QueryEvent::ContextCompactionStarted).await;
     match compact_history(&items, &token_info, &summarizer, &config, cancel_token).await {
         Ok(CompactAction::Replaced(compacted_items)) => {
-            let new_messages: Vec<Message> = compacted_items
-                .iter()
-                .filter_map(|item| match item {
-                    ResponseItem::Message(msg) => Some(msg.clone()),
-                    _ => None,
-                })
-                .collect();
+            if let Some(journal) = model.journal
+                && let Err(error) = journal
+                    .commit(
+                        crate::durable_execution::ExecutionRecord::PromptCheckpoint {
+                            counters: Some(crate::durable_execution::ExecutionCounters::capture(
+                                session,
+                            )),
+                            items: compacted_items.clone(),
+                        },
+                    )
+                    .await
+            {
+                emit_query_event(
+                    on_event,
+                    QueryEvent::ContextCompactionFailed {
+                        message: format!("failed to persist compaction checkpoint: {error}"),
+                    },
+                )
+                .await;
+                return;
+            }
+            let new_messages = crate::history::response_items_to_messages(&compacted_items);
             let removed = session
                 .prompt_source_messages()
                 .len()
@@ -211,10 +245,12 @@ async fn summarize_and_compact(
 const TOOL_RESULT_TRUNCATION_MARKER: &str = "\n...[truncated]";
 
 /// Tools that store the model-facing payload in Mixed `text` and put UI/protocol
-/// metadata in `json` (shell exit/cwd; read preview/truncated). Omit JSON from
-/// the prompt so the stream is not duplicated.
+/// metadata in `json` (read preview/truncated). Omit JSON from the prompt so the
+/// stream is not duplicated. Shell results are NOT omitted: their `json` holds
+/// no copy of the output stream and carries `duration_ms`/exit/cwd, which the
+/// model needs to reason about slow, hung, or interrupted commands.
 fn tool_result_omits_mixed_json_for_model(tool_name: Option<&str>) -> bool {
-    matches!(tool_name, Some("shell_command" | "bash" | "read"))
+    matches!(tool_name, Some("read"))
 }
 
 fn serialize_tool_content_for_model(content: ToolContent, tool_name: Option<&str>) -> String {
@@ -300,6 +336,19 @@ fn insert_goal_context_message(messages: &mut Vec<RequestMessage>, goal_context:
     );
 }
 
+/// Inject Continual Harness digest after skills prefix, before hidden goal.
+fn insert_harness_digest_message(messages: &mut Vec<RequestMessage>, digest: &str) {
+    let insert_at = if messages.last().is_some_and(is_visible_user_text_message) {
+        messages.len().saturating_sub(1)
+    } else {
+        messages.len()
+    };
+    messages.splice(
+        insert_at..insert_at,
+        [request_text_message(digest.to_string())],
+    );
+}
+
 fn request_text_message(text: String) -> RequestMessage {
     RequestMessage {
         role: Role::User.as_str().to_string(),
@@ -330,12 +379,15 @@ fn is_injected_context_message(message: &RequestMessage) -> bool {
                     || trimmed.starts_with("<context_changes>")
                     || trimmed.starts_with("<user_instructions_updates>")
                     || trimmed.starts_with("<user_instructions>")
+                    || trimmed.contains("[harness-digest]")
+                    || trimmed.starts_with("## Continual harness")
             }
             RequestContent::Reasoning { .. }
             | RequestContent::ProviderReasoning { .. }
             | RequestContent::HostedToolUse { .. }
             | RequestContent::ToolUse { .. }
-            | RequestContent::ToolResult { .. } => false,
+            | RequestContent::ToolResult { .. }
+            | RequestContent::Image { .. } => false,
         })
 }
 
@@ -369,29 +421,33 @@ pub async fn query(
     on_event: Option<EventCallback>,
     options: QueryOptions,
 ) -> Result<(), AgentError> {
+    if let Some(journal) = &options.journal {
+        let replay = journal.replay().await.map_err(AgentError::Provider)?;
+        if let Some(counters) = &replay.counters {
+            counters.restore(session);
+        }
+        if replay.completed {
+            session.set_prompt_messages(crate::history::response_items_to_messages(&replay.items));
+            if let Some(stop_reason) = replay.stop_reason {
+                emit_query_event(&on_event, QueryEvent::TurnComplete { stop_reason }).await;
+            }
+            session.end_turn();
+            return Ok(());
+        }
+    }
     let compaction_provider = options
         .compaction_provider
         .as_ref()
         .unwrap_or(&provider)
         .clone();
+    let restricted_runtime = registry.model_tool_allowlist().map(|names| {
+        let names = names.iter().map(String::as_str).collect::<Vec<_>>();
+        runtime.restricted_to_specs(&names)
+    });
+    let model_runtime = restricted_runtime.as_ref().unwrap_or(runtime);
     let agents_md_manager = AgentsMdManager::new(session.config.agents_md.clone());
     let current_agents_snapshot = load_workspace_instructions(&session.cwd, &agents_md_manager);
     let agent_scope = runtime.agent_scope();
-    let mut request_tools = registry.tool_definitions();
-    if agent_scope == ToolAgentScope::Subagent {
-        request_tools.retain(|tool| !is_subagent_agent_coordination_tool(&tool.name));
-    }
-    if !turn_config.web_search.is_local() {
-        request_tools.retain(|tool| tool.name != "web_search");
-    }
-    if !turn_config.web_fetch.is_local() {
-        request_tools.retain(|tool| tool.name != "webfetch");
-    }
-    // Non-OpenAI models often emit malformed apply_patch input, so only expose
-    // the tool to OpenAI-channel models (see Model::supports_apply_patch).
-    if !turn_config.model.supports_apply_patch() {
-        request_tools.retain(|tool| tool.name != "apply_patch");
-    }
 
     if session.session_context.is_none() {
         session.session_context = Some(SessionContext::capture(
@@ -427,18 +483,25 @@ pub async fn query(
     let mut retry_count: usize = 0;
     let mut context_compacted = false;
     let mut budget_steer_injected = false;
+    // Loop guard: a model emitting the same tool batch over and over
+    // (observed in the wild: 100+ identical ToolSearch calls in one turn)
+    // burns provider calls indefinitely. Count consecutive identical batches
+    // and inject a visible steering note every IDENTICAL_BATCH_NOTICE_INTERVAL
+    // of them so the loop breaks without hard-aborting legitimate retries.
+    let mut last_batch_signature: Option<u64> = None;
+    let mut identical_batch_streak: u32 = 0;
+    const IDENTICAL_BATCH_NOTICE_INTERVAL: u32 = 5;
     let mut continuation_policy =
         TurnContinuationPolicy::for_models(&turn_config.model.slug, &turn_config.request_model);
+    // Live settings override (L2-DES-CONV-002 Phase 4): the active config
+    // starts as the turn-start snapshot and is re-applied per iteration when
+    // the shared generation advances.
+    let mut active_turn_config = turn_config.clone();
+    let mut applied_live_generation = 0u64;
 
     if session.turn_state.is_none() {
         session.start_turn(devo_protocol::TurnKind::Regular);
     }
-
-    let compaction_model_slug = turn_config
-        .model
-        .resolve_reasoning_effort_selection(turn_config.reasoning_effort_selection.as_deref())
-        .request_model;
-    let compaction_request_model = turn_config.provider_request_model(&compaction_model_slug);
 
     // Explicit interrupted-turn notice for the next user message after a user
     // interrupt. Placed before pending-input processing so it sits just above the
@@ -490,7 +553,31 @@ pub async fn query(
             }
         }
 
+        // Host goal changes must reach the checked-out working copy before
+        // assembling another request, including after a Python completion call.
+        if let Some(live_goal) = &options.live_goal {
+            let update = live_goal.lock().expect("live goal mutex poisoned").clone();
+            if let Some(goal) = update {
+                match goal {
+                    Some(goal) => session.set_active_goal(goal),
+                    None => session.clear_active_goal(),
+                }
+            }
+        }
         // Check token budget and compact before building the request
+        if let Some(live) = &options.live_settings {
+            let live = live.lock().expect("live settings mutex poisoned");
+            if live.generation != applied_live_generation {
+                if let Some(config) = &live.turn_config {
+                    active_turn_config = config.clone();
+                }
+                if let Some(limit) = live.auto_compact_token_limit {
+                    session.config.token_budget.context_window = limit;
+                    session.config.token_budget.auto_compact_token_limit = Some(limit);
+                }
+                applied_live_generation = live.generation;
+            }
+        }
         if session.last_turn_tokens > 0
             && session
                 .config
@@ -508,16 +595,25 @@ pub async fn query(
                 budget_steer_injected = true;
             }
             info!("token budget threshold exceeded, running LLM compaction");
+            let live_compaction_model_slug = active_turn_config
+                .model
+                .resolve_reasoning_effort_selection(
+                    active_turn_config.reasoning_effort_selection.as_deref(),
+                )
+                .request_model;
+            let live_compaction_request_model =
+                active_turn_config.provider_request_model(&live_compaction_model_slug);
             // Auto: preserve tail items up to COMPACT_USER_MESSAGE_MAX_TOKENS.
             // Example: [user1, asst1, user2, asst2, user3] -> [summary, asst2, user3].
             summarize_and_compact(
                 session,
                 &on_event,
                 CompactionModelRequest {
+                    journal: options.journal.as_deref(),
                     provider: &compaction_provider,
-                    model_slug: &compaction_model_slug,
-                    request_model: &compaction_request_model,
-                    max_tokens: turn_config.model.max_tokens.unwrap_or(4096) as usize,
+                    model_slug: &live_compaction_model_slug,
+                    request_model: &live_compaction_request_model,
+                    max_tokens: active_turn_config.model.max_tokens.unwrap_or(4096) as usize,
                 },
                 CompactionKind::Auto,
                 options.cancel_token.as_ref(),
@@ -530,39 +626,68 @@ pub async fn query(
             "turn",
             turn = session.turn_count,
             session_id = %session.id,
-            model = %turn_config.model.slug,
+            model = %active_turn_config.model.slug,
             cwd = %session.cwd.display()
         );
         let _turn_guard = turn_span.enter();
         info!("starting turn");
 
-        // Build model request from the session-locked prefix.
+        // Build system instructions from session-locked context plus the active mode.
         let request_system = {
-            let mut system = session_context.build_system_prompt();
-            if !matches!(
-                &turn_config.web_search,
-                devo_config::ResolvedWebSearchConfig::Disabled
-            ) {
+            let mut system = session_context.build_system_prompt(session.collaboration_mode);
+            if turn_config.web_search.is_provider() {
                 if !system.trim().is_empty() {
                     system.push_str("\n\n");
                 }
                 system.push_str(&crate::tools::websearch_prompt::web_search_prompt());
+            } else if turn_config.web_search.is_local() {
+                if !system.trim().is_empty() {
+                    system.push_str("\n\n");
+                }
+                system.push_str(
+                    "Local web search is available through Python as `await rlm.web_search(query)`. Use it for current information when needed.",
+                );
+            }
+            if turn_config.web_fetch.is_local() {
+                if !system.trim().is_empty() {
+                    system.push_str("\n\n");
+                }
+                system.push_str(
+                    "Local web fetch is available through Python as `await rlm.web_fetch(url)`. Use it to retrieve a specific URL when needed.",
+                );
+            } else if turn_config.web_fetch.is_provider() {
+                if !system.trim().is_empty() {
+                    system.push_str("\n\n");
+                }
+                system.push_str("Provider-hosted web fetch is available to retrieve a specific URL when needed.");
             }
             Some(system).filter(|system| !system.trim().is_empty())
         };
 
-        // Resolve provider-bound reasoning request parameters.
+        // Resolve provider-bound reasoning request parameters from the live
+        // config so mid-turn model/effort changes apply at this model call.
         let ResolvedReasoningRequest {
             request_model,
             request_thinking,
             request_reasoning_effort,
             extra_body,
             effective_reasoning_effort: _,
-        } = turn_config
-            .model
-            .resolve_reasoning_effort_selection(turn_config.reasoning_effort_selection.as_deref());
+        } = active_turn_config.model.resolve_reasoning_effort_selection(
+            active_turn_config.reasoning_effort_selection.as_deref(),
+        );
         let catalog_request_model = request_model.clone();
-        let provider_request_model = turn_config.provider_request_model(&catalog_request_model);
+        let provider_request_model =
+            active_turn_config.provider_request_model(&catalog_request_model);
+        let extra_body = crate::merge_model_request_body(
+            active_turn_config
+                .provider_request_models
+                .request_defaults(),
+            extra_body,
+        );
+        let extra_body = crate::add_model_request_headers(
+            extra_body,
+            active_turn_config.provider_request_models.request_headers(),
+        );
 
         let prompt_source_message_count = session.prompt_source_messages().len();
         let history_items = session
@@ -588,8 +713,23 @@ pub async fn query(
                 session_context.environment.cwd.display().to_string(),
             ),
         };
-        let mut messages = history
-            .for_prompt_with_prefix(&prefetched_user_inputs, &turn_config.model.input_modalities);
+        let mut messages = history.for_prompt_with_prefix(
+            &prefetched_user_inputs,
+            &active_turn_config.model.input_modalities,
+        );
+        // Internal registries may retain handlers for server-side operations, but
+        // only the Python kernel schema is ever sent to a model provider.
+        let model_registry = registry.restricted_to_specs(&["ipython"]);
+        let request_tools = model_registry.tool_definitions();
+        // Continual Harness digest: after skills (prefix), before hidden goal.
+        if let Some(digest) = options
+            .harness_digest
+            .as_deref()
+            .map(str::trim)
+            .filter(|d| !d.is_empty())
+        {
+            insert_harness_digest_message(&mut messages, digest);
+        }
         if let Some(goal_context) = session.goal_context_prompt() {
             insert_goal_context_message(&mut messages, &goal_context);
         }
@@ -597,33 +737,42 @@ pub async fn query(
             insert_subagent_request_reminders(&mut messages);
         }
 
-        let hosted_tools =
-            hosted_tools_for_web_capabilities(&turn_config.web_search, turn_config.web_fetch);
+        let hosted_tools = hosted_tools_for_web_capabilities(
+            &turn_config.web_search,
+            turn_config.web_fetch,
+            active_turn_config.model.provider,
+        );
         let request = ModelRequest {
             model_slug: devo_protocol::ModelProfileKey::CatalogSlug(catalog_request_model),
             model: provider_request_model,
             system: request_system,
             messages,
-            max_tokens: turn_config
+            max_tokens: active_turn_config
                 .model
                 .max_tokens
                 .map_or(session.config.token_budget.max_output_tokens, |value| {
                     value as usize
                 }),
-            tools: Some(request_tools.clone()),
+            tools: (!request_tools.is_empty()).then(|| request_tools.clone()),
             hosted_tools: hosted_tools.clone(),
             sampling: SamplingControls {
-                temperature: turn_config.model.temperature,
-                top_p: turn_config.model.top_p,
-                top_k: turn_config.model.top_k.map(|value| value as u32),
+                temperature: active_turn_config.model.temperature,
+                top_p: active_turn_config.model.top_p,
+                top_k: active_turn_config.model.top_k.map(|value| value as u32),
             },
             request_thinking,
             reasoning_effort: request_reasoning_effort,
             extra_body,
         };
         let breakdown = estimate_request_context_breakdown(&request);
+        tracing::debug!(
+            tool_count = request_tools.len(),
+            names = ?request_tools.iter().map(|t| t.name.clone()).collect::<Vec<_>>(),
+            "provider request tools"
+        );
         session.prompt_token_estimate = breakdown.total().try_into().unwrap_or(usize::MAX);
         session.raw_context_breakdown = Some(breakdown);
+        emit_query_event(&on_event, QueryEvent::ContextEstimate { breakdown }).await;
         debug!(
             prompt_source_messages = prompt_source_message_count,
             prompt_source_items = prompt_source_item_count,
@@ -635,6 +784,30 @@ pub async fn query(
             has_system = request.system.is_some(),
             "built model request"
         );
+        if let Some(slot) = &options.last_model_request
+            && let Ok(mut last) = slot.lock()
+        {
+            *last = Some(request.clone());
+        }
+
+        if let Some(journal) = &options.journal {
+            journal
+                .commit(
+                    crate::durable_execution::ExecutionRecord::PromptCheckpoint {
+                        counters: Some(crate::durable_execution::ExecutionCounters::capture(
+                            session,
+                        )),
+                        items: session
+                            .prompt_source_messages()
+                            .iter()
+                            .cloned()
+                            .flat_map(message_to_response_items)
+                            .collect(),
+                    },
+                )
+                .await
+                .map_err(AgentError::Provider)?;
+        }
 
         let assembled = match run_provider_attempt(
             provider.as_ref(),
@@ -671,14 +844,24 @@ pub async fn query(
                         warn!("context_too_long - compacting and retrying");
                         // Proactive: must compact even if token estimates disagree
                         // with the provider; preserve from latest user only.
+                        let retry_compaction_model_slug = active_turn_config
+                            .model
+                            .resolve_reasoning_effort_selection(
+                                active_turn_config.reasoning_effort_selection.as_deref(),
+                            )
+                            .request_model;
+                        let retry_compaction_request_model =
+                            active_turn_config.provider_request_model(&retry_compaction_model_slug);
                         summarize_and_compact(
                             session,
                             &on_event,
                             CompactionModelRequest {
+                                journal: options.journal.as_deref(),
                                 provider: &compaction_provider,
-                                model_slug: &compaction_model_slug,
-                                request_model: &compaction_request_model,
-                                max_tokens: turn_config.model.max_tokens.unwrap_or(4096) as usize,
+                                model_slug: &retry_compaction_model_slug,
+                                request_model: &retry_compaction_request_model,
+                                max_tokens: active_turn_config.model.max_tokens.unwrap_or(4096)
+                                    as usize,
                             },
                             CompactionKind::Proactive,
                             options.cancel_token.as_ref(),
@@ -708,12 +891,24 @@ pub async fn query(
                             &turn_config.model.slug,
                             retry_count,
                             backoff,
+                            &retry_error.to_string(),
                         )
                         .await?;
                         session.turn_count -= 1;
                         continue;
                     }
                     ProviderRetryDecision::Fail => {
+                        if retry_count > 0 {
+                            emit_query_event(
+                                &on_event,
+                                QueryEvent::ProviderQueryFailed {
+                                    attempt: retry_count,
+                                    max_attempts: provider_retry::max_provider_retries(),
+                                    message: retry_error.to_string(),
+                                },
+                            )
+                            .await;
+                        }
                         return Err(AgentError::Provider(retry_error));
                     }
                 }
@@ -721,7 +916,7 @@ pub async fn query(
         };
 
         let AssembledModelTurn {
-            assistant_content,
+            mut assistant_content,
             tool_calls,
             stop_reason,
             has_hosted_tool_uses,
@@ -740,11 +935,40 @@ pub async fn query(
             hosted_tools: &hosted_tools,
         });
 
+        if options
+            .cancel_token
+            .as_ref()
+            .is_some_and(CancellationToken::is_cancelled)
+        {
+            // History may retain partial text, but unfinished arguments and
+            // provider reasoning payloads are never valid recovered input.
+            assistant_content.retain(|block| matches!(block, ContentBlock::Text { .. }));
+        }
+
         if assistant_content_has_visible_content(&assistant_content) {
             session.push_message(Message {
                 role: Role::Assistant,
                 content: assistant_content,
             });
+        }
+
+        if let Some(journal) = &options.journal {
+            journal
+                .commit(
+                    crate::durable_execution::ExecutionRecord::PromptCheckpoint {
+                        counters: Some(crate::durable_execution::ExecutionCounters::capture(
+                            session,
+                        )),
+                        items: session
+                            .prompt_source_messages()
+                            .iter()
+                            .cloned()
+                            .flat_map(message_to_response_items)
+                            .collect(),
+                    },
+                )
+                .await
+                .map_err(AgentError::Provider)?;
         }
 
         match continuation {
@@ -755,6 +979,42 @@ pub async fn query(
                 continue;
             }
             TurnContinuation::Complete { stop_reason } => {
+                // Steering can arrive while the final model response streams,
+                // even when that response has no tool calls. Consume it at the
+                // next request boundary in this turn instead of letting
+                // end_turn silently convert accepted steering into a follow-up.
+                if !options
+                    .cancel_token
+                    .as_ref()
+                    .is_some_and(CancellationToken::is_cancelled)
+                    && !session
+                        .steer_input_queue
+                        .lock()
+                        .expect("steer input queue mutex should not be poisoned")
+                        .is_empty()
+                {
+                    emit_query_event(&on_event, QueryEvent::ModelResponseCompleted).await;
+                    continue;
+                }
+                if let Some(journal) = &options.journal
+                    && !options
+                        .cancel_token
+                        .as_ref()
+                        .is_some_and(CancellationToken::is_cancelled)
+                {
+                    journal
+                        .commit(crate::durable_execution::ExecutionRecord::ModelCompleted {
+                            items: session
+                                .prompt_source_messages()
+                                .iter()
+                                .cloned()
+                                .flat_map(message_to_response_items)
+                                .collect(),
+                            stop_reason: stop_reason.clone(),
+                        })
+                        .await
+                        .map_err(AgentError::Provider)?;
+                }
                 if let Some(sr) = stop_reason {
                     emit_query_event(&on_event, QueryEvent::TurnComplete { stop_reason: sr }).await;
                 }
@@ -784,6 +1044,22 @@ pub async fn query(
             return Ok(());
         }
 
+        if let Some(journal) = &options.journal {
+            journal
+                .commit(crate::durable_execution::ExecutionRecord::IntentBatch {
+                    calls: tool_calls
+                        .iter()
+                        .map(|call| ResponseItem::ToolCall {
+                            id: call.id.clone(),
+                            name: call.name.clone(),
+                            input: call.input.clone(),
+                        })
+                        .collect(),
+                })
+                .await
+                .map_err(AgentError::Provider)?;
+        }
+
         let tool_result_metadata: HashMap<String, (String, serde_json::Value, String)> = tool_calls
             .iter()
             .map(|call| {
@@ -805,10 +1081,13 @@ pub async fn query(
         // Execute tool calls. When a caller is observing query events, wire
         // tool progress and per-call completion into the same event stream so
         // long-running and parallel tools can render before the whole batch ends.
+        let journal_error = Arc::new(std::sync::Mutex::new(None));
         let results = if let Some(progress_events) = on_event.clone() {
+            let journal = options.journal.clone();
+            let completion_error = Arc::clone(&journal_error);
             let completion_events = Arc::clone(&progress_events);
             let metadata = Arc::new(tool_result_metadata.clone());
-            runtime
+            model_runtime
                 .execute_batch_streaming_with_completion(
                     &tool_calls,
                     move |tool_use_id, progress| {
@@ -824,6 +1103,8 @@ pub async fn query(
                     move |result| {
                         let completion_events = Arc::clone(&completion_events);
                         let metadata = Arc::clone(&metadata);
+                        let journal = journal.clone();
+                        let completion_error = Arc::clone(&completion_error);
                         Box::pin(async move {
                             let (tool_name, input, summary) = metadata
                                 .get(result.tool_use_id.as_str())
@@ -831,6 +1112,23 @@ pub async fn query(
                                 .unwrap_or_else(|| {
                                     (String::new(), serde_json::Value::Null, String::new())
                                 });
+                            if let Some(journal) = journal
+                                && let Err(error) = journal
+                                    .commit(crate::durable_execution::ExecutionRecord::Outcomes {
+                                        results: vec![ResponseItem::ToolCallOutput {
+                                            tool_use_id: result.tool_use_id.clone(),
+                                            content: serialize_tool_content_for_model(
+                                                result.content.clone(),
+                                                Some(&tool_name),
+                                            ),
+                                            is_error: result.is_error,
+                                        }],
+                                    })
+                                    .await
+                            {
+                                *completion_error.lock().expect("journal error lock") = Some(error);
+                                return;
+                            }
                             completion_events(QueryEvent::ToolResult {
                                 tool_use_id: result.tool_use_id,
                                 tool_name,
@@ -846,8 +1144,31 @@ pub async fn query(
                 )
                 .await
         } else {
-            runtime.execute_batch(&tool_calls).await
+            model_runtime.execute_batch(&tool_calls).await
         };
+        if let Some(error) = journal_error.lock().expect("journal error lock").take() {
+            return Err(AgentError::Provider(error));
+        }
+        if let Some(journal) = &options.journal {
+            journal
+                .commit(crate::durable_execution::ExecutionRecord::Outcomes {
+                    results: results
+                        .iter()
+                        .map(|result| ResponseItem::ToolCallOutput {
+                            tool_use_id: result.tool_use_id.clone(),
+                            content: serialize_tool_content_for_model(
+                                result.content.clone(),
+                                tool_result_metadata
+                                    .get(&result.tool_use_id)
+                                    .map(|(name, _, _)| name.as_str()),
+                            ),
+                            is_error: result.is_error,
+                        })
+                        .collect(),
+                })
+                .await
+                .map_err(AgentError::Provider)?;
+        }
         let tool_result_count = results.len();
         let tool_error_count = results.iter().filter(|result| result.is_error).count();
         let tool_output_bytes = results
@@ -867,29 +1188,120 @@ pub async fn query(
             "tool batch completed"
         );
 
-        // Build tool result message (user role, per Anthropic API convention)
+        // Build tool result message (user role, per Anthropic API convention).
+        // Vision attachments from tools (e.g. attach-image via ipython) are
+        // sibling Image blocks so providers receive real multimodal input.
         let truncation_policy = TruncationPolicy::from(turn_config.model.truncation_policy);
+        let mut artifacts = Vec::new();
         let result_content: Vec<ContentBlock> = results
             .into_iter()
-            .map(|r| {
+            .flat_map(|r| {
+                artifacts.extend(r.output_artifacts.clone());
                 let tool_name = tool_result_metadata
                     .get(r.tool_use_id.as_str())
                     .map(|(tool_name, _, _)| tool_name.as_str());
                 let content_str = serialize_tool_content_for_model(r.content, tool_name);
-                let content =
-                    truncate_tool_result_for_model(content_str, tool_name, truncation_policy);
-                ContentBlock::ToolResult {
+                let content = if r.output_kind == crate::tools::ToolOutputKind::ArtifactPage {
+                    content_str
+                } else if !r.output_artifacts.is_empty() {
+                    let notice = r.output_artifacts.iter().map(devo_tools::output_store::OutputArtifact::notice).collect::<Vec<_>>().join("\n");
+                    let budget = truncation_policy.byte_budget().saturating_sub(notice.len() + 1);
+                    let mut end = budget.min(content_str.len());
+                    while !content_str.is_char_boundary(end) { end -= 1; }
+                    format!("{}\n{notice}", &content_str[..end])
+                } else if !preserve_full_tool_result(tool_name)
+                    && content_str.len() > truncation_policy.byte_budget()
+                    && let Some(store) = &options.output_store
+                {
+                    let notice = match store.save(&r.tool_use_id, content_str.as_bytes()) {
+                        Ok(artifact) => { let notice = artifact.notice(); artifacts.push(artifact); notice },
+                        Err(error) => format!("Output exceeded the inline limit. Full output could not be saved: {error}"),
+                    };
+                    let budget = truncation_policy.byte_budget().saturating_sub(notice.len() + 1);
+                    let mut end = budget.min(content_str.len());
+                    while !content_str.is_char_boundary(end) { end -= 1; }
+                    format!("{}\n{notice}", &content_str[..end])
+                } else {
+                    truncate_tool_result_for_model(content_str, tool_name, truncation_policy)
+                };
+                let mut blocks = vec![ContentBlock::ToolResult {
                     tool_use_id: r.tool_use_id,
                     content,
                     is_error: r.is_error,
+                }];
+                for image in r.images {
+                    blocks.push(ContentBlock::Image {
+                        mime_type: image.mime_type,
+                        data_base64: image.data_base64,
+                    });
                 }
+                blocks
             })
             .collect();
 
+        if let Some(journal) = &options.journal {
+            journal
+                .commit(crate::durable_execution::ExecutionRecord::OutputArtifacts { artifacts })
+                .await
+                .map_err(AgentError::Provider)?;
+        }
         session.push_message(Message {
             role: Role::User,
             content: result_content,
         });
+        // Loop guard (see declaration site): nudges the model when the same
+        // batch repeats. Placed after the tool-result message so the note sits
+        // above the results in the next request.
+        {
+            use std::hash::Hasher;
+            let mut hasher = std::collections::hash_map::DefaultHasher::new();
+            for call in &tool_calls {
+                std::hash::Hash::hash(&call.name, &mut hasher);
+                std::hash::Hash::hash(&call.input.to_string(), &mut hasher);
+            }
+            let batch_signature = hasher.finish();
+            identical_batch_streak = if Some(batch_signature) == last_batch_signature {
+                identical_batch_streak.saturating_add(1)
+            } else {
+                1
+            };
+            last_batch_signature = Some(batch_signature);
+            if identical_batch_streak > 0
+                && identical_batch_streak.is_multiple_of(IDENTICAL_BATCH_NOTICE_INTERVAL)
+            {
+                warn!(
+                    streak = identical_batch_streak,
+                    first_tool = tool_calls.first().map(|call| call.name.as_str()),
+                    "identical tool batch repeated; injecting steering note"
+                );
+                session.push_message(Message::user(format!(
+                    "Note: the previous tool call(s) were repeated {} times in a row with \
+                     identical arguments. If the results are also unchanged, the repetition \
+                     is not making progress: change the approach — call the tool with \
+                     different arguments, use a different tool, or end the turn with a reply \
+                     to the user.",
+                    identical_batch_streak
+                )));
+            }
+        }
+        if let Some(journal) = &options.journal {
+            journal
+                .commit(
+                    crate::durable_execution::ExecutionRecord::PromptCheckpoint {
+                        items: session
+                            .prompt_source_messages()
+                            .iter()
+                            .cloned()
+                            .flat_map(message_to_response_items)
+                            .collect(),
+                        counters: Some(crate::durable_execution::ExecutionCounters::capture(
+                            session,
+                        )),
+                    },
+                )
+                .await
+                .map_err(AgentError::Provider)?;
+        }
 
         // If the turn was cancelled while tools were running, keep the
         // interrupted tool results above and stop without another model call.

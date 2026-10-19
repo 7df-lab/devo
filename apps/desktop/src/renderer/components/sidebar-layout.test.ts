@@ -41,4 +41,42 @@ describe("sidebar layout window controls", () => {
 			usesCompactPanelIcon: true,
 		})
 	})
+
+	test("windows app menu includes File actions", async () => {
+		const source = await readFile(sourcePath, "utf8")
+		expect({
+			fileMenu: source.includes('{ id: "file", label: "File" }'),
+			handlesNewAgent: source.includes('action === "new-agent"'),
+			routesNewAgentWithProject: source.includes("navigateToNewChat(navigate, projects, projectSlug, lastProjectDirectory)"),
+			handlesOpenFolder: source.includes('action === "open-folder"'),
+			handlesNewTerminal: source.includes('action === "new-terminal"'),
+			opensTerminal: source.includes("openNewTerminal()"),
+		}).toEqual({
+			fileMenu: true,
+			handlesNewAgent: true,
+			routesNewAgentWithProject: true,
+			handlesOpenFolder: true,
+			handlesNewTerminal: true,
+			opensTerminal: true,
+		})
+	})
+
+	test("sidebar width is drag-resizable and persisted", async () => {
+		const source = await readFile(sourcePath, "utf8")
+		expect({
+			importsResizeHandle: source.includes(
+				'import { SidebarResizeHandle } from "./sidebar/sidebar-resize-handle"',
+			),
+			importsWidthAtom: source.includes("sidebarWidthAtom"),
+			appliesSidebarWidthVar: source.includes('"--sidebar-width"'),
+			marksResizing: source.includes('data-resizing={sidebarResizing ? "true" : undefined}'),
+			rendersHandle: source.includes("<SidebarResizeHandle"),
+		}).toEqual({
+			importsResizeHandle: true,
+			importsWidthAtom: true,
+			appliesSidebarWidthVar: true,
+			marksResizing: true,
+			rendersHandle: true,
+		})
+	})
 })

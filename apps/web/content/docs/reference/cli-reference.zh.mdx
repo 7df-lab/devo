@@ -19,7 +19,7 @@ devo
 devo onboard
 ```
 
-使用特定的已配置 model binding 或 model name 启动：
+使用特定的已配置 `provider/model` reference 启动：
 
 ```bash
 devo --model deepseek-v4-pro
@@ -66,6 +66,23 @@ devo prompt --format jsonl "List the main config files."
 ```
 
 `devo prompt` 使用 always-allow permission checker。只在 prompt 和 working tree 都受控的可信 automation 中使用它。
+
+## Server Protocols
+
+启动仅暴露 Native API 的 singleton server（默认行为）：
+
+```bash
+devo server
+```
+
+ACP v1 必须显式启用。可以只暴露 ACP，也可以同时暴露 Native 和 ACP：
+
+```bash
+devo server --protocols acp
+devo server --protocols native,acp
+```
+
+如果 singleton 已经运行，再次执行 `devo server` 会把请求的 protocols 合并到当前集合中。Protocols 会一直保持启用，直到 server 重启。使用 `devo server --status` 可以查看状态且不会修改 protocol 集合。
 
 ## Health Check
 

@@ -11,7 +11,148 @@ env:
   RUSTFLAGS: -Dwarnings
 
 jobs:
+  changes:
+    name: Select affected CI components
+    runs-on: ubuntu-latest
+    outputs:
+      rust: ${{ steps.scope.outputs.rust }}
+      desktop: ${{ steps.scope.outputs.desktop }}
+      tui: ${{ steps.scope.outputs.tui }}
+      kernel_python: ${{ steps.scope.outputs.kernel_python }}
+    steps:
+      - uses: actions/checkout@v4
+        with:
+          fetch-depth: 0
+      - run: python -m unittest discover -s scripts -p test_ci_scope.py -v
+      - id: scope
+        env:
+          EVENT_NAME: ${{ github.event_name }}
+          BASE_SHA: ${{ github.event.pull_request.base.sha }}
+          HEAD_SHA: ${{ github.event.pull_request.head.sha }}
+        run: |
+          if [ "$EVENT_NAME" = "pull_request" ]; then
+            python scripts/ci_scope.py --base "$BASE_SHA" --head "$HEAD_SHA" --output "$GITHUB_OUTPUT"
+          else
+            python scripts/ci_scope.py --all --output "$GITHUB_OUTPUT"
+          fi
+
+  unix-kernel:
+    needs: changes
+    if: needs.changes.outputs.rust == 'true'
+    name: Unix kernel (${{ matrix.target }})
+    runs-on: ${{ matrix.os }}
+    strategy:
+      fail-fast: false
+      matrix:
+        include:
+          - os: ubuntu-latest
+            target: x86_64-unknown-linux-musl
+          - os: ubuntu-latest
+            target: aarch64-unknown-linux-musl
+          - os: macos-latest
+            target: x86_64-apple-darwin
+          - os: macos-latest
+            target: aarch64-apple-darwin
+    steps:
+      - uses: actions/checkout@v4
+      - uses: dtolnay/rust-toolchain@stable
+        with:
+          targets: ${{ matrix.target }}
+      - uses: Swatinem/rust-cache@v2
+      - uses: mlugg/setup-zig@v2
+        if: runner.os == 'Linux'
+      - uses: taiki-e/install-action@v2
+        if: runner.os == 'Linux'
+        with:
+          tool: cargo-zigbuild@0.23.0
+      - run: cargo zigbuild --locked -p devo-kernel --lib --target ${{ matrix.target }}
+        if: runner.os == 'Linux'
+      - run: cargo check --locked -p devo-kernel --all-targets --target ${{ matrix.target }}
+        if: runner.os == 'macOS'
+      - run: cargo test --locked -p devo-kernel credential_unix::tests
+        if: runner.os == 'macOS'
+
+  windows-kernel:
+    needs: changes
+    if: needs.changes.outputs.kernel_python == 'true'
+    name: Windows kernel (Python ${{ matrix.python }})
+    runs-on: windows-latest
+    strategy:
+      matrix:
+        python: ["3.11", "3.13"]
+    steps:
+      - uses: actions/checkout@v4
+      - uses: actions/setup-python@v5
+        with:
+          python-version: ${{ matrix.python }}
+      - run: python -m pip install dill==0.4.1
+      - run: python -m unittest discover -s crates/kernel/rlm-runtime/tests -v
+        env:
+          PYTHONPATH: crates/kernel/rlm-runtime/src
+
+  windows-check:
+    needs: changes
+    if: needs.changes.outputs.rust == 'true'
+    name: Windows Rust check and Clippy
+    runs-on: windows-latest
+    steps:
+      - uses: actions/checkout@v4
+      - uses: dtolnay/rust-toolchain@stable
+      - uses: Swatinem/rust-cache@v2
+      - run: cargo check --workspace --all-targets
+      - run: cargo clippy --workspace --all-targets -- -D warnings
+
+      - run: cargo test -p devo-windows-sandbox --bin devo-command-runner
+
+      - uses: oven-sh/setup-bun@v2
+        with:
+          bun-version: "1.4.0"
+      - run: bun test apps/desktop/scripts/dev-runtime.test.ts
+
+  desktop:
+    needs: changes
+    if: needs.changes.outputs.desktop == 'true'
+    name: Desktop tests and types
+    runs-on: ubuntu-latest
+    defaults:
+      run:
+        working-directory: apps/desktop
+    steps:
+      - uses: actions/checkout@v4
+      - uses: dtolnay/rust-toolchain@stable
+      - uses: Swatinem/rust-cache@v2
+      - uses: oven-sh/setup-bun@v2
+        with:
+          bun-version: "1.4.0"
+      - run: bun install --frozen-lockfile
+      - run: bun run test
+      - run: bunx tsc --noEmit
+
+  tui:
+    needs: changes
+    if: needs.changes.outputs.tui == 'true'
+    name: TUI tests (${{ matrix.os }})
+    runs-on: ${{ matrix.os }}
+    strategy:
+      matrix:
+        os: [ubuntu-latest, windows-latest]
+    defaults:
+      run:
+        working-directory: apps/tui
+    steps:
+      - uses: actions/checkout@v4
+      - uses: actions/setup-node@v4
+        with:
+          node-version: "24"
+          cache: npm
+          cache-dependency-path: apps/tui/package-lock.json
+      - run: npm ci --ignore-scripts --no-audit --no-fund
+      - run: npm test
+      - run: node --import tsx --test lib/coding-agent/src/modes/interactive/interactive-mode-model-candidates.test.ts lib/coding-agent/src/modes/interactive/interactive-mode-session-ancillary.test.ts
+
   check:
+    needs: changes
+    if: needs.changes.outputs.rust == 'true'
     name: Check
     runs-on: ubuntu-latest
     steps:
@@ -21,6 +162,8 @@ jobs:
       - run: cargo check --workspace --all-targets
 
   test:
+    needs: changes
+    if: needs.changes.outputs.rust == 'true'
     name: Test
     runs-on: ubuntu-latest
     steps:
@@ -30,6 +173,8 @@ jobs:
       - run: cargo test --workspace --jobs 1
 
   fmt:
+    needs: changes
+    if: needs.changes.outputs.rust == 'true'
     name: Rustfmt
     runs-on: ubuntu-latest
     steps:
@@ -39,18 +184,22 @@ jobs:
           components: rustfmt
       - run: cargo fmt --all -- --check
 
-  # clippy:
-  #   name: Clippy
-  #   runs-on: ubuntu-latest
-  #   steps:
-  #     - uses: actions/checkout@v4
-  #     - uses: dtolnay/rust-toolchain@stable
-  #       with:
-  #         components: clippy
-  #     - uses: Swatinem/rust-cache@v2
-  #     - run: cargo clippy --workspace --all-targets -- -D warnings
+  clippy:
+    needs: changes
+    if: needs.changes.outputs.rust == 'true'
+    name: Clippy
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v4
+      - uses: dtolnay/rust-toolchain@stable
+        with:
+          components: clippy
+      - uses: Swatinem/rust-cache@v2
+      - run: cargo clippy --workspace --all-targets -- -D warnings
 
   doc:
+    needs: changes
+    if: needs.changes.outputs.rust == 'true'
     name: Doc
     runs-on: ubuntu-latest
     steps:

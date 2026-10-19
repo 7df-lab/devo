@@ -26,8 +26,8 @@ export type MessageProps = HTMLAttributes<HTMLDivElement> & {
 export const Message = ({ className, from, ...props }: MessageProps) => (
 	<div
 		className={cn(
-			"group flex w-full max-w-[95%] flex-col gap-2",
-			from === "user" ? "is-user ml-auto justify-end" : "is-assistant",
+			"group w-full",
+			from === "user" ? "is-user text-right" : "is-assistant flex flex-col gap-2",
 			className,
 		)}
 		{...props}
@@ -39,9 +39,9 @@ export type MessageContentProps = HTMLAttributes<HTMLDivElement>
 export const MessageContent = ({ children, className, ...props }: MessageContentProps) => (
 	<div
 		className={cn(
-			"is-user:dark flex w-fit min-w-0 max-w-full flex-col gap-2 overflow-hidden text-sm",
-			"group-[.is-user]:ml-auto group-[.is-user]:rounded-lg group-[.is-user]:bg-secondary group-[.is-user]:px-4 group-[.is-user]:py-3 group-[.is-user]:text-foreground",
-			"group-[.is-assistant]:text-foreground",
+			"overflow-hidden",
+			"group-[.is-user]:block group-[.is-user]:space-y-2 group-[.is-user]:rounded-2xl group-[.is-user]:bg-muted/75 group-[.is-user]:px-4 group-[.is-user]:py-2.5 group-[.is-user]:text-left group-[.is-user]:text-[14px] group-[.is-user]:leading-[1.55] group-[.is-user]:tracking-[-0.01em] group-[.is-user]:text-foreground",
+			"group-[.is-assistant]:flex group-[.is-assistant]:w-full group-[.is-assistant]:max-w-none group-[.is-assistant]:flex-col group-[.is-assistant]:gap-2 group-[.is-assistant]:text-[14px] group-[.is-assistant]:leading-[1.6] group-[.is-assistant]:tracking-[-0.01em] group-[.is-assistant]:text-foreground",
 			className,
 		)}
 		{...props}
@@ -270,15 +270,27 @@ export const MessageBranchPage = ({ className, ...props }: MessageBranchPageProp
 	)
 }
 
-export type MessageResponseProps = ComponentProps<typeof Streamdown>
+export type MessageResponseProps = Omit<ComponentProps<typeof Streamdown>, "plugins"> & {
+	plugins?: ComponentProps<typeof Streamdown>["plugins"]
+	/**
+	 * Live streaming surface: skip Streamdown enter animation and heavy plugins
+	 * (math / mermaid) until the turn is idle.
+	 */
+	streaming?: boolean
+}
 
 const streamdownPlugins = { cjk, code, math, mermaid }
+const streamdownPluginsStreaming = { cjk, code }
 
 // Product requirement: regular transcript Markdown tables should keep copy and
-// download controls, but not show a fullscreen control.
+// download controls, but not show a fullscreen control. Code blocks keep copy
+// but hide download — the transcript already has the source in context.
 const transcriptMarkdownControls: NonNullable<MessageResponseProps["controls"]> = {
 	table: {
 		fullscreen: false,
+	},
+	code: {
+		download: false,
 	},
 }
 
@@ -293,7 +305,7 @@ function TranscriptMarkdownHeading({
 		<p
 			className={cn(
 				className,
-				"my-2 border-0 pb-0 text-sm font-semibold leading-6 text-foreground",
+				"mt-3 mb-1 border-0 p-0 text-[14px] font-[530] leading-snug tracking-normal text-foreground first:mt-0",
 			)}
 			{...props}
 		/>
@@ -302,7 +314,8 @@ function TranscriptMarkdownHeading({
 
 type TranscriptMarkdownRuleProps = ComponentProps<"hr"> & { node?: unknown }
 
-function TranscriptMarkdownRule({ node: _node, ..._props }: TranscriptMarkdownRuleProps) {
+function TranscriptMarkdownRule(props: TranscriptMarkdownRuleProps) {
+	void props
 	return null
 }
 
@@ -320,20 +333,24 @@ const transcriptMarkdownComponents: NonNullable<MessageResponseProps["components
 }
 
 export const MessageResponse = memo(
-	({ className, ...props }: MessageResponseProps) => (
+	({ className, streaming = false, animated, plugins, ...props }: MessageResponseProps) => (
 		<Streamdown
 			className={cn(
-				"devo-message-response size-full [&>*:first-child]:mt-0 [&>*:last-child]:mb-0",
+				"devo-message-response size-full font-sans [&>*:first-child]:mt-0 [&>*:last-child]:mb-0",
+				streaming && "devo-message-response--streaming",
 				className,
 			)}
+			animated={streaming ? false : animated}
 			components={transcriptMarkdownComponents}
 			controls={transcriptMarkdownControls}
-			plugins={streamdownPlugins}
+			plugins={plugins ?? (streaming ? streamdownPluginsStreaming : streamdownPlugins)}
 			{...props}
 		/>
 	),
 	(prevProps, nextProps) =>
-		prevProps.children === nextProps.children && prevProps.animated === nextProps.animated,
+		prevProps.children === nextProps.children &&
+		prevProps.animated === nextProps.animated &&
+		prevProps.streaming === nextProps.streaming,
 )
 
 MessageResponse.displayName = "MessageResponse"

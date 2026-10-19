@@ -51,9 +51,26 @@ pub fn resolve_windows_deny_read_paths(
         return Ok(paths);
     };
 
-    for pattern in unreadable_globs {
+    // Pre-validate every scan plan before expanding any of them: a
+    // root-anchored recursive glob without `glob_scan_max_depth` would scan
+    // the whole drive — reject the request up front instead.
+    let scan_plans = unreadable_globs
+        .iter()
+        .map(|pattern| {
+            let scan_plan = glob_scan_plan(pattern, file_system_sandbox_policy.glob_scan_max_depth);
+            if scan_plan.max_depth.is_none() && scan_plan.root.parent().is_none() {
+                return Err(format!(
+                    "unreadable glob `{pattern}` cannot be safely expanded from a filesystem \
+                     root without `glob_scan_max_depth`; configure `glob_scan_max_depth` or use \
+                     a non-root directory prefix"
+                ));
+            }
+            Ok(scan_plan)
+        })
+        .collect::<Result<Vec<_>, String>>()?;
+
+    for scan_plan in scan_plans {
         let mut seen_scan_dirs = HashSet::new();
-        let scan_plan = glob_scan_plan(&pattern, file_system_sandbox_policy.glob_scan_max_depth);
         collect_existing_glob_matches(
             &scan_plan.root,
             &matcher,
@@ -211,9 +228,9 @@ mod tests {
 
     fn unreadable_path_entry(path: PathBuf) -> FileSystemSandboxEntry {
         FileSystemSandboxEntry {
-            path: FileSystemPath::Path {
-                path: AbsolutePathBuf::from_absolute_path(path).expect("absolute path"),
-            },
+            path: FileSystemPath::from_path(
+                AbsolutePathBuf::from_absolute_path(path).expect("absolute path"),
+            ),
             access: FileSystemAccessMode::Deny,
         }
     }

@@ -1,3 +1,4 @@
+import { nativeItemType } from "@devo-ai/sdk/v2/client"
 import { cn } from "@devo/ui/lib/utils"
 import { useAtomValue } from "jotai"
 import {
@@ -9,61 +10,82 @@ import {
 	XCircleIcon,
 } from "lucide-react"
 import { useEffect, useMemo, useRef, useState } from "react"
-import { messagesFamily } from "../../atoms/messages"
-import { partStorageKey, partsFamily } from "../../atoms/parts"
-import { appStore } from "../../atoms/store"
+import { itemsFamily } from "../../atoms/messages"
 import { streamingVersionFamily } from "../../atoms/streaming"
 import { todosFamily } from "../../atoms/todos"
 import type { Todo } from "../../lib/types"
+
+/** Native camelCase todo/plan statuses only — no snake_case aliases. */
+function normalizeTodoStatus(status: string): string {
+	switch (status) {
+		case "completed":
+		case "inProgress":
+		case "cancelled":
+		case "pending":
+			return status
+		default:
+			return "pending"
+	}
+}
+
+function todosFromPlanItem(item: Record<string, unknown>): Todo[] | null {
+	const raw = item.entries
+	if (!Array.isArray(raw) || raw.length === 0) return null
+	const todos = raw
+		.map((entry) => {
+			if (!entry || typeof entry !== "object") return null
+			const value = entry as Record<string, unknown>
+			const content = String(value.content ?? value.step ?? "").trim()
+			if (!content) return null
+			// Skip expanded-looking markdown proposed-plan blobs.
+			if (content.includes("\n") && !content.trim().startsWith("{")) return null
+			return {
+				content,
+				status: normalizeTodoStatus(String(value.status ?? "pending")),
+			} as Todo
+		})
+		.filter((todo): todo is Todo => todo !== null)
+	return todos.length > 0 ? todos : null
+}
 
 /**
  * Derives the latest todo list for a session.
  *
  * Priority order:
- * 1. Store `todos[sessionId]` — set by `todo.updated` ACP events (real-time)
- * 2. Fallback: extract from the last `todowrite` tool part in messages (for page loads)
+ * 1. Store `todos[sessionId]` — set by `todo.updated` Native events (real-time)
+ * 2. Fallback: last Native `plan` item's `entries` (session reload)
  */
 function useSessionTodos(sessionId: string | null): Todo[] {
 	const storeTodos = useAtomValue(todosFamily(sessionId ?? ""))
-	const storeMessages = useAtomValue(messagesFamily(sessionId ?? ""))
+	const storeItems = useAtomValue(itemsFamily(sessionId ?? ""))
 	const streamingVersion = useAtomValue(streamingVersionFamily(sessionId ?? ""))
 
 	return useMemo(() => {
-		// If we have ACP-pushed todos, prefer those — they're the most up-to-date
 		if (storeTodos && storeTodos.length > 0) return storeTodos
 
-		// Fallback: walk messages backwards to find the last todowrite part
-		if (!storeMessages || storeMessages.length === 0) return []
-		// streamingVersion in deps triggers recomputation when parts update
+		if (!storeItems || storeItems.length === 0) return []
 		void streamingVersion
-		const sid = sessionId ?? ""
-		for (let i = storeMessages.length - 1; i >= 0; i--) {
-			const msg = storeMessages[i]
-			const parts = appStore.get(partsFamily(partStorageKey(sid, msg.id)))
-			if (!parts) continue
-			for (let j = parts.length - 1; j >= 0; j--) {
-				const part = parts[j]
-				if (part.type === "tool" && part.tool === "todowrite") {
-					const todos = part.state.input?.todos as Todo[] | undefined
-					if (todos && todos.length > 0) return todos
-				}
-			}
+		for (let i = storeItems.length - 1; i >= 0; i--) {
+			const envelope = storeItems[i]
+			if (nativeItemType(envelope) !== "plan") continue
+			const fromPlan = todosFromPlanItem(envelope.item)
+			if (fromPlan) return fromPlan
 		}
 		return []
-	}, [storeTodos, storeMessages, streamingVersion, sessionId])
+	}, [storeTodos, storeItems, streamingVersion, sessionId])
 }
 
 /** Compact status icon for a todo item */
 function TodoStatusIcon({ status }: { status: string }) {
-	switch (status) {
+	switch (normalizeTodoStatus(status)) {
 		case "completed":
-			return <CheckCircle2Icon className="size-3 text-emerald-500/80" />
-		case "in_progress":
-			return <Loader2Icon className="size-3 animate-spin text-blue-400/80" />
+			return <CheckCircle2Icon className="size-3.5 text-emerald-500/80" />
+		case "inProgress":
+			return <Loader2Icon className="size-3.5 animate-spin text-blue-400/80" />
 		case "cancelled":
-			return <XCircleIcon className="size-3 text-muted-foreground/30" />
+			return <XCircleIcon className="size-3.5 text-muted-foreground/30" />
 		default:
-			return <CircleDotIcon className="size-3 text-muted-foreground/30" />
+			return <CircleDotIcon className="size-3.5 text-muted-foreground/30" />
 	}
 }
 
@@ -73,7 +95,7 @@ interface SessionTaskListProps {
 
 /**
  * Collapsible task list that appears above the input field.
- * Shows the session's current todo list with completion progress.
+ * Shows the session's current todo list.
  * Subtly styled; task items animate in with stagger and re-animate on status change.
  */
 export function SessionTaskList({ sessionId }: SessionTaskListProps) {
@@ -81,17 +103,12 @@ export function SessionTaskList({ sessionId }: SessionTaskListProps) {
 	const [isExpanded, setIsExpanded] = useState(true)
 	const scrollRef = useRef<HTMLDivElement>(null)
 
-	const completedCount = useMemo(
-		() => todos.filter((t) => t.status === "completed").length,
-		[todos],
-	)
-
 	const activeTask = useMemo(
-		() => todos.find((t) => t.status === "in_progress"),
+		() => todos.find((t) => normalizeTodoStatus(t.status) === "inProgress"),
 		[todos],
 	)
 
-	const allCompleted = completedCount === todos.length && todos.length > 0
+	const headerLabel = activeTask?.content ?? "Tasks"
 
 	// Auto-scroll to bottom when todos change
 	// biome-ignore lint/correctness/useExhaustiveDependencies: scroll on todo changes intentionally
@@ -115,18 +132,8 @@ export function SessionTaskList({ sessionId }: SessionTaskListProps) {
 					isExpanded ? "rounded-t-lg" : "rounded-lg",
 				)}
 			>
-				{/* Progress text */}
-				<span className="flex-1 min-w-0 truncate text-xs text-muted-foreground">
-					<span className={allCompleted ? "text-emerald-500/80" : "text-foreground"}>
-						{completedCount}
-					</span>{" "}
-					out of {todos.length} tasks completed
-					{!isExpanded && activeTask && (
-						<>
-							{" · "}
-							<span className="text-foreground/80 italic">{activeTask.content}</span>
-						</>
-					)}
+				<span className="min-w-0 flex-1 truncate text-sm text-foreground/80">
+					{isExpanded ? "Tasks" : headerLabel}
 				</span>
 
 				{/* Chevron indicator */}
@@ -164,21 +171,21 @@ export function SessionTaskList({ sessionId }: SessionTaskListProps) {
 									className="flex items-start gap-2 animate-in fade-in-0 slide-in-from-bottom-1 duration-300"
 									style={{ animationDelay: `${index * 35}ms`, animationFillMode: "backwards" }}
 								>
-									<span className="mt-px shrink-0">
+									<span className="mt-0.5 shrink-0">
 										<TodoStatusIcon status={todo.status} />
 									</span>
-									<span className="flex items-baseline gap-1 text-[11px] leading-relaxed">
-										<span className="shrink-0 tabular-nums text-muted-foreground/30">{index + 1}.</span>
+									<span className="flex items-baseline gap-1.5 text-sm leading-relaxed">
+										<span className="shrink-0 tabular-nums text-muted-foreground/40">{index + 1}.</span>
 										<span
 											className={cn(
 												"transition-colors duration-300",
 												todo.status === "completed"
-													? "text-muted-foreground/40 line-through"
+													? "text-muted-foreground/50 line-through"
 													: todo.status === "cancelled"
-														? "text-muted-foreground/25 line-through"
-														: todo.status === "in_progress"
-															? "text-foreground/90"
-															: "text-muted-foreground/60",
+														? "text-muted-foreground/40 line-through"
+														: todo.status === "inProgress"
+															? "text-foreground"
+															: "text-muted-foreground",
 											)}
 										>
 											{todo.content}

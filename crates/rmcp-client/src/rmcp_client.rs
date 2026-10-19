@@ -105,6 +105,10 @@ enum ClientState {
 
 #[derive(Clone)]
 enum TransportRecipe {
+    AnonymousStreamableHttp {
+        url: String,
+        http_client: reqwest::Client,
+    },
     InProcess {
         factory: Arc<dyn InProcessTransportFactory>,
     },
@@ -373,6 +377,29 @@ impl RmcpClient {
         })
     }
 
+    /// Connect without consulting saved OAuth credentials. The caller supplies
+    /// its HTTP client so proxy settings, headers and request limits are retained.
+    pub async fn new_anonymous_streamable_http_client(
+        url: &str,
+        http_client: reqwest::Client,
+    ) -> Result<Self> {
+        let transport_recipe = TransportRecipe::AnonymousStreamableHttp {
+            url: url.to_string(),
+            http_client,
+        };
+        let transport = Self::create_pending_transport(&transport_recipe).await?;
+        Ok(Self {
+            state: Mutex::new(ClientState::Connecting {
+                transport: Some(transport),
+            }),
+            stdio_process: None,
+            transport_recipe,
+            initialize_context: Mutex::new(None),
+            session_recovery_lock: Semaphore::new(/*permits*/ 1),
+            elicitation_pause_state: ElicitationPauseState::new(),
+        })
+    }
+
     pub async fn new_sse_client(
         url: &str,
         bearer_token: Option<String>,
@@ -620,9 +647,8 @@ impl RmcpClient {
                                 meta,
                             },
                         )
-                        .await?
-                        .await_response()
                         .await?;
+                    let result = crate::cancellable_request::await_response(result).await?;
                     match result {
                         ServerResult::CallToolResult(result) => Ok(result),
                         _ => Err(rmcp::service::ServiceError::UnexpectedResponse),
@@ -746,6 +772,13 @@ impl RmcpClient {
         transport_recipe: &TransportRecipe,
     ) -> Result<PendingTransport> {
         match transport_recipe {
+            TransportRecipe::AnonymousStreamableHttp { url, http_client } => {
+                let transport = StreamableHttpClientTransport::with_client(
+                    StreamableHttpClientAdapter::new(http_client.clone(), HeaderMap::new()),
+                    StreamableHttpClientTransportConfig::with_uri(url.clone()),
+                );
+                Ok(PendingTransport::StreamableHttp { transport })
+            }
             TransportRecipe::InProcess { factory } => {
                 let transport = factory.open().await?;
                 Ok(PendingTransport::InProcess { transport })

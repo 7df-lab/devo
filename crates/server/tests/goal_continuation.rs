@@ -21,15 +21,20 @@ use support::QueuedPriorityProvider;
 use support::UsageProvider;
 use support::build_runtime;
 use support::collect_until_turn_completed;
+use support::create_goal;
 use support::initialize_connection;
 use support::is_user_message_item;
-use support::pause_goal_and_interrupt_turn;
+use support::pause_goal_and_interrupt_session;
+use support::read_goal;
 use support::request_contains_text;
 use support::request_last_message_contains_text;
+use support::set_session_mode;
 use support::start_session;
 use support::wait_for_captured_request_count;
 use support::wait_for_notification;
 use support::wait_for_request_count;
+
+use devo_protocol::native::rpc_session::GoalIfExists;
 
 #[tokio::test]
 async fn goal_token_budget_reached_after_turn_enters_budget_limited() -> Result<()> {
@@ -50,53 +55,33 @@ async fn goal_token_budget_reached_after_turn_enters_budget_limited() -> Result<
     let runtime = build_runtime(data_root.path(), provider.clone())?;
     let (connection_id, mut notifications_rx) = initialize_connection(&runtime).await?;
     let session_id = start_session(&runtime, connection_id, data_root.path()).await?;
-
-    let _ = runtime
-        .handle_incoming(
-            connection_id,
-            serde_json::json!({
-                "jsonrpc": "2.0",
-                "id": 9,
-                "method": "_devo/goal/set",
-                "params": {
-                    "sessionId": session_id,
-                    "objective": "use budget",
-                    "status": "active",
-                    "tokenBudget": 80
-                }
-            }),
-        )
-        .await
-        .context("goal/set response")?;
+    create_goal(
+        &runtime,
+        connection_id,
+        session_id,
+        "use budget",
+        Some(80),
+        GoalIfExists::Reject,
+        "goal-budget",
+    )
+    .await?;
     collect_until_turn_completed(&mut notifications_rx).await?;
     wait_for_request_count(&provider.requests, /*expected*/ 2).await?;
     collect_until_turn_completed(&mut notifications_rx).await?;
 
-    let status_response = runtime
-        .handle_incoming(
-            connection_id,
-            serde_json::json!({
-                "jsonrpc": "2.0",
-                "id": 10,
-                "method": "_devo/goal/status",
-                "params": {
-                    "sessionId": session_id
-                }
-            }),
-        )
-        .await
-        .context("goal/status response")?;
-    let response: devo_server::SuccessResponse<devo_protocol::GoalStatusResult> =
-        serde_json::from_value(status_response)?;
-
-    let goal = response.result.goal.expect("goal");
-    assert_eq!(goal.status, devo_protocol::ThreadGoalStatus::BudgetLimited);
+    let goal = read_goal(&runtime, connection_id, session_id)
+        .await?
+        .context("goal")?;
+    assert_eq!(
+        goal.status,
+        devo_protocol::native::goal::GoalStatus::BudgetLimited
+    );
     assert_eq!(goal.tokens_used, 160);
     assert_eq!(provider.requests.load(Ordering::SeqCst), 2);
     let requests = provider.captured_requests.lock().expect("lock requests");
     assert!(
         request_contains_text(&requests[1], "has reached its token budget")
-            && request_contains_text(&requests[1], "do not start new substantive work"),
+            && request_contains_text(&requests[1], "Do not start new substantive work"),
         "budget-limited goal should receive a wrap-up prompt"
     );
     Ok(())
@@ -122,60 +107,50 @@ async fn budget_limited_goal_pause_interrupts_pending_wrapup_turn() -> Result<()
     let (connection_id, mut notifications_rx) = initialize_connection(&runtime).await?;
     let session_id = start_session(&runtime, connection_id, data_root.path()).await?;
 
-    let _ = runtime
-        .handle_incoming(
-            connection_id,
-            serde_json::json!({
-                "jsonrpc": "2.0",
-                "id": 110,
-                "method": "_devo/goal/set",
-                "params": {
-                    "sessionId": session_id,
-                    "objective": "pause during budget wrap-up",
-                    "status": "active",
-                    "tokenBudget": 80
-                }
-            }),
-        )
-        .await
-        .context("goal/set response")?;
+    create_goal(
+        &runtime,
+        connection_id,
+        session_id,
+        "pause during budget wrap-up",
+        Some(80),
+        GoalIfExists::Reject,
+        "goal-budget-wrapup",
+    )
+    .await?;
     collect_until_turn_completed(&mut notifications_rx).await?;
     wait_for_request_count(&provider.requests, /*expected*/ 2).await?;
     let turn_started = wait_for_notification(&mut notifications_rx, "turn/started").await?;
     let turn_id = turn_started
         .get("params")
         .and_then(|params| params.get("turn"))
-        .and_then(|turn| turn.get("turn_id"))
+        .and_then(|turn| turn.get("id"))
         .cloned()
         .context("turn id in budget wrap-up turn/started")?;
-    wait_for_notification(&mut notifications_rx, "item/agentMessage/delta").await?;
+    wait_for_notification(&mut notifications_rx, "item/assistantMessage/delta").await?;
     tokio::time::sleep(Duration::from_millis(/*millis*/ 10)).await;
 
-    runtime
-        .handle_incoming(
-            connection_id,
-            serde_json::json!({
-                "jsonrpc": "2.0",
-                "id": 111,
-                "method": "_devo/goal/set",
-                "params": {
-                    "sessionId": session_id,
-                    "status": "paused"
-                }
-            }),
-        )
-        .await
-        .context("goal pause response")?;
+    let goal = read_goal(&runtime, connection_id, session_id)
+        .await?
+        .context("goal to pause")?;
+    support::transition_goal(
+        &runtime,
+        connection_id,
+        session_id,
+        "session/goal/pause",
+        &goal.id,
+    )
+    .await?;
 
     let notifications = collect_until_turn_completed(&mut notifications_rx).await?;
     assert!(
         notifications.iter().any(|value| {
-            value.get("method") == Some(&serde_json::json!("turn/interrupted"))
+            value.get("method") == Some(&serde_json::json!("turn/completed"))
                 && value
                     .get("params")
                     .and_then(|params| params.get("turn"))
-                    .and_then(|turn| turn.get("turn_id"))
+                    .and_then(|turn| turn.get("id"))
                     == Some(&turn_id)
+                && value["params"]["turn"]["status"] == serde_json::json!("interrupted")
         }),
         "pausing a budget-limited goal should interrupt the pending wrap-up turn"
     );
@@ -185,13 +160,14 @@ async fn budget_limited_goal_pause_interrupts_pending_wrapup_turn() -> Result<()
                 && value
                     .get("params")
                     .and_then(|params| params.get("item"))
-                    .and_then(|item| item.get("item_kind"))
-                    == Some(&serde_json::json!("agent_message"))
+                    .and_then(|item| item.get("item"))
+                    .and_then(|item| item.get("type"))
+                    == Some(&serde_json::json!("assistantMessage"))
                 && value
                     .get("params")
                     .and_then(|params| params.get("item"))
-                    .and_then(|item| item.get("payload"))
-                    .and_then(|payload| payload.get("text"))
+                    .and_then(|item| item.get("item"))
+                    .and_then(|item| item.get("text"))
                     == Some(&serde_json::json!("Budget wrap-up started."))
         }),
         "interrupting the wrap-up turn should complete deferred assistant text"
@@ -209,23 +185,26 @@ async fn persisted_paused_goal_replays_without_continuation() -> Result<()> {
     let (connection_id, _notifications_rx) = initialize_connection(&runtime).await?;
     let session_id = start_session(&runtime, connection_id, data_root.path()).await?;
 
-    let _ = runtime
-        .handle_incoming(
-            connection_id,
-            serde_json::json!({
-                "jsonrpc": "2.0",
-                "id": 11,
-                "method": "_devo/goal/set",
-                "params": {
-                    "sessionId": session_id,
-                    "objective": "persist paused goal",
-                    "status": "paused"
-                }
-            }),
-        )
-        .await
-        .context("paused goal/set response")?;
-    assert_eq!(provider.requests.load(Ordering::SeqCst), 0);
+    let goal = create_goal(
+        &runtime,
+        connection_id,
+        session_id,
+        "persist paused goal",
+        None,
+        GoalIfExists::Reject,
+        "goal-persist-paused",
+    )
+    .await?;
+    wait_for_request_count(&provider.requests, /*expected*/ 1).await?;
+    support::transition_goal(
+        &runtime,
+        connection_id,
+        session_id,
+        "session/goal/pause",
+        &goal.id,
+    )
+    .await?;
+    assert_eq!(provider.requests.load(Ordering::SeqCst), 1);
 
     let replay_provider = Arc::new(PendingProvider::default());
     let replayed_runtime = build_runtime(data_root.path(), replay_provider.clone())?;
@@ -233,26 +212,11 @@ async fn persisted_paused_goal_replays_without_continuation() -> Result<()> {
     let (replayed_connection_id, _replayed_notifications_rx) =
         initialize_connection(&replayed_runtime).await?;
 
-    let status_response = replayed_runtime
-        .handle_incoming(
-            replayed_connection_id,
-            serde_json::json!({
-                "jsonrpc": "2.0",
-                "id": 12,
-                "method": "_devo/goal/status",
-                "params": {
-                    "sessionId": session_id
-                }
-            }),
-        )
-        .await
-        .context("goal/status response")?;
-    let response: devo_server::SuccessResponse<devo_protocol::GoalStatusResult> =
-        serde_json::from_value(status_response)?;
-
     assert_eq!(
-        response.result.goal.as_ref().map(|goal| goal.status),
-        Some(devo_protocol::ThreadGoalStatus::Paused)
+        read_goal(&replayed_runtime, replayed_connection_id, session_id)
+            .await?
+            .map(|goal| goal.status),
+        Some(devo_protocol::native::goal::GoalStatus::Paused)
     );
     tokio::time::sleep(Duration::from_millis(/*millis*/ 50)).await;
     assert_eq!(replay_provider.requests.load(Ordering::SeqCst), 0);
@@ -267,6 +231,7 @@ async fn persisted_active_goal_pauses_on_restart_without_continuation() -> Resul
     let runtime = build_runtime(data_root.path(), provider.clone())?;
     let (connection_id, mut notifications_rx) = initialize_connection(&runtime).await?;
     let session_id = start_session(&runtime, connection_id, data_root.path()).await?;
+    set_session_mode(&runtime, connection_id, session_id, "plan").await?;
 
     runtime
         .handle_incoming(
@@ -274,10 +239,11 @@ async fn persisted_active_goal_pauses_on_restart_without_continuation() -> Resul
             serde_json::json!({
                 "jsonrpc": "2.0",
                 "id": 13,
-                "method": "_devo/turn/start",
+                "method": "turn/start",
                 "params": {
-                    "session_id": session_id,
+                    "sessionId": session_id,
                     "input": [{ "type": "text", "text": "plan before setting goal" }],
+                    "idempotencyKey": format!("native-test-turn-{}", uuid::Uuid::new_v4()),
                     "model": null,
                     "sandbox": null,
                     "approval_policy": null,
@@ -290,22 +256,16 @@ async fn persisted_active_goal_pauses_on_restart_without_continuation() -> Resul
         .context("plan turn/start response")?;
     collect_until_turn_completed(&mut notifications_rx).await?;
 
-    runtime
-        .handle_incoming(
-            connection_id,
-            serde_json::json!({
-                "jsonrpc": "2.0",
-                "id": 14,
-                "method": "_devo/goal/set",
-                "params": {
-                    "sessionId": session_id,
-                    "objective": "persist active goal without restart loop",
-                    "status": "active"
-                }
-            }),
-        )
-        .await
-        .context("active goal/set response")?;
+    create_goal(
+        &runtime,
+        connection_id,
+        session_id,
+        "persist active goal without restart loop",
+        None,
+        GoalIfExists::Reject,
+        "goal-persist-active",
+    )
+    .await?;
     assert_eq!(provider.requests.lock().expect("lock requests").len(), 1);
 
     let replay_provider = Arc::new(PendingProvider::default());
@@ -314,26 +274,11 @@ async fn persisted_active_goal_pauses_on_restart_without_continuation() -> Resul
     let (replayed_connection_id, _replayed_notifications_rx) =
         initialize_connection(&replayed_runtime).await?;
 
-    let status_response = replayed_runtime
-        .handle_incoming(
-            replayed_connection_id,
-            serde_json::json!({
-                "jsonrpc": "2.0",
-                "id": 15,
-                "method": "_devo/goal/status",
-                "params": {
-                    "sessionId": session_id
-                }
-            }),
-        )
-        .await
-        .context("goal/status response")?;
-    let response: devo_server::SuccessResponse<devo_protocol::GoalStatusResult> =
-        serde_json::from_value(status_response)?;
-
     assert_eq!(
-        response.result.goal.as_ref().map(|goal| goal.status),
-        Some(devo_protocol::ThreadGoalStatus::Paused)
+        read_goal(&replayed_runtime, replayed_connection_id, session_id)
+            .await?
+            .map(|goal| goal.status),
+        Some(devo_protocol::native::goal::GoalStatus::Paused)
     );
     tokio::time::sleep(Duration::from_millis(/*millis*/ 50)).await;
     assert_eq!(replay_provider.requests.load(Ordering::SeqCst), 0);
@@ -349,56 +294,47 @@ async fn goal_pause_interrupts_active_hidden_continuation_turn() -> Result<()> {
     let (connection_id, mut notifications_rx) = initialize_connection(&runtime).await?;
     let session_id = start_session(&runtime, connection_id, data_root.path()).await?;
 
-    runtime
-        .handle_incoming(
-            connection_id,
-            serde_json::json!({
-                "jsonrpc": "2.0",
-                "id": 16,
-                "method": "_devo/goal/set",
-                "params": {
-                    "sessionId": session_id,
-                    "objective": "pause an active continuation",
-                    "status": "active"
-                }
-            }),
-        )
-        .await
-        .context("active goal/set response")?;
+    create_goal(
+        &runtime,
+        connection_id,
+        session_id,
+        "pause an active continuation",
+        None,
+        GoalIfExists::Reject,
+        "goal-pause-active",
+    )
+    .await?;
     let turn_started = wait_for_notification(&mut notifications_rx, "turn/started").await?;
     let turn_id = turn_started
         .get("params")
         .and_then(|params| params.get("turn"))
-        .and_then(|turn| turn.get("turn_id"))
+        .and_then(|turn| turn.get("id"))
         .cloned()
         .context("turn id in turn/started")?;
     wait_for_request_count(&provider.requests, 1).await?;
 
-    runtime
-        .handle_incoming(
-            connection_id,
-            serde_json::json!({
-                "jsonrpc": "2.0",
-                "id": 17,
-                "method": "_devo/goal/set",
-                "params": {
-                    "sessionId": session_id,
-                    "status": "paused"
-                }
-            }),
-        )
-        .await
-        .context("paused goal/set response")?;
+    let goal = read_goal(&runtime, connection_id, session_id)
+        .await?
+        .context("goal to pause")?;
+    support::transition_goal(
+        &runtime,
+        connection_id,
+        session_id,
+        "session/goal/pause",
+        &goal.id,
+    )
+    .await?;
 
     let notifications = collect_until_turn_completed(&mut notifications_rx).await?;
     assert!(
         notifications.iter().any(|value| {
-            value.get("method") == Some(&serde_json::json!("turn/interrupted"))
+            value.get("method") == Some(&serde_json::json!("turn/completed"))
                 && value
                     .get("params")
                     .and_then(|params| params.get("turn"))
-                    .and_then(|turn| turn.get("turn_id"))
+                    .and_then(|turn| turn.get("id"))
                     == Some(&turn_id)
+                && value["params"]["turn"]["status"] == serde_json::json!("interrupted")
         }),
         "pausing an active goal should interrupt the hidden continuation turn"
     );
@@ -418,45 +354,24 @@ async fn provider_400_tool_call_adjacency_failure_pauses_goal_without_looping() 
     let (connection_id, mut notifications_rx) = initialize_connection(&runtime).await?;
     let session_id = start_session(&runtime, connection_id, data_root.path()).await?;
 
-    let _ = runtime
-        .handle_incoming(
-            connection_id,
-            serde_json::json!({
-                "jsonrpc": "2.0",
-                "id": 13,
-                "method": "_devo/goal/set",
-                "params": {
-                    "sessionId": session_id,
-                    "objective": "do not loop after bad request",
-                    "status": "active"
-                }
-            }),
-        )
-        .await
-        .context("goal/set response")?;
+    create_goal(
+        &runtime,
+        connection_id,
+        session_id,
+        "do not loop after bad request",
+        None,
+        GoalIfExists::Reject,
+        "goal-provider-failure",
+    )
+    .await?;
     collect_until_turn_completed(&mut notifications_rx).await?;
     tokio::time::sleep(Duration::from_millis(/*millis*/ 50)).await;
 
-    let status_response = runtime
-        .handle_incoming(
-            connection_id,
-            serde_json::json!({
-                "jsonrpc": "2.0",
-                "id": 14,
-                "method": "_devo/goal/status",
-                "params": {
-                    "sessionId": session_id
-                }
-            }),
-        )
-        .await
-        .context("goal/status response")?;
-    let response: devo_server::SuccessResponse<devo_protocol::GoalStatusResult> =
-        serde_json::from_value(status_response)?;
-
     assert_eq!(
-        response.result.goal.as_ref().map(|goal| goal.status),
-        Some(devo_protocol::ThreadGoalStatus::Paused)
+        read_goal(&runtime, connection_id, session_id)
+            .await?
+            .map(|goal| goal.status),
+        Some(devo_protocol::native::goal::GoalStatus::Paused)
     );
     assert_eq!(provider.requests.load(Ordering::SeqCst), 1);
     Ok(())
@@ -477,10 +392,11 @@ async fn goal_set_starts_hidden_continuation_turn() -> Result<()> {
             serde_json::json!({
                 "jsonrpc": "2.0",
                 "id": 19,
-                "method": "_devo/turn/start",
+                "method": "turn/start",
                 "params": {
-                    "session_id": session_id,
+                    "sessionId": session_id,
                     "input": [{ "type": "text", "text": "previous visible prompt" }],
+                    "idempotencyKey": format!("native-test-turn-{}", uuid::Uuid::new_v4()),
                     "model": null,
                     "sandbox": null,
                     "approval_policy": null,
@@ -492,25 +408,17 @@ async fn goal_set_starts_hidden_continuation_turn() -> Result<()> {
         .context("prior turn/start response")?;
     collect_until_turn_completed(&mut notifications_rx).await?;
 
-    let goal_response = runtime
-        .handle_incoming(
-            connection_id,
-            serde_json::json!({
-                "jsonrpc": "2.0",
-                "id": 20,
-                "method": "_devo/goal/set",
-                "params": {
-                    "sessionId": session_id,
-                    "objective": "write a benchmark note",
-                    "status": "active"
-                }
-            }),
-        )
-        .await
-        .context("goal/set response")?;
-    let response: devo_server::SuccessResponse<devo_protocol::GoalSetResult> =
-        serde_json::from_value(goal_response)?;
-    assert_eq!(response.result.goal.objective, "write a benchmark note");
+    let goal = create_goal(
+        &runtime,
+        connection_id,
+        session_id,
+        "write a benchmark note",
+        None,
+        GoalIfExists::Reject,
+        "goal-hidden-continuation",
+    )
+    .await?;
+    assert_eq!(goal.objective, "write a benchmark note");
     tokio::time::timeout(Duration::from_secs(/*secs*/ 5), async {
         loop {
             if provider.requests.lock().expect("lock requests").len() >= 2 {
@@ -522,21 +430,14 @@ async fn goal_set_starts_hidden_continuation_turn() -> Result<()> {
     .await
     .context("timed out waiting for captured provider request")??;
 
-    runtime
-        .handle_incoming(
-            connection_id,
-            serde_json::json!({
-                "jsonrpc": "2.0",
-                "id": 21,
-                "method": "_devo/goal/set",
-                "params": {
-                    "sessionId": session_id,
-                    "status": "paused"
-                }
-            }),
-        )
-        .await
-        .context("goal pause response")?;
+    support::transition_goal(
+        &runtime,
+        connection_id,
+        session_id,
+        "session/goal/pause",
+        &goal.id,
+    )
+    .await?;
 
     let notifications = collect_until_turn_completed(&mut notifications_rx).await?;
     assert!(
@@ -552,13 +453,15 @@ async fn goal_set_starts_hidden_continuation_turn() -> Result<()> {
 
     let requests = provider.requests.lock().expect("lock requests");
     assert!(requests.len() >= 2);
+    // Anchors from crates/core/prompts/goals/continuation.md: the objective
+    // rides inside the <objective> wrapper of the hidden continuation prompt.
     assert!(
-        request_contains_text(&requests[1], "Completion audit:")
+        request_contains_text(&requests[1], "<objective>")
             && request_contains_text(&requests[1], "write a benchmark note"),
         "goal continuation request should include hidden goal context"
     );
     assert!(
-        request_last_message_contains_text(&requests[1], "Completion audit:"),
+        request_last_message_contains_text(&requests[1], "<objective>"),
         "autonomous goal context should be the latest request message"
     );
 
@@ -579,10 +482,11 @@ async fn goal_set_does_not_start_continuation_while_turn_is_active() -> Result<(
             serde_json::json!({
                 "jsonrpc": "2.0",
                 "id": 30,
-                "method": "_devo/turn/start",
+                "method": "turn/start",
                 "params": {
-                    "session_id": session_id,
+                    "sessionId": session_id,
                     "input": [{ "type": "text", "text": "keep this turn active" }],
+                    "idempotencyKey": format!("native-test-turn-{}", uuid::Uuid::new_v4()),
                     "model": null,
                     "sandbox": null,
                     "approval_policy": null,
@@ -592,62 +496,47 @@ async fn goal_set_does_not_start_continuation_while_turn_is_active() -> Result<(
         )
         .await
         .context("turn/start response")?;
-    let turn_started = wait_for_notification(&mut notifications_rx, "turn/started").await?;
+    wait_for_notification(&mut notifications_rx, "turn/started").await?;
     wait_for_request_count(&provider.requests, /*expected*/ 1).await?;
 
-    let _ = runtime
-        .handle_incoming(
-            connection_id,
-            serde_json::json!({
-                "jsonrpc": "2.0",
-                "id": 31,
-                "method": "_devo/goal/set",
-                "params": {
-                    "sessionId": session_id,
-                    "objective": "continue after this turn",
-                    "status": "active"
-                }
-            }),
-        )
-        .await
-        .context("goal/set response")?;
+    let goal = create_goal(
+        &runtime,
+        connection_id,
+        session_id,
+        "continue after this turn",
+        None,
+        GoalIfExists::Reject,
+        "goal-while-turn-active",
+    )
+    .await?;
     tokio::time::sleep(Duration::from_millis(/*millis*/ 50)).await;
     assert_eq!(provider.requests.load(Ordering::SeqCst), 1);
 
-    let _ = runtime
-        .handle_incoming(
-            connection_id,
-            serde_json::json!({
-                "jsonrpc": "2.0",
-                "id": 32,
-                "method": "_devo/goal/set",
-                "params": {
-                    "sessionId": session_id,
-                    "status": "paused"
-                }
-            }),
-        )
-        .await
-        .context("goal pause response")?;
-    let turn_id = turn_started["params"]["turn"]["turn_id"]
-        .as_str()
-        .context("turn id")?;
+    support::transition_goal(
+        &runtime,
+        connection_id,
+        session_id,
+        "session/goal/pause",
+        &goal.id,
+    )
+    .await?;
     let _ = runtime
         .handle_incoming(
             connection_id,
             serde_json::json!({
                 "jsonrpc": "2.0",
                 "id": 33,
-                "method": "_devo/turn/interrupt",
+                "method": "session/interrupt",
                 "params": {
-                    "session_id": session_id,
-                    "turn_id": turn_id,
-                    "reason": "test cleanup"
+                    "scope": {
+                        "scope": "session",
+                        "sessionId": session_id
+                    }
                 }
             }),
         )
         .await
-        .context("turn/interrupt response")?;
+        .context("session/interrupt response")?;
 
     Ok(())
 }
@@ -660,28 +549,20 @@ async fn goal_create_starts_hidden_continuation_turn() -> Result<()> {
     let (connection_id, mut notifications_rx) = initialize_connection(&runtime).await?;
     let session_id = start_session(&runtime, connection_id, data_root.path()).await?;
 
-    let _ = runtime
-        .handle_incoming(
-            connection_id,
-            serde_json::json!({
-                "jsonrpc": "2.0",
-                "id": 34,
-                "method": "_devo/goal/create",
-                "params": {
-                    "sessionId": session_id,
-                    "objective": "created goal should run",
-                    "replaceExisting": false
-                }
-            }),
-        )
-        .await
-        .context("goal/create response")?;
-    let turn_started = wait_for_notification(&mut notifications_rx, "turn/started").await?;
+    create_goal(
+        &runtime,
+        connection_id,
+        session_id,
+        "created goal should run",
+        None,
+        GoalIfExists::Reject,
+        "goal-create",
+    )
+    .await?;
+    let _turn_started = wait_for_notification(&mut notifications_rx, "turn/started").await?;
     wait_for_request_count(&provider.requests, /*expected*/ 1).await?;
 
-    let turn_id: devo_protocol::TurnId =
-        serde_json::from_value(turn_started["params"]["turn"]["turn_id"].clone())?;
-    pause_goal_and_interrupt_turn(&runtime, connection_id, session_id, turn_id).await?;
+    pause_goal_and_interrupt_session(&runtime, connection_id, session_id).await?;
     Ok(())
 }
 
@@ -693,45 +574,41 @@ async fn goal_resume_starts_hidden_continuation_turn() -> Result<()> {
     let (connection_id, mut notifications_rx) = initialize_connection(&runtime).await?;
     let session_id = start_session(&runtime, connection_id, data_root.path()).await?;
 
-    let _ = runtime
-        .handle_incoming(
-            connection_id,
-            serde_json::json!({
-                "jsonrpc": "2.0",
-                "id": 35,
-                "method": "_devo/goal/set",
-                "params": {
-                    "sessionId": session_id,
-                    "objective": "paused goal should resume",
-                    "status": "paused"
-                }
-            }),
-        )
-        .await
-        .context("paused goal/set response")?;
-    assert_eq!(provider.requests.load(Ordering::SeqCst), 0);
-
-    let _ = runtime
-        .handle_incoming(
-            connection_id,
-            serde_json::json!({
-                "jsonrpc": "2.0",
-                "id": 36,
-                "method": "_devo/goal/resume",
-                "params": {
-                    "sessionId": session_id,
-                    "status": "active"
-                }
-            }),
-        )
-        .await
-        .context("goal/resume response")?;
-    let turn_started = wait_for_notification(&mut notifications_rx, "turn/started").await?;
+    let goal = create_goal(
+        &runtime,
+        connection_id,
+        session_id,
+        "paused goal should resume",
+        None,
+        GoalIfExists::Reject,
+        "goal-resume",
+    )
+    .await?;
+    wait_for_notification(&mut notifications_rx, "turn/started").await?;
     wait_for_request_count(&provider.requests, /*expected*/ 1).await?;
+    support::transition_goal(
+        &runtime,
+        connection_id,
+        session_id,
+        "session/goal/pause",
+        &goal.id,
+    )
+    .await?;
+    collect_until_turn_completed(&mut notifications_rx).await?;
+    assert_eq!(provider.requests.load(Ordering::SeqCst), 1);
 
-    let turn_id: devo_protocol::TurnId =
-        serde_json::from_value(turn_started["params"]["turn"]["turn_id"].clone())?;
-    pause_goal_and_interrupt_turn(&runtime, connection_id, session_id, turn_id).await?;
+    let _ = support::transition_goal(
+        &runtime,
+        connection_id,
+        session_id,
+        "session/goal/resume",
+        &goal.id,
+    )
+    .await?;
+    let _turn_started = wait_for_notification(&mut notifications_rx, "turn/started").await?;
+    wait_for_request_count(&provider.requests, /*expected*/ 2).await?;
+
+    pause_goal_and_interrupt_session(&runtime, connection_id, session_id).await?;
     Ok(())
 }
 
@@ -753,10 +630,11 @@ async fn queued_user_turn_runs_before_goal_continuation() -> Result<()> {
             serde_json::json!({
                 "jsonrpc": "2.0",
                 "id": 40,
-                "method": "_devo/turn/start",
+                "method": "turn/start",
                 "params": {
-                    "session_id": session_id,
+                    "sessionId": session_id,
                     "input": [{ "type": "text", "text": "hold the first turn" }],
+                    "idempotencyKey": format!("native-test-turn-{}", uuid::Uuid::new_v4()),
                     "model": null,
                     "sandbox": null,
                     "approval_policy": null,
@@ -766,12 +644,10 @@ async fn queued_user_turn_runs_before_goal_continuation() -> Result<()> {
         )
         .await
         .context("active turn/start response")?;
-    let active_result: devo_server::SuccessResponse<devo_server::TurnStartResult> =
-        serde_json::from_value(active_response)?;
-    let active_turn_id = active_result
-        .result
-        .turn_id()
-        .expect("active turn/start should start a turn");
+    let active_result: devo_server::SuccessResponse<
+        devo_protocol::native::rpc_turn::TurnStartResult,
+    > = serde_json::from_value(active_response)?;
+    let active_turn_id = active_result.result.turn.id;
     wait_for_captured_request_count(&provider.requests, /*expected*/ 1).await?;
     wait_for_notification(&mut notifications_rx, "turn/started").await?;
 
@@ -781,10 +657,11 @@ async fn queued_user_turn_runs_before_goal_continuation() -> Result<()> {
             serde_json::json!({
                 "jsonrpc": "2.0",
                 "id": 41,
-                "method": "_devo/turn/start",
+                "method": "session/queue/push",
                 "params": {
-                    "session_id": session_id,
+                    "sessionId": session_id,
                     "input": [{ "type": "text", "text": "queued user input wins" }],
+                    "idempotencyKey": format!("native-test-turn-{}", uuid::Uuid::new_v4()),
                     "model": null,
                     "sandbox": null,
                     "approval_policy": null,
@@ -794,40 +671,31 @@ async fn queued_user_turn_runs_before_goal_continuation() -> Result<()> {
         )
         .await
         .context("queued turn/start response")?;
-    let queued_result: devo_server::SuccessResponse<devo_server::TurnStartResult> =
-        serde_json::from_value(queued_response)?;
-    let devo_server::TurnStartResult::Queued {
-        active_turn_id: queued_active_turn_id,
-        queued_input_id,
-        status,
-        ..
-    } = queued_result.result
+    let queued_result: devo_server::SuccessResponse<
+        devo_protocol::native::rpc_turn::SessionQueuePushResult,
+    > = serde_json::from_value(queued_response.clone())
+        .with_context(|| format!("session/queue/push response: {queued_response}"))?;
+    let devo_protocol::native::rpc_turn::SessionQueuePushResult::Queued { entry } =
+        queued_result.result
     else {
-        panic!("expected queued turn/start result");
+        panic!("expected queued session/queue/push result");
     };
-    assert_eq!(queued_active_turn_id, active_turn_id);
-    assert_ne!(queued_input_id.to_string(), active_turn_id.to_string());
-    assert_eq!(status, devo_core::TurnStatus::Pending);
+    assert_eq!(entry.position, 1);
+    assert_ne!(entry.queue_item_id.to_string(), active_turn_id.to_string());
 
-    let _ = runtime
-        .handle_incoming(
-            connection_id,
-            serde_json::json!({
-                "jsonrpc": "2.0",
-                "id": 42,
-                "method": "_devo/goal/set",
-                "params": {
-                    "sessionId": session_id,
-                    "objective": "do not skip queued input",
-                    "status": "active"
-                }
-            }),
-        )
-        .await
-        .context("goal/set response")?;
+    let goal = create_goal(
+        &runtime,
+        connection_id,
+        session_id,
+        "do not skip queued input",
+        None,
+        GoalIfExists::Reject,
+        "goal-queued-input",
+    )
+    .await?;
 
     release_first.notify_one();
-    let queued_turn_started = wait_for_notification(&mut notifications_rx, "turn/started").await?;
+    wait_for_notification(&mut notifications_rx, "turn/started").await?;
     wait_for_captured_request_count(&provider.requests, /*expected*/ 2).await?;
     tokio::time::sleep(Duration::from_millis(/*millis*/ 50)).await;
     {
@@ -839,32 +707,26 @@ async fn queued_user_turn_runs_before_goal_continuation() -> Result<()> {
         );
     }
 
-    let _ = runtime
-        .handle_incoming(
-            connection_id,
-            serde_json::json!({
-                "jsonrpc": "2.0",
-                "id": 43,
-                "method": "_devo/goal/set",
-                "params": {
-                    "sessionId": session_id,
-                    "status": "paused"
-                }
-            }),
-        )
-        .await
-        .context("goal pause response")?;
+    support::transition_goal(
+        &runtime,
+        connection_id,
+        session_id,
+        "session/goal/pause",
+        &goal.id,
+    )
+    .await?;
     let _ = runtime
         .handle_incoming(
             connection_id,
             serde_json::json!({
                 "jsonrpc": "2.0",
                 "id": 44,
-                "method": "_devo/turn/interrupt",
+                "method": "session/interrupt",
                 "params": {
-                    "session_id": session_id,
-                    "turn_id": queued_turn_started["params"]["turn"]["turn_id"],
-                    "reason": "test cleanup"
+                    "scope": {
+                        "scope": "session",
+                        "sessionId": session_id
+                    }
                 }
             }),
         )

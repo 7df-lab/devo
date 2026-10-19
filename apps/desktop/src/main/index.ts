@@ -30,6 +30,12 @@ let isQuitting = false
 app.setName(appName)
 process.title = appName
 
+// Windows taskbar / jump-list identity. Without this, Windows may group the app
+// with other Electron apps and keep showing the default Electron icon.
+if (process.platform === "win32") {
+	app.setAppUserModelId(app.isPackaged ? "com.devo.desktop" : "com.devo.desktop.dev")
+}
+
 // ESM equivalent for __dirname
 const __filename = fileURLToPath(import.meta.url)
 const __dirname = path.dirname(__filename)
@@ -41,10 +47,36 @@ const __dirname = path.dirname(__filename)
 // full PATH (e.g., spawning devo) call waitForEnv() before proceeding.
 startEnvResolution()
 
+function sendAppMenuAction(action: "new-agent" | "open-folder" | "new-terminal"): void {
+	const win = BrowserWindow.getFocusedWindow() ?? BrowserWindow.getAllWindows()[0]
+	win?.webContents.send("app-menu:action", action)
+}
+
 // Minimal menu — required on macOS for Cmd+C/V/X/A to work in web contents.
 // A null menu kills native Edit shortcuts on macOS. This minimal template is
 // negligible overhead compared to the full default menu.
 const appMenuItems = {
+	file: {
+		label: "File",
+		submenu: [
+			{
+				label: "New Agent",
+				accelerator: "CmdOrCtrl+N",
+				click: () => sendAppMenuAction("new-agent"),
+			},
+			{
+				label: "Open Folder",
+				accelerator: "CmdOrCtrl+O",
+				click: () => sendAppMenuAction("open-folder"),
+			},
+			{ type: "separator" as const },
+			{
+				label: "New Terminal",
+				accelerator: "CmdOrCtrl+Shift+J",
+				click: () => sendAppMenuAction("new-terminal"),
+			},
+		],
+	},
 	edit: { role: "editMenu" as const },
 	view: { role: "viewMenu" as const },
 	window: { role: "windowMenu" as const },
@@ -53,16 +85,26 @@ const appMenuItems = {
 type AppMenuId = keyof typeof appMenuItems
 
 function isAppMenuId(value: unknown): value is AppMenuId {
-	return value === "edit" || value === "view" || value === "window"
+	return value === "file" || value === "edit" || value === "view" || value === "window"
+}
+
+function menuItemSubmenu(
+	item: Electron.MenuItemConstructorOptions,
+): Electron.MenuItemConstructorOptions[] | null {
+	return Array.isArray(item.submenu) ? item.submenu : null
 }
 
 const menuTemplate: Electron.MenuItemConstructorOptions[] = [
 	...(process.platform === "darwin" ? [{ role: "appMenu" as const }] : []),
+	appMenuItems.file,
 	appMenuItems.edit,
 	appMenuItems.view,
 	appMenuItems.window,
 ]
 Menu.setApplicationMenu(Menu.buildFromTemplate(menuTemplate))
+
+// Electron GC's menus that aren't retained; keep the last popup alive until the next one.
+let activePopupMenu: Electron.Menu | null = null
 
 ipcMain.handle(
 	"app-menu:popup",
@@ -76,11 +118,19 @@ ipcMain.handle(
 			return { success: false }
 		}
 
-		const menuItem = Menu.buildFromTemplate([appMenuItems[request.id]]).items[0]
-		const submenu = menuItem?.submenu
-		if (!submenu) {
+		const item = appMenuItems[request.id]
+		const explicitSubmenu = menuItemSubmenu(item)
+		let menu: Electron.Menu | undefined
+		if (explicitSubmenu) {
+			menu = Menu.buildFromTemplate(explicitSubmenu)
+		} else {
+			const wrapper = Menu.buildFromTemplate([item])
+			menu = wrapper.items[0]?.submenu
+		}
+		if (!menu) {
 			return { success: false }
 		}
+		activePopupMenu = menu
 
 		const popupOptions: Electron.PopupOptions = { window: win }
 		if (typeof request.x === "number" && typeof request.y === "number") {
@@ -88,7 +138,7 @@ ipcMain.handle(
 			popupOptions.y = Math.round(request.y)
 		}
 
-		submenu.popup(popupOptions)
+		activePopupMenu.popup(popupOptions)
 		return { success: true }
 	},
 )
@@ -219,7 +269,7 @@ if (isDev) {
 	app.setPath("userData", path.join(app.getPath("appData"), "Devo Dev"))
 }
 
-async function createWindow(): Promise<BrowserWindow> {
+async function createWindow({ bounds, hash }: { bounds?: Electron.Rectangle; hash?: string } = {}): Promise<BrowserWindow> {
 	const title = isDev ? `${appName} (Dev)` : appName
 
 	const isMac = process.platform === "darwin"
@@ -237,21 +287,28 @@ async function createWindow(): Promise<BrowserWindow> {
 	// Resolve the window icon for Linux/Windows. macOS uses the .app bundle icon.
 	// Linux: use 256x256 icon — GTK's GdkPixbuf can choke on the full 1024x1024
 	// icon on Wayland, causing GDK_IS_PIXBUF assertion failures.
+	// Windows: prefer .ico for best taskbar / title-bar visual quality.
 	const windowIcon = isMac
 		? undefined
 		: app.isPackaged
-			? path.join(process.resourcesPath, "icon.png")
+			? path.join(
+					process.resourcesPath,
+					process.platform === "win32" ? "icon.ico" : "icon.png",
+				)
 			: path.join(
 					__dirname,
 					process.platform === "linux"
 						? "../../resources/linux-icons/256x256.png"
-						: "../../resources/icon.png",
+						: process.platform === "win32"
+							? "../../resources/icon.ico"
+							: "../../resources/icon.png",
 				)
 
 	const win = new BrowserWindow({
 		title,
 		width: 1200,
 		height: 800,
+		...bounds,
 		autoHideMenuBar: process.platform === "win32",
 		// Transparent background for macOS glass/vibrancy tiers. Windows acrylic
 		// keeps a non-transparent BrowserWindow so native resize/maximize work.
@@ -275,6 +332,15 @@ async function createWindow(): Promise<BrowserWindow> {
 		},
 	})
 
+	if (windowIcon) {
+		const image = nativeImage.createFromPath(windowIcon)
+		if (image.isEmpty()) {
+			log.warn("Failed to load window icon", { windowIcon })
+		} else {
+			win.setIcon(image)
+		}
+	}
+
 	win.on("close", (event) => {
 		if (process.platform !== "win32" || isQuitting) return
 
@@ -285,6 +351,10 @@ async function createWindow(): Promise<BrowserWindow> {
 	// Show the window once the renderer has painted — avoids a flash of
 	// transparent/blank content while the page loads.
 	win.once("ready-to-show", () => {
+		if (windowIcon) {
+			const image = nativeImage.createFromPath(windowIcon)
+			if (!image.isEmpty()) win.setIcon(image)
+		}
 		win.show()
 	})
 
@@ -334,9 +404,11 @@ async function createWindow(): Promise<BrowserWindow> {
 
 	// Dev: load from Vite dev server | Prod: load built files
 	if (!app.isPackaged && process.env.ELECTRON_RENDERER_URL) {
-		win.loadURL(process.env.ELECTRON_RENDERER_URL)
+		const url = new URL(process.env.ELECTRON_RENDERER_URL)
+		if (hash) url.hash = hash
+		await win.loadURL(url.href)
 	} else {
-		win.loadFile(path.join(__dirname, "../renderer/index.html"))
+		await win.loadFile(path.join(__dirname, "../renderer/index.html"), { hash })
 	}
 
 	return win
@@ -380,7 +452,17 @@ if (!gotLock) {
 
 		initSettingsStore()
 		initCredentialStore()
-		registerIpcHandlers()
+		registerIpcHandlers({
+			recreateWindows: async () => {
+				const previousWindows = BrowserWindow.getAllWindows()
+				const previous = BrowserWindow.getFocusedWindow() ?? previousWindows[0]
+				await createWindow({
+					bounds: previous?.getBounds(),
+					hash: previous?.webContents.getURL().split("#")[1],
+				})
+				for (const win of previousWindows) win.destroy()
+			},
+		})
 		initAutomations().catch(console.error)
 		setMacDockIcon()
 		createWindow()

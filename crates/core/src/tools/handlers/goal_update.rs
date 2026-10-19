@@ -87,7 +87,7 @@ impl ToolHandler for GoalUpdateHandler {
             )
         })?;
         let result = Arc::clone(&coordinator)
-            .update_goal(ctx.session_id.clone(), status.to_string())
+            .update_goal(ctx.session_id, status.to_string())
             .await?;
 
         let tokens_used = result
@@ -135,6 +135,7 @@ mod tests {
         // Trace: L2-DES-GOAL-001
         let handler = GoalUpdateHandler::new();
         let ctx = ToolContext {
+            output_store: None,
             tool_call_id: crate::invocation::ToolCallId("call-1".into()),
             session_id: "session-1".into(),
             turn_id: Some("turn-1".into()),
@@ -151,7 +152,13 @@ mod tests {
             file_read_ledger: None,
             network_proxy: None,
             network_no_proxy: None,
+            sandbox_permission_overlay: None,
             sandbox_profile: None,
+            kernel: None,
+            python_cell_first_wait_ms: None,
+            python_cell_watch: None,
+            python_cell_completion: None,
+            session_dir: None,
         };
 
         let error = handler

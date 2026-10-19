@@ -3,81 +3,98 @@ use std::sync::Arc;
 use tokio::sync::mpsc;
 
 use crate::runtime::ServerRuntime;
-use crate::runtime::session_actor::state::SessionActorState;
+use crate::runtime::session_actor::TurnWorkingSet;
 use crate::runtime::subagent_usage::UsageTotals;
 use crate::runtime::turn_exec::{
     ExecuteTurnRequest, FinalizeTurnParams, QUERY_EVENT_CHANNEL_CAPACITY, TurnModelQueryParams,
     spawn_turn_event_stream,
 };
 
-/// Executes a turn inline on the session actor.
+/// Runs one turn on the caller's task using a checked-out [`TurnWorkingSet`].
 ///
-/// The actor does not poll its mailbox until this function returns. Code that
-/// must remain responsive while a turn runs (for example queue operations,
-/// steering, or future rollback preview) must not wait for an actor command.
-/// It must use the runtime reservation fast path and its shared queues instead.
-pub(super) async fn execute_turn_in_actor(
-    state: &mut SessionActorState,
+/// Returns whether goal continuation should be considered after merge.
+/// Post-turn scheduling is the caller's responsibility so this future does not
+/// recursively type-check against queue/follow-up spawn paths.
+pub(crate) async fn execute_turn_task(
+    mut working: TurnWorkingSet,
     runtime: Arc<ServerRuntime>,
     request: ExecuteTurnRequest,
-) {
+) -> bool {
     let ExecuteTurnRequest {
         session_id,
         turn,
         turn_config,
         display_input,
+        client_user_message_id,
         input,
         input_messages,
+        input_images,
+        input_image_paths,
         collaboration_mode,
         input_mode,
+        user_message_already_emitted,
     } = request;
 
-    let spawn_snapshot = Arc::new(state.spawn_snapshot());
-    eprintln!("dbg turn: register snapshot");
+    let pre_query_started = std::time::Instant::now();
+    let spawn_snapshot = Arc::new(working.state.spawn_snapshot());
+    let turn_id = turn.turn_id();
+    let mut step_started = std::time::Instant::now();
     runtime
-        .register_turn_spawn_snapshot(session_id, turn.turn_id, Arc::clone(&spawn_snapshot))
+        .register_turn_spawn_snapshot(session_id, turn_id, Arc::clone(&spawn_snapshot))
         .await;
+    let spawn_register_ms = step_started.elapsed().as_millis() as u64;
 
-    {
-        let mut stream = state.stream.lock().await;
-        stream.turn_inline = Some(super::turn_inline::TurnInlineState::new(state, &turn));
-    }
-    eprintln!("dbg turn: register stream");
+    step_started = std::time::Instant::now();
     runtime
-        .register_active_stream(session_id, Arc::clone(&state.stream))
+        .register_active_stream(session_id, Arc::clone(&working.state.stream))
         .await;
+    let stream_register_ms = step_started.elapsed().as_millis() as u64;
 
-    eprintln!("dbg turn: prepare");
+    step_started = std::time::Instant::now();
     runtime
         .prepare_turn_execution_for_actor(
-            state,
+            &mut working.state,
             &turn,
             &display_input,
-            input_mode.emits_user_message(),
+            &input_image_paths,
+            input_mode.emits_user_message() && !user_message_already_emitted,
+            client_user_message_id.as_deref(),
         )
         .await;
-    eprintln!("dbg turn: prepared");
+    let prepare_ms = step_started.elapsed().as_millis() as u64;
 
     let (event_tx, event_rx) = mpsc::channel(QUERY_EVENT_CHANNEL_CAPACITY);
-    let event_tool_registry = runtime.tool_registry_for_actor_state(state);
-    let usage_parent_session_id = state.parent_session_id();
-    let usage_context_window = Some(turn_config.model.context_window as u64);
-    // Only root sessions own a parent-turn usage ledger. Child turns publish
-    // through `publish_subagent_turn_usage` into their parent's ledger; starting
-    // a ledger keyed by the child session id is incorrect and can strand usage
-    // updates on the wrong session.
+    step_started = std::time::Instant::now();
+    let event_tool_registry = runtime.tool_registry_for_actor_state(&working.state);
+    let tool_registry_ms = step_started.elapsed().as_millis() as u64;
+    let usage_parent_session_id = working.state.parent_session_id();
+    let usage_context_window = Some(crate::runtime::context_occupancy::occupancy_window_tokens(
+        Some(&turn_config.model),
+    ));
+    step_started = std::time::Instant::now();
     if usage_parent_session_id.is_none() {
         runtime
             .begin_parent_usage_turn_with_base(
                 session_id,
-                turn.turn_id,
-                UsageTotals::from_session_summary(&state.summary),
+                turn_id,
+                UsageTotals::from_session_summary(&working.state.summary),
                 usage_context_window,
             )
             .await;
     }
+    let usage_ledger_ms = step_started.elapsed().as_millis() as u64;
 
-    let stream = Arc::clone(&state.stream);
+    tracing::info!(
+        session_id = %session_id,
+        pre_query_setup_ms = pre_query_started.elapsed().as_millis() as u64,
+        spawn_register_ms,
+        stream_register_ms,
+        prepare_ms,
+        tool_registry_ms,
+        usage_ledger_ms,
+        "turn task: pre-query setup completed (baseline, usage ledger, event stream)"
+    );
+    let stream = Arc::clone(&working.state.stream);
     let event_task = spawn_turn_event_stream(
         Arc::clone(&runtime),
         stream,
@@ -90,43 +107,60 @@ pub(super) async fn execute_turn_in_actor(
         event_rx,
     );
 
-    eprintln!("dbg turn: query start");
     let query_outcome = runtime
         .run_turn_model_query(TurnModelQueryParams {
-            state,
-            turn_id: turn.turn_id,
+            state: &mut working.state,
+            turn_id,
             turn_config: &turn_config,
             input: &input,
             input_messages: &input_messages,
+            input_images: &input_images,
             collaboration_mode,
             input_mode,
-            usage_parent_session_id,
+            usage_parent_session_id: usage_parent_session_id.as_ref().map(|id| *id),
             event_tx,
         })
         .await;
-    eprintln!("dbg turn: query done");
     let event_summary = event_task.await.ok();
-    eprintln!("dbg turn: event task done");
 
-    let turn_id = turn.turn_id;
     runtime
         .finalize_executed_turn(FinalizeTurnParams {
-            state,
+            state: &mut working.state,
             session_id,
             turn,
             query_outcome,
             event_summary,
-            usage_parent_session_id,
+            usage_parent_session_id: usage_parent_session_id.as_ref().map(|id| *id),
         })
         .await;
 
-    runtime.clear_turn_spawn_snapshot(session_id, turn_id).await;
-    runtime.unregister_active_stream(session_id).await;
+    // Merge before clearing the runtime registry so admission (compact /
+    // turn/start) cannot see a free registry while the actor still holds
+    // `active_turn` from BeginActiveTurn.
     let inline = {
-        let mut stream = state.stream.lock().await;
+        let mut stream = working.state.stream.lock().await;
         stream.turn_inline.take()
     };
     if let Some(inline) = inline {
-        inline.merge_into(state);
+        inline.merge_into(&mut working.state);
     }
+
+    let should_auto_continue_goal = working.state.latest_turn.as_ref().is_some_and(|turn| {
+        matches!(
+            turn.native.status,
+            devo_protocol::native::turn::TurnStatus::Completed
+                | devo_protocol::native::turn::TurnStatus::Failed
+        )
+    });
+
+    if let Some(handle) = runtime.session(session_id).await {
+        handle.merge_turn(working).await;
+    }
+
+    runtime.clear_turn_spawn_snapshot(session_id, turn_id).await;
+    runtime.unregister_active_stream(session_id).await;
+    let explicit_goal_activation = runtime.clear_active_turn_runtime_handles(session_id).await;
+    runtime.broadcast_recovery_state(session_id).await;
+
+    should_auto_continue_goal || explicit_goal_activation
 }

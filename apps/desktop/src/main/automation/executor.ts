@@ -5,7 +5,7 @@
  * 1. Creates a worktree (if useWorktree is enabled)
  * 2. Creates an Devo session with the appropriate permission ruleset
  * 3. Sends the automation prompt (with memory file context)
- * 4. Monitors ACP events until session goes idle or times out
+ * 4. Monitors Native events until session goes idle or times out
  * 5. Captures results (summary, branch, diffs) and updates the run record
  * 6. Auto-archives if the agent reports nothing actionable
  *
@@ -14,11 +14,16 @@
 
 import fs from "node:fs"
 import path from "node:path"
-import type { DevoClient, PermissionRuleset } from "@devo-ai/sdk/v2/client"
+import type { DevoClient, NativeItemEnvelope } from "@devo-ai/sdk/v2/client"
 import { createLogger } from "../logger"
 import { createAutomationClient } from "./devo-client"
+import { extractAutomationItem } from "./item-extract"
 import { getConfigDir } from "./paths"
+import { buildPermissionRuleset } from "./permission-policy"
 import type { AutomationConfig, PermissionPreset } from "./types"
+
+export type { AutomationItemExtract } from "./item-extract"
+export { extractAutomationItem }
 
 const log = createLogger("automation-executor")
 
@@ -48,56 +53,6 @@ function withTimeout<T>(promise: Promise<T>, ms: number, label: string): Promise
 // ============================================================
 // Permission presets
 // ============================================================
-
-/**
- * Maps a PermissionPreset to a PermissionRuleset array.
- *
- * All presets start from a base of "allow everything" and then layer
- * specific denies on top. Automations run unattended -- if any permission
- * lands in "ask" state the monitor would immediately reject it and fail
- * the run. Interactive prompts (question, plan_enter, plan_exit) are always
- * denied since there's no human to respond.
- *
- * - "default": Allow all tools (except interactive prompts).
- * - "allow-all": Identical to default, explicit for clarity.
- * - "read-only": Deny edit/write/bash on top of the allow-all base.
- *
- * NOTE: Ruleset evaluation uses findLast -- later rules override earlier
- * ones. Denies must come after the wildcard allow in the array.
- */
-function buildPermissionRuleset(preset: PermissionPreset): PermissionRuleset {
-	// Base rules: allow all permissions by default, then deny interactive
-	// prompts last so they take precedence (ruleset uses findLast evaluation).
-	// Automations run unattended -- blocking on any permission would cause
-	// the monitor to auto-reject and fail the run.
-	const baseRules: PermissionRuleset = [
-		{ permission: "*", pattern: "*", action: "allow" },
-		{ permission: "question", pattern: "*", action: "deny" },
-		{ permission: "plan_enter", pattern: "*", action: "deny" },
-		{ permission: "plan_exit", pattern: "*", action: "deny" },
-	]
-
-	switch (preset) {
-		case "allow-all":
-			return [
-				...baseRules,
-				{ permission: "edit", pattern: "*", action: "allow" },
-				{ permission: "bash", pattern: "*", action: "allow" },
-				{ permission: "webfetch", pattern: "*", action: "allow" },
-				{ permission: "external_directory", pattern: "*", action: "allow" },
-			]
-		case "read-only":
-			return [
-				...baseRules,
-				{ permission: "edit", pattern: "*", action: "deny" },
-				{ permission: "bash", pattern: "*", action: "deny" },
-				{ permission: "webfetch", pattern: "*", action: "allow" },
-			]
-		default:
-			// "default" or any unknown value: inherit project config, only deny interactive prompts
-			return baseRules
-	}
-}
 
 // ============================================================
 // Memory file
@@ -164,7 +119,7 @@ export interface ExecutionResult {
 }
 
 /**
- * Monitors ACP events for a session until it goes idle, errors, or times out.
+ * Monitors Native events for a session until it goes idle, errors, or times out.
  *
  * Returns collected text output and error information.
  */
@@ -173,8 +128,9 @@ async function monitorSession(
 	sessionId: string,
 	timeoutMs: number,
 	signal: AbortSignal,
+	permissionPreset: PermissionPreset,
 ): Promise<{ text: string; error: string | null }> {
-	const textParts: string[] = []
+	const textByItemId = new Map<string, string>()
 	let error: string | null = null
 
 	const timeoutPromise = new Promise<"timeout">((resolve) => {
@@ -184,31 +140,37 @@ async function monitorSession(
 
 	const eventPromise = (async (): Promise<"done"> => {
 		try {
-			log.debug("Subscribing to ACP events", { sessionId })
+			log.debug("Subscribing to Native events", { sessionId })
 			const result = await client.event.subscribe()
-			log.debug("ACP event stream connected", { sessionId })
+			log.debug("Native event stream connected", { sessionId })
 			for await (const event of result.stream) {
 				if (signal.aborted) break
 
-				// biome-ignore lint/suspicious/noExplicitAny: ACP events have dynamic types not fully covered by SDK
+				// biome-ignore lint/suspicious/noExplicitAny: Native events have dynamic types not fully covered by SDK
 				const evt = event as any
 
-				// Capture text output from the assistant
-				if (evt.type === "message.part.updated") {
-					const part = evt.properties?.part
-					if (
-						part?.sessionID === sessionId &&
-						part?.type === "text" &&
-						part?.time?.end &&
-						part?.text
-					) {
-						textParts.push(part.text)
+				// Capture text / tools from Native ItemEnvelope upserts
+				if (evt.type === "item.updated") {
+					const info = evt.properties?.info as NativeItemEnvelope | undefined
+					if (info?.sessionId === sessionId) {
+						const extracted = extractAutomationItem(info)
+						if (extracted.text) {
+							textByItemId.set(info.id, extracted.text)
+						}
+						if (extracted.toolName) {
+							log.debug("Automation tool item", {
+								sessionId,
+								itemId: info.id,
+								toolName: extracted.toolName,
+								state: info.state,
+							})
+						}
 					}
 				}
 
 				// Capture errors
 				if (evt.type === "session.error") {
-					if (evt.properties?.sessionID === sessionId && evt.properties?.error) {
+					if (evt.properties?.sessionId === sessionId && evt.properties?.error) {
 						const errObj = evt.properties.error
 						const errMsg = errObj.data?.message ?? errObj.name ?? "Unknown error"
 						error = error ? `${error}\n${errMsg}` : String(errMsg)
@@ -219,17 +181,18 @@ async function monitorSession(
 					}
 				}
 
-				// Auto-reject permission requests (the permission ruleset should prevent
-				// most, but catch any that slip through)
-				if (evt.type === "permission.asked") {
-					if (evt.properties?.sessionID === sessionId) {
+				// A configured restrictive policy may reject a request. The default
+				// policy remains waiting for an external controller instead of silently
+				// changing the user's effective permissions.
+				if (evt.type === "permission.asked" && permissionPreset === "read-only") {
+					if (evt.properties?.sessionId === sessionId) {
 						log.warn("Auto-rejecting permission request during automation", {
 							sessionId,
 							permission: evt.properties.permission,
 						})
 						try {
 							await client.permission.reply({
-								requestID: evt.properties.id,
+								requestId: evt.properties.id,
 								reply: "reject",
 							})
 						} catch (rejectErr) {
@@ -238,24 +201,10 @@ async function monitorSession(
 					}
 				}
 
-				// Auto-reject question requests
-				if (evt.type === "question.asked") {
-					if (evt.properties?.sessionID === sessionId) {
-						log.warn("Auto-rejecting question during automation", { sessionId })
-						try {
-							await client.question.reject({
-								requestID: evt.properties.id,
-							})
-						} catch (rejectErr) {
-							log.warn("Failed to reject question", rejectErr)
-						}
-					}
-				}
-
 				// Session went idle -- we're done
 				if (
 					evt.type === "session.status" &&
-					evt.properties?.sessionID === sessionId &&
+					evt.properties?.sessionId === sessionId &&
 					evt.properties?.status?.type === "idle"
 				) {
 					break
@@ -263,10 +212,10 @@ async function monitorSession(
 			}
 		} catch (err) {
 			if (!signal.aborted) {
-				log.error("ACP event monitoring error", err)
+				log.error("Native event monitoring error", err)
 				error = error
-					? `${error}\nACP event error: ${err instanceof Error ? err.message : String(err)}`
-					: `ACP event error: ${err instanceof Error ? err.message : String(err)}`
+					? `${error}\nNative event error: ${err instanceof Error ? err.message : String(err)}`
+					: `Native event error: ${err instanceof Error ? err.message : String(err)}`
 			}
 		}
 		return "done"
@@ -277,7 +226,7 @@ async function monitorSession(
 	if (outcome === "timeout") {
 		log.warn("Session monitoring timed out", { sessionId, timeoutMs })
 		try {
-			await client.session.abort({ sessionID: sessionId })
+			await client.session.abort({ sessionId: sessionId })
 			log.info("Session aborted after timeout", { sessionId })
 		} catch {
 			log.warn("Failed to abort session after timeout", { sessionId })
@@ -287,7 +236,7 @@ async function monitorSession(
 			: `Session timed out after ${Math.round(timeoutMs / 1000)}s`
 	}
 
-	return { text: textParts.join("\n"), error }
+	return { text: [...textByItemId.values()].join("\n"), error }
 }
 
 /**
@@ -366,6 +315,7 @@ export async function executeRun(
 
 	const abortController = new AbortController()
 	let worktreePath: string | null = null
+	let worktreeClient: DevoClient | null = null
 	let sessionId = ""
 	const runStartTime = Date.now()
 	log.info("Starting execution", {
@@ -421,7 +371,9 @@ export async function executeRun(
 		const permissionRuleset = buildPermissionRuleset(config.execution.permissionPreset ?? "default")
 
 		// If running in a worktree, create a client scoped to that directory
-		const sessionClient = worktreePath ? (createAutomationClient(worktreePath) ?? client) : client
+		const sessionClient = worktreePath
+			? ((worktreeClient = createAutomationClient(worktreePath)) ?? client)
+			: client
 
 		log.info("Creating session", {
 			automationId: config.id,
@@ -492,7 +444,7 @@ export async function executeRun(
 		const promptStart = Date.now()
 		await withTimeout(
 			sessionClient.session.promptAsync({
-				sessionID: sessionId,
+				sessionId: sessionId,
 				system: systemPrompt,
 				parts: [{ type: "text", text: config.prompt }],
 				model,
@@ -516,6 +468,7 @@ export async function executeRun(
 			sessionId,
 			config.execution.timeout * 1000,
 			abortController.signal,
+			config.execution.permissionPreset ?? "default",
 		)
 		log.info("Monitor completed", {
 			automationId: config.id,
@@ -531,7 +484,7 @@ export async function executeRun(
 		// Try to get session summary/diff info
 		let branch: string | null = null
 		try {
-			const sessionInfo = await sessionClient.session.get({ sessionID: sessionId })
+			const sessionInfo = await sessionClient.session.get({ sessionId: sessionId })
 			// biome-ignore lint/suspicious/noExplicitAny: session response shape varies
 			const info = sessionInfo.data as any
 			if (info?.summary?.diffs?.length > 0) {
@@ -591,5 +544,7 @@ export async function executeRun(
 		}
 	} finally {
 		abortController.abort()
+		worktreeClient?.dispose()
+		client.dispose()
 	}
 }

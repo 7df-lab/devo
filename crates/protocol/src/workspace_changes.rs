@@ -7,10 +7,12 @@ use ts_rs::TS;
 
 use crate::{SessionId, TurnId};
 
-#[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize, Deserialize, JsonSchema, TS)]
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Hash, Serialize, Deserialize, JsonSchema, TS)]
 #[serde(rename_all = "snake_case")]
 pub enum WorkspaceChangeScope {
     Branch,
+    Staged,
+    Unstaged,
     Uncommitted,
     Turn,
 }
@@ -63,7 +65,10 @@ pub enum WorkspaceChangedFileStatus {
     Unknown,
 }
 
+/// Internal / legacy-UUID read params. Native wire uses
+/// [`crate::native::rpc_workspace::WorkspaceChangesReadParams`].
 #[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize, JsonSchema, TS)]
+#[serde(rename_all = "camelCase")]
 pub struct WorkspaceChangesReadParams {
     pub session_id: SessionId,
     #[serde(default, skip_serializing_if = "Option::is_none")]
@@ -77,14 +82,29 @@ pub struct WorkspaceChangesReadParams {
     pub diff_detail: WorkspaceDiffDetail,
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub max_diff_bytes: Option<u64>,
+    /// Server-side `--ignore-all-space` for the git-backed scopes
+    /// (branch/staged/unstaged/uncommitted). Ignored for the turn scope,
+    /// whose finalized diffs are precomputed artifacts.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub ignore_whitespace: Option<bool>,
+    /// Optional path filter for expand-on-demand Full reads.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub paths: Option<Vec<PathBuf>>,
+    /// When true with path-scoped Full, attach `oldText`/`newText` so
+    /// clients can render expandable (non-partial) diffs.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub include_file_sides: Option<bool>,
 }
 
 #[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize, JsonSchema, TS)]
+#[serde(rename_all = "camelCase")]
 pub struct WorkspaceChangesReadResult {
     pub views: Vec<WorkspaceChangeView>,
 }
 
+/// Canonical workspace change view (Native camelCase wire).
 #[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize, JsonSchema, TS)]
+#[serde(rename_all = "camelCase")]
 pub struct WorkspaceChangeView {
     pub scope: WorkspaceChangeScope,
     pub status: WorkspaceChangeViewStatus,
@@ -104,10 +124,16 @@ pub struct WorkspaceChangeView {
 }
 
 #[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize, JsonSchema, TS)]
-#[serde(tag = "kind", rename_all = "snake_case")]
+#[serde(
+    tag = "kind",
+    rename_all = "snake_case",
+    rename_all_fields = "camelCase"
+)]
 pub enum WorkspaceChangeBase {
     Branch {
+        #[schemars(rename = "baseBranch")]
         base_branch: String,
+        #[schemars(rename = "mergeBase")]
         merge_base: String,
         head: String,
     },
@@ -115,7 +141,9 @@ pub enum WorkspaceChangeBase {
         head: Option<String>,
     },
     TurnCheckpoint {
+        #[schemars(rename = "turnId")]
         turn_id: TurnId,
+        #[schemars(rename = "checkpointId")]
         checkpoint_id: String,
         backend: WorkspaceCheckpointBackend,
     },
@@ -137,6 +165,7 @@ pub enum WorkspaceChangeAttribution {
 }
 
 #[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize, JsonSchema, TS)]
+#[serde(rename_all = "camelCase")]
 pub struct WorkspaceChangedFile {
     pub path: PathBuf,
     pub status: WorkspaceChangedFileStatus,
@@ -148,24 +177,20 @@ pub struct WorkspaceChangedFile {
     pub binary: bool,
     #[serde(default)]
     pub diff_truncated: bool,
+    /// Full previous-side text for MultiFileDiff expand-up/down.
+    /// Absent for added/untracked, binary, oversize, or when sides were not requested.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub old_text: Option<String>,
+    /// Full new-side text for MultiFileDiff expand-up/down.
+    /// Absent for deleted, binary, oversize, or when sides were not requested.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub new_text: Option<String>,
 }
 
 #[derive(Debug, Clone, Default, PartialEq, Eq, Serialize, Deserialize, JsonSchema, TS)]
+#[serde(rename_all = "camelCase")]
 pub struct WorkspaceChangeStats {
     pub files_changed: u64,
     pub additions: u64,
     pub deletions: u64,
-}
-
-#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize, JsonSchema, TS)]
-pub struct WorkspaceChangesUpdatedPayload {
-    pub session_id: SessionId,
-    pub turn_id: TurnId,
-    pub scope: WorkspaceChangeScope,
-    pub status: WorkspaceChangeViewStatus,
-    pub coverage: WorkspaceChangeCoverage,
-    pub change_set_status: WorkspaceChangeSetStatus,
-    pub stats: WorkspaceChangeStats,
-    pub version: u64,
-    pub generated_at: DateTime<Utc>,
 }

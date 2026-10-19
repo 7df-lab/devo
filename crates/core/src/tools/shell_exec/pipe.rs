@@ -4,7 +4,6 @@ use std::process::Stdio;
 
 use serde_json::json;
 use tokio::io::AsyncReadExt;
-use tokio::process::Child;
 use tokio::time::Duration;
 use tokio_util::sync::CancellationToken;
 use tracing::info;
@@ -29,6 +28,7 @@ pub(crate) async fn run_with_pipes(
     cancel_token: CancellationToken,
 ) -> anyhow::Result<FunctionToolOutput> {
     let ResolvedShellRun {
+        output_capture,
         shell,
         command_to_run,
         workdir,
@@ -37,12 +37,14 @@ pub(crate) async fn run_with_pipes(
         yield_time_ms,
         max_output_tokens,
         sandbox_profile,
+        sandbox_permission_overlay,
     } = run;
 
     info!(command = %command_to_run, shell = shell.program, "executing shell command");
 
     let plan = match SandboxLaunchPlan::prepare_pipe(
         sandbox_profile.as_deref(),
+        sandbox_permission_overlay.as_ref(),
         &workdir,
         &shell,
         &command_to_run,
@@ -68,8 +70,11 @@ pub(crate) async fn run_with_pipes(
         child.env("PYTHONUTF8", "1");
     }
 
-    let mut child = match child.spawn() {
-        Ok(child) => child,
+    let mut command = process_wrap::tokio::CommandWrap::from(child);
+    #[cfg(windows)]
+    command.wrap(devo_util_process::windows_job::OwnedJob);
+    let mut child = match command.spawn() {
+        Ok(child) => super::pipe_child::PipeChild(child),
         Err(error) => {
             return Ok(FunctionToolOutput::error(format!(
                 "failed to spawn process: {error}"
@@ -78,8 +83,18 @@ pub(crate) async fn run_with_pipes(
     };
     plan.schedule_placeholder_cleanup();
 
-    let stdout_task = spawn_stream_reader(child.stdout.take(), progress.clone());
-    let stderr_task = spawn_stream_reader(child.stderr.take(), progress);
+    // Wall-clock timing so the model can reason about slow or hung commands
+    // (start/end instants plus elapsed); the TUI shows the same span as
+    // "Took …" but the tool result itself previously carried no timing.
+    let started_at = std::time::Instant::now();
+
+    let stdout_task = spawn_stream_reader(
+        child.0.stdout().take(),
+        progress.clone(),
+        output_capture.clone(),
+    );
+    let stderr_task =
+        spawn_stream_reader(child.0.stderr().take(), progress, output_capture.clone());
 
     enum WaitOutcome {
         Exited(std::process::ExitStatus),
@@ -89,13 +104,16 @@ pub(crate) async fn run_with_pipes(
     }
 
     let outcome = tokio::select! {
-        status = child.wait() => match status {
+        status = child.0.wait() => match status {
             Ok(status) => WaitOutcome::Exited(status),
             Err(error) => WaitOutcome::WaitError(error),
         },
         _ = cancel_token.cancelled() => WaitOutcome::Cancelled,
         _ = tokio::time::sleep(Duration::from_millis(timeout_ms)) => WaitOutcome::TimedOut,
     };
+    // Measure at the moment the outcome was decided, before teardown waits
+    // (kill-and-wait) inflate the span the model is told about.
+    let duration_ms = started_at.elapsed().as_millis() as u64;
 
     match &outcome {
         WaitOutcome::Cancelled | WaitOutcome::TimedOut => {
@@ -106,15 +124,25 @@ pub(crate) async fn run_with_pipes(
 
     let stdout = String::from_utf8_lossy(&stdout_task.await.unwrap_or_default()).into_owned();
     let stderr = String::from_utf8_lossy(&stderr_task.await.unwrap_or_default()).into_owned();
-    let result_text = truncate_output(&merge_streams(&stdout, &stderr), max_output_tokens);
+    let mut result_text = truncate_output(&merge_streams(&stdout, &stderr), max_output_tokens);
+    super::append_capture_notice(&mut result_text, &output_capture);
 
     match outcome {
         WaitOutcome::Cancelled => Ok(FunctionToolOutput::error(format!(
-            "command cancelled\n{result_text}"
+            "command cancelled after {duration_ms}ms\n{result_text}"
         ))),
-        WaitOutcome::TimedOut => Ok(FunctionToolOutput::error(format!(
-            "command timed out after {timeout_ms}ms\n{result_text}"
-        ))),
+        WaitOutcome::TimedOut => Ok(FunctionToolOutput::error_with_metadata(
+            format!("command timed out after {timeout_ms}ms\n{result_text}"),
+            json!({
+                "command": command_to_run,
+                "exit": serde_json::Value::Null,
+                "description": description,
+                "cwd": workdir,
+                "yield_time_ms": yield_time_ms,
+                "timeout_ms": timeout_ms,
+                "duration_ms": duration_ms,
+            }),
+        )),
         WaitOutcome::WaitError(error) => Ok(FunctionToolOutput::error(format!(
             "failed to spawn process: {error}"
         ))),
@@ -128,6 +156,7 @@ pub(crate) async fn run_with_pipes(
                         "description": description,
                         "cwd": workdir,
                         "yield_time_ms": yield_time_ms,
+                        "duration_ms": duration_ms,
                     }),
                 ))
             } else {
@@ -146,7 +175,20 @@ pub(crate) async fn run_with_pipes(
                     &stderr,
                     &result_text,
                 );
-                Ok(FunctionToolOutput::error(error_message))
+                // Failed runs keep the structured metadata (exit, duration) so
+                // the model can reason about failing/hung commands, matching
+                // the success path.
+                Ok(FunctionToolOutput::error_with_metadata(
+                    error_message,
+                    json!({
+                        "command": command_to_run,
+                        "exit": status.code(),
+                        "description": description,
+                        "cwd": workdir,
+                        "yield_time_ms": yield_time_ms,
+                        "duration_ms": duration_ms,
+                    }),
+                ))
             }
         }
     }
@@ -155,6 +197,7 @@ pub(crate) async fn run_with_pipes(
 fn spawn_stream_reader<R>(
     pipe: Option<R>,
     progress: Option<ToolProgressSender>,
+    output_capture: Option<Result<devo_tools::output_store::SharedOutputCapture, String>>,
 ) -> tokio::task::JoinHandle<Vec<u8>>
 where
     R: AsyncReadExt + Unpin + Send + 'static,
@@ -172,7 +215,14 @@ where
                     if let Some(ref sender) = progress {
                         let _ = sender.send(String::from_utf8_lossy(&chunk[..n]).into_owned());
                     }
-                    buffer.extend_from_slice(&chunk[..n]);
+                    if let Some(Ok(capture)) = &output_capture {
+                        let mut capture = capture.lock().expect("output capture lock");
+                        if capture.append(&chunk[..n]).is_err() {
+                            capture.mark_incomplete();
+                        }
+                    }
+                    let keep = n.min((1024_usize * 1024).saturating_sub(buffer.len()));
+                    buffer.extend_from_slice(&chunk[..keep]);
                 }
                 Err(_) => break,
             }
@@ -181,10 +231,9 @@ where
     })
 }
 
-async fn kill_and_wait(child: &mut Child) {
-    let _ = devo_util_process::process_group::kill_child_process_group(child);
-    let _ = child.start_kill();
-    let _ = child.wait().await;
+async fn kill_and_wait(child: &mut super::pipe_child::PipeChild) {
+    child.terminate_tree();
+    let _ = child.0.wait().await;
 }
 
 pub(crate) fn merge_streams(stdout: &str, stderr: &str) -> String {

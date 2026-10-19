@@ -232,6 +232,207 @@ async fn responses_stream_fallback_preserves_mixed_tool_order_and_hosted_complet
     );
 }
 
+#[tokio::test]
+async fn responses_stream_separates_reasoning_summary_parts_with_paragraph_breaks() {
+    let (base_url, _capture) = spawn_sse_server(OPENAI_RESPONSES_SUMMARY_PARTS_SSE).await;
+    let provider = OpenAIResponsesProvider::new(base_url);
+
+    let mut stream = provider
+        .completion_stream(minimal_request())
+        .await
+        .expect("responses stream");
+    let mut events = Vec::new();
+    while let Some(event) = stream.next().await {
+        events.push(event.expect("stream event"));
+    }
+
+    assert_eq!(
+        events,
+        vec![
+            StreamEvent::ReasoningStart { index: 1 },
+            StreamEvent::ReasoningDelta {
+                index: 1,
+                text: "first part".to_string()
+            },
+            StreamEvent::ReasoningDelta {
+                index: 1,
+                text: "\n\n".to_string()
+            },
+            StreamEvent::ReasoningDelta {
+                index: 1,
+                text: "second part".to_string()
+            },
+            StreamEvent::ReasoningDone { index: 1 },
+            StreamEvent::MessageDone {
+                response: ModelResponse {
+                    id: "resp_parts".to_string(),
+                    content: vec![ResponseContent::Text("done".to_string())],
+                    stop_reason: Some(StopReason::EndTurn),
+                    usage: Usage {
+                        input_tokens: 1,
+                        output_tokens: 1,
+                        cache_creation_input_tokens: None,
+                        cache_read_input_tokens: None,
+                        reasoning_output_tokens: None,
+                        total_tokens: None,
+                    },
+                    metadata: ResponseMetadata {
+                        extras: vec![ResponseExtra::ReasoningText {
+                            text: "first part\n\nsecond part".to_string()
+                        }],
+                    },
+                },
+            },
+        ]
+    );
+}
+
+#[tokio::test]
+async fn responses_stream_does_not_emit_part_boundary_across_reasoning_items() {
+    let (base_url, _capture) =
+        spawn_sse_server(OPENAI_RESPONSES_SUMMARY_PARTS_ACROSS_ITEMS_SSE).await;
+    let provider = OpenAIResponsesProvider::new(base_url);
+
+    let mut stream = provider
+        .completion_stream(minimal_request())
+        .await
+        .expect("responses stream");
+    let mut events = Vec::new();
+    while let Some(event) = stream.next().await {
+        events.push(event.expect("stream event"));
+    }
+
+    assert_eq!(
+        events,
+        vec![
+            StreamEvent::ReasoningStart { index: 1 },
+            StreamEvent::ReasoningDelta {
+                index: 1,
+                text: "part one".to_string()
+            },
+            StreamEvent::HostedToolCallStart {
+                index: 1,
+                id: "ws_mid".to_string(),
+                name: "web_search".to_string(),
+                input: json!({"query": "hosted lookup"}),
+            },
+            StreamEvent::ReasoningDelta {
+                index: 1,
+                text: "part two".to_string()
+            },
+            StreamEvent::ReasoningDone { index: 1 },
+            StreamEvent::MessageDone {
+                response: ModelResponse {
+                    id: "resp_across".to_string(),
+                    content: vec![ResponseContent::Text("done".to_string())],
+                    stop_reason: Some(StopReason::EndTurn),
+                    usage: Usage {
+                        input_tokens: 1,
+                        output_tokens: 1,
+                        cache_creation_input_tokens: None,
+                        cache_read_input_tokens: None,
+                        reasoning_output_tokens: None,
+                        total_tokens: None,
+                    },
+                    metadata: ResponseMetadata {
+                        extras: vec![ResponseExtra::ReasoningText {
+                            text: "part onepart two".to_string()
+                        }],
+                    },
+                },
+            },
+        ]
+    );
+}
+
+#[tokio::test]
+async fn responses_stream_does_not_emit_part_boundary_after_function_call_without_item_ids() {
+    let (base_url, _capture) = spawn_sse_server(OPENAI_RESPONSES_SUMMARY_PARTS_NO_IDS_SSE).await;
+    let provider = OpenAIResponsesProvider::new(base_url);
+
+    let mut stream = provider
+        .completion_stream(minimal_request())
+        .await
+        .expect("responses stream");
+    let mut events = Vec::new();
+    while let Some(event) = stream.next().await {
+        events.push(event.expect("stream event"));
+    }
+
+    assert_eq!(
+        events,
+        vec![
+            StreamEvent::ReasoningStart { index: 1 },
+            StreamEvent::ReasoningDelta {
+                index: 1,
+                text: "part one".to_string()
+            },
+            StreamEvent::ToolCallStart {
+                index: 1,
+                id: "call_mid".to_string(),
+                name: "shell".to_string(),
+                input: json!({}),
+            },
+            StreamEvent::ReasoningDelta {
+                index: 1,
+                text: "part two".to_string()
+            },
+            StreamEvent::ReasoningDone { index: 1 },
+            StreamEvent::MessageDone {
+                response: ModelResponse {
+                    id: "resp_noids".to_string(),
+                    content: vec![ResponseContent::Text("done".to_string())],
+                    stop_reason: Some(StopReason::EndTurn),
+                    usage: Usage {
+                        input_tokens: 1,
+                        output_tokens: 1,
+                        cache_creation_input_tokens: None,
+                        cache_read_input_tokens: None,
+                        reasoning_output_tokens: None,
+                        total_tokens: None,
+                    },
+                    metadata: ResponseMetadata {
+                        extras: vec![ResponseExtra::ReasoningText {
+                            text: "part onepart two".to_string()
+                        }],
+                    },
+                },
+            },
+        ]
+    );
+}
+
+#[tokio::test]
+async fn completion_folds_streamed_text_when_completed_event_replays_no_output() {
+    let (base_url, _capture) = spawn_sse_server(OPENAI_RESPONSES_COMPLETED_EMPTY_OUTPUT_SSE).await;
+    let provider = OpenAIResponsesProvider::new(base_url);
+
+    // Codex-style backends do not replay the output items in the terminal
+    // `response.completed` event, so the folded non-streaming response must
+    // fall back to the streamed deltas.
+    let response = provider
+        .completion(minimal_request())
+        .await
+        .expect("completion");
+    let expected = ModelResponse {
+        id: "resp_codex_empty".to_string(),
+        content: vec![ResponseContent::Text(
+            "Verify Bash Tool Permissions".to_string(),
+        )],
+        stop_reason: Some(StopReason::EndTurn),
+        usage: Usage {
+            input_tokens: 7,
+            output_tokens: 3,
+            cache_creation_input_tokens: None,
+            cache_read_input_tokens: None,
+            reasoning_output_tokens: None,
+            total_tokens: None,
+        },
+        metadata: ResponseMetadata::default(),
+    };
+    assert_eq!(response, expected);
+}
+
 async fn spawn_sse_server(response: &'static str) -> (String, tokio::task::JoinHandle<String>) {
     let listener = TcpListener::bind("127.0.0.1:0")
         .await
@@ -326,6 +527,87 @@ const OPENAI_RESPONSES_FUNCTION_ARGUMENTS_SSE: &str = concat!(
     "data: {\"id\":\"resp_tools\",\"item_id\":\"fc_first\",\"delta\":\"{\\\"path\\\":\\\"a.md\\\"}\"}\n\n",
     "event: response.completed\n",
     "data: {\"id\":\"resp_tools\"}\n\n",
+);
+
+const OPENAI_RESPONSES_SUMMARY_PARTS_SSE: &str = concat!(
+    "HTTP/1.1 200 OK\r\n",
+    "content-type: text/event-stream\r\n",
+    "cache-control: no-cache\r\n",
+    "connection: close\r\n",
+    "\r\n",
+    "event: response.reasoning_summary_part.added\n",
+    "data: {\"id\":\"resp_parts\",\"item_id\":\"rs_parts\",\"output_index\":0,\"summary_index\":0,\"part\":{\"type\":\"summary_text\",\"text\":\"\"}}\n\n",
+    "event: response.reasoning_summary_text.delta\n",
+    "data: {\"id\":\"resp_parts\",\"item_id\":\"rs_parts\",\"delta\":\"first part\"}\n\n",
+    "event: response.reasoning_summary_part.added\n",
+    "data: {\"id\":\"resp_parts\",\"item_id\":\"rs_parts\",\"output_index\":0,\"summary_index\":1,\"part\":{\"type\":\"summary_text\",\"text\":\"\"}}\n\n",
+    "event: response.reasoning_summary_text.delta\n",
+    "data: {\"id\":\"resp_parts\",\"item_id\":\"rs_parts\",\"delta\":\"second part\"}\n\n",
+    "event: response.completed\n",
+    "data: {\"id\":\"resp_parts\",\"response\":{\"id\":\"resp_parts\",\"status\":\"completed\",\"output\":[{\"type\":\"message\",\"content\":[{\"type\":\"output_text\",\"text\":\"done\"}]}],\"usage\":{\"input_tokens\":1,\"output_tokens\":1}}}\n\n",
+);
+
+// Codex-shaped terminal event: the completed envelope carries id/status/usage
+// but replays NO output items, so the streamed deltas are the only content.
+const OPENAI_RESPONSES_COMPLETED_EMPTY_OUTPUT_SSE: &str = concat!(
+    "HTTP/1.1 200 OK\r\n",
+    "content-type: text/event-stream\r\n",
+    "cache-control: no-cache\r\n",
+    "connection: close\r\n",
+    "\r\n",
+    "event: response.output_text.delta\n",
+    "data: {\"id\":\"resp_codex_empty\",\"delta\":\"Verify Bash \"}\n\n",
+    "event: response.output_text.delta\n",
+    "data: {\"id\":\"resp_codex_empty\",\"delta\":\"Tool Permissions\"}\n\n",
+    "event: response.completed\n",
+    "data: {\"id\":\"resp_codex_empty\",\"response\":{\"id\":\"resp_codex_empty\",\"status\":\"completed\",\"output\":[],\"usage\":{\"input_tokens\":7,\"output_tokens\":3}}}\n\n",
+);
+
+// Two distinct reasoning items separated by a hosted web_search call — the
+// shape codex-style backends produce mid-stream. The part boundary must fire
+// only within one reasoning item; the second item must not start with an
+// orphan "\n\n".
+const OPENAI_RESPONSES_SUMMARY_PARTS_ACROSS_ITEMS_SSE: &str = concat!(
+    "HTTP/1.1 200 OK\r\n",
+    "content-type: text/event-stream\r\n",
+    "cache-control: no-cache\r\n",
+    "connection: close\r\n",
+    "\r\n",
+    "event: response.reasoning_summary_part.added\n",
+    "data: {\"id\":\"resp_across\",\"item_id\":\"rs_first\",\"output_index\":0,\"summary_index\":0,\"part\":{\"type\":\"summary_text\",\"text\":\"\"}}\n\n",
+    "event: response.reasoning_summary_text.delta\n",
+    "data: {\"id\":\"resp_across\",\"item_id\":\"rs_first\",\"delta\":\"part one\"}\n\n",
+    "event: response.output_item.added\n",
+    "data: {\"id\":\"resp_across\",\"item\":{\"id\":\"ws_mid\",\"type\":\"web_search_call\",\"status\":\"in_progress\",\"action\":{\"type\":\"search\",\"query\":\"hosted lookup\"}}}\n\n",
+    "event: response.reasoning_summary_part.added\n",
+    "data: {\"id\":\"resp_across\",\"item_id\":\"rs_second\",\"output_index\":2,\"summary_index\":0,\"part\":{\"type\":\"summary_text\",\"text\":\"\"}}\n\n",
+    "event: response.reasoning_summary_text.delta\n",
+    "data: {\"id\":\"resp_across\",\"item_id\":\"rs_second\",\"delta\":\"part two\"}\n\n",
+    "event: response.completed\n",
+    "data: {\"id\":\"resp_across\",\"response\":{\"id\":\"resp_across\",\"status\":\"completed\",\"output\":[{\"type\":\"message\",\"content\":[{\"type\":\"output_text\",\"text\":\"done\"}]}],\"usage\":{\"input_tokens\":1,\"output_tokens\":1}}}\n\n",
+);
+
+// Same interleaved shape but with **no item_id** on the part events — some
+// backends omit it, so the activity gate (not id matching) must suppress the
+// boundary after the function call.
+const OPENAI_RESPONSES_SUMMARY_PARTS_NO_IDS_SSE: &str = concat!(
+    "HTTP/1.1 200 OK\r\n",
+    "content-type: text/event-stream\r\n",
+    "cache-control: no-cache\r\n",
+    "connection: close\r\n",
+    "\r\n",
+    "event: response.reasoning_summary_part.added\n",
+    "data: {\"id\":\"resp_noids\",\"output_index\":0,\"summary_index\":0,\"part\":{\"type\":\"summary_text\",\"text\":\"\"}}\n\n",
+    "event: response.reasoning_summary_text.delta\n",
+    "data: {\"id\":\"resp_noids\",\"delta\":\"part one\"}\n\n",
+    "event: response.output_item.added\n",
+    "data: {\"id\":\"resp_noids\",\"item\":{\"id\":\"fc_mid\",\"type\":\"function_call\",\"call_id\":\"call_mid\",\"name\":\"shell\",\"arguments\":\"\"}}\n\n",
+    "event: response.reasoning_summary_part.added\n",
+    "data: {\"id\":\"resp_noids\",\"output_index\":2,\"summary_index\":0,\"part\":{\"type\":\"summary_text\",\"text\":\"\"}}\n\n",
+    "event: response.reasoning_summary_text.delta\n",
+    "data: {\"id\":\"resp_noids\",\"delta\":\"part two\"}\n\n",
+    "event: response.completed\n",
+    "data: {\"id\":\"resp_noids\",\"response\":{\"id\":\"resp_noids\",\"status\":\"completed\",\"output\":[{\"type\":\"message\",\"content\":[{\"type\":\"output_text\",\"text\":\"done\"}]}],\"usage\":{\"input_tokens\":1,\"output_tokens\":1}}}\n\n",
 );
 
 const OPENAI_RESPONSES_MIXED_TOOLS_DONE_SSE: &str = concat!(

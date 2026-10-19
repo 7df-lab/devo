@@ -14,26 +14,28 @@ import {
 import { ChevronDownIcon, ChevronRightIcon, RefreshCwIcon } from "lucide-react"
 import { useEffect, useState } from "react"
 import { useAtomValue } from "jotai"
-import type { AcpTrafficLogState, NetworkProxyMode } from "../../../preload/api"
+import type { NativeTrafficLogState, NetworkProxyMode } from "../../../preload/api"
 import { normalizeProxyUrl } from "../../../shared/network-proxy"
 import { serverConnectedAtom, serverUrlAtom } from "../../atoms/connection"
 import { useSettings } from "../../hooks/use-settings"
+import { SettingsHeader } from "./settings-header"
 import { SettingsRow } from "./settings-row"
 import { SettingsSection } from "./settings-section"
 
 const isElectron = typeof window !== "undefined" && "devo" in window
 
 interface ServerSettingsProps {
-	initialAcpTrafficLogState?: AcpTrafficLogState | null
+	initialNativeTrafficLogState?: NativeTrafficLogState | null
 }
 
-export function ServerSettings({ initialAcpTrafficLogState = null }: ServerSettingsProps = {}) {
+export function ServerSettings({ initialNativeTrafficLogState = null }: ServerSettingsProps = {}) {
 	const connected = useAtomValue(serverConnectedAtom)
 	const url = useAtomValue(serverUrlAtom)
 	const { settings, updateSettings } = useSettings()
 	const [restarting, setRestarting] = useState(false)
-	const [acpTrafficLogState, setAcpTrafficLogState] = useState<AcpTrafficLogState | null>(
-		initialAcpTrafficLogState,
+	const [restartError, setRestartError] = useState<string | null>(null)
+	const [nativeTrafficLogState, setNativeTrafficLogState] = useState<NativeTrafficLogState | null>(
+		initialNativeTrafficLogState,
 	)
 	const networkProxy = settings.servers.networkProxy
 	const customProxyUrl = normalizeProxyUrl(networkProxy.proxyUrl)
@@ -41,13 +43,13 @@ export function ServerSettings({ initialAcpTrafficLogState = null }: ServerSetti
 	useEffect(() => {
 		if (!isElectron) return
 		let cancelled = false
-		void window.devo.acpTraffic
+		void window.devo.nativeTraffic
 			.getState()
 			.then((state) => {
-				if (!cancelled) setAcpTrafficLogState(state)
+				if (!cancelled) setNativeTrafficLogState(state)
 			})
 			.catch((error) => {
-				console.error("Failed to load ACP traffic log state:", error)
+				console.error("Failed to load Native traffic log state:", error)
 			})
 		return () => {
 			cancelled = true
@@ -57,8 +59,11 @@ export function ServerSettings({ initialAcpTrafficLogState = null }: ServerSetti
 	async function restart() {
 		if (!isElectron) return
 		setRestarting(true)
+		setRestartError(null)
 		try {
 			await window.devo.restartDevo()
+		} catch (error) {
+			setRestartError(error instanceof Error ? error.message : "Failed to restart runtime")
 		} finally {
 			setRestarting(false)
 		}
@@ -66,12 +71,10 @@ export function ServerSettings({ initialAcpTrafficLogState = null }: ServerSetti
 
 	return (
 		<div className="space-y-8">
-			<div>
-				<h2 className="text-xl font-semibold">Server</h2>
-				<p className="mt-1 text-sm text-muted-foreground">
-					Devo Desktop manages a private local stdio ACP process.
-				</p>
-			</div>
+			<SettingsHeader
+				title="Server"
+				description="Devo Desktop manages a private local stdio Native process."
+			/>
 
 			<SettingsSection>
 				<SettingsRow
@@ -112,7 +115,7 @@ export function ServerSettings({ initialAcpTrafficLogState = null }: ServerSetti
 							off: "Off",
 						}}
 					>
-						<SelectTrigger className="min-w-[140px]">
+						<SelectTrigger aria-label="Proxy mode" className="min-w-[140px]">
 							<SelectValue />
 						</SelectTrigger>
 						<SelectContent>
@@ -178,7 +181,7 @@ export function ServerSettings({ initialAcpTrafficLogState = null }: ServerSetti
 					label="Restart runtime"
 					description="Stop the current child process and start a fresh Devo stdio server"
 				>
-					<Button size="sm" variant="outline" onClick={restart} disabled={restarting}>
+					<Button size="sm" variant="outline" onClick={restart} disabled={restarting || (networkProxy.mode === "custom" && !customProxyUrl)}>
 						<RefreshCwIcon
 							aria-hidden="true"
 							className={`size-3.5 ${restarting ? "animate-spin" : ""}`}
@@ -187,17 +190,18 @@ export function ServerSettings({ initialAcpTrafficLogState = null }: ServerSetti
 					</Button>
 				</SettingsRow>
 			</SettingsSection>
+			{restartError && <p role="alert" className="text-sm text-destructive">{restartError}</p>}
 
-			<AcpTrafficLogStatus state={acpTrafficLogState} />
+			<NativeTrafficLogStatus state={nativeTrafficLogState} />
 		</div>
 	)
 }
 
-export function AcpTrafficLogStatus({
+export function NativeTrafficLogStatus({
 	state,
 	initialExpanded = false,
 }: {
-	state: AcpTrafficLogState | null
+	state: NativeTrafficLogState | null
 	initialExpanded?: boolean
 }) {
 	const [expanded, setExpanded] = useState(initialExpanded)
@@ -212,7 +216,7 @@ export function AcpTrafficLogStatus({
 			description="Tools for inspecting the managed local runtime."
 		>
 			<SettingsRow
-				label="ACP traffic log"
+				label="Native traffic log"
 				description="Protocol trace enabled via DEVO_PROTOCOL_TRACE"
 			>
 				<Button
@@ -228,15 +232,15 @@ export function AcpTrafficLogStatus({
 			</SettingsRow>
 			{expanded && (
 				<div className="space-y-2 px-4 py-3">
-					<div className="text-sm font-medium">Current log file</div>
+					<div className="text-sm tracking-tight">Current log file</div>
 					{state.path ? (
-						<code className="block truncate rounded bg-muted px-2 py-1.5 text-xs text-muted-foreground">
+						<code className="block truncate rounded-md bg-muted px-2 py-1.5 text-[13px] text-muted-foreground">
 							{state.path}
 						</code>
 					) : (
-						<p className="text-sm text-muted-foreground">No log file path is available.</p>
+						<p className="text-[13px] text-muted-foreground">No log file path is available.</p>
 					)}
-					<p className="text-xs text-muted-foreground">
+					<p className="text-[13px] leading-5 text-muted-foreground">
 						Traces are written under DEVO_HOME/traces/ (default ~/.devo/traces/). The log may
 						include prompts, paths, tool arguments, and provider details.
 					</p>

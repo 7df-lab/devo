@@ -8,6 +8,19 @@ use std::path::Path;
 
 use crate::invocation::FunctionToolOutput;
 
+/// Read-tool truncation policy:
+///
+/// 1. Skip lines before the 1-based `offset`.
+/// 2. Cap each included line at [`MAX_LINE_CHARS`] characters and append
+///    [`LINE_TRUNCATION_SUFFIX`].
+/// 3. Cap the joined payload at [`MAX_PAYLOAD_BYTES`] (50 KiB). User-facing
+///    messages still say "50 KB" so they stay aligned with this byte cap.
+/// 4. Set `more` when unread lines remain after a line-count or byte cap, and
+///    `truncated` when any cap fired (`cut || more`).
+const MAX_LINE_CHARS: usize = 2000;
+const LINE_TRUNCATION_SUFFIX: &str = "... (line truncated to 2000 chars)";
+const MAX_PAYLOAD_BYTES: usize = 50 * 1024;
+
 pub(crate) fn read_directory(
     path: &Path,
     limit: usize,
@@ -100,13 +113,9 @@ pub(crate) fn read_file(
             more = true;
             continue;
         }
-        // TODO: check the truncate policy
-        if line.len() > 2000 {
-            line.truncate(2000);
-            line.push_str("... (line truncated to 2000 chars)");
-        }
+        apply_line_char_cap(&mut line);
         let size = line.len() + if raw.is_empty() { 0 } else { 1 };
-        if bytes + size > 50 * 1024 {
+        if bytes + size > MAX_PAYLOAD_BYTES {
             cut = true;
             more = true;
             break;
@@ -165,6 +174,14 @@ pub(crate) fn read_file(
         }),
     )
     .with_display_content(display_content))
+}
+
+fn apply_line_char_cap(line: &mut String) {
+    let Some((byte_end, _)) = line.char_indices().nth(MAX_LINE_CHARS) else {
+        return;
+    };
+    line.truncate(byte_end);
+    line.push_str(LINE_TRUNCATION_SUFFIX);
 }
 
 pub(crate) fn is_binary_file(path: &Path) -> anyhow::Result<bool> {
@@ -409,6 +426,34 @@ mod tests {
                 .and_then(|value| value.as_bool()),
             Some(true)
         );
+    }
+
+    #[test]
+    fn read_file_caps_long_lines_and_payload() {
+        let dir = create_temp_dir("truncate");
+        let path = dir.join("wide.txt");
+        let long_line = "x".repeat(3_000);
+        let filler = "y".repeat(1_000);
+        let mut lines = vec![long_line.clone()];
+        lines.extend((0..80).map(|_| filler.clone()));
+        let line_refs: Vec<&str> = lines.iter().map(String::as_str).collect();
+        write_lines(&path, &line_refs);
+
+        let output = read_file(&path, 10_000, 1).unwrap();
+        assert!(!output.is_error);
+        let text = output_text(&output);
+        assert!(text.contains(LINE_TRUNCATION_SUFFIX));
+        assert!(!text.contains(&"x".repeat(2_001)));
+        assert!(text.contains("(Output capped at 50 KB. Showing lines"));
+        assert_eq!(
+            output_metadata(&output)
+                .get("truncated")
+                .and_then(|value| value.as_bool()),
+            Some(true)
+        );
+        let display = output.display_content().expect("display content");
+        assert!(display.contains(LINE_TRUNCATION_SUFFIX));
+        assert!(display.contains("Output capped at 50 KB"));
     }
 
     #[test]

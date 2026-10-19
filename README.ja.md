@@ -1,276 +1,77 @@
 <div align="center">
 
-<img src="./.github/assets/devo-readme-brand.svg" alt="Devo desktop coding agent app icon and wordmark" width="360" />
+<img src="./.github/assets/devo-readme-brand.svg" alt="Devo" width="360" />
 
 </div>
 
-<div align="center">
+# Devo — オープンソースの再帰型エージェント
 
-**Devo は、Desktop app、terminal TUI/CLI、model-neutral な Rust runtime を備えた open-source coding agent です。プライベート、エンタープライズ、OpenAI 互換モデル環境で、DeepSeek、Qwen、Kimi、Anthropic 互換 API、ローカルゲートウェイ、独自モデル endpoint に接続できます。**
+Devo は**状態を保持する Python ワークスペース**、**子エージェント**、
+**自由に選べるモデルプロバイダー**で複数ステップのタスクを進めます。
+ローカルの Rust ランタイムを、デスクトップアプリまたはターミナル TUI/CLI から利用できます。
 
-[![Stars](https://img.shields.io/github/stars/7df-lab/devo?style=flat-square)](https://github.com/7df-lab/devo/stargazers)
-[![Language](https://img.shields.io/badge/language-Rust-E57324?style=flat-square&logo=rust&logoColor=white)](https://www.rust-lang.org/)
-[![License](https://img.shields.io/badge/license-MIT-green?style=flat-square)](./LICENSE)
-[![PRs Welcome](https://img.shields.io/badge/PRs-welcome-brightgreen?style=flat-square)](https://github.com/7df-lab/devo/pulls)
 [![CI](https://img.shields.io/github/actions/workflow/status/7df-lab/devo/ci.yml?branch=main&style=flat-square)](https://github.com/7df-lab/devo/actions)
 [![Release](https://img.shields.io/github/v/release/7df-lab/devo?style=flat-square)](https://github.com/7df-lab/devo/releases)
+[![License: MIT](https://img.shields.io/badge/license-MIT-green?style=flat-square)](./LICENSE)
 
-[English](./README.md) | [简体中文](./README.zh-Hans.md) | [繁體中文](./README.zh-Hant.md) | [日本語](./README.ja.md) | [Русский](./README.ru.md)
+[English](./README.md) · [简体中文](./README.zh-Hans.md) · [繁體中文](./README.zh-Hant.md) · [日本語](./README.ja.md) · [Русский](./README.ru.md)
 
-[Devo を選ぶ理由](#devo-を選ぶ理由) · [スクリーンショット](#スクリーンショット) · [機能](#機能) · [検証済みモデル](#検証済みモデル) · [検証済みプラットフォーム](#検証済みプラットフォーム) · [インストール](#インストール) · [クイックスタート](#クイックスタート) · [ドキュメント](#docs)
+## Claude Code・Codex との違い
 
-</div>
+| エージェント | 主な特徴 | モデル接続 |
+| --- | --- | --- |
+| **Devo** | プログラムによる再帰的な実行で、開発やその他の複数ステップのタスクを処理。 | 互換クラウドプロバイダー、ローカルエンドポイント、プライベートゲートウェイ。 |
+| [Claude Code](https://code.claude.com/docs/en/overview) | Claude を中心とした開発ワークフロー。ターミナル、IDE、デスクトップ、Web に対応。 | Anthropic または対応クラウドプロバイダー経由の Claude。 |
+| [Codex](https://learn.chatgpt.com/docs/codex/cli) | OpenAI の開発エージェント。ターミナル、IDE、アプリ、クラウドに対応。 | 標準は OpenAI モデル。CLI は[カスタム・ローカルプロバイダー](https://learn.chatgpt.com/docs/config-file/config-advanced#custom-model-providers)にも対応。 |
 
----
+Devo の `ipython` ツールは、呼び出し間で変数や中間結果を保持します。
+Python で大量の出力を絞り込み、先行作業を再利用し、独立したサブタスクを
+専用のセッションと Python 状態を持つ子エージェントに委任できます。
+MCP、スキル、権限制御、セッション再開にも対応しています。
 
-## スクリーンショット
+## クイックスタート
 
-<p align="center">
-  <img width="100%" alt="Devo terminal TUI coding agent がローカルリポジトリでモデル、コンテキスト、token 状態を表示している画面" src="./.github/assets/devo-terminal-tui-coding-agent-screenshot.png" />
-</p>
+**デスクトップ：** [GitHub Releases](https://github.com/7df-lab/devo/releases/latest)
+から OS とアーキテクチャに合うパッケージをダウンロードし、初期設定でモデルプロバイダーを接続します。
 
-<p align="center">
-  <img width="100%" alt="Devo desktop coding agent app がリポジトリの会話、プロジェクトサイドバー、モデル制御を表示している画面" src="./.github/assets/devo-desktop-coding-agent-screenshot.png" />
-</p>
-
-## Devo を選ぶ理由
-
-Devo は、単一のホスト型モデルエコシステムに縛られず、モデル選択、
-Desktop 体験、terminal workflow、ランタイムの動作、ワークスペースでの
-実行境界を自分たちで制御したいチームのための coding agent です。
-
-- **任意のモデルを接続** - provider/model binding により、OpenAI 互換 Chat
-  Completions、OpenAI 互換 Responses、Anthropic Messages、DeepSeek、
-  Qwen、Kimi、またはプライベートモデルゲートウェイを接続できます。
-- **プライベート環境やイントラネット環境に対応** - 単一のローカル Rust
-  バイナリとして動作し、オフラインインストール経路をサポートし、
-  ホスト型 agent service に依存せず内部 endpoint を指定できます。
-- **Desktop と terminal の両方に対応** - Desktop app で視覚的なオンボーディングと
-  日常の coding を行い、端末ネイティブな自動化、remote shell、scriptable workflow が
-  必要なときは CLI/TUI を使えます。
-- **Agent Runtime として拡張可能** - MCP server、再利用可能な skills、
-  監査可能なセッション、権限管理、マルチエージェント flow は、一回限りの
-  prompt ではなくランタイム機能です。
-
-## 機能
-
-- **Model-neutral provider runtime** - provider/model binding により、OpenAI 互換、
-  Anthropic 互換、DeepSeek、Qwen、Kimi、GLM、MiniMax、Xiaomi MiMo、
-  OpenRouter、またはローカルエンドポイントを利用できます。
-- **MCP サポート** - [Model Context Protocol](https://modelcontextprotocol.io/)
-  サーバーを通じて外部ツールとコンテキストを接続できます。CLI で
-  `devo mcp add|list|enable|disable|remove` により追加・管理できます（
-  [設定](./docs/configuration.ja.md#mcp-サーバー) を参照）。
-- **Skill サポート** - 再利用可能なワークフロー、手順、スクリプト、参照資料を
-  [Agent Skills](https://agentskills.io/) としてパッケージ化できます。
-- **長時間タスクのサポート** - 複数ターンにまたがる作業でも Devo が自動的にコンテキストを管理し、
-  タスクが大きくなっても流れを失いにくくします。
-- **マルチエージェントサポート** - 専門エージェントに作業を分割しつつ、セッション内で調整状況を可視化します。
-- **Plan Mode** - 実装を始める前に、大きなタスクを明確な複数ステップの計画へ分解します。
-- **並列ツール呼び出し** - 独立した複数のツールを並列に実行し、モデルの待ち時間を減らして作業を進めます。
-- **権限付きツール実行** - センシティブなツール呼び出しがワークスペースに触れる前にレビューできます。
-- **監査可能なセッション** - モデル出力、ツール呼び出し、承認、token 使用量、セッション履歴を
-  確認および再開できる形で保持します。
-- **コストとコンテキストの可視化** - プロバイダーが提供する場合、入力/出力 token、cached token、
-  コンテキストウィンドウ使用量を表示します。
-- **軽量な Rust ランタイム** - Rust で構築され、メモリ使用量が小さく、コンパクトなローカルランタイムを備えます。
-- **組み込みセマンティックコード検索（MCP）** - 同梱のオプション MCP サーバー
-  （`code_search` / `devo-code-search-mcp`）。**既定では無効**です。ローカル CPU の
-  コード埋め込みモデルを実行し、dense retrieval と BM25 を組み合わせて、grep/find
-  のみのエージェントよりコード検索コンテキストを削減します。
-  `devo mcp enable code_search` または TUI `/mcps` で有効化します。
-
-## 検証済みモデル
-
-<p>
-  <img alt="DeepSeek v4 Flash / Pro" src="https://img.shields.io/badge/DeepSeek-v4%20Flash%20%2F%20Pro-4D6BFE?style=flat-square&logo=deepseek&logoColor=white" />
-  <img alt="GLM 5.2" src="https://img.shields.io/badge/GLM-5.2-7856FF?style=flat-square&logo=huggingfacei&logoColor=white" />
-  <img alt="MiniMax M3" src="https://img.shields.io/badge/MiniMax-M3-0B5FFF?style=flat-square&logo=minimax&logoColor=white" />
-  <img alt="Qwen3 Coder Next" src="https://img.shields.io/badge/Qwen3-Coder%20Next-615CED?style=flat-square&logo=qwen&logoColor=white" />
-  <img alt="Kimi K3" src="https://img.shields.io/badge/Kimi-K3-111111?style=flat-square&logo=moonshotai&logoColor=white" />
-</p>
-
-Devo の組み込みモデルカタログには、Qwen、Kimi、MiniMax、GLM、DeepSeek の検証済みモデル定義が含まれています。
-プロバイダーのエンドポイントは provider/model binding で引き続き設定できます。
-
-## 検証済みプラットフォーム
-
-<p>
-  <img alt="macOS 検証済み" src="https://img.shields.io/badge/macOS-tested-000000?style=flat-square&logo=apple&logoColor=white" />
-  <img alt="Linux 検証済み" src="https://img.shields.io/badge/Linux-tested-FCC624?style=flat-square&logo=linux&logoColor=000000" />
-  <img alt="Windows 検証済み" src="https://img.shields.io/badge/Windows-tested-0078D4?style=flat-square&logo=windows&logoColor=white" />
-</p>
-
-Devo は macOS、Linux、Windows、Kylin OS で検証済みです。
-
-### 中国のエンタープライズユーザー向け
-
-<p>
-  <img alt="Kylin OS 検証済み" src="https://img.shields.io/badge/Kylin%20OS-tested-1E88E5?style=flat-square" />
-  <img alt="HarmonyOS サポートはロードマップ上" src="https://img.shields.io/badge/HarmonyOS-on%20the%20road-111111?style=flat-square&logo=harmonyos&logoColor=white" />
-</p>
-
-中国のエンタープライズ環境では国産 OS が実際のデプロイ要件になることが多いため、Kylin OS の対応状況を明記しています。
-HarmonyOS サポートはロードマップ上にあります。HarmonyOS デバイスを持つコントリビューターによる、そのプラットフォーム向けのビルド、テスト、リリースを歓迎します。
-
-## インストール
-
-Devo には 2 つのインストール形態があります。グラフィカルな coding agent
-workspace が必要なら Desktop app、shell-first な開発には端末ネイティブな
-TUI/CLI を選んでください。両方を同じマシンにインストールすることもできます。
-
-### オプション 1: Desktop App
-
-グラフィカルな Devo 体験を使いたい場合は、まず
-[GitHub Releases](https://github.com/7df-lab/devo/releases/latest)
-から最新の Devo Desktop package をダウンロードし、OS とアーキテクチャに合う
-asset を選んでください:
-
-- **macOS** - `devo-desktop-...-mac-...` の `.dmg` または `.zip` asset をダウンロードします。
-- **Windows** - `devo-desktop-...-windows-...` の `.exe` asset をダウンロードします。
-- **Linux** - `devo-desktop-...-linux-...` の `.AppImage`、`.deb`、または
-  `.rpm` asset をダウンロードします。
-
-**macOS に「Devo」は壊れているため開けません、と表示される場合がありますが、これは想定された動作です。**
-現在の macOS Desktop builds は署名されていないため、インストール後に次のコマンドを実行すると
-macOS でアプリを起動できます:
-
-```bash
-sudo xattr -dr com.apple.quarantine /Applications/Devo.app
-```
-
-### オプション 2: TUI / CLI
-
-端末 TUI を使いたい場合、shell automation が必要な場合、または Desktop app と
-併用したい場合は、端末ネイティブな `devo` command をインストールしてください。
-
-Linux / macOS:
+**ターミナル — Linux / macOS：**
 
 ```bash
 curl -fsSL https://raw.githubusercontent.com/7df-lab/devo/main/install.sh | sh
 ```
 
-Windows:
+**ターミナル — Windows PowerShell：**
 
 ```powershell
 irm 'https://raw.githubusercontent.com/7df-lab/devo/main/install.ps1' | iex
 ```
 
-オンラインインストーラーは `devo` を Devo home ディレクトリに配置し、高速なリポジトリ検索に使う
-`rg` sidecar をインストールします。また、`code_search` が使うローカルモデルの任意設定にも対応しています。
-
-<details>
-<summary>任意: ローカルの <code>code_search</code> モデルを事前インストール</summary>
-
-インストール時に Hugging Face モデルをダウンロードしたい場合だけ使用してください。
-
-Linux / macOS:
+作業ディレクトリで起動します。初回はプロバイダー設定が開きます。
 
 ```bash
-curl -fsSL https://raw.githubusercontent.com/7df-lab/devo/main/install.sh | sh -s -- --install-code-search-model
+cd /path/to/your/workspace
+devo
 ```
 
-Windows:
-
-```powershell
-$env:DEVO_INSTALL_CODE_SEARCH_MODEL = "1"; irm 'https://raw.githubusercontent.com/7df-lab/devo/main/install.ps1' | iex
-```
-
-</details>
-
-既存のインストールを最新 release にアップグレードするには:
-
-```bash
-devo upgrade
-```
-
-アップグレードコマンドは同じプラットフォーム用インストーラーを実行し、
-インストーラーは `Version: v0.1.12 -> v0.1.15` のようにバージョン遷移を表示します。
-
-イントラネット環境やオフライン環境でインストールする場合は、
-[オフラインインストール](./docs/offline-installation.ja.md) を参照してください。
-
-## クイックスタート
-
-プロバイダーを設定し、リポジトリを開いて TUI を起動します:
-
-```bash
-cd /path/to/your/repo
-devo onboard
-```
-
-便利なコマンド:
-
-```bash
-devo                         # 現在のリポジトリで対話型 TUI を起動
-devo resume <session-id>
-```
+`devo resume <session-id>` で再開、`devo upgrade` で更新できます。
+ターミナルのパッケージには Node.js と Python が含まれています。
+Windows のシェルコマンドには [Git for Windows](https://gitforwindows.org/) が必要です。
+初回利用時にはサンドボックス設定の確認も一度承認してください。
 
 ## 設定
 
-`devo onboard` が推奨されるセットアップ方法です。provider/model binding を
-`config.toml` に書き、API key をユーザースコープの `auth.json` に保存します。
+**OpenAI 互換 Chat Completions**、**OpenAI 互換 Responses**、
+**Anthropic Messages** API に対応しています。組み込みカタログには
+DeepSeek、Qwen、Kimi、GLM、MiniMax が含まれます。
+`/model` でモデルを切り替え、`devo onboard` でプロバイダーを再設定できます。
 
-自分の API key とカスタムモデルを手動で設定する場合:
+手動設定、認証情報、MCP、オフラインインストール、リリースミラーは
+[ユーザーガイド（英語）](./docs/usage.md)を参照してください。
 
-1. `config.toml` で `[model.<slug>]` パラメータ、`[providers.<id>]`、
-   `[model_bindings.<id>]` を定義します。
-2. シークレットを `DEVO_HOME/auth.json` に置き、`[providers.<id>].credential`
-   からその credential id を参照します — API key 自体を `config.toml` に
-   書かないでください。
-3. エンドポイントのプロトコルに合わせて `invocation_method` を
-   `openai_chat_completions`、`openai_responses`、`anthropic_messages` の
-   いずれかに設定します。
+## ドキュメントと貢献
 
-完全な作業例（カスタムモデルパラメータ + API key）とプロトコルの説明は
-[設定](./docs/configuration.ja.md#自分の-api-key-を使う) を参照してください。
+- [ユーザーガイド（英語）](./docs/usage.md) — インストール、プロバイダー、設定、オフライン利用。
+- [TUI ガイド（英語）](./apps/tui/README.md) — ターミナル操作とコマンド。
+- [貢献ガイド（英語）](./CONTRIBUTING.md) — 問題報告、ドキュメント改善、小規模な修正を歓迎します。
 
-## Docs
-
-- [オフラインインストール](./docs/offline-installation.ja.md)
-- [設定](./docs/configuration.ja.md)
-
-## よくある質問
-
-### プロジェクトの状態は?
-
-Devo は pre-1.0 で、活発に開発されています。ローカル評価、実験、コントリビューターによる利用には適していますが、
-公開 API と設定は今後も変更される可能性があります。
-
-### どのモデルがサポートされていますか?
-
-組み込みモデルメタデータは現在、Qwen、Kimi、MiniMax、GLM、DeepSeek ファミリーをカバーしています。
-OpenAI 互換 Chat Completions、OpenAI 互換 Responses、または Anthropic Messages API をサポートするモデルエンドポイントであれば、
-provider/model binding を通じて接続できます。
-
-### 自分の API key を使うには?
-
-`devo onboard` を使うか、ユーザースコープの `auth.json` を編集し、
-`config.toml` の `[providers.<id>].credential` からその credential id を参照します。
-詳細は [設定](./docs/configuration.ja.md#自分の-api-key-を使う) を参照してください。
-
-### Desktop app と TUI/CLI のどちらを使うべきですか?
-
-視覚的なオンボーディング、セッション閲覧、グラフィカルな coding workspace が
-必要な場合は Desktop app を使ってください。端末ネイティブな自動化、remote shell
-workflow、または既存の command-line setup 内で動く coding agent が必要な場合は
-TUI/CLI を使ってください。どちらの surface も同じローカル Devo runtime を対象にしています。
-
-## コントリビュート
-
-プロジェクトはまだ初期段階であり、コントリビューションを歓迎します:
-
-- client/server runtime、provider layer、safety model、TUI に関するアーキテクチャフィードバック。
-- ドキュメントと翻訳。
-- Provider、model、wire API の対応範囲。
-- 検証コマンドと回帰テストを伴う、焦点を絞った修正。
-
-変更について議論するには issue または pull request を開いてください。
-
-## ライセンス
-
-このプロジェクトは [MIT License](./LICENSE) のもとで公開されています。
-
----
-
-**Devo が役に立った場合は、star をご検討ください。**
+Devo は **pre-1.0** です。API や設定は変更される場合があります。[MIT ライセンス](./LICENSE)。

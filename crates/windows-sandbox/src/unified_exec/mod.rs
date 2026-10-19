@@ -38,6 +38,11 @@ pub struct WindowsSandboxSessionRequest<'a> {
     pub write_roots_override: Option<&'a [PathBuf]>,
     pub deny_read_paths_override: &'a [AbsolutePathBuf],
     pub deny_write_paths_override: &'a [AbsolutePathBuf],
+    /// Per-session credential SID (design doc §9, P2): injected into the
+    /// sandboxed process's restricted token as an identity marker. ACEs granted
+    /// later via `SessionCredentialAuthority` make raw opens work for exactly
+    /// this session — without restarting it.
+    pub session_credential_sid: Option<&'a str>,
     pub tty: bool,
     pub stdin_open: bool,
     pub use_private_desktop: bool,
@@ -46,6 +51,16 @@ pub struct WindowsSandboxSessionRequest<'a> {
 pub async fn spawn_windows_sandbox_session_for_level(
     request: WindowsSandboxSessionRequest<'_>,
 ) -> Result<SpawnedProcess> {
+    let _probe_dir = std::env::var("USERPROFILE")
+        .map(|h| std::path::PathBuf::from(h).join(".devo/.sandbox"))
+        .ok();
+    crate::logging::log_note(
+        &format!(
+            "SANDBOX-DISPATCH level={:?} proxy_enforced={}",
+            request.windows_sandbox_level, request.proxy_enforced
+        ),
+        _probe_dir.as_deref(),
+    );
     if request.proxy_enforced
         || matches!(request.windows_sandbox_level, WindowsSandboxLevel::Elevated)
     {
@@ -80,6 +95,7 @@ pub async fn spawn_windows_sandbox_session_for_level(
             request.timeout_ms,
             request.deny_read_paths_override,
             request.deny_write_paths_override,
+            request.session_credential_sid,
             request.tty,
             request.stdin_open,
             request.use_private_desktop,
@@ -99,6 +115,7 @@ pub async fn spawn_windows_sandbox_session_legacy(
     timeout_ms: Option<u64>,
     additional_deny_read_paths: &[AbsolutePathBuf],
     additional_deny_write_paths: &[AbsolutePathBuf],
+    session_credential_sid: Option<&str>,
     tty: bool,
     stdin_open: bool,
     use_private_desktop: bool,
@@ -113,6 +130,7 @@ pub async fn spawn_windows_sandbox_session_legacy(
         timeout_ms,
         additional_deny_read_paths,
         additional_deny_write_paths,
+        session_credential_sid,
         tty,
         stdin_open,
         use_private_desktop,

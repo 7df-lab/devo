@@ -76,6 +76,7 @@ pub fn filter_by_modality(
     modalities: &[InputModality],
 ) -> Vec<ResponseItem> {
     let supports_text = modalities.contains(&InputModality::Text);
+    let supports_image = modalities.contains(&InputModality::Image);
     if supports_text && text_modality_keeps_all_items(items) {
         return items.to_vec();
     }
@@ -95,6 +96,7 @@ pub fn filter_by_modality(
                         devo_protocol::ContentBlock::ToolUse { .. } => true,
                         devo_protocol::ContentBlock::HostedToolUse { .. } => true,
                         devo_protocol::ContentBlock::ToolResult { .. } => true,
+                        devo_protocol::ContentBlock::Image { .. } => supports_image,
                     })
                     .cloned()
                     .collect();
@@ -123,23 +125,12 @@ pub(crate) fn text_modality_keeps_all_items(items: &[ResponseItem]) -> bool {
             | devo_protocol::ContentBlock::ToolUse { .. }
             | devo_protocol::ContentBlock::HostedToolUse { .. }
             | devo_protocol::ContentBlock::ToolResult { .. } => true,
+            devo_protocol::ContentBlock::Image { .. } => false,
         }),
         ResponseItem::Reason { .. }
         | ResponseItem::ToolCall { .. }
         | ResponseItem::ToolCallOutput { .. } => true,
     })
-}
-
-/// Removes all `Reason` items from the slice and returns the filtered vector.
-///
-/// This is used before compaction to strip reasoning text that is not
-/// useful for the summary.
-pub fn filter_reason(items: &[ResponseItem]) -> Vec<ResponseItem> {
-    items
-        .iter()
-        .filter(|item| !item.is_reason())
-        .cloned()
-        .collect()
 }
 
 /// Ensures tool-call / tool-call-output items are properly paired.
@@ -320,25 +311,6 @@ mod tests {
 
         let filtered = filter_by_modality(&items, &[InputModality::Text]);
         assert_eq!(filtered.len(), 2);
-    }
-
-    #[test]
-    fn filter_reason_removes_reason_items() {
-        let items = vec![
-            ResponseItem::Reason {
-                text: "thinking".into(),
-            },
-            ResponseItem::Message(Message::user("hello")),
-            ResponseItem::Reason {
-                text: "more thinking".into(),
-            },
-            ResponseItem::Message(Message::assistant_text("world")),
-        ];
-
-        let filtered = filter_reason(&items);
-        assert_eq!(filtered.len(), 2);
-        assert!(filtered[0].is_message());
-        assert!(filtered[1].is_message());
     }
 
     #[test]

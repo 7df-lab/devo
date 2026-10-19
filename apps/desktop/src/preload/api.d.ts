@@ -12,9 +12,16 @@ export interface DevoServerInfo {
 	managed: boolean
 }
 
-export interface AcpTrafficLogState {
+export interface NativeTrafficLogState {
 	enabled: boolean
 	path: string | null
+}
+
+export interface ProviderOAuthUpdate {
+	url?: string
+	instructions: string
+	userCode?: string
+	phase?: "saving"
 }
 
 export interface ModelRef {
@@ -43,7 +50,15 @@ export interface UpdateState {
 	canAutoInstall: boolean
 }
 
-export type AppMenuId = "edit" | "view" | "window"
+export type AppMenuId = "file" | "edit" | "view" | "window"
+export type AppMenuAction = "new-agent" | "open-folder" | "new-terminal"
+
+export interface RuleFileInfo {
+	path: string
+	name: string
+	directory: string
+	scope: "user" | "project"
+}
 
 export interface AppMenuPosition {
 	x: number
@@ -437,6 +452,7 @@ export interface DevoAPI {
 	getAppInfo: () => Promise<AppInfo>
 	appMenu: {
 		popup: (id: AppMenuId, position?: AppMenuPosition) => Promise<{ success: boolean }>
+		onAction: (callback: (action: AppMenuAction) => void) => () => void
 	}
 
 	/** Subscribe to chrome tier notification (fired once on load). */
@@ -449,18 +465,29 @@ export interface DevoAPI {
 	stopDevo: () => Promise<boolean>
 	restartDevo: () => Promise<DevoServerInfo>
 	onTerminalToggle: (callback: () => void) => () => void
-	acp: {
+	native: {
 		request: (request: {
 			method: string
 			params?: unknown
 			directory?: string
 		}) => Promise<unknown>
+		notify: (notification: {
+			method: string
+			params?: unknown
+			directory?: string
+		}) => Promise<void>
 		respond: (response: { id: number | string; result: unknown }) => Promise<void>
 		connected: () => Promise<boolean>
 		subscribe: (callback: (event: unknown) => void) => () => void
 	}
-	acpTraffic: {
-		getState: () => Promise<AcpTrafficLogState>
+	nativeTraffic: {
+		getState: () => Promise<NativeTrafficLogState>
+	}
+	providerOAuth: {
+		login: (providerId: string, enterpriseUrl?: string) => Promise<void>
+		/** False once the non-cancellable credential save has started. */
+		cancel: () => Promise<boolean>
+		onUpdate: (callback: (update: ProviderOAuthUpdate) => void) => () => void
 	}
 	terminal: {
 		create: (options: { cwd?: string; cols?: number; rows?: number }) => Promise<TerminalSessionInfo>
@@ -501,6 +528,42 @@ export interface DevoAPI {
 		stashPop: (directory: string) => Promise<GitStashResult>
 		getRoot: (directory: string) => Promise<string | null>
 		diffStat: (directory: string) => Promise<GitDiffStat>
+		workspaceChangesSummary: (
+			directory: string,
+			scope: "uncommitted" | "staged" | "unstaged" | "branch",
+			options?: { baseBranch?: string | null; ignoreWhitespace?: boolean },
+		) => Promise<{
+			scope: string
+			status: string
+			workspace_root: string
+			coverage: string
+			attribution: string
+			change_set_status: string
+			files: Array<{
+				path: string
+				status: string
+				additions: number | null
+				deletions: number | null
+				binary: boolean
+				diff_truncated: boolean
+			}>
+			stats: { files_changed: number; additions: number; deletions: number }
+			unified_diff: string | null
+			warnings: string[]
+			generated_at: string
+		}>
+		workspaceFilePatch: (
+			directory: string,
+			scope: "uncommitted" | "staged" | "unstaged" | "branch" | "turn",
+			filePath: string,
+			options?: {
+				baseBranch?: string | null
+				ignoreWhitespace?: boolean
+				fileStatus?: string | null
+				checkpointId?: string | null
+				mergeBase?: string | null
+			},
+		) => Promise<string>
 		commitAll: (directory: string, message: string) => Promise<GitCommitResult>
 		push: (directory: string, remote?: string) => Promise<GitPushResult>
 		createBranch: (directory: string, branchName: string) => Promise<GitCheckoutResult>
@@ -522,6 +585,7 @@ export interface DevoAPI {
 		getTargets: () => Promise<OpenInTargetsResult>
 		open: (directory: string, targetId: string, persistPreferred?: boolean) => Promise<void>
 		setPreferred: (targetId: string) => Promise<{ success: boolean }>
+		openMcpConfig?: () => Promise<{ path: string }>
 	}
 
 	// Native theme (syncs OS chrome to app color scheme)
@@ -536,6 +600,14 @@ export interface DevoAPI {
 
 	// Directory picker
 	pickDirectory: () => Promise<string | null>
+	rules: {
+		list: (directories: string[]) => Promise<RuleFileInfo[]>
+		open: (filePath: string) => Promise<void>
+		create: (directory: string) => Promise<RuleFileInfo>
+	}
+	mcp?: {
+		openConfig: () => Promise<{ path: string }>
+	}
 	desktopFolders: {
 		stat: (directories: string[]) => Promise<DesktopFolderStat[]>
 		create: (input: CreateDesktopFolderInput) => Promise<CreateDesktopFolderResult>

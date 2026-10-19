@@ -27,7 +27,7 @@ describe("sidebar row actions", () => {
 	})
 
 	test("project actions expose remove as a regular enabled project action", () => {
-		expect(buildProjectRowActions({ canRevealInFinder: true })).toEqual([
+		expect(buildProjectRowActions({ canRevealInFinder: true, platform: "darwin" })).toEqual([
 			{ id: "pin", label: "Pin project", variant: "default", disabled: true },
 			{ id: "reveal", label: "Reveal in Finder", variant: "default", disabled: false },
 			{
@@ -39,6 +39,21 @@ describe("sidebar row actions", () => {
 			{ id: "rename", label: "Rename project", variant: "default", disabled: true },
 			{ id: "archive-chats", label: "Archive chats", variant: "default", disabled: true },
 			{ id: "remove", label: "Remove", variant: "default", disabled: false },
+		])
+	})
+
+	test("folder reveal labels match the desktop platform", () => {
+		expect(
+			["win32", "darwin", "linux", undefined].map((platform) =>
+				buildProjectRowActions({ canRevealInFinder: true, platform }).filter(
+					(action) => action.id === "reveal",
+				),
+			),
+		).toEqual([
+			[{ id: "reveal", label: "Show in Explorer", variant: "default", disabled: false }],
+			[{ id: "reveal", label: "Reveal in Finder", variant: "default", disabled: false }],
+			[{ id: "reveal", label: "Show in file manager", variant: "default", disabled: false }],
+			[{ id: "reveal", label: "Show in file manager", variant: "default", disabled: false }],
 		])
 	})
 })

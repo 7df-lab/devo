@@ -63,6 +63,25 @@ pub(super) const FILTER_SPECS: &[FilterSpec] = &[
             ConditionSpec::Protocol(IPPROTO_ICMPV6 as u8),
         ],
     },
+    // ALL-PROTOCOL outbound block for the sandbox account (v4 + v6).
+    // Per-user firewall rules do NOT selectively block outbound on Windows
+    // (verified empirically 2026-09-19: LocalUser condition blocks all users
+    // or none). WFP ALE filters with a User condition DO work — these are
+    // the real network wall for the sandbox account.
+    FilterSpec {
+        key: GUID::from_u128(0x5a1b2c3d_0001_4001_8001_000000000001),
+        name: "devo_wfp_all_connect_v4",
+        description: "Block sandbox-account ALL outbound connect v4",
+        layer_key: FWPM_LAYER_ALE_AUTH_CONNECT_V4,
+        conditions: &[ConditionSpec::User],
+    },
+    FilterSpec {
+        key: GUID::from_u128(0x5a1b2c3d_0002_4002_8002_000000000002),
+        name: "devo_wfp_all_connect_v6",
+        description: "Block sandbox-account ALL outbound connect v6",
+        layer_key: FWPM_LAYER_ALE_AUTH_CONNECT_V6,
+        conditions: &[ConditionSpec::User],
+    },
     // NAME_RESOLUTION_CACHE filters are intentionally omitted because ordinary
     // static filter shapes returned FWP_E_OUT_OF_BOUNDS during validation.
     FilterSpec {

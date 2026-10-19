@@ -24,6 +24,8 @@ use tokio_util::sync::CancellationToken;
 
 use crate::AcpErrorCode;
 use crate::ClientTransportKind;
+use crate::ProtocolSet;
+use crate::ServerProtocol;
 use crate::ServerRuntime;
 use crate::acp_error_response;
 use crate::runtime::INBOUND_CONCURRENCY_LIMIT;
@@ -33,6 +35,7 @@ use crate::runtime::OutboundFrame;
 use crate::runtime::enqueue_outbound;
 use crate::runtime::log_outbound_frame;
 use crate::runtime::outbound_frame_to_value;
+use crate::singleton::SERVER_CONTROL_ENABLE_PROTOCOLS_METHOD;
 use crate::singleton::SERVER_CONTROL_SHUTDOWN_METHOD;
 use crate::singleton::SERVER_CONTROL_STATUS_METHOD;
 
@@ -120,6 +123,7 @@ fn spawn_outbound_writer(
 ///
 /// Abstracts the connection to a client, allowing different transport
 /// implementations (stdio, WebSocket, etc.) to be used interchangeably.
+#[allow(clippy::double_must_use)]
 #[async_trait]
 pub trait Transport: Send + Sync {
     /// Send a success response to the client.
@@ -193,7 +197,7 @@ impl EventBroadcaster {
             .read()
             .await
             .get(session_id)
-            .copied()
+            .cloned()
             .unwrap_or(0)
     }
 
@@ -245,6 +249,10 @@ impl InternalProxyControl {
 
     fn request_shutdown(&self) {
         self.shutdown_token.cancel();
+    }
+
+    fn shutdown_token(&self) -> &CancellationToken {
+        &self.shutdown_token
     }
 }
 
@@ -313,7 +321,8 @@ pub async fn run_listeners(runtime: Arc<ServerRuntime>, listen: &[String]) -> Re
 ///
 /// The internal proxy task authenticates clients with `token`, handles one-shot
 /// control RPCs (`status` / `shutdown`), then treats the connection as a
-/// `ClientTransportKind::StdioProxy` ACP session (see `handle_internal_proxy_connection`).
+/// protocol-uninitialized `ClientTransportKind::StdioProxy` connection (see
+/// `handle_internal_proxy_connection`).
 pub async fn run_listeners_with_internal_proxy(
     runtime: Arc<ServerRuntime>,
     listen: &[String],
@@ -331,6 +340,9 @@ async fn run_listener_tasks(
     internal_proxy: Option<(InternalProxyEndpoint, String, InternalProxyControl)>,
 ) -> Result<()> {
     let mut tasks = JoinSet::new();
+    let shutdown_token = internal_proxy
+        .as_ref()
+        .map(|(_, _, control)| control.shutdown_token().clone());
     for target in targets {
         let runtime = Arc::clone(&runtime);
         tasks.spawn(async move {
@@ -354,11 +366,101 @@ async fn run_listener_tasks(
         );
     }
 
-    if let Some(result) = tasks.join_next().await {
-        tasks.abort_all();
-        result??;
+    // Every select arm returns — this is a single wait, not a polling loop.
+    tokio::select! {
+        biased;
+        () = async {
+            match &shutdown_token {
+                Some(token) => token.cancelled().await,
+                None => std::future::pending::<()>().await,
+            }
+        } => {
+            tracing::info!("listener shutdown signalled");
+            tasks.abort_all();
+            Ok(())
+        }
+        joined = tasks.join_next() => {
+            let Some(result) = joined else {
+                return Ok(());
+            };
+            match result {
+                Ok(Ok(())) => {
+                    // Primary stdio (or another listener) ended. Keep the
+                    // singleton alive while proxied TUI clients remain.
+                    let remaining = runtime.active_connection_count().await;
+                    if remaining > 0 && !tasks.is_empty() {
+                        tracing::info!(
+                            remaining,
+                            "primary client disconnected; keeping singleton for proxy clients"
+                        );
+                        wait_for_proxy_clients_to_drain(
+                            &runtime,
+                            &mut tasks,
+                            shutdown_token.as_ref(),
+                        )
+                        .await?;
+                        return Ok(());
+                    }
+                    tasks.abort_all();
+                    Ok(())
+                }
+                Ok(Err(error)) => {
+                    tasks.abort_all();
+                    Err(error)
+                }
+                Err(error) => {
+                    tasks.abort_all();
+                    Err(error.into())
+                }
+            }
+        }
     }
-    Ok(())
+}
+
+async fn wait_for_proxy_clients_to_drain(
+    runtime: &Arc<ServerRuntime>,
+    tasks: &mut JoinSet<Result<()>>,
+    shutdown_token: Option<&CancellationToken>,
+) -> Result<()> {
+    loop {
+        tokio::select! {
+            biased;
+            () = async {
+                match shutdown_token {
+                    Some(token) => token.cancelled().await,
+                    None => std::future::pending::<()>().await,
+                }
+            } => {
+                tasks.abort_all();
+                return Ok(());
+            }
+            () = tokio::time::sleep(std::time::Duration::from_millis(250)) => {
+                let remaining = runtime.active_connection_count().await;
+                if remaining == 0 {
+                    tracing::info!("no proxy clients remain; shutting down singleton server");
+                    tasks.abort_all();
+                    return Ok(());
+                }
+            }
+            joined = tasks.join_next() => {
+                match joined {
+                    None => return Ok(()),
+                    Some(Ok(Ok(()))) => {
+                        tasks.abort_all();
+                        return Ok(());
+                    }
+                    Some(Ok(Err(error))) => {
+                        tasks.abort_all();
+                        return Err(error);
+                    }
+                    Some(Err(error)) => {
+                        tasks.abort_all();
+                        return Err(error.into());
+                    }
+                }
+            }
+        }
+    }
 }
 
 /// Stdio uses **NDJSON** (newline-delimited JSON): one JSON-RPC message per line.
@@ -444,12 +546,19 @@ async fn handle_internal_proxy_connection(
             Some(Ok(Message::Text(text))) => {
                 let value: serde_json::Value = serde_json::from_str(&text)?;
                 if let Some(request) = parse_internal_proxy_control_request(&value) {
-                    let response = internal_proxy_control_response(&request);
+                    let enabled_protocols = match &request.action {
+                        InternalProxyControlAction::EnableProtocols(requested) => {
+                            runtime.enable_protocols(requested).await
+                        }
+                        InternalProxyControlAction::Status
+                        | InternalProxyControlAction::Shutdown => runtime.enabled_protocols().await,
+                    };
+                    let response = internal_proxy_control_response(&request, &enabled_protocols);
                     writer
                         .send(Message::Text(response.to_string().into()))
                         .await
                         .context("send internal proxy control response")?;
-                    if request.action == InternalProxyControlAction::Shutdown {
+                    if matches!(request.action, InternalProxyControlAction::Shutdown) {
                         control.request_shutdown();
                     }
                     return Ok(());
@@ -472,60 +581,67 @@ async fn handle_internal_proxy_connection(
     let outbound_writer =
         spawn_outbound_writer(connection_id, outbound_rx, OutboundSink::WebSocket(writer));
 
-    if let Some(response) = runtime
-        .handle_incoming_with_actions(connection_id, first_value)
-        .await
-        && !send_incoming_response(
-            &runtime,
-            &outbound_tx,
-            response,
-            connection_id,
-            "internal_proxy_notifications",
-        )
-        .await
-    {
-        runtime.unregister_connection(connection_id).await;
-        tracing::info!(connection_id, "internal stdio proxy connection closed");
-        outbound_writer.abort();
-        return Ok(());
-    }
-
-    while let Some(frame) = reader.next().await {
-        let frame = frame?;
-        match frame {
-            Message::Text(text) => {
-                accept_incoming_client_message(
-                    Arc::clone(&runtime),
-                    connection_id,
-                    outbound_tx.clone(),
-                    Arc::clone(&transport.inbound_semaphore),
-                    text.as_str(),
-                    "internal_proxy_notifications",
-                )
-                .await;
-            }
-            Message::Close(_) => break,
-            _ => {}
+    // Serve the proxy client, but always run the cleanup below: an abrupt
+    // disconnect (connection reset without a WebSocket closing handshake)
+    // must still unregister, otherwise the connection count never drains and
+    // the singleton server keeps running after its last client is gone.
+    let result: Result<()> = async {
+        if let Some(response) = runtime
+            .handle_incoming_with_actions(connection_id, first_value)
+            .await
+            && !send_incoming_response(
+                &runtime,
+                &outbound_tx,
+                response,
+                connection_id,
+                "internal_proxy_notifications",
+            )
+            .await
+        {
+            return Ok(());
         }
+
+        while let Some(frame) = reader.next().await {
+            match frame {
+                Ok(Message::Text(text)) => {
+                    accept_incoming_client_message(
+                        Arc::clone(&runtime),
+                        connection_id,
+                        outbound_tx.clone(),
+                        Arc::clone(&transport.inbound_semaphore),
+                        text.as_str(),
+                        "internal_proxy_notifications",
+                    )
+                    .await;
+                }
+                Ok(Message::Close(_)) => break,
+                Ok(_) => {}
+                Err(error) => return Err(error.into()),
+            }
+        }
+        Ok(())
     }
+    .await;
 
     runtime.unregister_connection(connection_id).await;
     tracing::info!(connection_id, "internal stdio proxy connection closed");
     outbound_writer.abort();
-    Ok(())
+    result
 }
 
-#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+#[derive(Debug, Clone, PartialEq, Eq)]
 enum InternalProxyControlAction {
     Status,
     Shutdown,
+    EnableProtocols(ProtocolSet),
 }
 
 impl InternalProxyControlAction {
-    fn response_status(self) -> &'static str {
+    fn response_status(&self) -> &'static str {
         match self {
             InternalProxyControlAction::Status => "running",
             InternalProxyControlAction::Shutdown => "shutting down",
+            InternalProxyControlAction::EnableProtocols(_) => "running",
         }
     }
 }
@@ -543,6 +659,13 @@ fn parse_internal_proxy_control_request(
     let action = match method {
         SERVER_CONTROL_STATUS_METHOD => InternalProxyControlAction::Status,
         SERVER_CONTROL_SHUTDOWN_METHOD => InternalProxyControlAction::Shutdown,
+        SERVER_CONTROL_ENABLE_PROTOCOLS_METHOD => {
+            let protocols = serde_json::from_value::<Vec<ServerProtocol>>(
+                value.pointer("/params/protocols")?.clone(),
+            )
+            .ok()?;
+            InternalProxyControlAction::EnableProtocols(ProtocolSet::new(protocols).ok()?)
+        }
         _ => return None,
     };
     Some(InternalProxyControlRequest {
@@ -551,12 +674,16 @@ fn parse_internal_proxy_control_request(
     })
 }
 
-fn internal_proxy_control_response(request: &InternalProxyControlRequest) -> serde_json::Value {
+fn internal_proxy_control_response(
+    request: &InternalProxyControlRequest,
+    enabled_protocols: &ProtocolSet,
+) -> serde_json::Value {
     serde_json::json!({
         "jsonrpc": "2.0",
         "id": request.id.clone(),
         "result": {
             "status": request.action.response_status(),
+            "enabledProtocols": enabled_protocols.names(),
         },
     })
 }
@@ -593,29 +720,37 @@ async fn handle_websocket_connection(
     let outbound_writer =
         spawn_outbound_writer(connection_id, outbound_rx, OutboundSink::WebSocket(writer));
 
-    while let Some(frame) = reader.next().await {
-        let frame = frame?;
-        match frame {
-            Message::Text(text) => {
-                accept_incoming_client_message(
-                    Arc::clone(&runtime),
-                    connection_id,
-                    outbound_tx.clone(),
-                    Arc::clone(&transport.inbound_semaphore),
-                    text.as_str(),
-                    "websocket_notifications",
-                )
-                .await;
+    // Serve the connection, but always run the cleanup below: an abrupt
+    // disconnect (connection reset without a WebSocket closing handshake)
+    // must still unregister, otherwise the connection count never drains and
+    // the singleton server never shuts down.
+    let result: Result<()> = async {
+        while let Some(frame) = reader.next().await {
+            match frame {
+                Ok(Message::Text(text)) => {
+                    accept_incoming_client_message(
+                        Arc::clone(&runtime),
+                        connection_id,
+                        outbound_tx.clone(),
+                        Arc::clone(&transport.inbound_semaphore),
+                        text.as_str(),
+                        "websocket_notifications",
+                    )
+                    .await;
+                }
+                Ok(Message::Close(_)) => break,
+                Ok(_) => {}
+                Err(error) => return Err(error.into()),
             }
-            Message::Close(_) => break,
-            _ => {}
         }
+        Ok(())
     }
+    .await;
 
     runtime.unregister_connection(connection_id).await;
     tracing::info!(connection_id, "websocket connection closed");
     outbound_writer.abort();
-    Ok(())
+    result
 }
 
 /// Parses one inbound client payload (NDJSON line or WebSocket text frame).
@@ -863,6 +998,8 @@ mod tests {
     use super::resolve_listen_targets;
     use super::validate_incoming_client_message;
     use crate::AcpErrorCode;
+    use crate::ProtocolSet;
+    use crate::ServerProtocol;
     use pretty_assertions::assert_eq;
     use std::sync::Arc;
     use std::time::Duration;
@@ -940,17 +1077,40 @@ mod tests {
     }
 
     #[test]
+    fn internal_proxy_control_request_parses_protocol_enablement() {
+        assert_eq!(
+            parse_internal_proxy_control_request(&serde_json::json!({
+                "jsonrpc": "2.0",
+                "id": 3,
+                "method": crate::singleton::SERVER_CONTROL_ENABLE_PROTOCOLS_METHOD,
+                "params": { "protocols": ["acp"] },
+            }))
+            .expect("enable protocols request"),
+            InternalProxyControlRequest {
+                id: serde_json::json!(3),
+                action: InternalProxyControlAction::EnableProtocols(ProtocolSet::only(
+                    ServerProtocol::Acp,
+                )),
+            }
+        );
+    }
+
+    #[test]
     fn internal_proxy_control_response_reports_action_status() {
         assert_eq!(
-            internal_proxy_control_response(&InternalProxyControlRequest {
-                id: serde_json::json!(2),
-                action: InternalProxyControlAction::Shutdown,
-            }),
+            internal_proxy_control_response(
+                &InternalProxyControlRequest {
+                    id: serde_json::json!(2),
+                    action: InternalProxyControlAction::Shutdown,
+                },
+                &ProtocolSet::only(ServerProtocol::Native),
+            ),
             serde_json::json!({
                 "jsonrpc": "2.0",
                 "id": 2,
                 "result": {
                     "status": "shutting down",
+                    "enabledProtocols": ["native"],
                 },
             })
         );

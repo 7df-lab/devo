@@ -1,6 +1,7 @@
 import { describe, expect, test } from "bun:test"
 import {
 	getModelCurrentVariant,
+	getModelVariants,
 	loadVcsData,
 	modelAllowsDefaultVariant,
 	resolveEffectiveModel,
@@ -28,6 +29,58 @@ describe("model variant metadata", () => {
 
 		expect(getModelCurrentVariant("session", "test-openai", providers)).toBe("disabled")
 		expect(modelAllowsDefaultVariant("session", "test-openai", providers)).toBe(false)
+	})
+
+	test("returns per-model reasoning effort variants", () => {
+		const providers = [
+			{
+				id: "session",
+				models: {
+					"model-a": {
+						variants: {
+							r1: { name: "R1" },
+							r2: { name: "R2" },
+						},
+						allowDefaultVariant: false,
+					},
+					"model-b": {
+						variants: {
+							t1: { name: "T1" },
+							t2: { name: "T2" },
+							t3: { name: "T3" },
+						},
+						allowDefaultVariant: false,
+					},
+				},
+			},
+		] as Providers
+
+		expect(getModelVariants("session", "model-a", providers)).toEqual(["r1", "r2"])
+		expect(getModelVariants("session", "model-b", providers)).toEqual(["t1", "t2", "t3"])
+	})
+
+	test("falls back to thinkingLevelMap then reasoningCapability when variants are absent", () => {
+		const providers = [
+			{
+				id: "openai",
+				models: {
+					"gpt-map": {
+						thinkingLevelMap: { off: "none", low: "low", high: "high", xhigh: null },
+						reasoning: true,
+					},
+					"gpt-cap": {
+						reasoningCapability: { levels: ["minimal", "medium", "max"] },
+					},
+				},
+			},
+		] as Providers
+
+		expect(getModelVariants("openai", "gpt-map", providers)).toEqual(["off", "low", "high"])
+		expect(getModelVariants("openai", "gpt-cap", providers)).toEqual([
+			"minimal",
+			"medium",
+			"max",
+		])
 	})
 })
 

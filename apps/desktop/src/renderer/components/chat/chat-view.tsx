@@ -1,3 +1,5 @@
+import { useTurnRecovery } from "../../hooks/use-turn-recovery"
+import { TurnRecoveryPanel } from "./turn-recovery-panel"
 import {
 	Conversation,
 	ConversationContent,
@@ -9,31 +11,27 @@ import {
 	PromptInputButton,
 	PromptInputFooter,
 	PromptInputProvider,
-	PromptInputSubmit,
 	PromptInputTextarea,
 	PromptInputTools,
 	usePromptInputAttachments,
 	usePromptInputController,
 } from "@devo/ui/components/ai-elements/prompt-input"
-import { Tooltip, TooltipContent, TooltipTrigger } from "@devo/ui/components/tooltip"
 import { cn } from "@devo/ui/lib/utils"
 import { useVirtualizer } from "@tanstack/react-virtual"
-import { useAtomValue, useSetAtom } from "jotai"
+import { useAtom, useAtomValue, useSetAtom } from "jotai"
 import {
-	ArrowUpToLineIcon,
 	GitForkIcon,
-	GoalIcon,
-	ListTodoIcon,
 	Loader2Icon,
 	PlusIcon,
 	Redo2Icon,
-	SquareIcon,
 	Undo2Icon,
 	XIcon,
 } from "lucide-react"
 import {
 	type CSSProperties,
+	Fragment,
 	type ReactNode,
+	type MutableRefObject,
 	type RefObject,
 	useCallback,
 	useEffect,
@@ -43,17 +41,23 @@ import {
 	useRef,
 	useState,
 } from "react"
-import { compactionStatusFamily } from "../../atoms/compaction"
-import { messagesFamily } from "../../atoms/messages"
+import { collaborationModeFamily, type CollaborationMode } from "../../atoms/collaboration-mode"
+import { itemsFamily } from "../../atoms/messages"
 import { projectModelsAtom, setProjectModelAtom } from "../../atoms/preferences"
-import type { ProviderRetryStatus, SessionSetupPhase } from "../../atoms/sessions"
-import { removePermissionAtom, sessionFamily } from "../../atoms/sessions"
+import {
+	composerFromSessionModel,
+	hydrateSessionComposerState,
+	sessionComposerFamily,
+	setSessionComposerAtom,
+} from "../../atoms/session-composer"
+import type { ProviderErrorEntry, ProviderRetryStatus, SessionSetupPhase } from "../../atoms/sessions"
+import { sessionFamily } from "../../atoms/sessions"
 import {
 	effectivePermissionFamily,
 	effectiveQuestionFamily,
 } from "../../atoms/derived/session-requests"
 import { appStore } from "../../atoms/store"
-import { sessionScrollTopFamily, settingsOverlayOpenAtom } from "../../atoms/ui"
+import { sessionScrollSnapshotFamily, settingsOverlayOpenAtom } from "../../atoms/ui"
 import { useDraftActions, useDraftSnapshot } from "../../hooks/use-draft"
 import {
 	freezeSessionScroll,
@@ -64,6 +68,12 @@ import {
 	setPendingRestoreScrollTop,
 	trackSettingsOverlayOpen,
 } from "../../lib/settings-scroll-freeze"
+import {
+	isRestoringSessionScroll,
+	planSessionScrollRestore,
+	restoreSessionScrollWhenReady,
+	snapshotFromScrollElement,
+} from "../../lib/session-scroll-restore"
 import type {
 	ConfigData,
 	ModelRef,
@@ -74,34 +84,51 @@ import type {
 import {
 	getModelInputCapabilities,
 	getModelVariants,
+	modelRefFromSlug,
 	resolveEffectiveModel,
 	useModelState,
 } from "../../hooks/use-devo-data"
 import type { ChatTurn } from "../../hooks/use-session-chat"
+import { warmDiffHighlighter } from "../../lib/diff-highlighter-warmup"
 import { createLogger } from "../../lib/logger"
-import { computeTurnWorkTimeSplit, formatWorkDuration } from "../../lib/session-metrics"
-import type { Agent, FileAttachment, QuestionAnswer } from "../../lib/types"
-import { persistRuntimeModelConfigOption, persistRuntimeModelSelection } from "../../lib/model-config-options"
-import { getProjectClient } from "../../services/connection-manager"
+import type { Agent, FileAttachment, PermissionResponse, QuestionAnswer } from "../../lib/types"
+import { getBaseClient, getProjectClient } from "../../services/connection-manager"
 
 const log = createLogger("chat-view")
 
+/** Session ids whose collaboration mode was already seeded from persisted settings this run. */
+const seededCollaborationModes = new Set<string>()
+
+/** Debounce for persist-on-selection: coalesces rapid model/effort/mode changes. */
+const SELECTION_PERSIST_DEBOUNCE_MS = 500
+
 const VIRTUALIZE_TURN_THRESHOLD = 30
 const VIRTUAL_TURN_GAP = 40
+
+/** Stable empty array so historical ChatTurn memo is not busted every stream tick. */
+const EMPTY_PROVIDER_ERRORS: ProviderErrorEntry[] = []
 
 import {
 	type DiffComment,
 	diffCommentsFamily,
 	serializeCommentsForChat,
 } from "../review/review-comments"
-import { PermissionItem } from "./chat-permission"
+import { ComposerSubmitControls } from "./composer-submit-controls"
+import { ChatPermissionFlow } from "./chat-permission"
 import { ChatQuestionFlow } from "./chat-question"
-import { ChatTurnComponent } from "./chat-turn"
+import { isAssistantItemError } from "./assistant-item-error"
+import { ChatTurnComponent, isSyntheticMessage } from "./chat-turn"
+import { ForkBoundaryDivider } from "./fork-boundary-divider"
+import { forkBoundaryAfterTurnIndex } from "./fork-boundary"
+import { ChatLoadingSkeleton } from "./chat-turn-skeleton"
+import { ProviderErrorRow } from "./provider-error-row"
 import {
 	ComposerStatusStack,
 	type ComposerGoal,
 	type ComposerGoalStatus,
+	type ComposerQueueItem,
 } from "./composer-status-stack"
+import { useComposerQueue } from "../../hooks/use-composer-queue"
 import { ContextItems } from "./context-items"
 import type { MentionOption } from "./mention-popover"
 import { MentionPopover, type MentionPopoverHandle } from "./mention-popover"
@@ -114,8 +141,18 @@ import {
 	type PromptMention,
 	reconcileMentions,
 } from "./prompt-mentions"
+import { ComposerModeChip } from "./composer-mode-chip"
+import { ComposerPermissionPicker } from "./composer-permission-picker"
+import {
+	DEFAULT_COMPOSER_PERMISSION_PROFILE,
+	type ComposerPermissionProfile,
+	parseComposerPermissionProfile,
+	takeComposerPermissionForSession,
+} from "./composer-permission"
+import { goalPromptText, parseComposerSlash } from "./composer-slash"
 import { PromptToolbar } from "./prompt-toolbar"
 import { SessionTaskList } from "./session-task-list"
+import { SkillPickerDialog } from "./skill-picker-dialog"
 import { SlashCommandPopover, type SlashCommandPopoverHandle } from "./slash-command-popover"
 
 type ComposerTrigger = "goal" | "plan"
@@ -156,90 +193,56 @@ function AttachButton({ disabled }: { disabled?: boolean }) {
 			tooltip="Attach files"
 			onClick={() => attachments.openFileDialog()}
 			disabled={disabled}
+			className="size-8 rounded-full bg-muted/80 text-muted-foreground hover:bg-muted hover:text-foreground"
 		>
 			<PlusIcon className="size-4" />
 		</PromptInputButton>
 	)
 }
 
-function ComposerTriggerChip({
-	trigger,
-	onRemove,
-}: {
-	trigger: ComposerTrigger
-	onRemove: () => void
-}) {
-	const isPlan = trigger === "plan"
-	const Icon = isPlan ? ListTodoIcon : GoalIcon
-	const label = isPlan ? "Plan" : "Goal"
-	const description = isPlan ? "Create a plan" : "Set a goal"
-
-	return (
-		<Tooltip>
-			<TooltipTrigger
-				render={
-					<div className="group inline-flex h-7 items-center gap-1 rounded-full px-2 text-xs text-muted-foreground transition-colors hover:bg-muted hover:text-foreground" />
-				}
-			>
-				<button
-					type="button"
-					aria-label={`Remove ${label} trigger`}
-					onClick={onRemove}
-					// User requirement: hover replaces the trigger icon in-place with
-					// the close affordance, so the chip text never shifts.
-					className="pointer-events-none relative inline-flex size-3.5 shrink-0 items-center justify-center text-muted-foreground transition-colors group-focus-within:pointer-events-auto group-focus-within:text-foreground group-hover:pointer-events-auto group-hover:text-foreground focus-visible:rounded-sm focus-visible:outline-none focus-visible:ring-1 focus-visible:ring-ring"
-				>
-					<Icon
-						className="size-3.5 stroke-[1.5] opacity-100 transition-opacity group-focus-within:opacity-0 group-hover:opacity-0"
-						aria-hidden="true"
-					/>
-					<XIcon
-						className="absolute size-3.5 stroke-[1.5] opacity-0 transition-opacity group-focus-within:opacity-100 group-hover:opacity-100"
-						aria-hidden="true"
-					/>
-				</button>
-				<span>{label}</span>
-			</TooltipTrigger>
-			<TooltipContent side="top" align="start">
-				<div>{description}</div>
-				{isPlan && <div className="text-[11px] opacity-70">Shift + Tab to toggle</div>}
-			</TooltipContent>
-		</Tooltip>
-	)
-}
-
 /**
- * Instant-scroll when session content finishes loading.
- *
- * The `<Conversation>` (StickToBottom) uses `initial="instant"` for the first
- * paint, but messages are fetched async — by the time they arrive and render,
- * the library treats the content growth as a *resize* and applies
- * `resize="smooth"`, causing a visible scroll animation from top → bottom.
- *
- * This component sits inside `<Conversation>` so it can access the
- * StickToBottom context. It watches for the loading→loaded transition
- * and forces an instant scroll-to-bottom.
+ * Restores scroll position when session content finishes loading or the session
+ * remounts after LRU eviction. Respects saved scrollTop unless the user was at bottom.
  */
-function ScrollOnLoad({ loading, sessionId }: { loading: boolean; sessionId: string }) {
-	const { scrollToBottom } = useStickToBottomContext()
+function ScrollOnLoad({
+	loading,
+	sessionId,
+	isActive,
+}: {
+	loading: boolean
+	sessionId: string
+	isActive: boolean
+}) {
+	const { scrollToBottom, scrollRef, stopScroll } = useStickToBottomContext()
 	const settingsOverlayOpen = useAtomValue(settingsOverlayOpenAtom)
 	const prevLoadingRef = useRef(loading)
-	const prevSessionRef = useRef(sessionId)
+	const prevActiveRef = useRef(isActive)
 
 	useLayoutEffect(() => {
 		const wasLoading = prevLoadingRef.current
-		const sessionChanged = prevSessionRef.current !== sessionId
+		const becameActive = !prevActiveRef.current && isActive
 		prevLoadingRef.current = loading
-		prevSessionRef.current = sessionId
+		prevActiveRef.current = isActive
 
-		if (settingsOverlayOpen || getPendingRestoreScrollTop() != null) return
+		if (!isActive || settingsOverlayOpen || getPendingRestoreScrollTop() != null) return
 
-		// Instant scroll when: loading just finished, or session changed while not loading
-		// (e.g. messages were already cached in the Jotai store)
-		if ((wasLoading && !loading) || (sessionChanged && !loading)) {
-			scrollToBottom("instant")
+		if ((wasLoading && !loading) || becameActive) {
+			const snapshot = appStore.get(sessionScrollSnapshotFamily(sessionId))
+			const plan = planSessionScrollRestore(snapshot)
+			if (plan.action === "bottom") {
+				scrollToBottom("instant")
+			} else {
+				markScrollRestored(plan.scrollTop)
+				restoreSessionScrollWhenReady({
+					sessionId,
+					getElement: () => scrollRef.current,
+					scrollTop: plan.scrollTop,
+					stopScroll,
+					onRestored: markScrollRestored,
+				})
+			}
 		}
-	}, [loading, sessionId, scrollToBottom, settingsOverlayOpen])
+	}, [loading, sessionId, isActive, scrollToBottom, scrollRef, stopScroll, settingsOverlayOpen])
 
 	return null
 }
@@ -248,23 +251,29 @@ function ScrollOnLoad({ loading, sessionId }: { loading: boolean; sessionId: str
  * Tracks scroll position while the session is visible so it can be restored
  * after returning from Settings (StickToBottom may reset on layout changes).
  */
-function ScrollPositionTracker({ sessionId }: { sessionId: string }) {
+function ScrollPositionTracker({
+	sessionId,
+	isActive,
+}: {
+	sessionId: string
+	isActive: boolean
+}) {
 	const { scrollRef } = useStickToBottomContext()
-	const setScrollTop = useSetAtom(sessionScrollTopFamily(sessionId))
+	const setSnapshot = useSetAtom(sessionScrollSnapshotFamily(sessionId))
 	const settingsOverlayOpen = useAtomValue(settingsOverlayOpenAtom)
 
 	useEffect(() => {
 		const element = scrollRef.current
-		if (!element) return
+		if (!element || !isActive) return
 
 		const onScroll = () => {
 			if (settingsOverlayOpen) return
-			setScrollTop(element.scrollTop)
+			setSnapshot(snapshotFromScrollElement(element))
 		}
 
 		element.addEventListener("scroll", onScroll, { passive: true })
 		return () => element.removeEventListener("scroll", onScroll)
-	}, [scrollRef, sessionId, setScrollTop, settingsOverlayOpen])
+	}, [scrollRef, sessionId, isActive, setSnapshot, settingsOverlayOpen])
 
 	return null
 }
@@ -314,7 +323,7 @@ function SettingsScrollGuard({ sessionId }: { sessionId: string }) {
 	return null
 }
 
-interface ScrollHandle {
+export interface ChatScrollHandle {
 	scrollToBottom: (behavior?: "instant" | "smooth") => void
 	/** Returns the current scrollHeight of the scroll container */
 	getScrollHeight: () => number
@@ -328,9 +337,9 @@ interface ScrollHandle {
  * Bridge that exposes the StickToBottom `scrollToBottom` to the parent
  * via a ref so imperative callers (handleSend, question reply, etc.)
  * can force a scroll-to-bottom even when the user has scrolled away.
- * Also exposes scroll position helpers for the "jump to start" feature.
+ * Also exposes scroll position helpers for load-earlier anchor restore.
  */
-function ScrollBridge({ scrollRef }: { scrollRef: React.RefObject<ScrollHandle | null> }) {
+function ScrollBridge({ scrollRef }: { scrollRef: React.RefObject<ChatScrollHandle | null> }) {
 	const ctx = useStickToBottomContext()
 	useImperativeHandle(
 		scrollRef,
@@ -363,7 +372,7 @@ function LoadEarlierOnScroll({
 	hasEarlierMessages: boolean
 	loadingEarlier: boolean
 	onLoadEarlier?: () => void | Promise<void>
-	scrollRef: RefObject<ScrollHandle | null>
+	scrollRef: RefObject<ChatScrollHandle | null>
 }) {
 	const { scrollRef: containerRef, stopScroll } = useStickToBottomContext()
 	const sentinelRef = useRef<HTMLDivElement>(null)
@@ -424,71 +433,54 @@ const TURN_ESTIMATE_MIN = 120
 const TURN_ESTIMATE_MAX = 12_000
 
 function estimateTurnSize(turn: ChatTurn): number {
-	let partCount = turn.userMessage.parts.length
-	for (const message of turn.assistantMessages) {
-		partCount += message.parts.length
-	}
+	const itemCount = 1 + turn.assistantMessages.length
 	const assistantTextLength = turn.assistantMessages.reduce((total, message) => {
-		return (
-			total +
-			message.parts.reduce((messageTotal, part) => {
-				return messageTotal + (part.type === "text" || part.type === "reasoning" ? part.text.length : 0)
-			}, 0)
-		)
+		const item = message.info.item
+		const text = typeof item?.text === "string" ? item.text : ""
+		return total + text.length
 	}, 0)
-	const toolCount = turn.assistantMessages.reduce((total, message) => {
-		return total + message.parts.filter((part) => part.type === "tool").length
-	}, 0)
-	const reasoningCount = turn.assistantMessages.reduce((total, message) => {
-		return total + message.parts.filter((part) => part.type === "reasoning").length
-	}, 0)
-	const estimated =
-		180 +
-		turn.assistantMessages.length * 72 +
-		partCount * 36 +
-		toolCount * 96 +
-		reasoningCount * 48 +
-		assistantTextLength / 10
+	const estimated = 180 + itemCount * 72 + assistantTextLength / 10
 	return Math.max(TURN_ESTIMATE_MIN, Math.min(TURN_ESTIMATE_MAX, estimated))
 }
 
-function turnListRevision(turns: ChatTurn[]): string {
-	return turns
-		.map((turn) => {
-			let partCount = turn.userMessage.parts.length
-			let textLength = 0
-			for (const message of turn.assistantMessages) {
-				partCount += message.parts.length
-				for (const part of message.parts) {
-					if (part.type === "text" || part.type === "reasoning") {
-						textLength += part.text.length
-					}
-				}
-			}
-			return `${turn.id}:${partCount}:${textLength}`
-		})
-		.join("|")
+function turnListStructureRevision(turns: ChatTurn[]): string {
+	return turns.map((turn) => `${turn.id}:${1 + turn.assistantMessages.length}`).join("|")
 }
 
 interface VirtualizedTurnListProps {
 	turns: ChatTurn[]
 	renderTurn: (turn: ChatTurn, index: number) => ReactNode
+	sessionId: string
 }
 
-function VirtualizedTurnList({ turns, renderTurn }: VirtualizedTurnListProps) {
+function VirtualizedTurnList({ turns, renderTurn, sessionId }: VirtualizedTurnListProps) {
 	const { scrollRef } = useStickToBottomContext()
-	const turnsRevision = useMemo(() => turnListRevision(turns), [turns])
+	const turnsRevision = useMemo(() => turnListStructureRevision(turns), [turns])
 	const virtualizer = useVirtualizer({
 		count: turns.length,
 		getScrollElement: () => scrollRef.current,
 		getItemKey: (index) => turns[index]?.id ?? index,
 		estimateSize: (index) => estimateTurnSize(turns[index]),
-		overscan: 8,
+		overscan: 5,
 	})
 
 	useLayoutEffect(() => {
+		if (!isRestoringSessionScroll(sessionId)) {
+			virtualizer.measure()
+			return
+		}
+		const pending = getPendingRestoreScrollTop()
+		const snapshot = appStore.get(sessionScrollSnapshotFamily(sessionId))
+		const plan = planSessionScrollRestore(
+			pending != null
+				? { scrollTop: pending, atBottom: false, hasSnapshot: true }
+				: snapshot,
+		)
+		if (plan.action === "restore" && scrollRef.current) {
+			scrollRef.current.scrollTop = plan.scrollTop
+		}
 		virtualizer.measure()
-	}, [turnsRevision, virtualizer])
+	}, [turnsRevision, virtualizer, scrollRef, sessionId])
 
 	return (
 		<div
@@ -520,81 +512,6 @@ function VirtualizedTurnList({ turns, renderTurn }: VirtualizedTurnListProps) {
 				)
 			})}
 		</div>
-	)
-}
-
-/**
- * Floating pill button that appears when the agent finishes working.
- * Scrolls to the beginning of the last assistant response so the user
- * can read it from the top. Dismisses on click or after 8 seconds.
- *
- * Captures the scroll container's scrollHeight when the agent starts
- * working (idle-to-working transition). This position corresponds to
- * "where the new response began" regardless of whether the agent
- * started from a fresh message, a question answer, or a permission grant.
- *
- * Must be rendered inside `<Conversation>` to position correctly.
- */
-function ScrollToResponseStart({
-	isWorking,
-	scrollRef,
-}: {
-	isWorking: boolean
-	scrollRef: React.RefObject<ScrollHandle | null>
-}) {
-	const [visible, setVisible] = useState(false)
-	const prevWorkingRef = useRef(isWorking)
-	// Saved scrollHeight at the moment the agent started working.
-	// This is the Y position where the new response content begins.
-	const savedScrollTopRef = useRef(0)
-
-	useEffect(() => {
-		const wasWorking = prevWorkingRef.current
-		prevWorkingRef.current = isWorking
-
-		if (!wasWorking && isWorking) {
-			// Agent just started working -- snapshot where the response will begin.
-			// scrollHeight is the total content height; subtracting a small offset
-			// so the scroll lands slightly above the first new content.
-			const handle = scrollRef.current
-			if (handle) {
-				savedScrollTopRef.current = Math.max(0, handle.getScrollHeight() - 80)
-			}
-		}
-
-		if (wasWorking && !isWorking) {
-			// Agent finished -- show the pill
-			setVisible(true)
-		}
-
-		if (isWorking) {
-			setVisible(false)
-		}
-	}, [isWorking, scrollRef])
-
-	// Auto-dismiss after 8 seconds
-	useEffect(() => {
-		if (!visible) return
-		const timer = setTimeout(() => setVisible(false), 8000)
-		return () => clearTimeout(timer)
-	}, [visible])
-
-	const handleClick = useCallback(() => {
-		scrollRef.current?.scrollToPosition(savedScrollTopRef.current)
-		setVisible(false)
-	}, [scrollRef])
-
-	if (!visible) return null
-
-	return (
-		<button
-			type="button"
-			onClick={handleClick}
-			className="absolute bottom-[calc(var(--chat-composer-inset)+3.5rem)] left-1/2 z-20 flex -translate-x-1/2 items-center gap-1.5 rounded-full border border-border bg-background px-3 py-1.5 text-xs text-muted-foreground shadow-md transition-colors hover:bg-muted hover:text-foreground"
-		>
-			<ArrowUpToLineIcon className="size-3" />
-			<span>Jump to start of response</span>
-		</button>
 	)
 }
 
@@ -725,6 +642,8 @@ function MentionReconciler({
 interface ChatViewProps {
 	turns: ChatTurn[]
 	loading: boolean
+	/** True when fetching with no cached turns to display yet. */
+	showLoading?: boolean
 	/** Whether earlier messages are currently being loaded */
 	loadingEarlier: boolean
 	/** Whether there are earlier messages that can be loaded */
@@ -753,9 +672,14 @@ interface ChatViewProps {
 		agent: Agent,
 		permissionSessionId: string,
 		permissionId: string,
-		response?: "once" | "always",
+		response?: PermissionResponse,
 	) => Promise<void>
-	onDeny?: (agent: Agent, permissionSessionId: string, permissionId: string) => Promise<void>
+	onDeny?: (
+		agent: Agent,
+		permissionSessionId: string,
+		permissionId: string,
+		note?: string,
+	) => Promise<void>
 	/** Question handlers */
 	onReplyQuestion?: (agent: Agent, requestId: string, answers: QuestionAnswer[]) => Promise<void>
 	onRejectQuestion?: (agent: Agent, requestId: string) => Promise<void>
@@ -765,14 +689,40 @@ interface ChatViewProps {
 	onUndo?: () => Promise<string | undefined>
 	onRedo?: () => Promise<void>
 	isReverted?: boolean
-	/** Revert to a specific message (for per-turn undo) */
-	onRevertToMessage?: (messageId: string) => Promise<void>
-	/** Fork from a turn boundary (messageId of the next turn's user message, or undefined for full fork) */
-	onForkFromTurn?: (messageId?: string) => Promise<void>
-	/** Delete a specific part from a message (for error recovery) */
-	onDeletePart?: (sessionId: string, messageId: string, partId: string) => Promise<void>
+	/** Fork from a turn boundary (protocol turn id, or undefined for tip fork) */
+	onForkFromTurn?: (turnId?: string) => Promise<void>
+	/** Edit and resend the latest user message */
+	onEditUserMessage?: (messageId: string, text: string) => Promise<void>
 	/** Whether the review panel is open (removes max-w constraint) */
 	reviewPanelOpen?: boolean
+	/** Parent session title for fork boundary marker */
+	parentSessionName?: string
+	/** Whether this session is the visible panel (gates scroll tracking). */
+	isActive?: boolean
+	/** When false, only render the transcript (used by SessionShell). */
+	showComposer?: boolean
+	/** When false, only render the composer (used by SessionShell). */
+	showTranscript?: boolean
+	/** Shared scroll handle when composer is rendered outside the transcript. */
+	externalScrollRef?: RefObject<ChatScrollHandle | null>
+	/** Composer height when rendered outside this ChatView instance. */
+	composerInsetPx?: number
+	/** Registers /side handler when transcript and composer are split. */
+	sideQuestionHandlerRef?: MutableRefObject<((question: string) => Promise<void>) | null>
+}
+
+type SideCard = {
+	id: string
+	question: string
+	answer: string
+	status: "running" | "done" | "failed"
+}
+
+type SelectionPersistPatch = {
+	modelID?: string
+	reasoningEffort?: string
+	mode?: string
+	permissionProfile?: string
 }
 
 /**
@@ -787,6 +737,7 @@ interface ChatViewProps {
 export function ChatView({
 	turns,
 	loading,
+	showLoading = false,
 	loadingEarlier,
 	hasEarlierMessages,
 	onLoadEarlier,
@@ -806,13 +757,26 @@ export function ChatView({
 	onUndo,
 	onRedo,
 	isReverted,
-	onRevertToMessage,
 	onForkFromTurn,
-	onDeletePart,
+	onEditUserMessage,
 	reviewPanelOpen,
+	parentSessionName,
+	isActive = true,
+	showComposer = true,
+	showTranscript = true,
+	externalScrollRef,
+	composerInsetPx,
+	sideQuestionHandlerRef,
 }: ChatViewProps) {
-	const isWorking = agent.status === "running"
+	const recoveryState = useTurnRecovery(agent.sessionId, agent.directory, agent.status)
+	const isWorking = agent.status === "running" && !recoveryState.recovery
 	const settingsOverlayOpen = useAtomValue(settingsOverlayOpenAtom)
+
+	useEffect(() => {
+		void warmDiffHighlighter().catch(() => {
+			// Best-effort warmup; inline diffs retry via PierreDiffMount remount.
+		})
+	}, [])
 
 	const conversationTargetScrollTop = useCallback(
 		(defaultTarget: number) => {
@@ -831,19 +795,120 @@ export function ChatView({
 
 	// Ref to imperatively scroll the conversation to bottom from outside the
 	// <Conversation> tree (e.g. after sending a message or answering a question).
-	const scrollRef = useRef<ScrollHandle | null>(null)
+	const internalScrollRef = useRef<ChatScrollHandle | null>(null)
+	const scrollRef = externalScrollRef ?? internalScrollRef
 	const composerRef = useRef<HTMLDivElement | null>(null)
-	const [composerInset, setComposerInset] = useState(0)
+	const [measuredComposerInset, setMeasuredComposerInset] = useState(0)
+	const composerInset = composerInsetPx ?? measuredComposerInset
 
 	// Session-level error and setup phase from the session atom
 	const sessionEntry = useAtomValue(sessionFamily(agent.sessionId))
 	const sessionError = sessionEntry?.error
 	const setupPhase = sessionEntry?.setupPhase
-	const compactionStatus = useAtomValue(compactionStatusFamily(agent.sessionId))
+	const [sideCards, setSideCards] = useState<SideCard[]>([])
+
+	const startSideQuestion = useCallback(
+		async (question: string) => {
+			if (!agent.directory) return
+			const client = getProjectClient(agent.directory)
+			if (!client?.task?.startAgent) {
+				log.error("task.startAgent unavailable", { sessionId: agent.sessionId })
+				return
+			}
+			const cardId = crypto.randomUUID()
+			setSideCards((prev) => [
+				...prev,
+				{ id: cardId, question, answer: "", status: "running" },
+			])
+			const prompt =
+				"You are answering a /side side question in a lightweight forked agent.\n" +
+				"The inherited conversation is reference context only. Do not continue or modify the " +
+				"main session task. Answer only this side question.\n" +
+				"You cannot use tools in this fork: do not read files, run commands, search, or modify code. " +
+				"Produce one concise answer and stop.\n\n" +
+				`Side question:\n${question}`
+			try {
+				const result = await client.task.startAgent({
+					sessionId: agent.sessionId,
+					prompt,
+					forkTurns: "all",
+					maxTurns: 1,
+					toolPolicy: "deny_all",
+					ephemeral: true,
+				})
+				const itemId = result.data.itemId
+				const childSessionId = itemId.startsWith("item_") ? itemId.slice("item_".length) : itemId
+				let answer = ""
+				for (let attempt = 0; attempt < 40; attempt++) {
+					await new Promise((resolve) => setTimeout(resolve, 250))
+					try {
+						const messages = await client.session.messages({
+							sessionId: childSessionId,
+							limit: 50,
+						})
+						const texts: string[] = []
+						for (const entry of messages.data ?? []) {
+							const item = entry.info?.item
+							if (item?.type === "assistantMessage" && typeof item.text === "string" && item.text.trim()) {
+								texts.push(item.text)
+							}
+						}
+						answer = texts.join("\n").trim()
+						if (answer) break
+					} catch {
+						// Child may still be starting; keep polling.
+					}
+				}
+				setSideCards((prev) =>
+					prev.map((card) =>
+						card.id === cardId
+							? {
+									...card,
+									answer: answer || "No answer returned.",
+									status: answer ? "done" : "failed",
+								}
+							: card,
+					),
+				)
+			} catch (err) {
+				log.error("slash /side failed", { sessionId: agent.sessionId }, err)
+				setSideCards((prev) =>
+					prev.map((card) =>
+						card.id === cardId
+							? {
+									...card,
+									answer: err instanceof Error ? err.message : "Side question failed.",
+									status: "failed",
+								}
+							: card,
+					),
+				)
+			}
+		},
+		[agent.directory, agent.sessionId],
+	)
+
+	// Clear ephemeral side cards when switching sessions.
+	useEffect(() => {
+		setSideCards([])
+	}, [agent.sessionId])
+
+	useEffect(() => {
+		if (!sideQuestionHandlerRef || !isActive || showComposer) return
+		sideQuestionHandlerRef.current = startSideQuestion
+		return () => {
+			if (sideQuestionHandlerRef.current === startSideQuestion) {
+				sideQuestionHandlerRef.current = null
+			}
+		}
+	}, [isActive, showComposer, sideQuestionHandlerRef, startSideQuestion])
 
 	useLayoutEffect(() => {
+		if (composerInsetPx != null || !showComposer) {
+			return
+		}
 		if (setupPhase) {
-			setComposerInset(0)
+			setMeasuredComposerInset(0)
 			return
 		}
 
@@ -852,7 +917,7 @@ export function ChatView({
 
 		const updateComposerInset = () => {
 			const nextInset = Math.ceil(composer.getBoundingClientRect().height)
-			setComposerInset((currentInset) =>
+			setMeasuredComposerInset((currentInset) =>
 				currentInset === nextInset ? currentInset : nextInset,
 			)
 		}
@@ -882,13 +947,12 @@ export function ChatView({
 				window.removeEventListener("resize", updateComposerInset)
 			}
 		}
-	}, [setupPhase])
+	}, [composerInsetPx, setupPhase, showComposer])
 	const effectivePermission = useAtomValue(effectivePermissionFamily(agent.sessionId))
-	const removePermission = useSetAtom(removePermissionAtom)
 
 	// Format the session-level error for display. Only shown when the last
 	// turn doesn't already carry an assistant-level error (the server emits
-	// both session.error and message.updated for the same failure, so showing
+	// both session.error and item.updated for the same failure, so showing
 	// both would duplicate the message).
 	const sessionErrorText = useMemo(() => {
 		if (!sessionError) return undefined
@@ -901,12 +965,11 @@ export function ChatView({
 	const lastTurnHasError = useMemo(() => {
 		const lastTurn = turns.at(-1)
 		if (!lastTurn) return false
-		return lastTurn.assistantMessages.some(
-			(m) => m.info.role === "assistant" && m.info.error != null,
-		)
+		return lastTurn.assistantMessages.some(({ info }) => isAssistantItemError(info))
 	}, [turns])
 
-	const showSessionError = !!sessionErrorText && !lastTurnHasError
+	const showSessionError =
+		!!sessionErrorText && !lastTurnHasError && (sessionEntry?.providerErrors?.length ?? 0) === 0
 
 	// Stable callbacks for question/permission handlers — agent is stable
 	// per render, but wrapping in useCallback avoids creating new inline
@@ -916,27 +979,24 @@ export function ChatView({
 			a: Agent,
 			permissionSessionId: string,
 			permissionId: string,
-			response?: "once" | "always",
+			response?: PermissionResponse,
 		) => {
 			await onApprove?.(a, permissionSessionId, permissionId, response)
-			removePermission({ sessionId: permissionSessionId, permissionId })
-			// Permission card disappears after approval — scroll to keep content visible.
 			requestAnimationFrame(() => {
 				scrollRef.current?.scrollToBottom("smooth")
 			})
 		},
-		[onApprove, removePermission],
+		[onApprove],
 	)
 
 	const handleDenyPermission = useCallback(
-		async (a: Agent, permissionSessionId: string, permissionId: string) => {
-			await onDeny?.(a, permissionSessionId, permissionId)
-			removePermission({ sessionId: permissionSessionId, permissionId })
+		async (a: Agent, permissionSessionId: string, permissionId: string, note?: string) => {
+			await onDeny?.(a, permissionSessionId, permissionId, note)
 			requestAnimationFrame(() => {
 				scrollRef.current?.scrollToBottom("smooth")
 			})
 		},
-		[onDeny, removePermission],
+		[onDeny],
 	)
 
 	// Keyboard shortcuts for undo/redo
@@ -977,6 +1037,33 @@ export function ChatView({
 		: "mx-auto w-full min-w-0 max-w-3xl"
 
 	const retryStatus = sessionEntry?.retryStatus
+	const providerErrors = sessionEntry?.providerErrors ?? EMPTY_PROVIDER_ERRORS
+	const lastTurnProviderErrors = useMemo(() => {
+		if (providerErrors.length === 0) return EMPTY_PROVIDER_ERRORS
+		const lastTurn = turns[turns.length - 1]
+		if (!lastTurn?.turnId) return providerErrors
+		const filtered = providerErrors.filter(
+			(entry) => !entry.turnId || entry.turnId === lastTurn.turnId,
+		)
+		return filtered.length === providerErrors.length ? providerErrors : filtered
+	}, [providerErrors, turns])
+	const latestEditableUserTurnIndex = useMemo(() => {
+		for (let index = turns.length - 1; index >= 0; index--) {
+			if (!isSyntheticMessage(turns[index].userMessage)) return index
+		}
+		return -1
+	}, [turns])
+
+	const forkBoundaryAfterIndex = useMemo(
+		() =>
+			forkBoundaryAfterTurnIndex(
+				turns,
+				agent.forkFromId,
+				agent.atTurnId,
+				agent.createdAt,
+			),
+		[agent.atTurnId, agent.createdAt, agent.forkFromId, turns],
+	)
 
 	const renderTurn = useCallback(
 		(turn: ChatTurn, index: number) => {
@@ -993,43 +1080,52 @@ export function ChatView({
 						: isWorking
 							? retryStatus
 							: undefined
+			const turnProviderErrors = !isLastTurn ? EMPTY_PROVIDER_ERRORS : lastTurnProviderErrors
 			return (
+			<Fragment key={turn.id}>
 			<ChatTurnComponent
-				key={turn.id}
 				turn={turn}
 				isLast={isLastTurn}
 				isWorking={isWorking}
 				agent={agent}
-				pendingPermission={index === turns.length - 1 ? effectivePermission : undefined}
 				isConnected={isConnected}
-				compactionStatus={compactionStatus}
 				retryStatus={activeRetryStatus}
-				onApprovePermission={handleApprovePermission}
-				onDenyPermission={handleDenyPermission}
-				onRevertToMessage={onRevertToMessage}
+				providerErrors={turnProviderErrors}
 				onForkFromTurn={
 					onForkFromTurn
-						? () => {
-								const nextTurn = turns[index + 1]
-								return onForkFromTurn(nextTurn?.userMessage.info.id)
-							}
+						? () => onForkFromTurn(turn.turnId)
 						: undefined
 				}
-				onDeletePart={onDeletePart}
+				onEditUserMessage={
+					index === latestEditableUserTurnIndex && onEditUserMessage
+						? (text) => onEditUserMessage(turn.userMessage.info.id, text)
+						: undefined
+				}
 			/>
+			{index === forkBoundaryAfterIndex ? (
+				<ForkBoundaryDivider
+					parentName={parentSessionName}
+					sourceSessionId={agent.forkFromId}
+					projectSlug={agent.projectSlug}
+				/>
+			) : null}
+			</Fragment>
 			)
 		},
 		[
 			agent,
 			effectivePermission,
-			compactionStatus,
+			forkBoundaryAfterIndex,
 			handleApprovePermission,
 			handleDenyPermission,
 			isConnected,
 			isWorking,
-			onDeletePart,
+			latestEditableUserTurnIndex,
 			onForkFromTurn,
-			onRevertToMessage,
+			onEditUserMessage,
+			onSendMessage,
+			parentSessionName,
+			lastTurnProviderErrors,
 			retryStatus,
 			turns,
 		],
@@ -1045,21 +1141,26 @@ export function ChatView({
 			}
 		>
 			{/* Chat messages -- constrained width for readability */}
-			<div className="relative min-h-0 min-w-0 flex-1">
+			{showTranscript ? (
+			<div
+				className="relative min-h-0 min-w-0 flex-1"
+				data-conversation-surface={agent.sessionId}
+			>
 				<Conversation
 					key={agent.sessionId}
 					className="h-full"
+					streaming={isWorking}
 					targetScrollTop={conversationTargetScrollTop}
 				>
-					<ScrollOnLoad loading={loading} sessionId={agent.sessionId} />
+					<ScrollOnLoad loading={loading} sessionId={agent.sessionId} isActive={isActive} />
 					<SettingsScrollGuard sessionId={agent.sessionId} />
-					<ScrollPositionTracker sessionId={agent.sessionId} />
+					<ScrollPositionTracker sessionId={agent.sessionId} isActive={isActive} />
 					<ScrollBridge scrollRef={scrollRef} />
 					<ConversationContent
-						scrollClassName="scrollbar-comfort"
-						className="gap-10 px-6 pt-2 pb-[calc(var(--chat-composer-inset)+1rem)] sm:px-8 sm:pt-6 sm:pb-[calc(var(--chat-composer-inset)+1.5rem)] lg:px-10"
+						scrollClassName="scrollbar-chat"
+						className="gap-12 px-6 pt-4 pb-4 sm:px-10 sm:pt-8 sm:pb-6 lg:px-12"
 					>
-						<div className={cn(contentWidthClass, "space-y-10")}>
+						<div className={cn(contentWidthClass, "animate-in fade-in space-y-6 duration-150")}>
 							<LoadEarlierOnScroll
 								hasEarlierMessages={hasEarlierMessages}
 								loadingEarlier={loadingEarlier}
@@ -1067,14 +1168,15 @@ export function ChatView({
 								scrollRef={scrollRef}
 							/>
 
-							{loading ? (
-								<div className="flex items-center justify-center py-8">
-									<Loader2Icon className="size-5 animate-spin text-muted-foreground" />
-									<span className="ml-2 text-sm text-muted-foreground">Loading chat...</span>
-								</div>
+							{showLoading ? (
+								<ChatLoadingSkeleton />
 							) : turns.length > 0 ? (
 								turns.length > VIRTUALIZE_TURN_THRESHOLD ? (
-									<VirtualizedTurnList turns={turns} renderTurn={renderTurn} />
+									<VirtualizedTurnList
+										turns={turns}
+										renderTurn={renderTurn}
+										sessionId={agent.sessionId}
+									/>
 								) : (
 									turns.map(renderTurn)
 								)
@@ -1086,16 +1188,43 @@ export function ChatView({
 								</div>
 							)}
 
-							{/* Session-level error from session.error events */}
+							{sideCards.map((card) => (
+								<div
+									key={card.id}
+									className="rounded-lg border border-border/80 bg-muted/20 px-3 py-2.5 text-sm"
+								>
+									<div className="mb-1 flex items-center gap-1.5 text-xs font-medium text-muted-foreground">
+										<span>Side</span>
+										{card.status === "running" ? (
+											<Loader2Icon className="size-3 animate-spin" />
+										) : null}
+									</div>
+									<p className="mb-2 text-foreground/90">{card.question}</p>
+									{card.answer ? (
+										<p className="whitespace-pre-wrap text-muted-foreground">{card.answer}</p>
+									) : (
+										<p className="text-xs text-muted-foreground">Thinking…</p>
+									)}
+								</div>
+							))}
+
+							{/* Session-level error when no turn-scoped expandable rows exist */}
 							{showSessionError && sessionErrorText && (
-								<div className="rounded-md border border-red-500/30 bg-red-500/5 px-3 py-2 text-xs text-red-400">
-									{sessionErrorText}
+								<div className="py-0.5">
+									<ProviderErrorRow
+										entry={{
+											id: "session-error",
+											turnId: "",
+											message: sessionErrorText,
+											phase: "failed",
+											code: sessionError?.name,
+										}}
+									/>
 								</div>
 							)}
 						</div>
 					</ConversationContent>
-					<ScrollToResponseStart isWorking={isWorking} scrollRef={scrollRef} />
-					<ConversationScrollButton className="!bottom-[calc(var(--chat-composer-inset)+1rem)]" />
+					<ConversationScrollButton className="!bottom-3" />
 				</Conversation>
 
 				{/* Top fade */}
@@ -1108,24 +1237,21 @@ export function ChatView({
 				<div
 					data-slot="scroll-fade"
 					aria-hidden="true"
-					className="pointer-events-none absolute inset-x-0 bottom-[var(--chat-composer-inset)] z-10 h-6 bg-gradient-to-t from-background/30 to-transparent"
+					className="pointer-events-none absolute inset-x-0 bottom-0 z-10 h-6 bg-gradient-to-t from-background/30 to-transparent"
 				/>
 			</div>
+			) : null}
 
-			{/* Bottom input section — hidden during worktree setup since the stub session
-			   cannot accept prompts yet. Extracted into its own component so toolbar,
-			   popover, mention, and model-selection state changes don't re-render the
-			   conversation turn list above. */}
-			{!setupPhase && (
+			{showComposer && !setupPhase && (
 				<div
 					ref={composerRef}
 					className="pointer-events-none absolute bottom-0 left-0 right-3.5 z-30 overflow-visible pt-3"
 				>
 					<ChatInputSection
 						agent={agent}
-						turns={turns}
 						isConnected={isConnected}
 						isWorking={isWorking}
+						recoveryState={recoveryState}
 						onSendMessage={onSendMessage}
 						onStop={onStop}
 						providers={providers}
@@ -1135,6 +1261,8 @@ export function ChatView({
 						onDeny={handleDenyPermission}
 						onReplyQuestion={onReplyQuestion}
 						onRejectQuestion={onRejectQuestion}
+						onForkFromTurn={onForkFromTurn}
+						onStartSideQuestion={startSideQuestion}
 						canRedo={canRedo}
 						onRedo={onRedo}
 						isReverted={isReverted}
@@ -1153,9 +1281,9 @@ export function ChatView({
 
 interface ChatInputSectionProps {
 	agent: Agent
-	turns: ChatTurn[]
 	isConnected: boolean
 	isWorking: boolean
+	recoveryState?: ReturnType<typeof useTurnRecovery>
 	onSendMessage?: ChatViewProps["onSendMessage"]
 	onStop?: ChatViewProps["onStop"]
 	providers?: ProvidersData | null
@@ -1165,21 +1293,28 @@ interface ChatInputSectionProps {
 		agent: Agent,
 		permissionSessionId: string,
 		permissionId: string,
-		response?: "once" | "always",
+		response?: PermissionResponse,
 	) => Promise<void>
-	onDeny?: (agent: Agent, permissionSessionId: string, permissionId: string) => Promise<void>
+	onDeny?: (
+		agent: Agent,
+		permissionSessionId: string,
+		permissionId: string,
+		note?: string,
+	) => Promise<void>
 	onReplyQuestion?: ChatViewProps["onReplyQuestion"]
 	onRejectQuestion?: ChatViewProps["onRejectQuestion"]
+	onForkFromTurn?: ChatViewProps["onForkFromTurn"]
+	onStartSideQuestion?: (question: string) => Promise<void>
 	canRedo?: boolean
 	onRedo?: () => Promise<void>
 	isReverted?: boolean
-	scrollRef: React.RefObject<ScrollHandle | null>
+	scrollRef: React.RefObject<ChatScrollHandle | null>
 	reviewPanelOpen?: boolean
 }
 
-function ChatInputSection({
+export function ChatInputSection({
+	recoveryState,
 	agent,
-	turns,
 	isConnected,
 	isWorking,
 	onSendMessage,
@@ -1191,6 +1326,8 @@ function ChatInputSection({
 	onDeny,
 	onReplyQuestion,
 	onRejectQuestion,
+	onForkFromTurn,
+	onStartSideQuestion,
 	canRedo,
 	onRedo,
 	isReverted,
@@ -1201,12 +1338,22 @@ function ChatInputSection({
 	const [activeTrigger, setActiveTrigger] = useState<ComposerTrigger | null>(null)
 	const [activeGoal, setActiveGoal] = useState<ComposerGoal | null>(null)
 	const [goalAction, setGoalAction] = useState<ComposerGoalAction | null>(null)
-	const [collaborationMode, setCollaborationMode] = useState<"build" | "plan">("build")
-
-	// Reset collaboration mode when session changes
-	useEffect(() => {
-		setCollaborationMode("build")
-	}, [agent.sessionId])
+	const [modelPickerOpen, setModelPickerOpen] = useState(false)
+	const [skillPickerOpen, setSkillPickerOpen] = useState(false)
+	const {
+		queueItems,
+		draggingId: draggingQueueItemId,
+		setDraggingId: setDraggingQueueItemId,
+		steerQueueItem,
+		removeQueueItem,
+		editQueueItem,
+		reorderQueueItem,
+	} = useComposerQueue(agent.sessionId, agent.directory ?? null)
+	const [collaborationMode, setCollaborationModeAtom] = useAtom(
+		collaborationModeFamily(agent.sessionId),
+	)
+	const [permissionProfile, setPermissionProfile] =
+		useState<ComposerPermissionProfile>(DEFAULT_COMPOSER_PERMISSION_PROFILE)
 
 	// User requirement: the /goal footer chip is only an input trigger;
 	// the composer-adjacent status row reflects the real session goal state.
@@ -1214,13 +1361,17 @@ function ChatInputSection({
 		setActiveTrigger(null)
 		setActiveGoal(null)
 		setGoalAction(null)
+		const pendingPermission = takeComposerPermissionForSession(agent.sessionId)
+		if (pendingPermission) {
+			setPermissionProfile(pendingPermission)
+		}
 	}, [agent.sessionId])
 
 	const loadGoalStatus = useCallback(async (): Promise<ComposerGoal | null> => {
 		if (!agent.directory) return null
 		const client = getProjectClient(agent.directory)
 		if (!client?.goal?.status) return null
-		const result = await client.goal.status({ sessionID: agent.sessionId })
+		const result = await client.goal.status({ sessionId: agent.sessionId })
 		return normalizeComposerGoal(result.data)
 	}, [agent.directory, agent.sessionId])
 
@@ -1262,19 +1413,10 @@ function ChatInputSection({
 	// so the parent session's UI can respond on behalf of any descendant.
 	const effectivePermission = useAtomValue(effectivePermissionFamily(agent.sessionId))
 	const effectiveQuestion = useAtomValue(effectiveQuestionFamily(agent.sessionId))
-	const removePermission = useSetAtom(removePermissionAtom)
 
 	// Diff comments integration
 	const diffComments = useAtomValue(diffCommentsFamily(agent.sessionId))
 	const setDiffComments = useSetAtom(diffCommentsFamily(agent.sessionId))
-
-	// Elapsed-time split for the current turn — used for the live timer on the submit button.
-	const currentTurnWorkSplit = useMemo(() => {
-		if (!isWorking || turns.length === 0) return null
-		const lastTurn = turns[turns.length - 1]
-		if (lastTurn.assistantMessages.length === 0) return null
-		return computeTurnWorkTimeSplit(lastTurn)
-	}, [isWorking, turns])
 
 	// Mention tracking — files and agents referenced via @
 	const [mentions, setMentions] = useState<PromptMention[]>([])
@@ -1311,26 +1453,24 @@ function ChatInputSection({
 			a: Agent,
 			permissionSessionId: string,
 			permissionId: string,
-			response?: "once" | "always",
+			response?: PermissionResponse,
 		) => {
 			await onApprove?.(a, permissionSessionId, permissionId, response)
-			removePermission({ sessionId: permissionSessionId, permissionId })
 			requestAnimationFrame(() => {
 				scrollRef.current?.scrollToBottom("smooth")
 			})
 		},
-		[onApprove, removePermission, scrollRef],
+		[onApprove, scrollRef],
 	)
 
 	const handleDenyPermission = useCallback(
-		async (a: Agent, permissionSessionId: string, permissionId: string) => {
-			await onDeny?.(a, permissionSessionId, permissionId)
-			removePermission({ sessionId: permissionSessionId, permissionId })
+		async (a: Agent, permissionSessionId: string, permissionId: string, note?: string) => {
+			await onDeny?.(a, permissionSessionId, permissionId, note)
 			requestAnimationFrame(() => {
 				scrollRef.current?.scrollToBottom("smooth")
 			})
 		},
-		[onDeny, removePermission, scrollRef],
+		[onDeny, scrollRef],
 	)
 
 	// Draft persistence
@@ -1341,69 +1481,157 @@ function ChatInputSection({
 	const [, setInterruptCount] = useState(0)
 	const interruptTimerRef = useRef<ReturnType<typeof setTimeout> | null>(null)
 
-	// Toolbar state
-	const [selectedModel, setSelectedModel] = useState<ModelRef | null>(null)
-	const [selectedAgent, setSelectedAgent] = useState<string | null>(null)
-	const [selectedVariant, setSelectedVariant] = useState<string | undefined>(undefined)
-
-	// Initialize model, variant, and agent from the session's last user message.
-	const sessionMessages = useAtomValue(messagesFamily(agent.sessionId))
+	// Per-session composer settings (model / variant / agent).
+	const sessionMessages = useAtomValue(itemsFamily(agent.sessionId))
 	const projectModels = useAtomValue(projectModelsAtom)
-	const initializedForSessionRef = useRef<string | null>(null)
-	const resetForSessionRef = useRef<string | null>(null)
+	const composerState = useAtomValue(sessionComposerFamily(agent.sessionId))
+	const setComposerState = useSetAtom(setSessionComposerAtom)
+	const hydratedForMessagesRef = useRef<string | null>(null)
+	const sessionEntry = useAtomValue(sessionFamily(agent.sessionId))
+
 	useEffect(() => {
-		if (resetForSessionRef.current !== agent.sessionId) {
-			resetForSessionRef.current = agent.sessionId
-			initializedForSessionRef.current = null
-			const stored = agent.directory ? projectModels[agent.directory] : undefined
-			if (stored?.providerID && stored?.modelID) {
-				setSelectedModel(stored)
-				setSelectedVariant(stored.variant)
-			} else {
-				setSelectedModel(null)
-				setSelectedVariant(undefined)
+		const wireSession = sessionEntry?.session as {
+			model?: {
+				provider?: string
+				model?: string
+				reasoningEffort?: string
+				reasoning_effort?: string
 			}
-			setSelectedAgent(stored?.agent || null)
-		}
-
-		if (initializedForSessionRef.current === agent.sessionId) return
-		if (!sessionMessages || sessionMessages.length === 0) return
-		initializedForSessionRef.current = agent.sessionId
-
-		let foundModel = false
-		let foundAgent = false
-		for (let i = sessionMessages.length - 1; i >= 0; i--) {
-			const msg = sessionMessages[i]
-			if (msg.role !== "user") continue
-			const dynamic = msg as Record<string, unknown>
-
-			if (!foundModel && "model" in msg && msg.model) {
-				const model = msg.model as { providerID: string; modelID: string }
-				if (model.providerID && model.modelID) {
-					setSelectedModel(model)
-					foundModel = true
-					const variant = dynamic.variant as string | undefined
-					if (variant) {
-						setSelectedVariant(variant)
-					} else {
-						setSelectedVariant(undefined)
-					}
+			settings?: {
+				mode?: string
+				reasoningEffort?: string
+				reasoning_effort?: string
+				permissionProfile?: string
+				permission_profile?: string
+			}
+		} | null | undefined
+		const persistedReasoningEffort =
+			wireSession?.model?.reasoningEffort ??
+			wireSession?.model?.reasoning_effort ??
+			wireSession?.settings?.reasoningEffort ??
+			wireSession?.settings?.reasoning_effort
+		// Include the wire seed fingerprint so enrichment (session/resume
+		// replaces the cold list snapshot with full model/settings) re-runs
+		// the hydration even when the message count has not changed.
+		const messageKey = `${agent.sessionId}:${sessionMessages.length}:${
+			wireSession?.model?.provider ??
+			""
+		}|${wireSession?.model?.model ?? ""}|${persistedReasoningEffort ?? ""}|${
+			wireSession?.settings?.mode ?? ""
+		}|${wireSession?.settings?.permissionProfile ?? wireSession?.settings?.permission_profile ?? ""}`
+		if (hydratedForMessagesRef.current === messageKey) return
+		const projectDefault = agent.directory ? projectModels[agent.directory] : undefined
+		// Persisted per-session turn settings survive restarts (the server
+		// restores them on resume); history messages do not carry model
+		// metadata, so without this seed every restored session would show
+		// the project-default model / reasoning effort.
+		const wireModel = wireSession?.model
+		const wireModelSeed = wireModel
+			? {
+					provider: wireModel.provider,
+					model: wireModel.model,
+					reasoningEffort: persistedReasoningEffort,
+			  }
+			: undefined
+		const sessionSeed = composerFromSessionModel(wireModelSeed, (seed) => {
+			const providerList = providers?.providers ?? []
+			// Prefer the wire provider id when it names a provider that actually
+			// serves the model (session/resume carries a real binding); cold
+			// list snapshots may only carry "unknown", so fall back to a
+			// reverse lookup by model slug.
+			if (seed.provider && seed.provider !== "unknown") {
+				const provider = providerList.find((p) => p.id === seed.provider)
+				if (provider?.models?.[seed.model ?? ""]) {
+					return { providerID: seed.provider, modelID: seed.model ?? "" }
 				}
 			}
-
-			if (
-				!foundAgent &&
-				dynamic.agent &&
-				typeof dynamic.agent === "string" &&
-				dynamic.agent.length > 0
-			) {
-				setSelectedAgent(dynamic.agent)
-				foundAgent = true
-			}
-
-			if (foundModel && foundAgent) break
+			return seed.model ? modelRefFromSlug(seed.model, providerList) : null
+		})
+		const next = hydrateSessionComposerState(
+			composerState,
+			sessionMessages.length,
+			projectDefault,
+			sessionSeed,
+		)
+		if (
+			next.model?.providerID !== composerState.model?.providerID ||
+			next.model?.modelID !== composerState.model?.modelID ||
+			next.variant !== composerState.variant ||
+			next.agent !== composerState.agent
+		) {
+			setComposerState({ sessionId: agent.sessionId, patch: next })
 		}
-	}, [sessionMessages, agent.sessionId, agent.directory, projectModels])
+		// Record the guard key only once hydration is conclusive. A wire seed
+		// that exists but could not be resolved yet (provider list still
+		// loading, slug unmatched against current providers) must retry on the
+		// next dep change — recording the key now would lock the composer into
+		// the default model/effort forever. Writing the ref does not render,
+		// so retries are driven purely by dep changes and cannot loop.
+		if (next.model || !wireSession?.model?.model || composerState.hasUserOverride) {
+			hydratedForMessagesRef.current = messageKey
+		}
+		// Seed the collaboration mode (build/plan) once per session per run so
+		// restarts restore it without fighting in-run user toggles.
+		const wireMode = wireSession?.settings?.mode
+		if (
+			(wireMode === "plan" || wireMode === "build") &&
+			!seededCollaborationModes.has(agent.sessionId)
+		) {
+			seededCollaborationModes.add(agent.sessionId)
+			appStore.set(collaborationModeFamily(agent.sessionId), wireMode)
+		}
+		const wirePermission =
+			wireSession?.settings?.permissionProfile ?? wireSession?.settings?.permission_profile
+		if (wirePermission) {
+			setPermissionProfile(parseComposerPermissionProfile(wirePermission))
+		}
+	}, [
+		agent.directory,
+		agent.sessionId,
+		composerState,
+		projectModels,
+		providers,
+		sessionEntry,
+		sessionMessages,
+		setComposerState,
+	])
+
+	const selectedModel = composerState.model
+	const selectedAgent = composerState.agent
+	const selectedVariant = composerState.variant
+
+	const setSelectedModel = useCallback(
+		(model: ModelRef | null) => {
+			setComposerState({
+				sessionId: agent.sessionId,
+				patch: { model, variant: undefined },
+				userOverride: true,
+			})
+		},
+		[agent.sessionId, setComposerState],
+	)
+
+	const setSelectedAgent = useCallback(
+		(agentName: string | null) => {
+			setComposerState({
+				sessionId: agent.sessionId,
+				patch: { agent: agentName },
+				userOverride: true,
+			})
+		},
+		[agent.sessionId, setComposerState],
+	)
+
+	const setSelectedVariant = useCallback(
+		(variant: string | undefined) => {
+			setComposerState({
+				sessionId: agent.sessionId,
+				patch: { variant },
+				userOverride: true,
+			})
+		},
+		[agent.sessionId, setComposerState],
+	)
 
 	const { addRecent: addRecentModel } = useModelState()
 
@@ -1434,36 +1662,130 @@ function ChatInputSection({
 		if (!available.includes(selectedVariant)) {
 			setSelectedVariant(undefined)
 		}
-	}, [selectedVariant, effectiveModel, providers])
+	}, [selectedVariant, effectiveModel, providers, setSelectedVariant])
 
 	const modelCapabilities = useMemo(
 		() => getModelInputCapabilities(effectiveModel, providers?.providers ?? []),
 		[effectiveModel, providers],
 	)
 
+	// ── Persist-on-selection ─────────────────────────────────────────────
+	// Composer selections (model / reasoning effort / mode) are persisted to
+	// the session record the moment they change, debounced and coalesced into
+	// one session/metadata/update per burst, so they survive a restart even
+	// if no message is ever sent. The send path still passes them per turn
+	// (and re-persists), acting as a backstop.
+	const pendingSelectionPersistRef = useRef<SelectionPersistPatch | null>(null)
+	const selectionPersistTimerRef = useRef<ReturnType<typeof setTimeout> | null>(null)
+	const permissionProfileDirtyRef = useRef(false)
+
+	const flushSelectionPersist = useCallback((): Promise<void> => {
+		if (selectionPersistTimerRef.current !== null) {
+			clearTimeout(selectionPersistTimerRef.current)
+			selectionPersistTimerRef.current = null
+		}
+		const pending: SelectionPersistPatch = {
+			...pendingSelectionPersistRef.current,
+		}
+		if (permissionProfileDirtyRef.current) {
+			pending.permissionProfile = permissionProfile
+		}
+		pendingSelectionPersistRef.current = null
+		if (!agent.sessionId) return Promise.resolve()
+		const hasPersistableFields = Object.keys(pending).length > 0
+		if (!hasPersistableFields) return Promise.resolve()
+		try {
+			const client =
+				(agent.directory ? getProjectClient(agent.directory) : null) ?? getBaseClient()
+			if (!client) {
+				log.warn("session settings persist skipped: not connected", {
+					sessionId: agent.sessionId,
+				})
+				return Promise.resolve()
+			}
+			const updateSettings = client.session?.updateSettings
+			if (typeof updateSettings !== "function") {
+				log.warn("session settings persist skipped: client API unavailable", {
+					sessionId: agent.sessionId,
+				})
+				return Promise.resolve()
+			}
+			// Resolved (not rejected) when the write lands or has failed and
+			// been logged — callers await this to order the flush ahead of a
+			// turn without taking on error handling.
+			return Promise.resolve()
+				.then(() => updateSettings.call(client.session, { sessionId: agent.sessionId, ...pending }))
+				.then(() => {
+					if (pending.permissionProfile) {
+						permissionProfileDirtyRef.current = false
+					}
+				})
+				.catch((error: unknown) => {
+					log.warn("session settings persist failed", { sessionId: agent.sessionId }, error)
+				})
+		} catch (error) {
+			log.warn("session settings persist failed", { sessionId: agent.sessionId }, error)
+			return Promise.resolve()
+		}
+	}, [agent.directory, agent.sessionId, permissionProfile])
+
+	const scheduleSelectionPersist = useCallback(
+		(patch: SelectionPersistPatch) => {
+			pendingSelectionPersistRef.current = { ...pendingSelectionPersistRef.current, ...patch }
+			if (selectionPersistTimerRef.current !== null) {
+				clearTimeout(selectionPersistTimerRef.current)
+			}
+			selectionPersistTimerRef.current = setTimeout(
+				() => flushSelectionPersist(),
+				SELECTION_PERSIST_DEBOUNCE_MS,
+			)
+		},
+		[flushSelectionPersist],
+	)
+
+	// Unmount / session switch flushes whatever is still pending.
+	useEffect(() => {
+		return () => {
+			flushSelectionPersist()
+		}
+	}, [flushSelectionPersist])
+
 	const handleModelSelect = useCallback(
 		(model: ModelRef | null) => {
 			setSelectedModel(model)
-			setSelectedVariant(undefined)
 			if (!model) return
 			addRecentModel(model)
-			if (!agent.directory) return
-			void persistRuntimeModelSelection(agent.directory, model).catch((err) => {
-				console.error("Failed to persist model selection:", err)
-			})
+			scheduleSelectionPersist({ modelID: model.modelID })
 		},
-		[addRecentModel, agent.directory],
+		[addRecentModel, scheduleSelectionPersist, setSelectedModel],
 	)
 
 	const handleVariantSelect = useCallback(
 		(variant: string | undefined) => {
 			setSelectedVariant(variant)
-			if (!variant || !agent.directory) return
-			void persistRuntimeModelConfigOption(agent.directory, "thought_level", variant).catch((err) => {
-				console.error("Failed to persist reasoning effort selection:", err)
-			})
+			if (typeof variant === "string" && variant.length > 0) {
+				scheduleSelectionPersist({ reasoningEffort: variant })
+			}
 		},
-		[agent.directory],
+		[scheduleSelectionPersist, setSelectedVariant],
+	)
+
+	/** Mode toggle that also persists the choice to the session record. */
+	const changeCollaborationMode = useCallback(
+		(next: CollaborationMode) => {
+			setCollaborationModeAtom(next)
+			scheduleSelectionPersist({ mode: next })
+		},
+		[scheduleSelectionPersist, setCollaborationModeAtom],
+	)
+
+	const handlePermissionProfileChange = useCallback(
+		(profile: ComposerPermissionProfile) => {
+			setPermissionProfile(profile)
+			permissionProfileDirtyRef.current = true
+			scheduleSelectionPersist({ permissionProfile: profile })
+		},
+		[scheduleSelectionPersist, agent.sessionId],
 	)
 
 	const slashCommandRef = useRef<{
@@ -1491,7 +1813,7 @@ function ChatInputSection({
 		if (!client?.goal?.pause) return
 		setGoalAction("pause")
 		try {
-			const result = await client.goal.pause({ sessionID: agent.sessionId })
+			const result = await client.goal.pause({ sessionId: agent.sessionId })
 			setActiveGoal(normalizeComposerGoal(result.data))
 		} catch (err) {
 			log.error("goal.pause failed", { sessionId: agent.sessionId }, err)
@@ -1506,7 +1828,7 @@ function ChatInputSection({
 		if (!client?.goal?.resume) return
 		setGoalAction("resume")
 		try {
-			const result = await client.goal.resume({ sessionID: agent.sessionId })
+			const result = await client.goal.resume({ sessionId: agent.sessionId })
 			setActiveGoal(normalizeComposerGoal(result.data))
 		} catch (err) {
 			log.error("goal.resume failed", { sessionId: agent.sessionId }, err)
@@ -1521,7 +1843,7 @@ function ChatInputSection({
 		if (!client?.goal?.clear) return
 		setGoalAction("clear")
 		try {
-			await client.goal.clear({ sessionID: agent.sessionId })
+			await client.goal.clear({ sessionId: agent.sessionId })
 			setActiveGoal(null)
 		} catch (err) {
 			log.error("goal.clear failed", { sessionId: agent.sessionId }, err)
@@ -1532,25 +1854,22 @@ function ChatInputSection({
 
 	const handleSlashCommand = useCallback(
 		async (text: string): Promise<boolean> => {
-			const trimmed = text.trim()
-			if (!trimmed.startsWith("/")) return false
+			const parsed = parseComposerSlash(text)
+			if (!parsed) return false
 
-			const spaceIndex = trimmed.indexOf(" ")
-			const cmdName = spaceIndex === -1 ? trimmed.slice(1) : trimmed.slice(1, spaceIndex)
+			const { name, args } = parsed
 
 			// Product requirement: Desktop slash commands are limited to first-party
-			// entries. Compact executes immediately; Goal/Plan become footer trigger
-			// chips; Research stays as slash text so ACP can run it after a question.
-			switch (cmdName.toLowerCase()) {
+			// entries. Compact executes immediately; Goal becomes a footer trigger
+			// chip; /plan switches collaboration mode; Research stays as slash text.
+			switch (name) {
 				case "compact":
-					if (agent.directory && effectiveModel) {
+					if (agent.directory) {
 						const client = getProjectClient(agent.directory)
 						if (client) {
 							try {
 								await client.session.summarize({
-									sessionID: agent.sessionId,
-									providerID: effectiveModel.providerID,
-									modelID: effectiveModel.modelID,
+									sessionId: agent.sessionId,
 								})
 							} catch (err) {
 								log.error("session.summarize failed", { sessionId: agent.sessionId }, err)
@@ -1558,19 +1877,46 @@ function ChatInputSection({
 						}
 					}
 					return true
+				case "fork":
+					if (onForkFromTurn) {
+						try {
+							await onForkFromTurn()
+						} catch (err) {
+							log.error("slash /fork failed", { sessionId: agent.sessionId }, err)
+						}
+					}
+					return true
+				case "side": {
+					if (!args) {
+						slashCommandRef.current?.setText("/side ")
+						return true
+					}
+					await onStartSideQuestion?.(args)
+					return true
+				}
 				case "goal":
 					setActiveTrigger("goal")
 					return true
 				case "plan":
-					setActiveTrigger("plan")
+					changeCollaborationMode("plan")
+					return true
+				case "model":
+					setModelPickerOpen(true)
+					return true
+				case "skills":
+					setSkillPickerOpen(true)
 					return true
 				case "research":
 					return false
-				default:
-					return false
 			}
 		},
-		[agent.directory, agent.sessionId, effectiveModel],
+		[
+			agent.directory,
+			agent.sessionId,
+			changeCollaborationMode,
+			onForkFromTurn,
+			onStartSideQuestion,
+		],
 	)
 
 	const submitTriggeredPrompt = useCallback(
@@ -1585,7 +1931,7 @@ function ChatInputSection({
 					filename?: string
 					url: string
 				}
-			> = [{ type: "text", text: `/${trigger} ${text.trim()}` }]
+			> = [{ type: "text", text: trigger === "goal" ? goalPromptText(text) : `/${trigger} ${text.trim()}` }]
 			for (const file of files ?? []) {
 				parts.push({
 					type: "file",
@@ -1594,17 +1940,41 @@ function ChatInputSection({
 					url: file.url,
 				})
 			}
+			// Flush any still-debounced composer selection so the turn starts
+			// from exactly what the UI shows, then send only the explicit
+			// selection — never a fallback-resolved model, which would
+			// overwrite the persisted per-session choice.
+			await flushSelectionPersist()
 			await client.session.promptAsync({
-				sessionID: agent.sessionId,
+				sessionId: agent.sessionId,
 				parts,
-				model: effectiveModel
-					? { providerID: effectiveModel.providerID, modelID: effectiveModel.modelID }
+				model: selectedModel
+					? { providerID: selectedModel.providerID, modelID: selectedModel.modelID }
 					: undefined,
 				agent: selectedAgent || undefined,
 				variant: selectedVariant,
 			})
 		},
-		[agent.directory, agent.sessionId, effectiveModel, selectedAgent, selectedVariant],
+		[
+			agent.directory,
+			agent.sessionId,
+			flushSelectionPersist,
+			selectedModel,
+			selectedAgent,
+			selectedVariant,
+		],
+	)
+
+	const handleEditQueueItem = useCallback(
+		async (item: ComposerQueueItem) => {
+			try {
+				const text = await editQueueItem(item)
+				if (text) slashCommandRef.current?.setText(text)
+			} catch (err) {
+				log.error("edit queue item failed", { sessionId: agent.sessionId, queueItemId: item.id }, err)
+			}
+		},
+		[agent.sessionId, editQueueItem],
 	)
 
 	const handleSend = useCallback(
@@ -1615,7 +1985,7 @@ function ChatInputSection({
 				sending,
 				sessionId: agent.sessionId,
 			})
-			if (!text.trim() || (!onSendMessage && !activeTrigger) || sending) {
+			if (recoveryState?.recovery || recoveryState?.pending || !text.trim() || (!onSendMessage && !activeTrigger) || sending) {
 				log.warn("handleSend bailed", {
 					emptyText: !text.trim(),
 					noOnSendMessage: !onSendMessage,
@@ -1636,11 +2006,15 @@ function ChatInputSection({
 
 			setSending(true)
 			try {
-				if (effectiveModel && agent.directory) {
+				// Only an explicit composer selection may become the project's
+				// default model — a fallback-resolved model would poison the
+				// preference (and then every future fallback) with request
+				// slugs or defaults the user never chose.
+				if (selectedModel && agent.directory) {
 					appStore.set(setProjectModelAtom, {
 						directory: agent.directory,
 						model: {
-							...effectiveModel,
+							...selectedModel,
 							variant: selectedVariant,
 							agent: selectedAgent || undefined,
 						},
@@ -1672,8 +2046,12 @@ function ChatInputSection({
 						setTimeout(() => void refreshGoalStatus(), 1_200)
 					}
 				} else {
+					// Land any still-debounced selection before the turn, and
+					// send only the explicit selection — the server keeps the
+					// session's persisted model otherwise.
+					await flushSelectionPersist()
 					await onSendMessage?.(agent, finalText, {
-						model: effectiveModel ?? undefined,
+						model: selectedModel ?? undefined,
 						agentName: selectedAgent || undefined,
 						variant: selectedVariant,
 						files,
@@ -1693,15 +2071,18 @@ function ChatInputSection({
 				})
 			} catch (err) {
 				log.error("handleSend failed", { sessionId: agent.sessionId }, err)
+				throw err // PromptInput retains the text and attachments when submission rejects.
 			} finally {
 				setSending(false)
 			}
 		},
 		[
+			recoveryState,
 			onSendMessage,
 			sending,
 			agent,
-			effectiveModel,
+			selectedModel,
+			flushSelectionPersist,
 			selectedAgent,
 			selectedVariant,
 			clearDraft,
@@ -1712,10 +2093,17 @@ function ChatInputSection({
 			scrollRef,
 			diffComments,
 			setDiffComments,
+			collaborationMode,
 		],
 	)
 
-	const canSend = isConnected && !sending
+	const queuePlaceholder = isWorking
+		? queueItems.length > 0
+			? "Add to queue…"
+			: "Queue a follow-up…"
+		: "What would you like to do?"
+
+	const canSend = isConnected && !sending && !recoveryState?.recovery && !recoveryState?.pending
 
 	const handleStop = useCallback(() => {
 		if (onStop && isWorking) {
@@ -1851,7 +2239,7 @@ function ChatInputSection({
 				e.preventDefault()
 				handleSlashClose()
 				handleMentionClose()
-				setActiveTrigger((current) => (current === "plan" ? null : "plan"))
+				changeCollaborationMode(collaborationMode === "plan" ? "build" : "plan")
 				return
 			}
 
@@ -1866,7 +2254,7 @@ function ChatInputSection({
 				handleEscapeAbort()
 			}
 		},
-		[handleEscapeAbort, handleSlashClose, handleMentionClose],
+		[handleEscapeAbort, handleSlashClose, handleMentionClose, changeCollaborationMode, collaborationMode],
 	)
 
 	// Width constraint class: remove max-w when review panel is open
@@ -1901,23 +2289,6 @@ function ChatInputSection({
 						</div>
 					)}
 
-					{/* Pending permissions — tree-scoped: shows own OR any sub-agent's permission */}
-					{turns.length === 0 && effectivePermission && (
-						<div className="pb-2">
-								<PermissionItem
-									key={effectivePermission.request.id}
-									agent={agent}
-									permission={effectivePermission.request}
-									onApprove={handleApprovePermission}
-									onDeny={handleDenyPermission}
-									isConnected={isConnected}
-									isFromSubAgent={effectivePermission.sessionId !== agent.sessionId}
-								/>
-						</div>
-					)}
-
-					{/* When questions are pending, replace the input with a focused question flow.
-					    Tree-scoped: shows own OR any sub-agent's question. */}
 					{effectiveQuestion ? (
 						<ChatQuestionFlow
 							questions={[effectiveQuestion.request]}
@@ -1925,6 +2296,15 @@ function ChatInputSection({
 							onReply={handleReplyQuestion}
 							onReject={handleRejectQuestion}
 							disabled={!isConnected}
+						/>
+					) : effectivePermission ? (
+						<ChatPermissionFlow
+							agent={agent}
+							permission={effectivePermission.request}
+							onApprove={handleApprovePermission}
+							onDeny={handleDenyPermission}
+							disabled={!isConnected}
+							isFromSubAgent={effectivePermission.sessionId !== agent.sessionId}
 						/>
 					) : (
 						/* Input card — PromptInputProvider wraps everything,
@@ -1958,19 +2338,8 @@ function ChatInputSection({
 									onSelect={handleMentionSelect}
 									onClose={handleMentionClose}
 								/>
-								<ComposerStatusStack
-									goal={activeGoal}
-									goalAction={goalAction}
-									onEditGoal={handleEditGoal}
-									onPauseGoal={handlePauseGoal}
-									onResumeGoal={handleResumeGoal}
-									onClearGoal={handleClearGoal}
-								/>
 								<PromptInput
-									className={cn(
-										"devo-composer bg-background/95 shadow-[0_18px_52px_rgba(0,0,0,0.10)] dark:shadow-[0_18px_58px_rgba(0,0,0,0.34)]",
-										activeGoal && "rounded-t-none border-t-border/70",
-									)}
+									className="devo-composer bg-background/95 shadow-[0_8px_32px_rgba(0,0,0,0.05)] dark:shadow-[0_10px_36px_rgba(0,0,0,0.28)]"
 									accept="image/png,image/jpeg,image/gif,image/webp,application/pdf"
 									multiple
 									maxFileSize={10 * 1024 * 1024}
@@ -1979,6 +2348,23 @@ function ChatInputSection({
 											handleSend(message.text, message.files.length > 0 ? message.files : undefined)
 									}}
 								>
+									{recoveryState && <TurnRecoveryPanel state={recoveryState} />}
+                                    <ComposerStatusStack
+										goal={activeGoal}
+										goalAction={goalAction}
+										queueItems={queueItems}
+										draggingQueueItemId={draggingQueueItemId}
+										onEditGoal={handleEditGoal}
+										onPauseGoal={handlePauseGoal}
+										onResumeGoal={handleResumeGoal}
+										onClearGoal={handleClearGoal}
+										onSteerQueueItem={steerQueueItem}
+										onEditQueueItem={handleEditQueueItem}
+										onRemoveQueueItem={removeQueueItem}
+										onReorderQueueItem={reorderQueueItem}
+										onQueueDragStart={setDraggingQueueItemId}
+										onQueueDragEnd={() => setDraggingQueueItemId(null)}
+									/>
 									{/* Mention chips above the textarea */}
 									<ContextItems mentions={mentions} onRemove={handleMentionRemove} />
 									{/* Diff comment chips above the textarea */}
@@ -1996,15 +2382,34 @@ function ChatInputSection({
 										data-prompt-input
 										onKeyDown={handleTextareaKeyDown}
 										disabled={!isConnected}
-										placeholder={
-											isWorking ? "Send a follow-up message..." : "What would you like to do?"
-										}
+										placeholder={queuePlaceholder}
 									/>
 
 									{/* Toolbar inside the card — agent + model + variant selectors + submit */}
-									<PromptInputFooter>
+									<PromptInputFooter className="flex-wrap">
 										<PromptInputTools>
 											<AttachButton disabled={!isConnected} />
+											<ComposerPermissionPicker
+												value={permissionProfile}
+												onChange={handlePermissionProfileChange}
+												disabled={!isConnected}
+											/>
+											{collaborationMode === "plan" && (
+												<ComposerModeChip
+													variant="plan"
+													disabled={!isConnected}
+													onRemove={() => changeCollaborationMode("build")}
+												/>
+											)}
+											{activeTrigger === "goal" && (
+												<ComposerModeChip
+													variant="goal"
+													disabled={!isConnected}
+													onRemove={() => setActiveTrigger(null)}
+												/>
+											)}
+										</PromptInputTools>
+										<div className="ml-auto flex min-w-0 items-center gap-0.5">
 											<PromptToolbar
 												agents={devoAgents ?? []}
 												selectedAgent={selectedAgent}
@@ -2014,30 +2419,14 @@ function ChatInputSection({
 												effectiveModel={effectiveModel}
 												hasModelOverride={!!selectedModel}
 												onSelectModel={handleModelSelect}
+												modelPickerOpen={modelPickerOpen}
+												onModelPickerOpenChange={setModelPickerOpen}
 												selectedVariant={selectedVariant}
 												onSelectVariant={handleVariantSelect}
 												disabled={!isConnected}
 											/>
-											{activeTrigger && (
-												<ComposerTriggerChip
-													trigger={activeTrigger}
-													onRemove={() => setActiveTrigger(null)}
-												/>
-											)}
-										</PromptInputTools>
-										<PromptInputSubmit
-											disabled={!canSend}
-											status={isWorking ? "streaming" : undefined}
-											onStop={handleStop}
-											size={isWorking && currentTurnWorkSplit ? "xs" : "icon-sm"}
-										>
-											{isWorking && currentTurnWorkSplit ? (
-												<LiveTurnTimer
-													completedMs={currentTurnWorkSplit.completedMs}
-													activeStartMs={currentTurnWorkSplit.activeStartMs}
-												/>
-											) : undefined}
-										</PromptInputSubmit>
+											<ComposerSubmitControls isWorking={isWorking} isConnected={isConnected} canSend={canSend} onStop={handleStop} />
+										</div>
 									</PromptInputFooter>
 								</PromptInput>
 							</div>
@@ -2046,48 +2435,20 @@ function ChatInputSection({
 
 				</div>
 			</div>
+			<SkillPickerDialog
+				directory={agent.directory}
+				onOpenChange={setSkillPickerOpen}
+				onSelect={(skillName) => {
+					const ctrl = slashCommandRef.current
+					if (!ctrl) return
+					const current = ctrl.getText()
+					const insertion = `$${skillName} `
+					ctrl.setText(current.trim() ? `${current.replace(/\/skills\s*$/i, "").trimEnd()} ${insertion}` : insertion)
+				}}
+				open={skillPickerOpen}
+			/>
 
 		</>
-	)
-}
-
-// ============================================================
-// Live turn timer — ticks every second while the agent is working
-// ============================================================
-
-/**
- * Compact live timer that shows elapsed time from the user prompt to now.
- */
-function LiveTurnTimer({
-	completedMs,
-	activeStartMs,
-}: {
-	completedMs: number
-	activeStartMs: number | null
-}) {
-	const computeDisplay = useCallback(
-		() =>
-			formatWorkDuration(completedMs + (activeStartMs != null ? Date.now() - activeStartMs : 0)),
-		[completedMs, activeStartMs],
-	)
-
-	const [elapsed, setElapsed] = useState(computeDisplay)
-
-	useEffect(() => {
-		const tick = () => setElapsed(computeDisplay())
-		tick()
-		// Only tick if there's an active (in-progress) message
-		if (activeStartMs != null) {
-			const id = setInterval(tick, 1_000)
-			return () => clearInterval(id)
-		}
-	}, [computeDisplay, activeStartMs])
-
-	return (
-		<span className="inline-flex items-center gap-1.5 text-xs tabular-nums">
-			<SquareIcon className="size-3.5" />
-			{elapsed}
-		</span>
 	)
 }
 

@@ -46,7 +46,6 @@ use devo_protocol::RequestRole;
 use devo_protocol::normalize_tool_result_messages;
 
 use super::TokenInfo;
-use super::normalize;
 
 const SUMMARIZATION_PROMPT: &str = include_str!("../../prompts/compact/prompt.md");
 /// Tail preserve budget for [`CompactionKind::Auto`]: walk backward from the
@@ -91,6 +90,7 @@ pub enum CompactionError {
 ///
 /// Implementations are provided by the caller (e.g. the query loop) so that
 /// this module does not depend directly on a specific provider SDK.
+#[allow(clippy::double_must_use)]
 #[async_trait]
 pub trait HistorySummarizer: Send + Sync {
     /// Send `messages` (to-compact history followed by a developer compaction
@@ -197,27 +197,17 @@ pub async fn compact_history(
         return Ok(CompactAction::Skipped);
     }
 
-    // 1. Filter out Reason items.
-    let mut filtered = normalize::filter_reason(items);
-    normalize::pair_tool_call_items(&mut filtered);
-
-    // 2. Pick preserve strategy from compaction kind.
-    //    Auto: tail token window (may include assistant/tool items before the
-    //    latest user). Proactive: suffix from the latest user message only.
-    let (mut to_compact, mut preserved) = if config.kind == CompactionKind::Proactive {
-        (
-            filtered.clone(),
-            preserve_suffix_from_latest_user_message(&filtered),
-        )
+    // Never normalize away pending intents or sever a completed tool batch.
+    let proposed = if config.kind == CompactionKind::Proactive {
+        items.len() - preserve_suffix_from_latest_user_message(items).len()
     } else {
-        split_by_user_message_budget(&filtered, COMPACT_USER_MESSAGE_MAX_TOKENS)
+        split_by_user_message_budget(items, COMPACT_USER_MESSAGE_MAX_TOKENS)
+            .0
+            .len()
     };
-
-    // The split can sever ToolCall ↔ ToolCallOutput pairs: e.g. a ToolCall lands
-    // in `to_compact` while its ToolCallOutput falls into `preserved` (or vice
-    // versa). Re-run pairing on each half so neither side carries an orphan.
-    normalize::pair_tool_call_items(&mut to_compact);
-    normalize::pair_tool_call_items(&mut preserved);
+    let boundary = super::transactions::preserve_boundary(items, proposed);
+    let mut to_compact = items[..boundary].to_vec();
+    let mut preserved = items[boundary..].to_vec();
 
     if to_compact.is_empty() {
         // Nothing to compact — everything is within the preserve budget.
@@ -254,8 +244,14 @@ pub async fn compact_history(
                 }
                 // Move the newest to‑compact item into the preserve set
                 // so the summarizer receives less input on the next try.
-                let last = to_compact.pop().unwrap();
-                preserved.insert(0, last);
+                let boundary =
+                    super::transactions::preserve_boundary(&to_compact, to_compact.len() - 1);
+                let mut moved = to_compact.split_off(boundary);
+                moved.append(&mut preserved);
+                preserved = moved;
+                if to_compact.is_empty() {
+                    return Ok(CompactAction::Skipped);
+                }
                 continue;
             }
             Err(e) => {
@@ -355,7 +351,9 @@ fn split_by_user_message_budget(
 }
 
 fn summarizer_request_messages(to_compact: &[ResponseItem]) -> Vec<RequestMessage> {
-    let mut messages: Vec<RequestMessage> = to_compact.iter().map(RequestMessage::from).collect();
+    let without_digests = super::harness_digest_strip::exclude_harness_digests(to_compact);
+    let mut messages: Vec<RequestMessage> =
+        without_digests.iter().map(RequestMessage::from).collect();
     merge_consecutive_assistant_messages(&mut messages);
     normalize_tool_result_messages(&mut messages);
     messages.push(RequestMessage {
@@ -440,7 +438,8 @@ fn estimate_item_tokens(item: &ResponseItem) -> usize {
                     devo_protocol::ContentBlock::ProviderReasoning { .. }
                     | devo_protocol::ContentBlock::ToolUse { .. }
                     | devo_protocol::ContentBlock::HostedToolUse { .. }
-                    | devo_protocol::ContentBlock::ToolResult { .. } => continue,
+                    | devo_protocol::ContentBlock::ToolResult { .. }
+                    | devo_protocol::ContentBlock::Image { .. } => continue,
                 };
                 if text_blocks > 0 {
                     bytes += 1;
@@ -782,7 +781,7 @@ mod tests {
                 messages: Vec<RequestMessage>,
                 _cancel_token: Option<&CancellationToken>,
             ) -> Result<String, CompactionError> {
-                assert_eq!(messages.len(), 4);
+                assert_eq!(messages.len(), 3);
                 let last = messages
                     .last()
                     .expect("summarizer messages should not be empty");

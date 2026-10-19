@@ -1,7 +1,7 @@
 /**
  * Onboarding Step 2: Environment Check.
  *
- * Verifies the bundled Devo runtime used by the private stdio ACP child process.
+ * Verifies the bundled Devo runtime used by the private stdio Native child process.
  */
 
 import { Button } from "@devo/ui/components/button"
@@ -110,7 +110,7 @@ export function EnvironmentCheckStep({ onComplete }: EnvironmentCheckStepProps) 
 		<div className="flex h-full flex-col items-center justify-center px-6">
 			<div className="w-full max-w-lg space-y-6">
 				<div className="text-center">
-					<h2 className="text-xl font-semibold text-foreground">Environment Check</h2>
+					<h2 className="text-[22px] font-medium tracking-tight text-foreground">Environment Check</h2>
 					<p className="mt-1 text-sm text-muted-foreground">
 						Verifying your local setup is ready for Devo.
 					</p>

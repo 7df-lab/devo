@@ -1,17 +1,16 @@
 //! Transport-agnostic Devo server client: JSON-RPC request/response routing,
-//! server-initiated ACP client handlers, and notification demultiplexing.
+//! Native reverse-request handling, and notification demultiplexing.
 //!
 //! Both [`crate::stdio::StdioServerClient`] and [`crate::websocket::WebSocketServerClient`]
 //! delegate protocol logic here. Incoming messages are classified as:
 //!
 //! - **Server → client requests** (`id` + `method`): handled asynchronously; the
-//!   response echoes the same JSON-RPC `id` (see `fs/read`, permissions).
+//!   response echoes the same JSON-RPC `id`.
 //! - **Server responses** (`id` + `result`/`error`, no `method`): matched against
 //!   [`PendingResponses`] via numeric `id` to complete a client-initiated `request`.
 //! - **Notifications** (no `id`): forwarded on the notification channel.
 
 use std::collections::HashMap;
-use std::collections::HashSet;
 use std::path::PathBuf;
 use std::sync::Arc;
 use std::sync::OnceLock;
@@ -24,7 +23,6 @@ use anyhow::Context;
 use anyhow::Result;
 use anyhow::anyhow;
 use anyhow::bail;
-use chrono::Utc;
 use devo_protocol::*;
 use serde::Serialize;
 use serde::de::DeserializeOwned;
@@ -33,17 +31,44 @@ use tokio::sync::mpsc;
 use tokio::sync::oneshot;
 use tokio::time::timeout;
 
-use crate::acp_fs::handle_acp_fs_request;
-use crate::acp_permissions::AcpPendingPermissions;
-use crate::acp_permissions::handle_acp_request_permission;
-use crate::acp_permissions::resolve_acp_permission_response;
+use crate::native_approval::PendingApprovals;
+use crate::native_approval::discard_approval_request;
+use crate::native_approval::handle_approval_request;
+use crate::native_approval::resolve_approval_response;
+use devo_protocol::native::ids::SessionId as NativeSessionId;
+use devo_protocol::native::ids::TurnId as NativeTurnId;
 
-pub const ACP_PROMPT_STARTED_NOTIFICATION_METHOD: &str = "_devo/acp_prompt/started";
-pub const ACP_PROMPT_COMPLETED_NOTIFICATION_METHOD: &str = "_devo/acp_prompt/completed";
+fn native_session_id(session_id: SessionId) -> NativeSessionId {
+    NativeSessionId::from_string(session_id.to_string())
+}
+
+fn native_turn_id(turn_id: TurnId) -> NativeTurnId {
+    NativeTurnId::from_string(turn_id.to_string())
+}
 
 const SERVER_RESPONSE_TIMEOUT: Duration = Duration::from_secs(10);
+/// Cold-starting the managed `devo server` child can exceed the default RPC
+/// budget. Matches the Desktop stdio client's `INITIALIZE_REQUEST_TIMEOUT_MS`.
+const SERVER_INITIALIZE_TIMEOUT: Duration = Duration::from_secs(60);
 
-/// Synthetic notifications emitted when falling back to detached `session/prompt`.
+#[derive(Clone, Copy)]
+enum ServerResponseWait {
+    Standard,
+    Handshake,
+    Unbounded,
+}
+
+impl ServerResponseWait {
+    fn timeout(self) -> Option<Duration> {
+        match self {
+            Self::Standard => Some(SERVER_RESPONSE_TIMEOUT),
+            Self::Handshake => Some(SERVER_INITIALIZE_TIMEOUT),
+            Self::Unbounded => None,
+        }
+    }
+}
+
+/// Server notifications forwarded by the Native client transports.
 #[derive(Debug, Clone, PartialEq)]
 pub struct ServerNotificationMessage {
     pub method: String,
@@ -89,16 +114,29 @@ impl ClientWriter {
 pub(crate) struct ServerClientReaderState {
     writer: ClientWriter,
     pending: PendingResponses,
-    acp_pending_permissions: AcpPendingPermissions,
+    pending_approvals: PendingApprovals,
+    native_pending_user_inputs: NativePendingUserInputs,
     notifications_tx: mpsc::UnboundedSender<ServerNotificationMessage>,
 }
+
+/// Pending canonical `userInput/request` reverse requests: canonical
+/// `requestId` → JSON-RPC request id of the inbound server request
+/// (L2-DES-APP-008 DD-8).
+pub(crate) type NativePendingUserInputs = Arc<Mutex<HashMap<String, serde_json::Value>>>;
 
 pub(crate) struct ServerClientCore {
     writer: ClientWriter,
     pending: PendingResponses,
-    acp_pending_permissions: AcpPendingPermissions,
-    acp_agent_capabilities: Option<AcpAgentCapabilities>,
+    pending_approvals: PendingApprovals,
+    native_pending_user_inputs: NativePendingUserInputs,
     client_capabilities: AcpClientCapabilities,
+    /// Opt into native typed item events on initialize (L2-DES-APP-009).
+    /// Per-consumer until every first-party client handles typed shapes.
+    typed_items_opt_in: bool,
+    /// Declare the Native protocol surface on initialize (L2-DES-APP-009
+    /// DD-6). All first-party Devo clients opt in; external ACP clients use
+    /// the server's separate ACP adapter surface.
+    native_protocol_opt_in: bool,
     next_request_id: AtomicU64,
     notifications_rx: mpsc::UnboundedReceiver<ServerNotificationMessage>,
     notifications_tx: mpsc::UnboundedSender<ServerNotificationMessage>,
@@ -110,20 +148,31 @@ impl ServerClientCore {
         Self {
             writer,
             pending: Arc::new(Mutex::new(HashMap::new())),
-            acp_pending_permissions: Arc::new(Mutex::new(HashMap::new())),
-            acp_agent_capabilities: None,
+            pending_approvals: Arc::new(Mutex::new(HashMap::new())),
+            native_pending_user_inputs: Arc::new(Mutex::new(HashMap::new())),
             client_capabilities,
+            typed_items_opt_in: false,
+            native_protocol_opt_in: false,
             next_request_id: AtomicU64::new(1),
             notifications_rx,
             notifications_tx,
         }
     }
 
+    pub(crate) fn set_typed_items_opt_in(&mut self, opted_in: bool) {
+        self.typed_items_opt_in = opted_in;
+    }
+
+    pub(crate) fn set_native_protocol_opt_in(&mut self, opted_in: bool) {
+        self.native_protocol_opt_in = opted_in;
+    }
+
     pub(crate) fn reader_state(&self) -> ServerClientReaderState {
         ServerClientReaderState {
             writer: self.writer.clone(),
             pending: Arc::clone(&self.pending),
-            acp_pending_permissions: Arc::clone(&self.acp_pending_permissions),
+            pending_approvals: Arc::clone(&self.pending_approvals),
+            native_pending_user_inputs: Arc::clone(&self.native_pending_user_inputs),
             notifications_tx: self.notifications_tx.clone(),
         }
     }
@@ -137,15 +186,9 @@ impl ServerClientCore {
         Arc::clone(&self.pending)
     }
 
-    #[cfg(test)]
-    pub(crate) fn set_agent_capabilities_for_test(&mut self, capabilities: AcpAgentCapabilities) {
-        self.acp_agent_capabilities = Some(capabilities);
-    }
-
     pub(crate) async fn initialize(&mut self) -> Result<InitializeResult> {
-        let result: AcpInitializeResult = timeout(
-            SERVER_RESPONSE_TIMEOUT,
-            self.request(
+        let result: AcpInitializeResult = self
+            .request_with_wait(
                 ACP_INITIALIZE_METHOD,
                 AcpInitializeParams {
                     protocol_version: 1,
@@ -154,13 +197,38 @@ impl ServerClientCore {
                         AcpImplementation::new("devo", env!("CARGO_PKG_VERSION"))
                             .with_title("Devo"),
                     ),
-                    meta: None,
+                    // Opt-ins ride the `_meta.devo` extension object: the
+                    // Native protocol surface (L2-DES-APP-009 DD-6) routes
+                    // colliding method names to Native handlers; typed
+                    // items select native typed notifications. Both are
+                    // per-consumer until every first-party client migrates.
+                    meta: {
+                        let mut devo_ext = serde_json::Map::new();
+                        if self.native_protocol_opt_in {
+                            devo_ext.insert(
+                                devo_protocol::DEVO_PROTOCOL_META.to_string(),
+                                serde_json::Value::String(
+                                    devo_protocol::DEVO_PROTOCOL_NATIVE.to_string(),
+                                ),
+                            );
+                        }
+                        if self.typed_items_opt_in {
+                            devo_ext.insert(
+                                devo_protocol::DEVO_TYPED_ITEMS_META.to_string(),
+                                serde_json::Value::Bool(true),
+                            );
+                        }
+                        (!devo_ext.is_empty()).then(|| {
+                            devo_protocol::AcpMeta::from_iter([(
+                                devo_protocol::DEVO_EXTENSION_META.to_string(),
+                                serde_json::Value::Object(devo_ext),
+                            )])
+                        })
+                    },
                 },
-            ),
-        )
-        .await
-        .context("timed out waiting for initialize response from server")??;
-        self.acp_agent_capabilities = Some(result.agent_capabilities.clone());
+                ServerResponseWait::Handshake,
+            )
+            .await?;
         let meta = result.meta.as_ref();
         Ok(InitializeResult {
             server_name: result
@@ -191,131 +259,35 @@ impl ServerClientCore {
         })
     }
 
-    pub(crate) async fn session_start(
-        &mut self,
-        params: SessionStartParams,
-    ) -> Result<SessionStartResult> {
-        let result: AcpNewSessionResult = self
-            .request(
-                ACP_SESSION_NEW_METHOD,
-                AcpNewSessionParams {
-                    cwd: params.cwd.clone(),
-                    additional_directories: params.additional_directories.clone(),
-                    mcp_servers: Vec::new(),
-                    meta: None,
-                },
-            )
-            .await?;
-        let session = result
-            .meta
-            .as_ref()
-            .and_then(|meta| meta.get(DEVO_SESSION_META))
-            .cloned()
-            .map(serde_json::from_value)
-            .transpose()
-            .context("decode session metadata from ACP session/new response")?
-            .unwrap_or_else(|| acp_session_metadata_from_start_params(&params, result.session_id));
-        Ok(SessionStartResult { session })
-    }
-
-    pub(crate) async fn session_resume(
-        &mut self,
-        params: SessionResumeParams,
-    ) -> Result<SessionResumeResult> {
-        let sessions = self.session_list().await?;
-        let session = sessions
-            .into_iter()
-            .find(|session| session.session_id == params.session_id)
-            .with_context(|| {
-                format!(
-                    "session {} not found for ACP session/resume",
-                    params.session_id
-                )
-            })?;
-        let result: AcpResumeSessionResult = self
-            .request(
-                ACP_SESSION_RESUME_METHOD,
-                AcpResumeSessionParams {
-                    session_id: params.session_id,
-                    cwd: session.cwd.clone(),
-                    additional_directories: session.additional_directories.clone(),
-                    mcp_servers: Vec::new(),
-                    meta: None,
-                },
-            )
-            .await?;
-        Ok(result
-            .meta
-            .as_ref()
-            .and_then(|meta| meta.get(DEVO_SESSION_RESUME_META))
-            .cloned()
-            .map(serde_json::from_value)
-            .transpose()
-            .context("decode session resume metadata from ACP session/resume response")?
-            .unwrap_or_else(|| SessionResumeResult {
-                session,
-                latest_turn: None,
-                loaded_item_count: 0,
-                history_items: Vec::new(),
-                pending_texts: Vec::new(),
-            }))
-    }
-
-    pub(crate) async fn session_list(&mut self) -> Result<Vec<SessionMetadata>> {
-        let Some(capabilities) = self.acp_agent_capabilities.as_ref() else {
-            bail!("ACP initialize must complete before session/list");
-        };
-        if capabilities.session_capabilities.list.is_none() {
-            bail!("ACP agent does not advertise sessionCapabilities.list");
-        }
-
-        let mut cursor = None;
-        let mut seen_cursors = HashSet::new();
-        let mut sessions = Vec::new();
-        loop {
-            let result: AcpListSessionsResult = self
-                .request(
-                    ACP_SESSION_LIST_METHOD,
-                    AcpListSessionsParams {
-                        cwd: None,
-                        cursor,
-                        meta: None,
-                    },
-                )
-                .await?;
-            for session_info in result.sessions {
-                let session = session_info
-                    .meta
-                    .as_ref()
-                    .and_then(|meta| meta.get(DEVO_SESSION_META))
-                    .cloned()
-                    .map(serde_json::from_value)
-                    .transpose()
-                    .context("decode session metadata from ACP session/list response")?
-                    .unwrap_or_else(|| acp_session_metadata_from_session_info(&session_info));
-                sessions.push(session);
-            }
-            let Some(next_cursor) = result.next_cursor else {
-                break;
-            };
-            if !seen_cursors.insert(next_cursor.clone()) {
-                bail!("ACP session/list returned a repeated nextCursor");
-            }
-            cursor = Some(next_cursor);
-        }
-        Ok(sessions)
-    }
-
-    pub(crate) async fn request_devo<P, R>(&mut self, method: &str, params: P) -> Result<R>
+    pub(crate) async fn request<P, R>(&mut self, method: &str, params: P) -> Result<R>
     where
         P: Serialize,
         R: DeserializeOwned,
     {
-        let method = devo_extension_method(method);
-        self.request(&method, params).await
+        self.request_with_wait(method, params, ServerResponseWait::Standard)
+            .await
     }
 
-    pub(crate) async fn request<P, R>(&mut self, method: &str, params: P) -> Result<R>
+    async fn request_without_timeout<P, R>(&mut self, method: &str, params: P) -> Result<R>
+    where
+        P: Serialize,
+        R: DeserializeOwned,
+    {
+        self.request_with_wait(method, params, ServerResponseWait::Unbounded)
+            .await
+    }
+
+    async fn request_void<P: Serialize>(&mut self, method: &str, params: P) -> Result<()> {
+        let _: serde_json::Value = self.request(method, params).await?;
+        Ok(())
+    }
+
+    async fn request_with_wait<P, R>(
+        &mut self,
+        method: &str,
+        params: P,
+        wait: ServerResponseWait,
+    ) -> Result<R>
     where
         P: Serialize,
         R: DeserializeOwned,
@@ -331,19 +303,30 @@ impl ServerClientCore {
             return Err(error);
         }
 
-        let response = match timeout(SERVER_RESPONSE_TIMEOUT, response_rx).await {
-            Ok(Ok(response)) => response,
-            Ok(Err(error)) => {
-                self.pending.lock().await.remove(&request_id);
-                return Err(error)
-                    .with_context(|| format!("server dropped response for request {request_id}"));
-            }
-            Err(error) => {
-                self.pending.lock().await.remove(&request_id);
-                return Err(error).with_context(|| {
-                    format!("timed out waiting for server response to request {request_id}")
-                });
-            }
+        let response = match wait.timeout() {
+            Some(duration) => match timeout(duration, response_rx).await {
+                Ok(Ok(response)) => response,
+                Ok(Err(error)) => {
+                    self.pending.lock().await.remove(&request_id);
+                    return Err(error).with_context(|| {
+                        format!("server dropped response for request {request_id}")
+                    });
+                }
+                Err(error) => {
+                    self.pending.lock().await.remove(&request_id);
+                    return Err(error)
+                        .with_context(|| format!("{method} request {request_id} timed out"));
+                }
+            },
+            None => match response_rx.await {
+                Ok(response) => response,
+                Err(error) => {
+                    self.pending.lock().await.remove(&request_id);
+                    return Err(error).with_context(|| {
+                        format!("server dropped response for request {request_id}")
+                    });
+                }
+            },
         };
         if response.get("error").is_some() {
             bail_server_error(&response)?;
@@ -353,42 +336,429 @@ impl ServerClientCore {
         Ok(success.result)
     }
 
-    pub(crate) async fn turn_start(&mut self, params: TurnStartParams) -> Result<TurnStartResult> {
-        match self
-            .request_devo::<_, TurnStartResult>("turn/start", params.clone())
+    pub(crate) async fn turn_start_native(
+        &mut self,
+        session_id: SessionId,
+        input: Vec<devo_protocol::native::item::UserInput>,
+        idempotency_key: String,
+    ) -> Result<devo_protocol::native::rpc_turn::TurnStartResult> {
+        self.request(
+            "turn/start",
+            devo_protocol::native::rpc_turn::TurnStartParams {
+                session_id: native_session_id(session_id),
+                input,
+                client_user_message_id: None,
+                idempotency_key,
+            },
+        )
+        .await
+    }
+
+    pub(crate) async fn session_compact_start_native(
+        &mut self,
+        session_id: SessionId,
+    ) -> Result<devo_protocol::native::rpc_turn::TurnStartResult> {
+        self.request(
+            "session/compact/start",
+            devo_protocol::native::rpc_session::SessionCompactStartParams {
+                session_id: native_session_id(session_id),
+            },
+        )
+        .await
+    }
+
+    pub(crate) async fn session_rollback_preview_native(
+        &mut self,
+        session_id: SessionId,
+        user_turn_index: u32,
+        mode: devo_protocol::native::rpc_session::RollbackMode,
+    ) -> Result<devo_protocol::native::rpc_session::RestorePlan> {
+        self.request(
+            "session/rollback/preview",
+            devo_protocol::native::rpc_session::SessionRollbackPreviewParams {
+                session_id: native_session_id(session_id),
+                user_turn_index,
+                mode,
+            },
+        )
+        .await
+    }
+
+    pub(crate) async fn session_rollback_commit_native(
+        &mut self,
+        restore_plan_id: devo_protocol::native::ids::RestorePlanId,
+        expected_workspace_version: String,
+    ) -> Result<devo_protocol::native::rpc_session::SessionRollbackCommitResult> {
+        self.request(
+            "session/rollback/commit",
+            devo_protocol::native::rpc_session::SessionRollbackCommitParams {
+                restore_plan_id,
+                expected_workspace_version,
+            },
+        )
+        .await
+    }
+
+    pub(crate) async fn session_goal_update_native(
+        &mut self,
+        session_id: SessionId,
+        patch: devo_protocol::native::rpc_session::GoalPatch,
+        idempotency_key: String,
+    ) -> Result<devo_protocol::native::rpc_session::SessionGoalUpdateResult> {
+        self.request(
+            "session/goal/update",
+            devo_protocol::native::rpc_session::SessionGoalUpdateParams {
+                session_id: native_session_id(session_id),
+                expected_goal_id: None,
+                patch,
+                idempotency_key,
+            },
+        )
+        .await
+    }
+
+    pub(crate) async fn session_new_native(
+        &mut self,
+        cwd: std::path::PathBuf,
+        idempotency_key: String,
+    ) -> Result<devo_protocol::native::rpc_session::SessionNewResult> {
+        self.request(
+            "session/new",
+            devo_protocol::native::rpc_session::SessionNewParams {
+                cwd,
+                idempotency_key,
+            },
+        )
+        .await
+    }
+
+    pub(crate) async fn session_list_native(
+        &mut self,
+        params: devo_protocol::native::rpc_session::SessionListParams,
+    ) -> Result<devo_protocol::native::rpc_session::SessionListResult> {
+        self.request("session/list", params).await
+    }
+
+    pub(crate) async fn session_delete_native(&mut self, session_id: SessionId) -> Result<()> {
+        self.request_void(
+            "session/delete",
+            devo_protocol::native::rpc_session::SessionDeleteParams {
+                session_id: native_session_id(session_id),
+            },
+        )
+        .await
+    }
+
+    pub(crate) async fn session_resume_native(
+        &mut self,
+        session_id: SessionId,
+    ) -> Result<devo_protocol::native::rpc_session::SessionResumeResult> {
+        self.request(
+            "session/resume",
+            devo_protocol::native::rpc_session::SessionResumeParams {
+                session_id: native_session_id(session_id),
+            },
+        )
+        .await
+    }
+
+    pub(crate) async fn session_items_list_native(
+        &mut self,
+        session_id: SessionId,
+        cursor: Option<String>,
+        limit: Option<u32>,
+    ) -> Result<devo_protocol::native::page::Page<devo_protocol::native::item::ItemEnvelope>> {
+        self.request(
+            "session/items/list",
+            devo_protocol::native::rpc_session::SessionItemsListParams {
+                session_id: native_session_id(session_id),
+                turn_id: None,
+                page: devo_protocol::native::page::PageParams { cursor, limit },
+            },
+        )
+        .await
+    }
+
+    pub(crate) async fn session_turns_list_native(
+        &mut self,
+        session_id: SessionId,
+        cursor: Option<String>,
+        limit: Option<u32>,
+    ) -> Result<devo_protocol::native::page::Page<devo_protocol::native::turn::Turn>> {
+        self.request(
+            "session/turns/list",
+            devo_protocol::native::rpc_session::SessionTurnsListParams {
+                session_id: native_session_id(session_id),
+                page: devo_protocol::native::page::PageParams { cursor, limit },
+            },
+        )
+        .await
+    }
+
+    pub(crate) async fn turn_read_native(
+        &mut self,
+        session_id: SessionId,
+        turn_id: TurnId,
+    ) -> Result<devo_protocol::native::rpc_turn::TurnReadResult> {
+        self.request(
+            "turn/read",
+            devo_protocol::native::rpc_turn::TurnReadParams {
+                session_id: native_session_id(session_id),
+                turn_id: native_turn_id(turn_id),
+            },
+        )
+        .await
+    }
+
+    pub(crate) async fn turn_items_list_native(
+        &mut self,
+        session_id: SessionId,
+        turn_id: TurnId,
+        cursor: Option<String>,
+        limit: Option<u32>,
+    ) -> Result<devo_protocol::native::page::Page<devo_protocol::native::item::ItemEnvelope>> {
+        self.request(
+            "session/items/list",
+            devo_protocol::native::rpc_session::SessionItemsListParams {
+                session_id: native_session_id(session_id),
+                turn_id: Some(native_turn_id(turn_id)),
+                page: devo_protocol::native::page::PageParams { cursor, limit },
+            },
+        )
+        .await
+    }
+
+    pub(crate) async fn session_fork_native(
+        &mut self,
+        session_id: SessionId,
+        at_turn_id: Option<TurnId>,
+    ) -> Result<devo_protocol::native::rpc_session::SessionForkResult> {
+        self.session_fork_native_with_cut(session_id, at_turn_id, None)
             .await
-        {
-            Ok(result) => Ok(result),
-            Err(error) if is_method_not_found_error(&error) => {
-                self.turn_start_acp_prompt_detached(params).await?;
-                Ok(TurnStartResult::Started {
-                    turn_id: TurnId::new(),
-                    status: TurnStatus::Running,
-                    accepted_at: Utc::now(),
-                })
-            }
-            Err(error) => Err(error),
+    }
+
+    pub(crate) async fn session_fork_native_with_cut(
+        &mut self,
+        session_id: SessionId,
+        at_turn_id: Option<TurnId>,
+        cut: Option<devo_protocol::native::rpc_session::SessionForkCut>,
+    ) -> Result<devo_protocol::native::rpc_session::SessionForkResult> {
+        self.request(
+            "session/fork",
+            devo_protocol::native::rpc_session::SessionForkParams {
+                session_id: native_session_id(session_id),
+                at_turn_id: at_turn_id.map(native_turn_id),
+                cut,
+            },
+        )
+        .await
+    }
+
+    pub(crate) async fn session_title_update_native(
+        &mut self,
+        session_id: SessionId,
+        title: String,
+    ) -> Result<devo_protocol::native::rpc_session::SessionMetadataUpdateResult> {
+        self.request(
+            "session/metadata/update",
+            devo_protocol::native::rpc_session::SessionMetadataUpdateParams {
+                session_id: native_session_id(session_id),
+                expected_version: 0,
+                title: devo_protocol::native::patch::PatchField::Value(title),
+                model: None,
+                model_binding_id: None,
+                settings: None,
+            },
+        )
+        .await
+    }
+
+    pub(crate) async fn session_goal_set_native(
+        &mut self,
+        session_id: SessionId,
+        objective: String,
+        token_budget: Option<u64>,
+        if_exists: devo_protocol::native::rpc_session::GoalIfExists,
+        idempotency_key: String,
+    ) -> Result<devo_protocol::native::rpc_session::SessionGoalSetResult> {
+        self.request(
+            "session/goal/set",
+            devo_protocol::native::rpc_session::SessionGoalSetParams {
+                session_id: native_session_id(session_id),
+                objective,
+                token_budget,
+                if_exists,
+                idempotency_key,
+            },
+        )
+        .await
+    }
+
+    pub(crate) async fn session_goal_read_native(
+        &mut self,
+        session_id: SessionId,
+    ) -> Result<devo_protocol::native::rpc_session::SessionGoalReadResult> {
+        self.request(
+            "session/goal/read",
+            devo_protocol::native::rpc_session::SessionGoalReadParams {
+                session_id: native_session_id(session_id),
+            },
+        )
+        .await
+    }
+
+    pub(crate) async fn session_goal_transition_native(
+        &mut self,
+        session_id: SessionId,
+        expected_goal_id: &devo_protocol::native::ids::GoalId,
+        transition: GoalLifecycleTransition,
+    ) -> Result<Option<devo_protocol::native::goal::Goal>> {
+        let method = match transition {
+            GoalLifecycleTransition::Pause => "session/goal/pause",
+            GoalLifecycleTransition::Resume => "session/goal/resume",
+            GoalLifecycleTransition::Complete => "session/goal/complete",
+            GoalLifecycleTransition::Cancel => "session/goal/cancel",
+            GoalLifecycleTransition::Clear => "session/goal/clear",
+        };
+        let params = devo_protocol::native::rpc_session::SessionGoalTransitionParams {
+            session_id: native_session_id(session_id),
+            expected_goal_id: *expected_goal_id,
+        };
+        if matches!(transition, GoalLifecycleTransition::Clear) {
+            let _: serde_json::Value = self.request(method, params).await?;
+            return Ok(None);
         }
+        let result: devo_protocol::native::rpc_session::SessionGoalTransitionResult =
+            self.request(method, params).await?;
+        Ok(Some(result.goal))
+    }
+
+    pub(crate) async fn session_interrupt_native(
+        &mut self,
+        scope: devo_protocol::native::rpc_session::SessionInterruptScope,
+    ) -> Result<devo_protocol::native::rpc_session::SessionInterruptResult> {
+        self.request(
+            "session/interrupt",
+            devo_protocol::native::rpc_session::SessionInterruptParams { scope },
+        )
+        .await
+    }
+
+    pub(crate) async fn agent_list_native(
+        &mut self,
+        session_id: SessionId,
+    ) -> Result<devo_protocol::native::rpc_turn::AgentListResult> {
+        self.request(
+            "agent/list",
+            devo_protocol::native::rpc_turn::AgentListParams {
+                session_id: Some(native_session_id(session_id)),
+            },
+        )
+        .await
+    }
+
+    pub(crate) async fn agent_cancel_native(
+        &mut self,
+        item_id: &devo_protocol::native::ids::ItemId,
+    ) -> Result<()> {
+        self.request_void(
+            "agent/cancel",
+            devo_protocol::native::rpc_turn::AgentCancelParams { item_id: *item_id },
+        )
+        .await
+    }
+
+    pub(crate) async fn agent_message_native(
+        &mut self,
+        item_id: &devo_protocol::native::ids::ItemId,
+        input: Vec<devo_protocol::native::item::UserInput>,
+    ) -> Result<()> {
+        self.request_void(
+            "agent/message",
+            devo_protocol::native::rpc_turn::AgentMessageParams {
+                item_id: *item_id,
+                input,
+            },
+        )
+        .await
+    }
+
+    pub(crate) async fn agent_read_native(
+        &mut self,
+        item_id: &devo_protocol::native::ids::ItemId,
+    ) -> Result<devo_protocol::native::rpc_turn::AgentReadResult> {
+        self.request(
+            "agent/read",
+            devo_protocol::native::rpc_turn::AgentReadParams { item_id: *item_id },
+        )
+        .await
+    }
+
+    pub(crate) async fn task_start_process_native(
+        &mut self,
+        session_id: SessionId,
+        command: String,
+        cwd: Option<std::path::PathBuf>,
+        idempotency_key: String,
+    ) -> Result<devo_protocol::native::rpc_turn::TaskStartResult> {
+        self.request(
+            "task/start",
+            devo_protocol::native::rpc_turn::TaskStartParams::Process {
+                session_id: native_session_id(session_id),
+                command,
+                cwd,
+                idempotency_key,
+            },
+        )
+        .await
+    }
+
+    pub(crate) async fn task_start_agent_native(
+        &mut self,
+        params: devo_protocol::native::rpc_turn::TaskStartParams,
+    ) -> Result<devo_protocol::native::rpc_turn::TaskStartResult> {
+        self.request("task/start", params).await
+    }
+
+    pub(crate) async fn task_interrupt_native(
+        &mut self,
+        item_id: &devo_protocol::native::ids::ItemId,
+    ) -> Result<()> {
+        self.request_void(
+            "task/interrupt",
+            devo_protocol::native::rpc_turn::TaskInterruptParams { item_id: *item_id },
+        )
+        .await
     }
 
     pub(crate) async fn approval_respond(&mut self, params: ApprovalResponseParams) -> Result<()> {
-        if let Some((response, notification)) =
-            resolve_acp_permission_response(&self.acp_pending_permissions, &params).await
-        {
+        if let Some(response) = resolve_approval_response(&self.pending_approvals, &params).await {
             self.writer.send_value(response)?;
-            let _ = self.notifications_tx.send(notification);
             return Ok(());
         }
-        bail!("no pending ACP permission request exists for approval response")
+        bail!("no pending Native approval request exists for approval response")
     }
 
     pub(crate) async fn request_user_input_respond(
         &mut self,
-        params: RequestUserInputRespondParams,
+        request_id: String,
+        response: RequestUserInputResponse,
     ) -> Result<()> {
-        let _: serde_json::Value = self
-            .request_devo("request_user_input/respond", params)
-            .await?;
+        let pending_request_id = self
+            .native_pending_user_inputs
+            .lock()
+            .await
+            .remove(request_id.as_str())
+            .ok_or_else(|| anyhow!("no pending canonical user-input request exists"))?;
+        let answer = devo_protocol::native::methods::UserInputRespondParams {
+            request_id,
+            answers: serde_json::to_value(&response.answers).expect("serialize user input answers"),
+        };
+        let response = devo_protocol::acp_success_response(
+            pending_request_id,
+            serde_json::to_value(answer).expect("serialize canonical user input answer"),
+        );
+        self.writer.send_value(response)?;
         Ok(())
     }
 
@@ -396,410 +766,239 @@ impl ServerClientCore {
         self.notifications_rx.recv().await
     }
 
-    pub(crate) async fn recv_client_event(&mut self) -> Result<Option<crate::ClientEvent>> {
-        let Some(notification) = self.recv_notification().await else {
-            return Ok(None);
-        };
-        crate::events::client_event_from_notification(&notification)
-    }
-
-    pub(crate) async fn recv_event(&mut self) -> Result<Option<(String, ServerEvent)>> {
-        let Some(notification) = self.recv_notification().await else {
-            return Ok(None);
-        };
-        let ServerNotificationMessage { method, params } = notification;
-        let event = serde_json::from_value(params)
-            .with_context(|| format!("failed to decode server event for method {method}"))?;
-        Ok(Some((method, event)))
-    }
-
     pub(crate) async fn shutdown(&self) {
         self.writer.close();
     }
 
-    pub(crate) async fn agent_list(&mut self, params: AgentListParams) -> Result<AgentListResult> {
-        self.request_devo("agent/list", params).await
-    }
-
-    pub(crate) async fn agent_spawn(
+    pub(crate) async fn session_settings_update(
         &mut self,
-        params: SpawnAgentParams,
-    ) -> Result<SpawnAgentResult> {
-        self.request_devo("agent/spawn", params).await
+        session_id: SessionId,
+        patch: devo_protocol::native::rpc_session::SessionSettingsPatch,
+    ) -> Result<devo_protocol::native::rpc_session::SessionMetadataUpdateResult> {
+        self.request(
+            "session/metadata/update",
+            devo_protocol::native::rpc_session::SessionMetadataUpdateParams {
+                session_id: native_session_id(session_id),
+                expected_version: 0,
+                title: devo_protocol::native::patch::PatchField::Missing,
+                model: None,
+                model_binding_id: None,
+                settings: Some(patch),
+            },
+        )
+        .await
     }
 
-    pub(crate) async fn agent_close(
+    pub(crate) async fn session_model_update(
         &mut self,
-        params: CloseAgentParams,
-    ) -> Result<CloseAgentResult> {
-        self.request_devo("agent/close", params).await
-    }
-
-    pub(crate) async fn session_title_update(
-        &mut self,
-        params: SessionTitleUpdateParams,
-    ) -> Result<SessionTitleUpdateResult> {
-        self.request_devo("session/title/update", params).await
-    }
-
-    pub(crate) async fn session_delete(
-        &mut self,
-        params: AcpDeleteSessionParams,
-    ) -> Result<AcpDeleteSessionResult> {
-        self.request(ACP_SESSION_DELETE_METHOD, params).await
-    }
-
-    pub(crate) async fn session_metadata_update(
-        &mut self,
-        params: SessionMetadataUpdateParams,
-    ) -> Result<SessionMetadataUpdateResult> {
-        self.request_devo("session/metadata/update", params).await
-    }
-
-    pub(crate) async fn session_permissions_update(
-        &mut self,
-        params: SessionPermissionsUpdateParams,
-    ) -> Result<SessionPermissionsUpdateResult> {
-        self.request_devo("session/permissions/update", params)
-            .await
-    }
-
-    pub(crate) async fn session_compaction_update(
-        &mut self,
-        params: SessionCompactionUpdateParams,
-    ) -> Result<SessionCompactionUpdateResult> {
-        self.request_devo("session/compaction/update", params).await
-    }
-
-    pub(crate) async fn session_sandbox_profile_update(
-        &mut self,
-        params: SessionSandboxProfileUpdateParams,
-    ) -> Result<SessionSandboxProfileUpdateResult> {
-        self.request_devo("session/sandbox_profile/update", params)
-            .await
-    }
-
-    pub(crate) async fn session_compact(
-        &mut self,
-        params: SessionCompactParams,
-    ) -> Result<TurnStartResult> {
-        self.request_devo("session/compact", params).await
-    }
-
-    pub(crate) async fn session_cancel(
-        &mut self,
-        params: AcpCancelParams,
-    ) -> Result<AcpEmptyResult> {
-        self.request(ACP_SESSION_CANCEL_METHOD, params).await
-    }
-
-    pub(crate) async fn goal_create(
-        &mut self,
-        params: GoalCreateParams,
-    ) -> Result<GoalCreateResult> {
-        self.request_devo("goal/create", params).await
-    }
-
-    pub(crate) async fn goal_set(&mut self, params: GoalSetParams) -> Result<GoalSetResult> {
-        self.request_devo("goal/set", params).await
-    }
-
-    pub(crate) async fn goal_status(
-        &mut self,
-        params: GoalStatusParams,
-    ) -> Result<GoalStatusResult> {
-        self.request_devo("goal/status", params).await
-    }
-
-    pub(crate) async fn goal_pause(
-        &mut self,
-        params: GoalSetStatusParams,
-    ) -> Result<GoalSetStatusResult> {
-        self.request_devo("goal/pause", params).await
-    }
-
-    pub(crate) async fn goal_resume(
-        &mut self,
-        params: GoalSetStatusParams,
-    ) -> Result<GoalSetStatusResult> {
-        self.request_devo("goal/resume", params).await
-    }
-
-    pub(crate) async fn goal_complete(
-        &mut self,
-        params: GoalSetStatusParams,
-    ) -> Result<GoalSetStatusResult> {
-        self.request_devo("goal/complete", params).await
-    }
-
-    pub(crate) async fn goal_clear(&mut self, params: GoalClearParams) -> Result<GoalClearResult> {
-        self.request_devo("goal/clear", params).await
-    }
-
-    pub(crate) async fn session_fork(
-        &mut self,
-        params: SessionForkParams,
-    ) -> Result<SessionForkResult> {
-        self.request_devo("session/fork", params).await
-    }
-
-    pub(crate) async fn session_rollback(
-        &mut self,
-        params: SessionRollbackParams,
-    ) -> Result<SessionRollbackResult> {
-        self.request_devo("session/rollback", params).await
-    }
-
-    pub(crate) async fn skills_list(&mut self, params: SkillListParams) -> Result<SkillListResult> {
-        self.request_devo("skills/list", params).await
-    }
-
-    pub(crate) async fn skills_changed(
-        &mut self,
-        params: SkillChangedParams,
-    ) -> Result<SkillChangedResult> {
-        self.request_devo("skills/changed", params).await
-    }
-
-    pub(crate) async fn skills_set_enabled(
-        &mut self,
-        params: SkillSetEnabledParams,
-    ) -> Result<SkillSetEnabledResult> {
-        self.request_devo("skills/set_enabled", params).await
+        session_id: SessionId,
+        model: Option<String>,
+        model_binding_id: Option<String>,
+        reasoning_effort_selection: Option<String>,
+        collaboration_mode: Option<devo_protocol::CollaborationMode>,
+    ) -> Result<devo_protocol::native::rpc_session::SessionMetadataUpdateResult> {
+        let settings = if reasoning_effort_selection.is_some() || collaboration_mode.is_some() {
+            Some(devo_protocol::native::rpc_session::SessionSettingsPatch {
+                reasoning_effort: reasoning_effort_selection,
+                mode: collaboration_mode.and_then(|mode| {
+                    serde_json::to_value(mode)
+                        .ok()
+                        .and_then(|value| value.as_str().map(str::to_string))
+                }),
+                ..Default::default()
+            })
+        } else {
+            None
+        };
+        self.request(
+            "session/metadata/update",
+            devo_protocol::native::rpc_session::SessionMetadataUpdateParams {
+                session_id: native_session_id(session_id),
+                expected_version: 0,
+                title: devo_protocol::native::patch::PatchField::Missing,
+                model: model.map(|slug| devo_protocol::native::model::ModelBinding {
+                    // The server resolves routing from the slug/binding; the
+                    // provider label is response-side information.
+                    provider: String::new(),
+                    model: slug,
+                    variant: None,
+                    reasoning_effort: None,
+                }),
+                model_binding_id,
+                settings,
+            },
+        )
+        .await
     }
 
     pub(crate) async fn mcp_list(
         &mut self,
-        params: devo_protocol::canonical::rpc_admin::McpListParams,
-    ) -> Result<devo_protocol::canonical::rpc_admin::McpListResult> {
-        self.request_devo("mcp/list", params).await
+        params: devo_protocol::native::rpc_admin::McpListParams,
+    ) -> Result<devo_protocol::native::rpc_admin::McpListResult> {
+        self.request("mcp/list", params).await
     }
 
     pub(crate) async fn mcp_tools(
         &mut self,
-        params: devo_protocol::canonical::rpc_admin::McpToolsParams,
-    ) -> Result<devo_protocol::canonical::rpc_admin::McpToolsResult> {
-        self.request_devo("mcp/tools", params).await
+        params: devo_protocol::native::rpc_admin::McpToolsParams,
+    ) -> Result<devo_protocol::native::rpc_admin::McpToolsResult> {
+        self.request("mcp/tools", params).await
     }
 
     pub(crate) async fn mcp_set_enabled(
         &mut self,
-        params: devo_protocol::canonical::rpc_admin::McpSetEnabledParams,
-    ) -> Result<devo_protocol::canonical::rpc_admin::McpSetEnabledResult> {
-        self.request_devo("mcp/set_enabled", params).await
+        params: devo_protocol::native::rpc_admin::McpSetEnabledParams,
+    ) -> Result<devo_protocol::native::rpc_admin::McpSetEnabledResult> {
+        self.request("mcp/set_enabled", params).await
     }
 
-    pub(crate) async fn model_catalog(
+    pub(crate) async fn model_list_native(
         &mut self,
-        params: ModelCatalogParams,
-    ) -> Result<ModelCatalogResult> {
-        self.request_devo("model/catalog", params).await
+    ) -> Result<devo_protocol::native::rpc_admin::ModelListResult> {
+        self.request(
+            "model/list",
+            devo_protocol::native::rpc_admin::ModelListParams {},
+        )
+        .await
     }
 
-    pub(crate) async fn model_saved(
+    pub(crate) async fn provider_list(
         &mut self,
-        params: ModelSavedParams,
-    ) -> Result<ModelSavedResult> {
-        self.request_devo("model/saved", params).await
+    ) -> Result<devo_protocol::native::rpc_admin::ProviderListResult> {
+        self.request(
+            "provider/list",
+            devo_protocol::native::rpc_admin::ProviderListParams {},
+        )
+        .await
     }
 
-    pub(crate) async fn provider_vendor_list(
+    pub(crate) async fn provider_upsert(
         &mut self,
-        params: ProviderVendorListParams,
-    ) -> Result<ProviderVendorListResult> {
-        self.request_devo("provider/list", params).await
+        params: devo_protocol::native::rpc_admin::ProviderUpsertParams,
+    ) -> Result<devo_protocol::native::rpc_admin::ProviderUpsertResult> {
+        self.request("provider/upsert", params).await
     }
 
-    pub(crate) async fn provider_vendor_upsert(
+    pub(crate) async fn provider_disconnect(
         &mut self,
-        params: ProviderVendorUpsertParams,
-    ) -> Result<ProviderVendorUpsertResult> {
-        self.request_devo("provider/upsert", params).await
+        params: devo_protocol::native::rpc_admin::ProviderDisconnectParams,
+    ) -> Result<devo_protocol::native::rpc_admin::ProviderDisconnectResult> {
+        self.request("provider/disconnect", params).await
+    }
+
+    pub(crate) async fn provider_model_remove(
+        &mut self,
+        params: devo_protocol::native::rpc_admin::ProviderModelRemoveParams,
+    ) -> Result<devo_protocol::native::rpc_admin::ProviderModelRemoveResult> {
+        self.request("provider/model/remove", params).await
     }
 
     pub(crate) async fn provider_validate(
         &mut self,
-        params: ProviderValidateParams,
-    ) -> Result<ProviderValidateResult> {
-        self.request_devo("provider/validate", params).await
+        params: devo_protocol::native::rpc_admin::ProviderValidateParams,
+    ) -> Result<devo_protocol::native::rpc_admin::ProviderValidateResult> {
+        self.request_without_timeout("provider/validate", params)
+            .await
+    }
+
+    pub(crate) async fn provider_discover(
+        &mut self,
+        params: devo_protocol::native::rpc_admin::ProviderDiscoverParams,
+    ) -> Result<devo_protocol::native::rpc_admin::ProviderDiscoverResult> {
+        self.request_without_timeout("provider/discover", params)
+            .await
     }
 
     pub(crate) async fn command_exec(
         &mut self,
         params: CommandExecParams,
     ) -> Result<CommandExecResult> {
-        self.request_devo("command/exec", params).await
-    }
-
-    pub(crate) async fn command_exec_write(
-        &mut self,
-        params: CommandExecWriteParams,
-    ) -> Result<CommandExecWriteResult> {
-        self.request_devo("command/exec/write", params).await
-    }
-
-    pub(crate) async fn command_exec_resize(
-        &mut self,
-        params: CommandExecResizeParams,
-    ) -> Result<CommandExecResizeResult> {
-        self.request_devo("command/exec/resize", params).await
-    }
-
-    pub(crate) async fn command_exec_terminate(
-        &mut self,
-        params: CommandExecTerminateParams,
-    ) -> Result<CommandExecTerminateResult> {
-        self.request_devo("command/exec/terminate", params).await
-    }
-
-    pub(crate) async fn turn_shell_command(
-        &mut self,
-        params: ShellCommandParams,
-    ) -> Result<ShellCommandResult> {
-        self.request_devo("turn/shell_command", params).await
-    }
-
-    pub(crate) async fn turn_interrupt(
-        &mut self,
-        params: TurnInterruptParams,
-    ) -> Result<TurnInterruptResult> {
-        self.request_devo("turn/interrupt", params).await
+        self.request("command/exec", params).await
     }
 
     pub(crate) async fn session_queue_push(
         &mut self,
-        params: canonical::rpc_turn::SessionQueuePushParams,
-    ) -> Result<canonical::rpc_turn::SessionQueuePushResult> {
-        self.request_devo("session/queue/push", params).await
+        params: native::rpc_turn::SessionQueuePushParams,
+    ) -> Result<native::rpc_turn::SessionQueuePushResult> {
+        self.request("session/queue/push", params).await
     }
 
     pub(crate) async fn session_queue_list(
         &mut self,
-        params: canonical::rpc_turn::SessionQueueListParams,
-    ) -> Result<canonical::rpc_turn::SessionQueueListResult> {
-        self.request_devo("session/queue/list", params).await
+        params: native::rpc_turn::SessionQueueListParams,
+    ) -> Result<native::rpc_turn::SessionQueueListResult> {
+        self.request("session/queue/list", params).await
     }
 
     pub(crate) async fn session_queue_update(
         &mut self,
-        params: canonical::rpc_turn::SessionQueueUpdateParams,
-    ) -> Result<canonical::rpc_turn::SessionQueueUpdateResult> {
-        self.request_devo("session/queue/update", params).await
+        params: native::rpc_turn::SessionQueueUpdateParams,
+    ) -> Result<native::rpc_turn::SessionQueueUpdateResult> {
+        self.request("session/queue/update", params).await
     }
 
     pub(crate) async fn session_queue_remove(
         &mut self,
-        params: canonical::rpc_turn::SessionQueueRemoveParams,
-    ) -> Result<canonical::rpc_turn::SessionQueueRemoveResult> {
-        self.request_devo("session/queue/remove", params).await
+        params: native::rpc_turn::SessionQueueRemoveParams,
+    ) -> Result<native::rpc_turn::SessionQueueRemoveResult> {
+        self.request("session/queue/remove", params).await
     }
 
-    pub(crate) async fn session_queue_steer(
+    pub(crate) async fn turn_steer(
         &mut self,
-        params: canonical::rpc_turn::SessionQueueSteerParams,
-    ) -> Result<canonical::rpc_turn::SessionQueueSteerResult> {
-        self.request_devo("session/queue/steer", params).await
+        params: native::rpc_turn::TurnSteerParams,
+    ) -> Result<native::rpc_turn::TurnSteerResult> {
+        self.request("turn/steer", params).await
     }
 
     pub(crate) async fn subscription_create(
         &mut self,
-        params: canonical::event::SubscriptionCreateParams,
-    ) -> Result<canonical::event::SubscriptionCreateResult> {
-        self.request_devo("subscription/create", params).await
+        params: native::event::SubscriptionCreateParams,
+    ) -> Result<native::event::SubscriptionCreateResult> {
+        self.request("subscription/create", params).await
     }
 
-    pub(crate) async fn reference_search_start(
+    pub(crate) async fn search_start(
         &mut self,
-        params: ReferenceSearchStartParams,
-    ) -> Result<ReferenceSearchStartResult> {
-        self.request_devo("search/start", params).await
+        cwd: Option<std::path::PathBuf>,
+        query: String,
+    ) -> Result<devo_protocol::native::rpc_search::SearchSnapshot> {
+        let result: devo_protocol::native::rpc_search::SearchStartResult = self
+            .request(
+                "search/start",
+                devo_protocol::native::rpc_search::SearchStartParams { cwd, query },
+            )
+            .await?;
+        Ok(result.snapshot)
     }
 
-    pub(crate) async fn reference_search_update(
+    pub(crate) async fn search_update(
         &mut self,
-        params: ReferenceSearchUpdateParams,
-    ) -> Result<ReferenceSearchUpdateResult> {
-        self.request_devo("search/update", params).await
+        search_id: devo_protocol::ReferenceSearchId,
+        query: String,
+    ) -> Result<devo_protocol::native::rpc_search::SearchSnapshot> {
+        let result: devo_protocol::native::rpc_search::SearchUpdateResult = self
+            .request(
+                "search/update",
+                devo_protocol::native::rpc_search::SearchUpdateParams { search_id, query },
+            )
+            .await?;
+        Ok(result.snapshot)
     }
 
-    pub(crate) async fn reference_search_cancel(
+    pub(crate) async fn search_cancel(
         &mut self,
-        params: ReferenceSearchCancelParams,
-    ) -> Result<ReferenceSearchCancelResult> {
-        self.request_devo("search/cancel", params).await
-    }
-
-    /// Fallback when the server does not implement `_devo/turn/start`.
-    ///
-    /// Sends blocking ACP `session/prompt` but returns immediately after the
-    /// request is written. Completion is delivered later via synthetic
-    /// `_devo/acp_prompt/completed` notifications. Multiple detached prompts
-    /// may be in flight at once; each uses a distinct JSON-RPC `id` in
-    /// [`PendingResponses`], so responses do not collide as long as ids stay unique.
-    async fn turn_start_acp_prompt_detached(&mut self, params: TurnStartParams) -> Result<()> {
-        let session_id = params.session_id;
-        let prompt = params
-            .input
-            .into_iter()
-            .map(acp_content_block_from_input_item)
-            .collect();
-        let request_id = self.next_request_id.fetch_add(1, Ordering::SeqCst);
-        let (response_tx, response_rx) = oneshot::channel();
-        self.pending.lock().await.insert(request_id, response_tx);
-        let request = AcpClientRequest::new(
-            serde_json::json!(request_id),
-            ACP_SESSION_PROMPT_METHOD,
-            AcpPromptParams {
-                session_id,
-                prompt,
-                meta: None,
-            },
-        );
-        if let Err(error) = self.writer.send_serializable(&request) {
-            self.pending.lock().await.remove(&request_id);
-            return Err(error);
-        }
-
-        let _ = self.notifications_tx.send(ServerNotificationMessage {
-            method: ACP_PROMPT_STARTED_NOTIFICATION_METHOD.to_string(),
-            params: serde_json::json!({ "sessionId": session_id }),
-        });
-        let notifications_tx = self.notifications_tx.clone();
-        tokio::spawn(async move {
-            let params = match response_rx.await {
-                Ok(response) if response.get("error").is_some() => serde_json::json!({
-                    "sessionId": session_id,
-                    "error": server_error_text(&response),
-                }),
-                Ok(response) => {
-                    match serde_json::from_value::<AcpSuccessResponse<AcpPromptResult>>(response) {
-                        Ok(success) => serde_json::json!({
-                            "sessionId": session_id,
-                            "stopReason": success.result.stop_reason,
-                        }),
-                        Err(error) => serde_json::json!({
-                            "sessionId": session_id,
-                            "error": format!("decode ACP prompt response: {error}"),
-                        }),
-                    }
-                }
-                Err(error) => serde_json::json!({
-                    "sessionId": session_id,
-                    "error": format!("server dropped ACP prompt response: {error}"),
-                }),
-            };
-            let _ = notifications_tx.send(ServerNotificationMessage {
-                method: ACP_PROMPT_COMPLETED_NOTIFICATION_METHOD.to_string(),
-                params,
-            });
-        });
-        Ok(())
+        search_id: devo_protocol::ReferenceSearchId,
+    ) -> Result<()> {
+        self.request_void(
+            "search/cancel",
+            devo_protocol::native::rpc_search::SearchCancelParams { search_id },
+        )
+        .await
     }
 }
 
 impl ServerClientReaderState {
-    /// Classifies one inbound server payload and dispatches without blocking the
-    /// transport read loop on handler work.
     pub(crate) async fn handle_message(&self, message: serde_json::Value) {
         if let (Some(id), Some(method)) = (
             message.get("id").cloned(),
@@ -811,6 +1010,17 @@ impl ServerClientReaderState {
                 .unwrap_or_else(|| serde_json::json!({}));
             let state = self.clone();
             let method = method.to_string();
+            if matches!(
+                method.as_str(),
+                "approval/command/request"
+                    | "approval/fileChange/request"
+                    | "approval/permission/request"
+                    | "session/goal/completionApproval/request"
+                    | "userInput/request"
+            ) {
+                state.handle_client_request(id, &method, params).await;
+                return;
+            }
             // Server-initiated ACP client tools may run concurrently; each reply
             // must echo the request `id` assigned by the server.
             tokio::spawn(async move {
@@ -831,6 +1041,8 @@ impl ServerClientReaderState {
 
     pub(crate) async fn finish_reader(&self, transport_name: &'static str) {
         let abandoned_response_count = self.pending.lock().await.drain().count();
+        self.pending_approvals.lock().await.clear();
+        self.native_pending_user_inputs.lock().await.clear();
         if abandoned_response_count == 0 {
             tracing::warn!(transport_name, "server reader stopped");
         } else {
@@ -843,24 +1055,47 @@ impl ServerClientReaderState {
     }
 
     fn handle_notification(&self, notification: NotificationEnvelope<serde_json::Value>) {
+        if notification.method == "item/completed"
+            && notification.params.pointer("/item/item/decision").is_some()
+            && let Some(approval_id) = notification
+                .params
+                .pointer("/item/item/approvalId")
+                .and_then(serde_json::Value::as_str)
+                .map(str::to_string)
+        {
+            let pending_approvals = Arc::clone(&self.pending_approvals);
+            tokio::spawn(async move {
+                discard_approval_request(&pending_approvals, &approval_id).await;
+            });
+        }
+        let user_input_request_id = match notification.method.as_str() {
+            "item/completed" => notification
+                .params
+                .pointer("/item/item/requestId")
+                .and_then(serde_json::Value::as_str)
+                .map(str::to_string),
+            "serverRequest/resolved" => notification
+                .params
+                .get("requestId")
+                .or_else(|| notification.params.get("request_id"))
+                .and_then(serde_json::Value::as_str)
+                .map(str::to_string),
+            _ => None,
+        };
+        if let Some(request_id) = user_input_request_id {
+            let pending_user_inputs = Arc::clone(&self.native_pending_user_inputs);
+            tokio::spawn(async move {
+                pending_user_inputs.lock().await.remove(&request_id);
+            });
+        }
         if notification.method == ACP_SESSION_UPDATE_METHOD
             && let Ok(acp_notification) =
                 serde_json::from_value::<AcpSessionNotification>(notification.params.clone())
-            && let Some((method, event)) = original_event_from_acp_notification(&acp_notification)
+            && let Some((method, params)) = original_notification_wire_from_acp(&acp_notification)
         {
-            let _ = self.notifications_tx.send(ServerNotificationMessage {
-                method,
-                params: serde_json::to_value(event).expect("serialize original ACP event"),
-            });
-            return;
-        }
-        if let Some(method) = devo_extension_inner_method(&notification.method)
-            && serde_json::from_value::<ServerEvent>(notification.params.clone()).is_ok()
-        {
-            let _ = self.notifications_tx.send(ServerNotificationMessage {
-                method: method.to_string(),
-                params: notification.params,
-            });
+            let _ = self
+                .notifications_tx
+                .send(ServerNotificationMessage { method, params });
             return;
         }
         log_notification_received(&notification);
@@ -876,26 +1111,46 @@ impl ServerClientReaderState {
         method: &str,
         params: serde_json::Value,
     ) {
-        let response = if method == ACP_SESSION_REQUEST_PERMISSION_METHOD {
-            match handle_acp_request_permission(
-                id.clone(),
-                params,
-                self.acp_pending_permissions,
-                self.notifications_tx,
-            )
-            .await
-            {
+        let response = if matches!(
+            method,
+            "approval/command/request"
+                | "approval/fileChange/request"
+                | "approval/permission/request"
+                | "session/goal/completionApproval/request"
+        ) {
+            // Native reverse approval request (L2-DES-APP-008 DD-8): the
+            // server's own item events drive the approval UI; the pending
+            // entry only needs to resolve the JSON-RPC response later.
+            match handle_approval_request(id.clone(), params, self.pending_approvals).await {
                 Ok(()) => return,
                 Err(message) => acp_client_error_response(id, -32603, message),
             }
-        } else if matches!(
-            method,
-            ACP_FS_READ_TEXT_FILE_METHOD | ACP_FS_WRITE_TEXT_FILE_METHOD
-        ) {
-            match handle_acp_fs_request(id.clone(), method, params).await {
-                Ok(response) => response,
-                Err(message) => acp_client_error_response(id, -32603, message),
-            }
+        } else if method == "userInput/request" {
+            // Native reverse question request (DD-8): the broadcast event
+            // drives the question UI; register the request so
+            // `request_user_input_respond` answers it on this channel.
+            let Some(native_request_id) = params
+                .get("requestId")
+                .or_else(|| params.get("request_id"))
+                .and_then(serde_json::Value::as_str)
+                .filter(|request_id| !request_id.is_empty())
+                .map(str::to_string)
+            else {
+                let response = acp_client_error_response(
+                    id,
+                    -32603,
+                    "userInput/request params.requestId is required",
+                );
+                if let Err(error) = self.writer.send_value(response) {
+                    tracing::warn!(%error, method, "failed to write ACP client response");
+                }
+                return;
+            };
+            self.native_pending_user_inputs
+                .lock()
+                .await
+                .insert(native_request_id, id);
+            return;
         } else {
             acp_client_error_response(id, -32601, format!("unknown client method {method}"))
         };
@@ -939,10 +1194,6 @@ fn bail_server_error(response: &serde_json::Value) -> Result<()> {
     bail!("{}", server_error_text(response))
 }
 
-fn is_method_not_found_error(error: &anyhow::Error) -> bool {
-    error.to_string().starts_with("server -32601:")
-}
-
 fn server_error_text(response: &serde_json::Value) -> String {
     if let Ok(error) = serde_json::from_value::<ErrorResponse>(response.clone()) {
         let data = if error.error.data.is_null() {
@@ -977,7 +1228,9 @@ fn format_protocol_error_code(code: &ProtocolErrorCode) -> &'static str {
         ProtocolErrorCode::NotInitialized => "not_initialized",
         ProtocolErrorCode::InvalidParams => "invalid_params",
         ProtocolErrorCode::SessionNotFound => "session_not_found",
+        ProtocolErrorCode::SessionLocked => "session_locked",
         ProtocolErrorCode::TurnNotFound => "turn_not_found",
+        ProtocolErrorCode::GoalNotFound => "goal_not_found",
         ProtocolErrorCode::TurnAlreadyRunning => "turn_already_running",
         ProtocolErrorCode::ApprovalNotFound => "approval_not_found",
         ProtocolErrorCode::PolicyDenied => "policy_denied",
@@ -1014,129 +1267,6 @@ fn format_protocol_error_code(code: &ProtocolErrorCode) -> &'static str {
     }
 }
 
-fn acp_content_block_from_input_item(input: InputItem) -> AcpContentBlock {
-    match input {
-        InputItem::Text { text } => AcpContentBlock::text(text),
-        InputItem::Skill { name, path } => AcpContentBlock::Text {
-            annotations: None,
-            text: format!("Skill {name}: {}", path.display()),
-            meta: None,
-        },
-        InputItem::LocalImage { path } => AcpContentBlock::Text {
-            annotations: None,
-            text: format!("Image: {}", path.display()),
-            meta: None,
-        },
-        InputItem::Mention { path, name } => AcpContentBlock::ResourceLink {
-            annotations: None,
-            uri: file_uri_from_path(&path),
-            name: name.unwrap_or_else(|| path.clone()),
-            title: None,
-            description: None,
-            mime_type: None,
-            size: None,
-            meta: None,
-        },
-    }
-}
-
-fn file_uri_from_path(path: &str) -> String {
-    let normalized = path.replace('\\', "/");
-    if normalized.starts_with('/') {
-        format!("file://{normalized}")
-    } else {
-        format!("file:///{normalized}")
-    }
-}
-
-fn acp_session_metadata_from_start_params(
-    params: &SessionStartParams,
-    session_id: SessionId,
-) -> SessionMetadata {
-    let now = Utc::now();
-    SessionMetadata {
-        session_id,
-        cwd: params.cwd.clone(),
-        additional_directories: params.additional_directories.clone(),
-        created_at: now,
-        updated_at: now,
-        last_activity_at: now,
-        title: params.title.clone(),
-        title_state: acp_title_state(&params.title),
-        parent_session_id: None,
-        agent_path: None,
-        agent_nickname: None,
-        agent_role: None,
-        ephemeral: params.ephemeral,
-        model: params.model.clone(),
-        model_binding_id: params.model_binding_id.clone(),
-        reasoning_effort_selection: None,
-        reasoning_effort: None,
-        total_input_tokens: 0,
-        total_output_tokens: 0,
-        total_tokens: 0,
-        total_cache_creation_tokens: 0,
-        total_cache_read_tokens: 0,
-        prompt_token_estimate: 0,
-        last_query_usage: None,
-        last_query_total_tokens: 0,
-        last_context_occupancy: None,
-        status: SessionRuntimeStatus::Idle,
-        collaboration_mode: Default::default(),
-        effective_context_window: None,
-        permission_preset: None,
-    }
-}
-
-fn acp_session_metadata_from_session_info(session_info: &AcpSessionInfo) -> SessionMetadata {
-    let updated_at = session_info
-        .updated_at
-        .as_deref()
-        .and_then(|value| chrono::DateTime::parse_from_rfc3339(value).ok())
-        .map(|value| value.with_timezone(&Utc))
-        .unwrap_or_else(Utc::now);
-    SessionMetadata {
-        session_id: session_info.session_id,
-        cwd: session_info.cwd.clone(),
-        additional_directories: session_info.additional_directories.clone(),
-        created_at: updated_at,
-        updated_at,
-        last_activity_at: updated_at,
-        title: session_info.title.clone(),
-        title_state: acp_title_state(&session_info.title),
-        parent_session_id: None,
-        agent_path: None,
-        agent_nickname: None,
-        agent_role: None,
-        ephemeral: false,
-        model: None,
-        model_binding_id: None,
-        reasoning_effort_selection: None,
-        reasoning_effort: None,
-        total_input_tokens: 0,
-        total_output_tokens: 0,
-        total_tokens: 0,
-        total_cache_creation_tokens: 0,
-        total_cache_read_tokens: 0,
-        prompt_token_estimate: 0,
-        last_query_usage: None,
-        last_query_total_tokens: 0,
-        last_context_occupancy: None,
-        status: SessionRuntimeStatus::Idle,
-        collaboration_mode: Default::default(),
-        effective_context_window: None,
-        permission_preset: None,
-    }
-}
-
-fn acp_title_state(title: &Option<String>) -> SessionTitleState {
-    if title.is_some() {
-        SessionTitleState::Provisional
-    } else {
-        SessionTitleState::Unset
-    }
-}
-
 fn log_notification_received(notification: &NotificationEnvelope<serde_json::Value>) {
     let event_seq = notification
         .params
@@ -1152,27 +1282,15 @@ fn log_notification_received(notification: &NotificationEnvelope<serde_json::Val
         .then(|| notification.params.get("delta")?.as_str())
         .flatten();
     let delta_len = assistant_delta.map(str::len);
-    let assistant_token_text = assistant_delta.and_then(assistant_token_log_preview);
-    if let Some(assistant_token_text) = assistant_token_text.as_deref() {
-        tracing::debug!(
-            stream_elapsed_ms = stream_trace_elapsed_ms(),
-            method = %notification.method,
-            event_seq,
-            item_id = ?item_id,
-            delta_len = ?delta_len,
-            assistant_token_text,
-            "client received server notification"
-        );
-    } else {
-        tracing::debug!(
-            stream_elapsed_ms = stream_trace_elapsed_ms(),
-            method = %notification.method,
-            event_seq,
-            item_id = ?item_id,
-            delta_len = ?delta_len,
-            "client received server notification"
-        );
-    }
+    tracing::debug!(
+        stream_elapsed_ms = stream_trace_elapsed_ms(),
+        method = %notification.method,
+        event_seq,
+        item_id = ?item_id,
+        delta_len = ?delta_len,
+        assistant_token_text = assistant_delta.and_then(assistant_token_log_preview).as_deref(),
+        "client received server notification"
+    );
 }
 
 fn stream_trace_elapsed_ms() -> u128 {
@@ -1226,4 +1344,45 @@ fn format_assistant_token_log_preview(text: &str, max_chars: usize) -> String {
         preview.push_str("...");
     }
     preview
+}
+
+/// Goal lifecycle transitions for `session_goal_transition_native`
+/// (L2-DES-APP-008 Phase B).
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub enum GoalLifecycleTransition {
+    Pause,
+    Resume,
+    Complete,
+    Cancel,
+    Clear,
+}
+
+#[cfg(test)]
+mod tests {
+    use pretty_assertions::assert_eq;
+
+    use super::SERVER_INITIALIZE_TIMEOUT;
+    use super::SERVER_RESPONSE_TIMEOUT;
+    use super::ServerResponseWait;
+
+    /// Trace: L2-DES-TUI-001, L1-REQ-TUI-010
+    /// Verifies: stdio initialize waits for a cold-started server instead of
+    /// the default 10s RPC budget used by later requests.
+    #[test]
+    fn initialize_handshake_timeout_exceeds_standard_rpc_budget() {
+        assert_eq!(
+            ServerResponseWait::Handshake.timeout(),
+            Some(SERVER_INITIALIZE_TIMEOUT)
+        );
+        assert_eq!(
+            ServerResponseWait::Standard.timeout(),
+            Some(SERVER_RESPONSE_TIMEOUT)
+        );
+        assert_eq!(ServerResponseWait::Unbounded.timeout(), None);
+        assert!(SERVER_INITIALIZE_TIMEOUT > SERVER_RESPONSE_TIMEOUT);
+        assert_eq!(
+            SERVER_INITIALIZE_TIMEOUT,
+            std::time::Duration::from_secs(60)
+        );
+    }
 }

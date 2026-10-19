@@ -1,6 +1,7 @@
 :root {
-	--devo-chrome-background: #f5f5f5;
+	--devo-chrome-background: #f6f6f6;
 	--devo-transcript-background: var(--background);
+	--devo-titlebar-height: 32px;
 }
 
 :root:not(.dark) {
@@ -18,7 +19,7 @@
 }
 
 :root[data-platform="win32"] {
-	--devo-titlebar-height: 40px;
+	--devo-titlebar-height: 32px;
 	--devo-windows-focus-chrome-bg: var(--devo-chrome-background);
 	--devo-windows-unfocused-chrome-bg: var(--devo-chrome-background);
 }
@@ -40,6 +41,14 @@
 [data-slot="sidebar"][data-collapsible="offcanvas"][data-state="collapsed"] {
 	flex-basis: 0;
 	width: 0;
+}
+
+/* While dragging the sidebar split, snap width without the collapse animation. */
+[data-slot="sidebar-wrapper"][data-resizing="true"] [data-slot="sidebar"],
+[data-slot="sidebar-wrapper"][data-resizing="true"] [data-slot="sidebar-container"],
+[data-slot="sidebar-wrapper"][data-resizing="true"] [data-slot="sidebar-gap"],
+[data-slot="sidebar-wrapper"][data-resizing="true"] [data-slot="sidebar-inset"] {
+	transition: none !important;
 }
 
 [data-slot="content-area"] {
@@ -108,7 +117,7 @@
 	right: 0;
 	left: 0;
 	z-index: 20;
-	height: var(--devo-titlebar-height, 40px);
+	height: var(--devo-titlebar-height, 32px);
 	pointer-events: none;
 	background-color: var(--devo-windows-chrome-bg);
 	/* Product requirement - after the splash enters the app, the Windows topbar
@@ -207,12 +216,14 @@
 
 .devo-composer,
 .devo-composer-shell {
-	border-radius: var(--devo-composer-radius, 16px);
+	border-radius: var(--devo-composer-radius, 18px);
 }
 
 .devo-composer {
 	background: var(--background) !important;
 	background-color: var(--background) !important;
+	border: 1px solid color-mix(in srgb, var(--border) 88%, transparent);
+	box-shadow: 0 8px 28px rgba(0, 0, 0, 0.04);
 }
 
 .devo-composer-shell {

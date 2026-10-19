@@ -19,7 +19,7 @@ use rmcp::model::ProtocolVersion;
 use rmcp::model::Tool;
 use serde_json::Value;
 use tokio::sync::RwLock;
-use tracing::warn;
+use tracing::{info, warn};
 
 use devo_core::mcp::McpAuthConfig;
 use devo_core::mcp::McpAuthState;
@@ -166,6 +166,10 @@ impl McpManager for RmcpMcpManager {
             match self.refresh(&record.id).await {
                 Ok(_) => {
                     let Some(client) = self.clients.read().await.get(&record.id).cloned() else {
+                        warn!(
+                            server_id = %record.id,
+                            "MCP refresh succeeded but no client is registered"
+                        );
                         continue;
                     };
                     match client
@@ -173,6 +177,12 @@ impl McpManager for RmcpMcpManager {
                         .await
                     {
                         Ok(list) => {
+                            info!(
+                                server_id = %record.id,
+                                tool_count = list.tools.len(),
+                                tool_names = ?list.tools.iter().map(|t| t.tool.name.to_string()).collect::<Vec<_>>(),
+                                "MCP tools listed"
+                            );
                             tools.reserve(list.tools.len());
                             for tool in list.tools {
                                 tools.push(mcp_tool_info_from_rmcp_tool(
@@ -201,6 +211,11 @@ impl McpManager for RmcpMcpManager {
                 }
             }
         }
+        info!(
+            discoverable_servers = records.len(),
+            total_tools = tools.len(),
+            "MCP discover_tools completed"
+        );
         Ok(tools)
     }
 

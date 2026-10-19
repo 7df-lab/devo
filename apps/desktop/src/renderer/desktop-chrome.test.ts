@@ -51,7 +51,7 @@ describe("desktop chrome CSS", () => {
 			":root:not(.dark)",
 		);
 
-		expect(lightDeclarations["--devo-chrome-background"]).toBe("#f5f5f5");
+		expect(lightDeclarations["--devo-chrome-background"]).toBe("#f6f6f6");
 		expect(lightDeclarations["--devo-transcript-background"]).toBe(
 			"var(--background)",
 		);
@@ -141,7 +141,7 @@ describe("desktop chrome CSS", () => {
 		);
 
 		expect(lightDeclarations).toEqual({
-			"--devo-titlebar-height": "40px",
+			"--devo-titlebar-height": "32px",
 			"--devo-windows-focus-chrome-bg": "var(--devo-chrome-background)",
 			"--devo-windows-unfocused-chrome-bg": "var(--devo-chrome-background)",
 		});

@@ -4,7 +4,6 @@
 //! onboarding validation can show the same guidance.
 
 use crate::error::ProviderError;
-use crate::timeout::StreamIdleTimeoutError;
 
 /// Network / proxy / timeout guidance.
 pub const NETWORK_PROXY_HINT: &str = "Check network connectivity and proxy settings ([provider_http].proxy_url or HTTPS_PROXY/HTTP_PROXY).";
@@ -50,9 +49,6 @@ pub fn recovery_hint_for_anyhow(error: &anyhow::Error) -> Option<String> {
         if let Some(provider_error) = cause.downcast_ref::<ProviderError>() {
             return provider_error.recovery_hint().map(str::to_string);
         }
-        if cause.downcast_ref::<StreamIdleTimeoutError>().is_some() {
-            return Some(NETWORK_PROXY_HINT.to_string());
-        }
         if let Some(reqwest_error) = cause.downcast_ref::<reqwest::Error>() {
             if reqwest_error.status() == Some(reqwest::StatusCode::UNAUTHORIZED)
                 || reqwest_error.status() == Some(reqwest::StatusCode::FORBIDDEN)
@@ -83,6 +79,10 @@ pub fn recovery_hint_for_message(message: &str) -> Option<String> {
         || msg.contains("credential")
         || msg.contains("invalid api key")
         || msg.contains("missing credential")
+        || msg.contains("run /login")
+        || msg.contains("re-authenticate")
+        || msg.contains("oauth refresh failed")
+        || msg.contains("oauth credential")
         || (msg.contains("401") && !msg.contains("1401"))
         || msg.contains("403")
     {
@@ -137,8 +137,6 @@ mod tests {
     use pretty_assertions::assert_eq;
 
     use super::*;
-    use crate::timeout::StreamIdleTimeoutError;
-    use std::time::Duration;
 
     #[test]
     fn provider_timeout_maps_to_network_hint() {
@@ -179,20 +177,9 @@ mod tests {
     }
 
     #[test]
-    fn anyhow_idle_timeout_maps_to_network_hint() {
-        let error = anyhow::Error::new(StreamIdleTimeoutError {
-            idle_timeout: Duration::from_secs(60),
-        });
-        assert_eq!(
-            recovery_hint_for_anyhow(&error).as_deref(),
-            Some(NETWORK_PROXY_HINT)
-        );
-    }
-
-    #[test]
     fn message_heuristics_cover_validation_timeout() {
         assert_eq!(
-            recovery_hint_for_message("provider validation request timed out").as_deref(),
+            recovery_hint_for_message("provider connection timed out").as_deref(),
             Some(NETWORK_PROXY_HINT)
         );
         assert_eq!(
@@ -202,6 +189,13 @@ mod tests {
         assert_eq!(
             recovery_hint_for_message("model not found: gpt-missing").as_deref(),
             Some(MODEL_NOT_FOUND_HINT)
+        );
+        assert_eq!(
+            recovery_hint_for_message(
+                "oauth credential `anthropic_oauth` for provider `anthropic` is expired; run /login to re-authenticate"
+            )
+            .as_deref(),
+            Some(AUTH_HINT)
         );
         assert_eq!(recovery_hint_for_message("quota exceeded"), None);
     }

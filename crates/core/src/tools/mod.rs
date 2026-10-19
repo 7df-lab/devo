@@ -45,14 +45,43 @@ pub use exec_policy_loader::{
 pub(crate) mod shell_exec;
 pub(crate) mod websearch_prompt;
 
+/// Command tools that advertise sandbox escalation fields on the model-facing schema.
+///
+/// `write_stdin` is excluded: sandbox policy is decided when the process is spawned.
+pub(crate) fn tool_accepts_sandbox_escalation_fields(tool_name: &str) -> bool {
+    matches!(tool_name, "bash" | "shell_command" | "exec_command")
+}
+
+pub(crate) fn sandbox_overlay_for_spawn(
+    overlay: Option<&devo_tools::SandboxPermissionOverlay>,
+) -> Option<devo_sandbox::SandboxPermissionOverlay> {
+    overlay.map(|overlay| devo_sandbox::SandboxPermissionOverlay {
+        network: match overlay.network {
+            devo_tools::SandboxNetworkPermission::Unchanged => {
+                devo_sandbox::SandboxNetworkPermission::Unchanged
+            }
+            devo_tools::SandboxNetworkPermission::Enabled => {
+                devo_sandbox::SandboxNetworkPermission::Enabled
+            }
+        },
+        read_paths: overlay.read_paths.clone(),
+        write_paths: overlay.write_paths.clone(),
+    })
+}
+
 pub use contracts::{
     RedactionState, SessionMode, ToolAgentScope, ToolCallError, ToolContext, ToolPermissionProfile,
-    ToolProgress, ToolProgressSender, ToolResult, ToolResultContent, ToolTerminalStatus,
+    ToolProgress, ToolProgressSender, ToolResult, ToolResultContent, ToolResultImage,
+    ToolTerminalStatus,
 };
 pub use deferred_loading::*;
 pub use devo_tools::{
     AgentToolCoordinator, ClientFilesystem, ClientTextFileRead, ClientTextFileWrite,
-    FileReadFreshnessError, FileReadLedger,
+    FileReadFreshnessError, FileReadLedger, PYTHON_CELL_FIRST_WAIT_MS_DEFAULT,
+    PYTHON_CELL_MAX_CONTINUE_RENEWALS, PYTHON_CELL_WAIT_SECONDS_MAX, PYTHON_CELL_WAIT_SECONDS_MIN,
+    PythonCellCompletionEvent, PythonCellCompletionHook, PythonCellWatch, PythonCellWatchAction,
+    PythonCellWatchDecision, PythonCellWatchInput, clamp_wait_seconds, effective_first_wait_ms,
+    output_tail, parse_python_cell_watch_decision,
 };
 pub use errors::*;
 pub use events::ToolEvent;
@@ -71,3 +100,5 @@ pub fn create_default_tool_registry() -> registry::ToolRegistry {
     handlers::build_registry_from_plan(&ToolPlanConfig::default())
 }
 pub(crate) mod background_tasks;
+
+pub use devo_tools::output_store;

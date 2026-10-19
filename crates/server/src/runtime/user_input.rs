@@ -1,86 +1,8 @@
 use super::*;
-use crate::PendingServerRequestContext;
-use crate::ServerRequestKind;
-use crate::runtime::session_interactive::UserInputTakeError;
 
 impl ServerRuntime {
-    pub(super) async fn handle_request_user_input_respond(
-        &self,
-        request_id: serde_json::Value,
-        params: serde_json::Value,
-    ) -> serde_json::Value {
-        let params: RequestUserInputRespondParams = match serde_json::from_value(params) {
-            Ok(params) => params,
-            Err(error) => {
-                return self.error_response(
-                    request_id,
-                    ProtocolErrorCode::InvalidParams,
-                    format!("invalid request_user_input/respond params: {error}"),
-                );
-            }
-        };
-
-        if self.session(params.session_id).await.is_none() {
-            return self.error_response(
-                request_id,
-                ProtocolErrorCode::SessionNotFound,
-                "session does not exist",
-            );
-        }
-
-        let request_key = params.request_id.to_string();
-        let pending = match self
-            .session_interactive
-            .take_pending_user_input(params.session_id, &request_key, params.turn_id)
-            .await
-        {
-            Ok(pending) => pending,
-            Err(UserInputTakeError::NotFound) => {
-                return self.error_response(
-                    request_id,
-                    ProtocolErrorCode::InvalidParams,
-                    "no pending request_user_input request exists for this runtime",
-                );
-            }
-            Err(UserInputTakeError::WrongTurn) => {
-                return self.error_response(
-                    request_id,
-                    ProtocolErrorCode::InvalidParams,
-                    "request_user_input belongs to a different turn",
-                );
-            }
-        };
-
-        if let Some(persisted) = &pending.persisted {
-            self.persist_answered_user_input_item(
-                params.session_id,
-                params.turn_id,
-                request_key,
-                &pending.questions,
-                &params.response,
-                persisted,
-            )
-            .await;
-        }
-        let _ = pending.tx.send(params.response);
-        self.broadcast_event(ServerEvent::ServerRequestResolved(
-            ServerRequestResolvedPayload {
-                session_id: params.session_id,
-                request_id: params.request_id.clone(),
-                turn_id: Some(params.turn_id),
-            },
-        ))
-        .await;
-
-        serde_json::to_value(SuccessResponse {
-            id: request_id,
-            result: serde_json::json!({ "request_id": params.request_id }),
-        })
-        .expect("serialize request_user_input response")
-    }
-
     pub(super) async fn request_user_input_for_tool(
-        &self,
+        self: &Arc<Self>,
         session_id: SessionId,
         turn_id: TurnId,
         tool_call_id: String,
@@ -95,19 +17,23 @@ impl ServerRuntime {
             ));
         }
 
+        let host_session_id = self.permission_host_session_id(session_id).await;
+        let (native_session_id, native_turn_id) =
+            self.native_session_turn_ids(session_id, turn_id).await;
         let persisted = self
             .persist_waiting_user_input_item(
-                session_id,
-                turn_id,
+                native_session_id,
+                native_turn_id,
                 request_id.clone(),
                 &args.questions,
             )
             .await;
         self.session_interactive
             .register_pending_user_input(
-                session_id,
+                host_session_id,
                 request_id.clone(),
                 PendingUserInput {
+                    owner_session_id: session_id,
                     turn_id,
                     questions: args.questions.clone(),
                     persisted,
@@ -116,20 +42,239 @@ impl ServerRuntime {
             )
             .await;
 
-        self.broadcast_event(ServerEvent::RequestUserInput(RequestUserInputPayload {
-            request: PendingServerRequestContext {
-                request_id: request_id.clone().into(),
-                request_kind: ServerRequestKind::ItemToolRequestUserInput,
-                session_id,
-                turn_id: Some(turn_id),
-                item_id: None,
+        // Native reverse request (L2-DES-APP-008 DD-8): canonical-surface
+        // controllers get `userInput/request` with the waiting-state payload;
+        // the first valid answer resolves through the same pending registry.
+        let native_payload =
+            serde_json::to_value(devo_protocol::native::item::Item::UserInputRequest {
+                request_id: request_id.clone(),
+                target_item_id: None,
+                questions: super::interaction_items::native_questions(&args.questions),
+                answers: None,
+            })
+            .expect("serialize canonical userInput/request params");
+        let runtime = Arc::clone(self);
+        let fanout_request_id = request_id.clone();
+        let cancel_token = self
+            .active_turns
+            .cancel_token_for_host_or_session(host_session_id, session_id)
+            .await;
+        let fanout_cancel_token = cancel_token.clone();
+        let broadcast_session_id = session_id;
+        let broadcast_turn_id = turn_id;
+        let fail_session_id = session_id;
+        let fail_turn_id = turn_id;
+        let (request_ready_tx, request_ready_rx) = tokio::sync::oneshot::channel();
+        let (fanout_error_tx, mut fanout_error_rx) = tokio::sync::mpsc::unbounded_channel();
+        let fanout = tokio::spawn(async move {
+            let owner_connection_id = runtime
+                .active_turns
+                .active_connection_id(host_session_id)
+                .await;
+            match runtime
+                .request_user_input_from_native_controllers(
+                    host_session_id,
+                    owner_connection_id,
+                    super::control_requests::UserInputControllerRequest {
+                        params: native_payload,
+                        ready: request_ready_tx,
+                    },
+                    fanout_cancel_token,
+                )
+                .await
+            {
+                Ok(response) => {
+                    runtime
+                        .resolve_user_input_from_native(
+                            session_id,
+                            turn_id,
+                            fanout_request_id,
+                            response,
+                        )
+                        .await
+                }
+                Err(error) => {
+                    let _ = fanout_error_tx.send(error);
+                }
+            }
+        });
+
+        match request_ready_rx.await {
+            Ok(Ok(())) => {}
+            Ok(Err(error)) => {
+                fanout.abort();
+                self.fail_pending_user_input(
+                    fail_session_id,
+                    fail_turn_id,
+                    &request_id,
+                    cancel_token.is_cancelled(),
+                )
+                .await;
+                return Err(ToolCallError::ExecutionFailed(error));
+            }
+            Err(_) => {
+                fanout.abort();
+                self.fail_pending_user_input(fail_session_id, fail_turn_id, &request_id, true)
+                    .await;
+                return Err(ToolCallError::ExecutionFailed(
+                    "user-input request readiness channel closed".to_string(),
+                ));
+            }
+        }
+
+        self.broadcast_notification(
+            devo_protocol::native::event::ServerNotification::RequestUserInput {
+                request: devo_protocol::native::event::RequestUserInputNotification {
+                    request_id: request_id.clone(),
+                    request_kind: "item_tool_request_user_input".to_string(),
+                    session_id: broadcast_session_id,
+                    turn_id: Some(broadcast_turn_id),
+                    item_id: None,
+                },
+                questions: args.questions,
             },
-            questions: args.questions,
-        }))
+        )
         .await;
 
-        rx.await.map_err(|_| {
-            ToolCallError::ExecutionFailed("request_user_input channel closed".to_string())
-        })
+        let mut rx = rx;
+        let result = tokio::select! {
+            response = &mut rx => response.map_err(|_| {
+                ToolCallError::ExecutionFailed("request_user_input channel closed".to_string())
+            }),
+            error = fanout_error_rx.recv() => {
+                match error {
+                    Some(error) => {
+                        self.fail_pending_user_input(
+                            fail_session_id,
+                            fail_turn_id,
+                            &request_id,
+                            cancel_token.is_cancelled(),
+                        )
+                        .await;
+                        Err(ToolCallError::ExecutionFailed(error))
+                    }
+                    None => rx.await.map_err(|_| {
+                        ToolCallError::ExecutionFailed(
+                            "request_user_input channel closed".to_string(),
+                        )
+                    }),
+                }
+            }
+        };
+        // The question is answered (or the turn died); the losing reverse
+        // requests are abandoned — late responses are ignored by design.
+        fanout.abort();
+        result
+    }
+
+    async fn fail_pending_user_input(
+        &self,
+        session_id: SessionId,
+        turn_id: TurnId,
+        request_id: &str,
+        interrupted: bool,
+    ) {
+        let Ok(pending) = self
+            .session_interactive
+            .take_pending_user_input(session_id, request_id, turn_id)
+            .await
+        else {
+            return;
+        };
+        if let Some(persisted) = &pending.persisted {
+            let (native_session_id, native_turn_id) =
+                self.native_session_turn_ids(session_id, turn_id).await;
+            self.persist_terminal_user_input_item(
+                native_session_id,
+                native_turn_id,
+                request_id.to_string(),
+                &pending.questions,
+                if interrupted {
+                    devo_protocol::native::item::ItemState::Interrupted
+                } else {
+                    devo_protocol::native::item::ItemState::Failed
+                },
+                persisted,
+            )
+            .await;
+        }
+    }
+
+    /// Resolves a pending user-input question from a canonical
+    /// `userInput/request` answer (DD-8), mirroring the legacy respond path.
+    /// A no-op when another controller already answered.
+    pub(super) async fn resolve_user_input_from_native(
+        &self,
+        session_id: SessionId,
+        turn_id: TurnId,
+        request_key: String,
+        response: RequestUserInputResponse,
+    ) {
+        let Ok(pending) = self
+            .session_interactive
+            .take_pending_user_input(session_id, &request_key, turn_id)
+            .await
+        else {
+            return;
+        };
+        if let Some(persisted) = &pending.persisted {
+            let (native_session_id, native_turn_id) =
+                self.native_session_turn_ids(session_id, turn_id).await;
+            self.persist_answered_user_input_item(
+                native_session_id,
+                native_turn_id,
+                request_key.clone(),
+                &pending.questions,
+                &response,
+                persisted,
+            )
+            .await;
+        }
+        let _ = pending.tx.send(response);
+        self.broadcast_notification(
+            devo_protocol::native::event::ServerNotification::ServerRequestResolved {
+                session_id,
+                request_id: request_key,
+                turn_id: Some(turn_id),
+            },
+        )
+        .await;
+    }
+
+    /// Reconstructs answerable user-input lanes from persisted Waiting items
+    /// after a process restart. The original tool task is gone; answering still
+    /// completes the item so the desktop question UI can round-trip.
+    pub(super) async fn restore_waiting_user_inputs_from_history(
+        &self,
+        session_id: SessionId,
+        host_session_id: SessionId,
+        history: &devo_core::CanonicalHistory,
+    ) {
+        for recovered in super::interaction_items::latest_waiting_user_inputs(&history.items) {
+            if recovered.owner_session_id != session_id {
+                continue;
+            }
+            if self
+                .session_interactive
+                .has_pending_user_input_request(&recovered.request_id)
+                .await
+            {
+                continue;
+            }
+            let (tx, _rx) = oneshot::channel();
+            self.session_interactive
+                .register_pending_user_input(
+                    host_session_id,
+                    recovered.request_id,
+                    crate::execution::PendingUserInput {
+                        owner_session_id: recovered.owner_session_id,
+                        turn_id: recovered.turn_id,
+                        questions: recovered.questions,
+                        persisted: Some(recovered.persisted),
+                        tx,
+                    },
+                )
+                .await;
+        }
     }
 }

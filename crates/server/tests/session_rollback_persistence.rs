@@ -7,28 +7,17 @@ use std::sync::Mutex;
 use anyhow::Context;
 use anyhow::Result;
 use async_trait::async_trait;
-use devo_core::AppConfigStore;
-use devo_core::BundledSkillsConfig;
-use devo_core::FileSystemSkillCatalog;
-use devo_core::PresetModelCatalog;
-use devo_core::ProviderVendorCatalog;
-use devo_core::SkillsConfig;
-use devo_core::tools::ToolRegistry;
-use devo_protocol::Model;
 use devo_protocol::ModelRequest;
 use devo_protocol::ModelResponse;
 use devo_protocol::ResponseContent;
 use devo_protocol::ResponseMetadata;
-use devo_protocol::SessionHistoryItemKind;
 use devo_protocol::SessionId;
 use devo_protocol::StopReason;
 use devo_protocol::StreamEvent;
 use devo_protocol::Usage;
 use devo_provider::ModelProviderSDK;
-use devo_provider::SingleProviderRouter;
 use devo_server::ClientTransportKind;
 use devo_server::ServerRuntime;
-use devo_server::ServerRuntimeDependencies;
 use futures::Stream;
 use futures::stream;
 use pretty_assertions::assert_eq;
@@ -112,29 +101,46 @@ async fn session_rollback_persists_cut_and_keeps_future_turns_durable() -> Resul
     )
     .await?;
 
-    let rollback_response = runtime
+    let preview_response = runtime
         .handle_incoming(
             connection_id,
             serde_json::json!({
                 "id": 5,
-                "method": "_devo/session/rollback",
+                "method": "session/rollback/preview",
                 "params": {
-                    "session_id": session_id,
-                    "user_turn_index": 1,
-                    "mode": "before_user_turn"
+                    "sessionId": session_id,
+                    "userTurnIndex": 1,
+                    "mode": "beforeUserTurn"
                 }
             }),
         )
         .await
-        .context("session/rollback response")?;
-    let rollback = serde_json::from_value::<
-        devo_server::SuccessResponse<devo_server::SessionRollbackResult>,
-    >(rollback_response)?
+        .context("session/rollback/preview response")?;
+    let plan = serde_json::from_value::<
+        devo_server::SuccessResponse<devo_protocol::native::rpc_session::RestorePlan>,
+    >(preview_response)?
     .result;
-    assert_eq!(
-        rollback.latest_turn.as_ref().map(|turn| turn.sequence),
-        Some(1)
-    );
+    let commit_response = runtime
+        .handle_incoming(
+            connection_id,
+            serde_json::json!({
+                "id": 6,
+                "method": "session/rollback/commit",
+                "params": {
+                    "restorePlanId": plan.restore_plan_id,
+                    "expectedWorkspaceVersion": plan.workspace_version
+                }
+            }),
+        )
+        .await
+        .context("session/rollback/commit response")?;
+    let commit = serde_json::from_value::<
+        devo_server::SuccessResponse<
+            devo_protocol::native::rpc_session::SessionRollbackCommitResult,
+        >,
+    >(commit_response)?
+    .result;
+    assert_eq!(commit.restored_turn_count, 1);
 
     start_and_complete_turn(
         &runtime,
@@ -159,28 +165,44 @@ async fn session_rollback_persists_cut_and_keeps_future_turns_durable() -> Resul
             rebuilt_connection_id,
             serde_json::json!({
                 "id": 6,
-                "method": "_devo/session/resume",
+                "method": "session/resume",
                 "params": {
-                    "session_id": session_id
+                    "sessionId": session_id
                 }
             }),
         )
         .await
         .context("session/resume response")?;
     let resumed = serde_json::from_value::<
-        devo_server::SuccessResponse<devo_server::SessionResumeResult>,
+        devo_server::SuccessResponse<devo_protocol::native::rpc_session::SessionResumeResult>,
     >(resume_response)?
     .result;
-    let visible_bodies = resumed
-        .history_items
+    let items_response = rebuilt_runtime
+        .handle_incoming(
+            rebuilt_connection_id,
+            serde_json::json!({
+                "id": 7,
+                "method": "session/items/list",
+                "params": { "sessionId": session_id }
+            }),
+        )
+        .await
+        .context("session/items/list response")?;
+    let items: devo_protocol::native::page::Page<devo_protocol::native::item::ItemEnvelope> =
+        serde_json::from_value(items_response["result"].clone())?;
+    let visible_bodies = items
+        .data
         .iter()
-        .filter(|item| {
-            matches!(
-                item.kind,
-                SessionHistoryItemKind::User | SessionHistoryItemKind::Assistant
-            )
+        .filter_map(|item| {
+            let value = serde_json::to_value(&item.item).ok()?;
+            match value["type"].as_str() {
+                Some("userMessage") => value["content"][0]["text"]
+                    .as_str()
+                    .map(ToString::to_string),
+                Some("assistantMessage") => value["text"].as_str().map(ToString::to_string),
+                _ => None,
+            }
         })
-        .map(|item| item.body.as_str())
         .collect::<Vec<_>>();
 
     assert_eq!(
@@ -192,10 +214,136 @@ async fn session_rollback_persists_cut_and_keeps_future_turns_durable() -> Resul
             "third assistant"
         ]
     );
-    assert_eq!(
-        resumed.latest_turn.as_ref().map(|turn| turn.sequence),
-        Some(2)
+    assert_eq!(resumed.session.id.as_str(), session_id.to_string());
+    Ok(())
+}
+
+/// Regression (live r25): rollback commit left the file's last sessionLeaf
+/// naming the pre-rollback tip — a DROPPED item. Every file-derived tip
+/// (actor replace_state, resume) adopted the dangling leaf, so the first
+/// post-rollback write parented onto a dropped item and the transcript tree
+/// fragmented into disconnected roots.
+#[tokio::test]
+async fn rollback_commit_repoints_session_leaf_to_retained_tip() -> Result<()> {
+    let data_root = TempDir::new()?;
+    let runtime = build_runtime(
+        data_root.path(),
+        Arc::new(ScriptedReplyProvider::new([
+            "first assistant",
+            "second assistant",
+            "third assistant",
+        ])),
+    )?;
+    let (connection_id, mut notifications_rx) = initialize_connection(&runtime).await?;
+    let session_id = start_session(&runtime, connection_id, data_root.path()).await?;
+    start_and_complete_turn(
+        &runtime,
+        connection_id,
+        &mut notifications_rx,
+        session_id,
+        "first prompt",
+    )
+    .await?;
+    start_and_complete_turn(
+        &runtime,
+        connection_id,
+        &mut notifications_rx,
+        session_id,
+        "second prompt",
+    )
+    .await?;
+
+    let preview_response = runtime
+        .handle_incoming(
+            connection_id,
+            serde_json::json!({
+                "id": 5,
+                "method": "session/rollback/preview",
+                "params": {
+                    "sessionId": session_id,
+                    "userTurnIndex": 1,
+                    "mode": "beforeUserTurn"
+                }
+            }),
+        )
+        .await
+        .context("preview response")?;
+    let plan = serde_json::from_value::<
+        devo_server::SuccessResponse<devo_protocol::native::rpc_session::RestorePlan>,
+    >(preview_response)?
+    .result;
+    let commit_response = runtime
+        .handle_incoming(
+            connection_id,
+            serde_json::json!({
+                "id": 6,
+                "method": "session/rollback/commit",
+                "params": {
+                    "restorePlanId": plan.restore_plan_id,
+                    "expectedWorkspaceVersion": plan.workspace_version
+                }
+            }),
+        )
+        .await
+        .context("commit response")?;
+    assert!(
+        commit_response.get("error").is_none(),
+        "commit failed: {commit_response}"
     );
+
+    // First post-rollback write: its parent edge must resolve to an item
+    // that exists in the journal (the retained cut point), not a dropped one.
+    start_and_complete_turn(
+        &runtime,
+        connection_id,
+        &mut notifications_rx,
+        session_id,
+        "third prompt",
+    )
+    .await?;
+
+    let rollout_path = data_root
+        .path()
+        .join("sessions")
+        .join(format!("{session_id}.jsonl"));
+    let journal: Vec<serde_json::Value> = std::fs::read_to_string(&rollout_path)
+        .context("read rollout")?
+        .lines()
+        .filter_map(|line| serde_json::from_str(line).ok())
+        .collect();
+    let item_ids: std::collections::HashSet<String> = journal
+        .iter()
+        .filter(|line| line["kind"] == "item")
+        .map(|line| line["item"]["id"].as_str().expect("item id").to_string())
+        .collect();
+    let mut last_leaf = None;
+    for line in &journal {
+        if line["kind"] == "internal" && line["entry"]["type"].as_str() == Some("sessionLeaf") {
+            last_leaf = line["entry"]["leafId"].as_str().map(ToString::to_string);
+        }
+    }
+    let Some(leaf) = last_leaf else {
+        anyhow::bail!("no sessionLeaf line in journal");
+    };
+    assert!(
+        item_ids.contains(&leaf),
+        "post-rollback session leaf must name a retained item, got {leaf}"
+    );
+    let third_prompt = journal
+        .iter()
+        .find(|line| {
+            line["kind"] == "item"
+                && line["item"]["item"]["type"] == "userMessage"
+                && line["item"]["item"]["content"][0]["text"] == "third prompt"
+        })
+        .context("third prompt item")?;
+    match third_prompt["item"]["parentId"].as_str() {
+        Some(parent) => assert!(
+            item_ids.contains(parent),
+            "first post-rollback item parents onto a dropped item ({parent})"
+        ),
+        None => anyhow::bail!("third prompt item has no parent edge"),
+    }
     Ok(())
 }
 
@@ -213,35 +361,10 @@ fn build_runtime(
     data_root: &Path,
     provider: Arc<dyn ModelProviderSDK>,
 ) -> Result<Arc<ServerRuntime>> {
-    let db = Arc::new(devo_server::db::Database::open(
-        data_root.join("session_rollback_persistence.db"),
-    )?);
-    Ok(ServerRuntime::new(
-        data_root.to_path_buf(),
-        ServerRuntimeDependencies::new(
-            Arc::clone(&provider),
-            Arc::new(SingleProviderRouter::new(provider)),
-            Arc::new(ToolRegistry::new()),
-            devo_server::empty_mcp_manager(),
-            "test-model".to_string(),
-            Arc::new(PresetModelCatalog::new(vec![Model {
-                slug: "test-model".to_string(),
-                display_name: "Test Model".to_string(),
-                ..Model::default()
-            }])),
-            Arc::new(ProviderVendorCatalog::default()),
-            Box::new(FileSystemSkillCatalog::new(SkillsConfig {
-                bundled: Some(BundledSkillsConfig { enabled: false }),
-                ..SkillsConfig::default()
-            })),
-            devo_core::AgentsMdConfig::default(),
-            db,
-            Arc::new(std::sync::Mutex::new(AppConfigStore::load(
-                data_root.to_path_buf(),
-                /*workspace_root*/ None,
-            )?)),
-        ),
-    ))
+    Ok(devo_server::test_support::TestRuntime::new(provider)
+        .with_named_model("test-model", "Test Model")
+        .db_file("session_rollback_persistence.db")
+        .runtime(data_root))
 }
 
 async fn initialize_connection(
@@ -260,6 +383,7 @@ async fn initialize_connection(
                 "params": {
                     "protocolVersion": 1,
                     "clientCapabilities": {},
+                    "_meta": { "devo": { "protocol": "native" } },
                     "clientInfo": {
                         "name": "session-rollback-persistence-test",
                         "title": "session-rollback-persistence-test",
@@ -288,21 +412,19 @@ async fn start_session(
             connection_id,
             serde_json::json!({
                 "id": 2,
-                "method": "session/start",
+                "method": "session/new",
                 "params": {
                     "cwd": cwd,
-                    "ephemeral": false,
-                    "title": "Rollback source",
-                    "model": "test-model",
-                    "model_binding_id": null
+                    "idempotencyKey": "rollback-source-session"
                 }
             }),
         )
         .await
-        .context("session/start response")?;
-    let response: devo_server::SuccessResponse<devo_server::SessionStartResult> =
-        serde_json::from_value(response)?;
-    Ok(response.result.session.session_id)
+        .context("session/new response")?;
+    let response: devo_server::SuccessResponse<
+        devo_protocol::native::rpc_session::SessionNewResult,
+    > = serde_json::from_value(response)?;
+    Ok(SessionId::from(response.result.session.id.as_str()))
 }
 
 async fn start_and_complete_turn(
@@ -317,22 +439,17 @@ async fn start_and_complete_turn(
             connection_id,
             serde_json::json!({
                 "id": 3,
-                "method": "_devo/turn/start",
+                "method": "turn/start",
                 "params": {
-                    "session_id": session_id,
+                    "sessionId": session_id,
                     "input": [{ "type": "text", "text": text }],
-                    "model": null,
-                    "model_binding_id": null,
-                    "thinking": null,
-                    "sandbox": null,
-                    "approval_policy": null,
-                    "cwd": null
+                    "idempotencyKey": text
                 }
             }),
         )
         .await
         .context("turn/start response")?;
-    let _: devo_server::SuccessResponse<devo_server::TurnStartResult> =
+    let _: devo_server::SuccessResponse<devo_protocol::native::rpc_turn::TurnStartResult> =
         serde_json::from_value(response)?;
     wait_for_turn_completed(notifications_rx).await
 }

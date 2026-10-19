@@ -8,9 +8,12 @@
 
 mod launch;
 mod pipe;
+mod pipe_child;
 mod pty;
 mod resolve;
 
+#[cfg(test)]
+mod pipe_cancellation_tests;
 #[cfg(test)]
 mod tests;
 
@@ -44,6 +47,8 @@ const TRUNCATED_SUFFIX: &str = "\n\n... [truncated]";
 /// execution path. Shared runtime knobs (workdir, timeouts, sandbox, …) are
 /// forwarded into whichever path runs.
 pub(crate) struct ShellExecRequest {
+    pub(crate) output_capture:
+        Option<Result<devo_tools::output_store::SharedOutputCapture, String>>,
     pub command: String,
     pub workdir: PathBuf,
     pub description: String,
@@ -58,6 +63,7 @@ pub(crate) struct ShellExecRequest {
     pub yield_time_ms: u64,
     pub max_output_tokens: usize,
     pub sandbox_profile: Option<String>,
+    pub sandbox_permission_overlay: Option<devo_sandbox::SandboxPermissionOverlay>,
 }
 
 /// Run a shell command from a [`ShellExecRequest`].
@@ -70,6 +76,7 @@ pub(crate) async fn execute_shell_command(
     cancel_token: CancellationToken,
 ) -> anyhow::Result<FunctionToolOutput> {
     let ShellExecRequest {
+        output_capture,
         command,
         workdir,
         description,
@@ -80,6 +87,7 @@ pub(crate) async fn execute_shell_command(
         yield_time_ms,
         max_output_tokens,
         sandbox_profile,
+        sandbox_permission_overlay,
     } = request;
 
     if !workdir.exists() {
@@ -92,6 +100,7 @@ pub(crate) async fn execute_shell_command(
     let shell = resolve_shell(shell_override.as_deref(), login);
     let command_to_run = normalize_command_for_shell(&shell, command);
     let run = ResolvedShellRun {
+        output_capture,
         shell,
         command_to_run,
         workdir,
@@ -100,6 +109,7 @@ pub(crate) async fn execute_shell_command(
         yield_time_ms,
         max_output_tokens,
         sandbox_profile,
+        sandbox_permission_overlay,
     };
 
     if tty {
@@ -122,4 +132,33 @@ pub(crate) fn truncate_output(text: &str, max_output_tokens: usize) -> String {
         out.push_str(TRUNCATED_SUFFIX);
     }
     out
+}
+
+/// Finalize pipe/PTY capture and report data loss independently of exit status.
+fn append_capture_notice(
+    text: &mut String,
+    capture: &Option<Result<devo_tools::output_store::SharedOutputCapture, String>>,
+) {
+    let result = match capture {
+        Some(Ok(capture)) => capture
+            .lock()
+            .expect("output capture lock")
+            .finish()
+            .map_err(|error| error.to_string()),
+        Some(Err(error)) => Err(error.clone()),
+        None => return,
+    };
+    match result {
+        Ok(artifact)
+            if artifact.bytes > text.len() as u64
+                || artifact.state == devo_tools::output_store::CaptureState::Incomplete =>
+        {
+            text.push('\n');
+            text.push_str(&artifact.notice());
+        }
+        Ok(_) => {}
+        Err(error) => {
+            text.push_str(&format!("\nFull output could not be saved: {error}"));
+        }
+    }
 }

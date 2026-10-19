@@ -8,11 +8,11 @@ import {
 	shouldPromptBeforeQuit,
 } from "./quit-guard"
 
-function session(status: string, parentID?: string): SessionState {
+function session(status: string, parentId?: string): SessionState {
 	return {
 		status,
 		title: "Session",
-		parentID,
+		parentId,
 	}
 }
 

@@ -9,6 +9,8 @@ use std::sync::Arc;
 
 use async_trait::async_trait;
 use devo_protocol::CollaborationMode;
+use devo_protocol::SessionId;
+use devo_protocol::TurnId;
 use serde::Deserialize;
 use serde::Serialize;
 
@@ -23,6 +25,24 @@ use tokio_util::sync::CancellationToken;
 pub struct ToolBudgets {
     pub output_limit_bytes: usize,
     pub wall_time_limit_ms: Option<u64>,
+}
+
+/// Network access requested by a single sandboxed tool invocation.
+#[derive(Debug, Clone, Copy, Default, PartialEq, Eq, Hash)]
+pub enum SandboxNetworkPermission {
+    /// Preserve the active profile's network policy.
+    #[default]
+    Unchanged,
+    /// Allow network access while preserving filesystem sandboxing.
+    Enabled,
+}
+
+/// Additional sandbox capabilities granted to one tool invocation.
+#[derive(Debug, Clone, Default, PartialEq, Eq, Hash)]
+pub struct SandboxPermissionOverlay {
+    pub network: SandboxNetworkPermission,
+    pub read_paths: Vec<PathBuf>,
+    pub write_paths: Vec<PathBuf>,
 }
 
 // ── ToolContext ──────────────────────────────────────────────────────
@@ -41,9 +61,10 @@ pub enum ToolAgentScope {
 /// Full execution context passed to every tool handler invocation.
 #[derive(Clone)]
 pub struct ToolContext {
+    pub output_store: Option<Arc<crate::output_store::OutputStore>>,
     pub tool_call_id: ToolCallId,
-    pub session_id: String,
-    pub turn_id: Option<String>,
+    pub session_id: SessionId,
+    pub turn_id: Option<TurnId>,
     pub workspace_root: PathBuf,
     pub budgets: ToolBudgets,
     pub cancel_token: CancellationToken,
@@ -59,6 +80,20 @@ pub struct ToolContext {
     /// `None` means no sandboxing; otherwise the value is a profile name such
     /// as `"workspace"`, `"strict"`, or `"off"`.
     pub sandbox_profile: Option<String>,
+    /// Per-invocation capabilities merged into `sandbox_profile` without
+    /// disabling the operating-system sandbox.
+    pub sandbox_permission_overlay: Option<SandboxPermissionOverlay>,
+    /// Session-scoped RLM kernel when `execution_surface` is Rlm.
+    pub kernel: Option<Arc<devo_kernel::KernelSession>>,
+    /// First foreground wait before Python cell wait-policy (ms). `None` → default 180s.
+    pub python_cell_first_wait_ms: Option<u64>,
+    /// Optional mid-tool wait-policy decider (server injects aux LLM; tests mock).
+    pub python_cell_watch: Option<Arc<dyn crate::python_cell_watch::PythonCellWatch>>,
+    /// Optional completion hook for backgrounded Python cells.
+    pub python_cell_completion: Option<Arc<dyn crate::python_cell_watch::PythonCellCompletionHook>>,
+    /// Session artifact directory (`session-artifacts/<id>/`) for kernel dill
+    /// snapshot/restore across process restarts. `None` disables persistence.
+    pub session_dir: Option<PathBuf>,
 }
 
 impl std::fmt::Debug for ToolContext {
@@ -92,6 +127,17 @@ impl std::fmt::Debug for ToolContext {
                 "network_no_proxy",
                 &self.network_no_proxy.as_ref().map(|_| "<configured>"),
             )
+            .field("kernel", &self.kernel.as_ref().map(|_| "<configured>"))
+            .field("python_cell_first_wait_ms", &self.python_cell_first_wait_ms)
+            .field(
+                "python_cell_watch",
+                &self.python_cell_watch.as_ref().map(|_| "<configured>"),
+            )
+            .field(
+                "python_cell_completion",
+                &self.python_cell_completion.as_ref().map(|_| "<configured>"),
+            )
+            .field("session_dir", &self.session_dir)
             .finish_non_exhaustive()
     }
 }
@@ -110,6 +156,8 @@ pub struct ToolPermissionProfile {
 /// Structured tool output (struct, not trait — per L3-BEH-TOOLS-001).
 #[derive(Debug, Clone, Serialize, Deserialize)]
 pub struct ToolResult {
+    #[serde(default)]
+    pub output_artifacts: Vec<crate::output_store::OutputArtifact>,
     /// Primary output content for model consumption.
     pub content: ToolResultContent,
     /// Optional display-only content (not sent to model).
@@ -122,17 +170,31 @@ pub struct ToolResult {
     pub redaction_state: RedactionState,
     /// Safety notice if output was modified for safety reasons.
     pub safety_notice: Option<String>,
+    /// Multimodal attachments (e.g. attach-image via ipython) for the next
+    /// model step. Kept separate from [`Self::content`] so base64 is not
+    /// duplicated into the string tool_result payload.
+    #[serde(default)]
+    pub images: Vec<ToolResultImage>,
+}
+
+/// One image to inject alongside a tool result for vision-capable models.
+#[derive(Debug, Clone, Serialize, Deserialize, PartialEq, Eq)]
+pub struct ToolResultImage {
+    pub mime_type: String,
+    pub data_base64: String,
 }
 
 impl ToolResult {
     pub fn success(content: ToolResultContent, summary: impl Into<String>) -> Self {
         Self {
             content,
+            output_artifacts: Vec::new(),
             display_content: None,
             structured_status: ToolTerminalStatus::Completed,
             result_summary: summary.into(),
             redaction_state: RedactionState::Clean,
             safety_notice: None,
+            images: Vec::new(),
         }
     }
 
@@ -143,11 +205,13 @@ impl ToolResult {
     ) -> Self {
         Self {
             content,
+            output_artifacts: Vec::new(),
             display_content: None,
             structured_status: ToolTerminalStatus::Failed(error),
             result_summary: summary.into(),
             redaction_state: RedactionState::Clean,
             safety_notice: None,
+            images: Vec::new(),
         }
     }
 }
@@ -244,6 +308,7 @@ pub type ToolProgressSender = tokio::sync::mpsc::UnboundedSender<ToolProgress>;
 ///
 /// Per L3-BEH-TOOLS-001, ToolRegistry is a trait (not a concrete struct)
 /// to allow different registry implementations.
+#[allow(clippy::double_must_use)]
 #[async_trait]
 pub trait ToolRegistry: Send + Sync {
     /// Get a tool handler by name.

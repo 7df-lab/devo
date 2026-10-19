@@ -1,17 +1,12 @@
 import { useAtomValue } from "jotai"
 import { useEffect } from "react"
 import { activeServerConfigAtom, serverConnectedAtom } from "../atoms/connection"
-import { desktopFolderStatusByDirectoryAtom, desktopFoldersAtom } from "../atoms/desktop-folders"
 import { discoveryAtom } from "../atoms/discovery"
 import { isMockModeAtom } from "../atoms/mock-mode"
 import { appStore } from "../atoms/store"
 import { createLogger } from "../lib/logger"
 import { resolveAuthHeader, resolveServerUrl } from "../services/backend"
-import {
-	connectToDevo,
-	loadAllProjects,
-	loadProjectSessions,
-} from "../services/connection-manager"
+import { connectToDevo, loadAllProjects } from "../services/connection-manager"
 
 const log = createLogger("discovery")
 
@@ -37,13 +32,11 @@ function setPhase(phase: import("../atoms/discovery").DiscoveryPhase): void {
  * On mount:
  * 1. Resolves the active server URL (starts the local stdio runtime)
  * 2. Resolves auth credentials if the server requires them
- * 3. Connects to the Devo server (ACP events for all projects)
+ * 3. Connects to the Devo server (Native events for all projects)
  * 4. Lists all projects from the API via `client.project.list()`
- * 5. Loads sessions for the top few most-recently-active projects
- *    (enough to populate "Recent" and "Active Now" sections)
  *
- * Remaining project sessions are loaded lazily when expanded in the sidebar.
- * Active sessions also arrive in real-time via ACP events.
+ * Project sessions are loaded lazily when expanded in the sidebar.
+ * Active sessions also arrive in real-time via Native events.
  */
 export function useDiscovery() {
 	const discovery = useAtomValue(discoveryAtom)
@@ -77,7 +70,7 @@ export function useDiscovery() {
 				// --- Step 2: Resolve auth if needed ---
 				const authHeader = await resolveAuthHeader(activeServer)
 
-				// --- Step 3: Connect to the server (starts ACP event loop) ---
+				// --- Step 3: Connect to the server (starts Native event loop) ---
 				setPhase("connecting")
 				log.info("Connecting to Devo server", {
 					url,
@@ -121,40 +114,14 @@ export function useDiscovery() {
 					projects,
 				})
 
-				// --- Step 5: Pre-fetch sessions for user-managed Desktop projects ---
-				const desktopFolders = appStore.get(desktopFoldersAtom)
-				const folderStatuses = appStore.get(desktopFolderStatusByDirectoryAtom)
-				const storedAvailableFolders = desktopFolders.filter(
-					(folder) => (folderStatuses[folder.directory] ?? "available") === "available",
-				)
-
-				if (storedAvailableFolders.length > 0) {
-					// Build sandbox lookup for worktree metadata restoration
-					const projectSandboxMap = new Map<string, Set<string>>()
-					for (const project of projects) {
-						if (!project.worktree || !project.sandboxes?.length) continue
-						const sandboxSet = new Set<string>()
-						for (const s of project.sandboxes) sandboxSet.add(s)
-						projectSandboxMap.set(project.worktree, sandboxSet)
-					}
-
-					await Promise.allSettled(
-						storedAvailableFolders.map((folder) => {
-							const sandboxDirs = projectSandboxMap.get(folder.directory)
-							return loadProjectSessions(
-								folder.directory,
-								sandboxDirs?.size ? sandboxDirs : undefined,
-								{ limit: 5, roots: true },
-							)
-						}),
-					)
-				}
+				// Expanded sidebar sections request their first page themselves.
+				// Prefetching every stored/collapsed folder creates a startup RPC
+				// burst and delays the chat the user actually wants to open.
 
 				log.info("Discovery complete", {
 					server: activeServer.name,
 					url,
 					projects: projects.length,
-					prefetched: storedAvailableFolders.length,
 				})
 			} catch (err) {
 				log.error("Discovery failed", err)

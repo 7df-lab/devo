@@ -32,16 +32,16 @@ describe("desktop package runtime resources", () => {
 			usesCanonicalOwner: config.includes("owner: 7df-lab"),
 			usesCanonicalRepo: config.includes("repo: devo"),
 			usesCanonicalReleasePage: updaterSource.includes("https://github.com/7df-lab/devo"),
-			publishesBlockmaps: releaseWorkflow.includes("-o -name '*.blockmap'"),
-			publishesChannelMetadata: releaseWorkflow.includes("-o -name '*.yml'"),
+			collectsReleaseAssets: releaseWorkflow.includes("bun apps/desktop/scripts/collect-release-assets.ts"),
+			preservesMatrixArtifacts: !releaseWorkflow.includes("merge-multiple: true"),
 		}).toEqual({
 			homepage: "https://github.com/7df-lab/devo",
 			repositoryUrl: "https://github.com/7df-lab/devo.git",
 			usesCanonicalOwner: true,
 			usesCanonicalRepo: true,
 			usesCanonicalReleasePage: true,
-			publishesBlockmaps: true,
-			publishesChannelMetadata: true,
+			collectsReleaseAssets: true,
+			preservesMatrixArtifacts: true,
 		})
 	})
 })

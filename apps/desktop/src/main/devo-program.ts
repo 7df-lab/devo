@@ -26,6 +26,8 @@ export function resolveDevoProgram({
 
 	if (isPackaged) {
 		const runtimeRoot = resourcesPath ?? path.join(appPath, "..")
+		const completeBundle = path.join(runtimeRoot, "runtime", devoExecutableName(platform))
+		if (existsSync(completeBundle)) return completeBundle
 		const bundled = path.join(runtimeRoot, "runtime", "bin", devoExecutableName(platform))
 		if (existsSync(bundled)) return bundled
 		throw new Error(`Bundled Devo runtime not found at ${bundled}`)

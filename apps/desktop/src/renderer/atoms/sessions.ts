@@ -1,8 +1,7 @@
 import { atom } from "jotai"
 import { atomFamily } from "jotai-family"
 import type { PermissionRequest, QuestionRequest, Session, SessionStatus } from "../lib/types"
-import { messagesFamily } from "./messages"
-import { partsFamily, partStorageKey } from "./parts"
+import { itemsFamily } from "./messages"
 import { viewedSessionIdAtom } from "./ui"
 
 // ============================================================
@@ -30,6 +29,20 @@ export type ProviderRetryStatus = {
 	model: string
 	phase: "scheduled" | "resumed" | string
 	message: string
+}
+
+/** Expandable provider/LLM failure rows for the chat process timeline. */
+export type ProviderErrorEntry = {
+	id: string
+	turnId: string
+	message: string
+	phase: "scheduled" | "failed" | string
+	attempt?: number
+	code?: string
+	/** Backoff budget when this retry was scheduled (ms). */
+	backoffMs?: number
+	/** Client clock when the scheduled retry was observed. */
+	scheduledAtMs?: number
 }
 
 /** Phases of worktree setup shown in the chat view's empty state */
@@ -70,6 +83,8 @@ export interface SessionEntry {
 	hasUnreadCompletion?: boolean
 	/** Active provider retry status for the current turn. */
 	retryStatus?: ProviderRetryStatus
+	/** Accumulated provider retry / failure rows for expandable display. */
+	providerErrors?: ProviderErrorEntry[]
 }
 
 // ============================================================
@@ -114,6 +129,7 @@ export const upsertSessionAtom = atom(
 			setupPhase: existing?.setupPhase,
 			hasUnreadCompletion: existing?.hasUnreadCompletion,
 			retryStatus: existing?.retryStatus,
+			providerErrors: existing?.providerErrors,
 		})
 
 		// Add to index
@@ -127,17 +143,8 @@ export const upsertSessionAtom = atom(
 )
 
 export const removeSessionAtom = atom(null, (get, set, sessionId: string) => {
-	// Clean up message and part atoms to prevent memory leaks.
-	// messagesFamily/partsFamily create atoms on demand and never remove them,
-	// so we must explicitly clear and remove entries for deleted sessions.
-	const messages = get(messagesFamily(sessionId))
-	if (messages && messages.length > 0) {
-		for (const msg of messages) {
-			partsFamily.remove(partStorageKey(sessionId, msg.id))
-			partsFamily.remove(msg.id)
-		}
-	}
-	messagesFamily.remove(sessionId)
+	// Clean up item atoms to prevent memory leaks.
+	itemsFamily.remove(sessionId)
 
 	sessionFamily.remove(sessionId)
 
@@ -169,11 +176,15 @@ export const setSessionStatusAtom = atom(
 			: completedTurn
 				? get(viewedSessionIdAtom) !== args.sessionId
 				: entry.hasUnreadCompletion
+		// New turn: drop prior expandable error rows so they stay scoped to one attempt.
+		const startingFreshTurn =
+			isWorking && (entry.status.type === "idle" || entry.status.type === "error")
 		set(sessionFamily(args.sessionId), {
 			...entry,
 			status: args.status,
 			hasUnreadCompletion,
 			retryStatus: args.status.type === "idle" || args.status.type === "error" ? undefined : entry.retryStatus,
+			providerErrors: startingFreshTurn ? [] : entry.providerErrors,
 		})
 	},
 )
@@ -191,7 +202,37 @@ export const setProviderRetryStatusAtom = atom(
 	) => {
 		const entry = get(sessionFamily(args.sessionId))
 		if (!entry) return
-		set(sessionFamily(args.sessionId), { ...entry, retryStatus: args.status })
+		const status = args.status
+		if (!status) {
+			set(sessionFamily(args.sessionId), { ...entry, retryStatus: undefined })
+			return
+		}
+		if (status.phase === "resumed") {
+			set(sessionFamily(args.sessionId), { ...entry, retryStatus: undefined })
+			return
+		}
+		const message = status.message.trim()
+		const nextErrors = [...(entry.providerErrors ?? [])]
+		if (message || status.phase === "scheduled") {
+			const id = `retry-${status.turnId}-${status.attempt}`
+			const nextEntry: ProviderErrorEntry = {
+				id,
+				turnId: status.turnId,
+				message: message || "Provider request failed",
+				phase: status.phase || "scheduled",
+				attempt: status.attempt,
+				backoffMs: status.backoffMs,
+				scheduledAtMs: Date.now(),
+			}
+			const existingIndex = nextErrors.findIndex((item) => item.id === id)
+			if (existingIndex >= 0) nextErrors[existingIndex] = nextEntry
+			else nextErrors.push(nextEntry)
+		}
+		set(sessionFamily(args.sessionId), {
+			...entry,
+			retryStatus: status,
+			providerErrors: nextErrors,
+		})
 	},
 )
 
@@ -208,12 +249,41 @@ export const setSessionErrorAtom = atom(
 		set,
 		args: {
 			sessionId: string
+			turnId?: string
 			error: SessionError | undefined
 		},
 	) => {
 		const entry = get(sessionFamily(args.sessionId))
 		if (!entry) return
-		set(sessionFamily(args.sessionId), { ...entry, error: args.error })
+		if (!args.error) {
+			set(sessionFamily(args.sessionId), { ...entry, error: undefined })
+			return
+		}
+		const message =
+			typeof args.error.data.message === "string" && args.error.data.message.trim()
+				? args.error.data.message.trim()
+				: `${args.error.name}: ${JSON.stringify(args.error.data)}`
+		const turnId =
+			args.turnId ||
+			entry.retryStatus?.turnId ||
+			[...(entry.providerErrors ?? [])].reverse().find((item) => item.turnId)?.turnId ||
+			""
+		const id = `failed-${turnId || "session"}-${args.error.name}-${message.slice(0, 48)}`
+		const nextErrors = [...(entry.providerErrors ?? [])]
+		if (!nextErrors.some((item) => item.turnId === turnId && item.message === message && item.phase === "failed")) {
+			nextErrors.push({
+				id,
+				turnId,
+				message,
+				phase: "failed",
+				code: args.error.name,
+			})
+		}
+		set(sessionFamily(args.sessionId), {
+			...entry,
+			error: args.error,
+			providerErrors: nextErrors,
+		})
 	},
 )
 
@@ -282,6 +352,7 @@ export const addPermissionAtom = atom(
 	) => {
 		const entry = get(sessionFamily(args.sessionId))
 		if (!entry) return
+		if (entry.permissions.some((permission) => permission.id === args.permission.id)) return
 		set(sessionFamily(args.sessionId), {
 			...entry,
 			permissions: [...entry.permissions, args.permission],
@@ -351,7 +422,7 @@ export const removeQuestionAtom = atom(
 /**
  * Bulk-set sessions (used during project load).
  * Merges new sessions into the store without overwriting
- * permissions/questions that arrived via ACP events before the fetch completed.
+ * permissions/questions that arrived via Native events before the fetch completed.
  *
  * Uses each session's own `directory` field from the API (falling back to
  * `args.directory`). This preserves sandbox (worktree) paths so the mapping
@@ -394,7 +465,8 @@ export const setSessionsAtom = atom(
 				error: existing?.error,
 				setupPhase: existing?.setupPhase,
 				hasUnreadCompletion: existing?.hasUnreadCompletion,
-			retryStatus: existing?.retryStatus,
+				retryStatus: existing?.retryStatus,
+				providerErrors: existing?.providerErrors,
 			})
 			nextIds.add(session.id)
 		}

@@ -2,6 +2,8 @@
  * Tests for Canonical -> Cursor conversion.
  */
 import { describe, expect, test } from "bun:test"
+import { tmpdir } from "node:os"
+import { join } from "node:path"
 import { canonicalToCursor } from "../../src/converter/from-canonical/to-cursor"
 import type { CanonicalScanResult } from "../../src/types/canonical"
 
@@ -17,6 +19,8 @@ function emptyCanonical(): CanonicalScanResult {
 		projects: [],
 	}
 }
+
+const projectPath = join(tmpdir(), "devo-cursor-conversion")
 
 describe("canonicalToCursor", () => {
 	test("converts empty scan result", () => {
@@ -81,11 +85,11 @@ describe("canonicalToCursor", () => {
 	test("generates .mdc rule files from canonical rules", () => {
 		const scan = emptyCanonical()
 		scan.projects.push({
-			path: "/test/project",
+			path: projectPath,
 			mcpServers: {},
 			rules: [
 				{
-					path: "/test/project/CLAUDE.md",
+					path: join(projectPath, "CLAUDE.md"),
 					name: "CLAUDE.md",
 					content: "# Project Rules\n\nUse TypeScript strict mode.",
 					alwaysApply: true,
@@ -105,7 +109,7 @@ describe("canonicalToCursor", () => {
 		expect(ruleEntries.length).toBe(1)
 
 		const [path, content] = ruleEntries[0]
-		expect(path).toContain(".cursor/rules/")
+		expect(path).toBe(join(projectPath, ".cursor", "rules", "claude.mdc"))
 		expect(path).toEndWith(".mdc")
 		expect(content).toContain("alwaysApply")
 	})
@@ -113,11 +117,11 @@ describe("canonicalToCursor", () => {
 	test("generates .mdc rule files with globs for file-scoped rules", () => {
 		const scan = emptyCanonical()
 		scan.projects.push({
-			path: "/test/project",
+			path: projectPath,
 			mcpServers: {},
 			rules: [
 				{
-					path: "/test/project/.devo/rules/api.md",
+					path: join(projectPath, ".devo", "rules", "api.md"),
 					name: "api-rules",
 					content: "Use NestJS patterns for the API.",
 					globs: "api/src/**/*.ts",
@@ -144,14 +148,14 @@ describe("canonicalToCursor", () => {
 	test("converts agents to Cursor format (minimal frontmatter)", () => {
 		const scan = emptyCanonical()
 		scan.projects.push({
-			path: "/test/project",
+			path: projectPath,
 			mcpServers: {},
 			rules: [],
 			skills: [],
 			commands: [],
 			agents: [
 				{
-					path: "/test/project/.devo/agents/build.md",
+					path: join(projectPath, ".devo", "agents", "build.md"),
 					name: "build",
 					content: "---\ndescription: Build agent\n---\n\nYou are a build agent.",
 					frontmatter: { description: "Build agent" },
@@ -167,21 +171,21 @@ describe("canonicalToCursor", () => {
 		expect(result.agents.size).toBe(1)
 		const agentEntries = [...result.agents.entries()]
 		const [path, content] = agentEntries[0]
-		expect(path).toContain(".cursor/agents/build.md")
+		expect(path).toBe(join(projectPath, ".cursor", "agents", "build.md"))
 		expect(content).toContain("build")
 	})
 
 	test("converts commands to plain markdown (no frontmatter)", () => {
 		const scan = emptyCanonical()
 		scan.projects.push({
-			path: "/test/project",
+			path: projectPath,
 			mcpServers: {},
 			rules: [],
 			skills: [],
 			agents: [],
 			commands: [
 				{
-					path: "/test/project/.devo/commands/commit.md",
+					path: join(projectPath, ".devo", "commands", "commit.md"),
 					name: "commit",
 					content: "---\ndescription: Commit changes\n---\n\nCommit all staged changes.",
 					frontmatter: { description: "Commit changes" },
@@ -196,7 +200,7 @@ describe("canonicalToCursor", () => {
 		expect(result.commands.size).toBe(1)
 		const cmdEntries = [...result.commands.entries()]
 		const [path, content] = cmdEntries[0]
-		expect(path).toContain(".cursor/commands/commit.md")
+		expect(path).toBe(join(projectPath, ".cursor", "commands", "commit.md"))
 		// Cursor commands are plain markdown
 		expect(content).toBe("Commit all staged changes.")
 		expect(content).not.toContain("---")
@@ -220,7 +224,7 @@ describe("canonicalToCursor", () => {
 	test("converts project MCP to .cursor/mcp.json", () => {
 		const scan = emptyCanonical()
 		scan.projects.push({
-			path: "/test/project",
+			path: projectPath,
 			mcpServers: {
 				LocalDB: {
 					type: "local",
@@ -237,7 +241,7 @@ describe("canonicalToCursor", () => {
 		const result = canonicalToCursor(scan)
 
 		expect(result.projectConfigs.size).toBe(1)
-		const config = result.projectConfigs.get("/test/project") as {
+		const config = result.projectConfigs.get(projectPath) as {
 			mcpServers: Record<string, { command: string }>
 		}
 		expect(config.mcpServers.LocalDB.command).toBe("node")
@@ -249,7 +253,7 @@ describe("canonicalToCursor", () => {
 			TestServer: { type: "remote", url: "https://test.com/mcp" },
 		}
 		scan.projects.push({
-			path: "/test/project",
+			path: projectPath,
 			mcpServers: {},
 			rules: [
 				{

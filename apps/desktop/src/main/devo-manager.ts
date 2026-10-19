@@ -1,14 +1,17 @@
-import type { AcpTransport, AcpTransportEvent, AcpTransportListener, JsonRpcId } from "./acp-stdio-client"
+import { DESKTOP_INITIALIZE_PARAMS } from "@devo-ai/sdk/v2/client"
+import type { JsonRpcId, NativeTransport, NativeTransportEvent, NativeTransportListener } from "./native-stdio-client"
+import { execFile } from "node:child_process"
+import { promisify } from "node:util"
 import { app } from "electron"
 import {
 	DEVO_HOME_ENV,
 	PROTOCOL_TRACE_ENV,
 	PROTOCOL_TRACE_FILE_ENV,
-	createAcpTrafficLoggerFromEnv,
-	type AcpTrafficLogger,
-	type AcpTrafficLogState,
-} from "./acp-traffic-log"
-import { StdioAcpClient } from "./acp-stdio-client"
+	createNativeTrafficLoggerFromEnv,
+	type NativeTrafficLogger,
+	type NativeTrafficLogState,
+} from "./native-traffic-log"
+import { StdioNativeClient } from "./native-stdio-client"
 import { resolveDevoProgram } from "./devo-program"
 import { createLogger } from "./logger"
 import { startNotificationWatcher, stopNotificationWatcher } from "./notification-watcher"
@@ -17,8 +20,10 @@ import { waitForEnv } from "./shell-env"
 
 const log = createLogger("devo-manager")
 
+const execFileAsync = promisify(execFile)
+
 const STDIO_URL = "stdio://local"
-const acpTrafficLogStartupEnv = {
+const nativeTrafficLogStartupEnv = {
 	[DEVO_HOME_ENV]: process.env[DEVO_HOME_ENV],
 	[PROTOCOL_TRACE_ENV]: process.env[PROTOCOL_TRACE_ENV],
 	[PROTOCOL_TRACE_FILE_ENV]: process.env[PROTOCOL_TRACE_FILE_ENV],
@@ -31,20 +36,25 @@ export interface DevoServer {
 	managed: boolean
 }
 
-let stdioClient: StdioAcpClient | null = null
+let stdioClient: StdioNativeClient | null = null
 let server: DevoServer | null = null
 let initializing: Promise<DevoServer> | null = null
-let acpTrafficLogger: AcpTrafficLogger | null = null
+// Invalidate an in-flight startup when the desktop stops or restarts the server.
+let lifecycleGeneration = 0
+let nativeTrafficLogger: NativeTrafficLogger | null = null
 const serverReadyListeners = new Set<() => void>()
+const nativeListeners = new Set<NativeTransportListener>()
 
 export async function ensureServer(): Promise<DevoServer> {
 	if (server && stdioClient?.connected()) return server
 	if (initializing) return initializing
 
-	initializing = startServer().finally(() => {
-		initializing = null
+	const startup = startServer(lifecycleGeneration).finally(() => {
+		// An older startup must not clear a newer restart's promise.
+		if (initializing === startup) initializing = null
 	})
-	return initializing
+	initializing = startup
+	return startup
 }
 
 export function getServerUrl(): string | null {
@@ -66,6 +76,8 @@ export function onServerReady(listener: () => void): () => void {
 }
 
 export function stopServer(): boolean {
+	lifecycleGeneration++
+	initializing = null
 	stopNotificationWatcher()
 	const hadClient = stdioClient !== null
 	stdioClient?.stop()
@@ -79,7 +91,59 @@ export async function restartServer(): Promise<DevoServer> {
 	return ensureServer()
 }
 
-export async function requestAcp(
+/**
+ * Minimum spacing between protocol-mismatch recycles so a genuine schema bug
+ * in the current build cannot restart-loop the app.
+ */
+const PROTOCOL_RECYCLE_COOLDOWN_MS = 5 * 60_000
+let lastProtocolRecycleAt = 0
+
+/**
+ * Recovers from a stale singleton server.
+ *
+ * At most one real devo-server runs per DEVO_HOME (`~/.devo/server.lock`); a
+ * spawned stdio child that loses the lock silently proxies to the holder
+ * (server `singleton.rs`). When the holder is an older build, this build's
+ * protocol schema rejects its traffic (ProtocolValidationError on e.g.
+ * subscription/create replay). Ask the singleton to shut down, then restart
+ * our own child, which becomes the real server.
+ *
+ * Returns false when the cooldown suppressed the recycle.
+ */
+export async function recycleServerForProtocolMismatch(reason: string): Promise<boolean> {
+	const now = Date.now()
+	if (now - lastProtocolRecycleAt < PROTOCOL_RECYCLE_COOLDOWN_MS) {
+		log.warn(
+			"Skipping Devo server recycle (cooldown); if the error persists, restart the app or run 'devo server --shutdown'",
+			{ reason },
+		)
+		return false
+	}
+	lastProtocolRecycleAt = now
+	log.warn("Recycling Devo server after protocol mismatch", { reason })
+
+	const program = resolveDevoProgram({
+		appPath: app.getAppPath(),
+		env: process.env,
+		isPackaged: app.isPackaged,
+		resourcesPath: process.resourcesPath,
+	})
+	try {
+		await execFileAsync(program, ["server", "--shutdown"], {
+			timeout: 15_000,
+			windowsHide: true,
+		})
+	} catch (error) {
+		// No singleton is running (or it died mid-handshake): the restart below
+		// still brings up a fresh real server of this build.
+		log.debug("Singleton shutdown call did not succeed", { error: String(error) })
+	}
+
+	await restartServer()
+	return true
+}
+
+export async function requestNative(
 	method: string,
 	params?: unknown,
 	directory?: string,
@@ -88,62 +152,90 @@ export async function requestAcp(
 	return client.request(method, params, directory)
 }
 
-export async function respondAcp(id: JsonRpcId, result: unknown): Promise<void> {
+export async function notifyNative(
+	method: string,
+	params?: unknown,
+	directory?: string,
+): Promise<void> {
+	const client = await ensureClient()
+	return client.notify(method, params, directory)
+}
+
+export async function respondNative(id: JsonRpcId, result: unknown): Promise<void> {
 	const client = await ensureClient()
 	await client.respond(id, result)
 }
 
-export function subscribeAcp(listener: AcpTransportListener): () => void {
-	const client = getOrCreateClient()
-	return client.subscribe(listener)
+export function subscribeNative(listener: NativeTransportListener): () => void {
+	nativeListeners.add(listener)
+	getOrCreateClient()
+	return () => { nativeListeners.delete(listener) }
 }
 
-export function isAcpConnected(): boolean {
+export function isNativeConnected(): boolean {
 	return stdioClient?.connected() ?? false
 }
 
-const sharedAcpTransport: AcpTransport = {
-	request: requestAcp,
-	respond: respondAcp,
-	subscribe: subscribeAcp,
-	connected: isAcpConnected,
+const sharedNativeTransport: NativeTransport = {
+	request: requestNative,
+	notify: notifyNative,
+	respond: respondNative,
+	subscribe: subscribeNative,
+	connected: isNativeConnected,
 	pid: () => stdioClient?.pid() ?? null,
 	stop: stopServer,
 }
 
-export function getAcpTransport(): AcpTransport {
-	return sharedAcpTransport
+export function getNativeTransport(): NativeTransport {
+	return sharedNativeTransport
 }
 
-export function getAcpTrafficLogState(): AcpTrafficLogState {
-	return getAcpTrafficLogger().getState()
+export function getNativeTrafficLogState(): NativeTrafficLogState {
+	return getNativeTrafficLogger().getState()
 }
 
-async function startServer(): Promise<DevoServer> {
+async function startServer(generation: number): Promise<DevoServer> {
 	await waitForEnv()
+	if (generation !== lifecycleGeneration) throw new Error("Devo Native stdio server startup cancelled")
+
 	const client = getOrCreateClient()
-	client.start()
+	try {
+		client.start()
+		await initialize(client)
+		if (generation !== lifecycleGeneration || stdioClient !== client) {
+			throw new Error("Devo Native stdio server startup cancelled")
+		}
 
-	await initialize(client)
-
-	server = {
-		url: STDIO_URL,
-		transport: "stdio",
-		pid: client.pid(),
-		managed: true,
+		const readyServer: DevoServer = {
+			url: STDIO_URL,
+			transport: "stdio",
+			pid: client.pid(),
+			managed: true,
+		}
+		server = readyServer
+		startNotificationWatcher(getNativeTransport())
+		notifyServerReady()
+		log.info("Devo Native stdio server ready", { pid: readyServer.pid })
+		return readyServer
+	} catch (error) {
+		// stopServer may already have stopped this child and installed a replacement.
+		// Only clean up a client that this startup still owns.
+		if (stdioClient === client) {
+			stopNotificationWatcher()
+			client.stop()
+			stdioClient = null
+			server = null
+		}
+		throw error
 	}
-	startNotificationWatcher(getAcpTransport())
-	notifyServerReady()
-	log.info("Devo ACP stdio server ready", { pid: server.pid })
-	return server
 }
 
-async function ensureClient(): Promise<StdioAcpClient> {
+async function ensureClient(): Promise<StdioNativeClient> {
 	await ensureServer()
 	return getOrCreateClient()
 }
 
-function getOrCreateClient(): StdioAcpClient {
+function getOrCreateClient(): StdioNativeClient {
 	if (!stdioClient) {
 		const program = resolveDevoProgram({
 			appPath: app.getAppPath(),
@@ -151,29 +243,38 @@ function getOrCreateClient(): StdioAcpClient {
 			isPackaged: app.isPackaged,
 			resourcesPath: process.resourcesPath,
 		})
-			stdioClient = new StdioAcpClient({
-				program,
-				networkProxy: getSettings().servers.networkProxy,
-				trafficLogger: getAcpTrafficLogger(),
-			})
-		stdioClient.subscribe(handleTransportEvent)
+		const client = new StdioNativeClient({
+			program,
+			networkProxy: getSettings().servers.networkProxy,
+			trafficLogger: getNativeTrafficLogger(),
+		})
+		stdioClient = client
+		client.subscribe((event) => handleTransportEvent(client, event))
 	}
 	return stdioClient
 }
 
-function getAcpTrafficLogger(): AcpTrafficLogger {
-	if (!acpTrafficLogger) {
-		acpTrafficLogger = createAcpTrafficLoggerFromEnv({
-			env: acpTrafficLogStartupEnv,
+function getNativeTrafficLogger(): NativeTrafficLogger {
+	if (!nativeTrafficLogger) {
+		nativeTrafficLogger = createNativeTrafficLoggerFromEnv({
+			env: nativeTrafficLogStartupEnv,
 		})
 	}
-	return acpTrafficLogger
+	return nativeTrafficLogger
 }
 
-function handleTransportEvent(event: AcpTransportEvent): void {
+function handleTransportEvent(client: StdioNativeClient, event: NativeTransportEvent): void {
+	if (client !== stdioClient) return
 	if (event.type === "closed") {
-		log.warn("Devo ACP stdio transport closed", { error: event.error })
+		log.warn("Devo Native stdio transport closed", { error: event.error })
 		server = null
+	}
+	for (const listener of nativeListeners) {
+		try {
+			listener(event)
+		} catch (error) {
+			log.warn("Native transport listener failed", error)
+		}
 	}
 }
 
@@ -187,17 +288,21 @@ function notifyServerReady(): void {
 	}
 }
 
-async function initialize(client: StdioAcpClient): Promise<void> {
-	await client.request("initialize", {
-		protocolVersion: 1,
-		clientCapabilities: {
-			fs: { readTextFile: false, writeTextFile: false },
-			terminal: false,
-		},
-		clientInfo: {
-			name: "devo-desktop",
-			title: "Devo Desktop",
-			version: "0.1.0",
-		},
-	})
+async function initialize(client: StdioNativeClient): Promise<void> {
+	try {
+		await client.request("initialize", DESKTOP_INITIALIZE_PARAMS)
+	} catch (error) {
+		// A timed-out initialize can still leave a warming stdio child alive; retry once
+		// before surfacing the error to the renderer (common when opening a session cold).
+		if (client.connected() && isInitializeTimeoutError(error)) {
+			log.warn("initialize timed out during cold start; retrying once")
+			await client.request("initialize", DESKTOP_INITIALIZE_PARAMS)
+			return
+		}
+		throw error
+	}
+}
+
+function isInitializeTimeoutError(error: unknown): boolean {
+	return error instanceof Error && error.message.startsWith("initialize request ")
 }

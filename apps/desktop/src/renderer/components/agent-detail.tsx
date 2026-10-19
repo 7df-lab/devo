@@ -35,7 +35,7 @@ import type {
 } from "../hooks/use-devo-data"
 import type { ChatTurn } from "../hooks/use-session-chat"
 import { formatShortcut } from "../lib/shortcut-display"
-import type { Agent, FileAttachment, QuestionAnswer } from "../lib/types"
+import type { Agent, FileAttachment, PermissionResponse, QuestionAnswer } from "../lib/types"
 import { workspaceChangeStats } from "../lib/workspace-diff"
 import {
 	fetchOpenInTargets,
@@ -44,9 +44,9 @@ import {
 	setOpenInPreferred,
 } from "../services/backend"
 import { ChatView } from "./chat"
+import { ContextUsageButton } from "./context-usage-button"
 import { BottomPanelIcon, RightPanelIcon } from "./panel-icons"
-import { ReviewPanel } from "./review/review-panel"
-import { SessionMetricsOverviewButton } from "./session-metrics-bar"
+import { ReviewSideRail } from "./review/review-side-rail"
 import { WorktreeActions } from "./worktree-actions"
 
 function useTurnWorkspaceChangeStats(sessionId: string): {
@@ -77,6 +77,8 @@ interface AgentDetailProps {
 	/** Structured chat turns (for Chat tab) */
 	chatTurns: ChatTurn[]
 	chatLoading?: boolean
+	/** True when the initial fetch is in flight and no cached turns exist yet. */
+	chatShowLoading?: boolean
 	/** Whether earlier messages are currently being loaded */
 	chatLoadingEarlier?: boolean
 	/** Whether there are earlier messages that can be loaded */
@@ -88,9 +90,14 @@ interface AgentDetailProps {
 		agent: Agent,
 		permissionSessionId: string,
 		permissionId: string,
-		response?: "once" | "always",
+		response?: PermissionResponse,
 	) => Promise<void>
-	onDeny?: (agent: Agent, permissionSessionId: string, permissionId: string) => Promise<void>
+	onDeny?: (
+		agent: Agent,
+		permissionSessionId: string,
+		permissionId: string,
+		note?: string,
+	) => Promise<void>
 	onReplyQuestion?: (agent: Agent, requestId: string, answers: QuestionAnswer[]) => Promise<void>
 	onRejectQuestion?: (agent: Agent, requestId: string) => Promise<void>
 	onSendMessage?: (
@@ -120,18 +127,17 @@ interface AgentDetailProps {
 	onRedo?: () => Promise<void>
 	/** Whether the session is in a reverted state */
 	isReverted?: boolean
-	/** Revert to a specific message (for per-turn undo) */
-	onRevertToMessage?: (messageId: string) => Promise<void>
-	/** Fork from a turn boundary (messageId of the next turn's user message, or undefined for full fork) */
-	onForkFromTurn?: (messageId?: string) => Promise<void>
-	/** Delete a specific part from a message (for error recovery) */
-	onDeletePart?: (sessionId: string, messageId: string, partId: string) => Promise<void>
+	/** Fork from a turn boundary (protocol turn id, or undefined for tip fork) */
+	onForkFromTurn?: (turnId?: string) => Promise<void>
+	/** Edit and resend the latest user message */
+	onEditUserMessage?: (messageId: string, text: string) => Promise<void>
 }
 
 export function AgentDetail({
 	agent,
 	chatTurns,
 	chatLoading,
+	chatShowLoading,
 	onStop,
 	onApprove,
 	onDeny,
@@ -153,9 +159,8 @@ export function AgentDetail({
 	onUndo,
 	onRedo,
 	isReverted,
-	onRevertToMessage,
 	onForkFromTurn,
-	onDeletePart,
+	onEditUserMessage,
 }: AgentDetailProps) {
 	const navigate = useNavigate()
 	const { projectSlug } = useParams({ strict: false }) as { projectSlug?: string }
@@ -167,6 +172,7 @@ export function AgentDetail({
 	// Review panel state
 	const [reviewPanelOpen, setReviewPanelOpen] = useAtom(reviewPanelOpenAtom)
 	const [reviewSettings, setReviewSettings] = useAtom(reviewPanelSettingsAtom)
+	const reviewExpanded = reviewPanelOpen && Boolean(reviewSettings.expanded)
 
 	// Keyboard shortcut: Cmd/Ctrl+Shift+D to toggle review panel
 	useEffect(() => {
@@ -240,16 +246,15 @@ export function AgentDetail({
 				onToggleReviewPanel={() => setReviewPanelOpen((prev) => !prev)}
 			/>
 
-			{/* Sub-agent breadcrumb -- navigate back to parent */}
-			{agent.parentId && (
+			{/* Sub-agent breadcrumb — navigate back to parent (forks use the in-transcript marker) */}
+			{agent.parentId && !agent.forkFromId && (
 				<button
 					type="button"
 					onClick={() => {
-						const parentId = agent.parentId
-						if (!parentId) return
+						if (!agent.parentId) return
 						navigate({
 							to: "/project/$projectSlug/session/$sessionId",
-							params: { projectSlug: projectSlug ?? agent.projectSlug, sessionId: parentId },
+							params: { projectSlug: projectSlug ?? agent.projectSlug, sessionId: agent.parentId },
 						})
 					}}
 					className="flex items-center gap-1.5 border-b border-border bg-muted/30 px-4 py-1.5 text-xs text-muted-foreground transition-colors hover:bg-muted/50 hover:text-foreground"
@@ -269,6 +274,7 @@ export function AgentDetail({
 				<ChatView
 					turns={chatTurns}
 					loading={chatLoading ?? false}
+					showLoading={chatShowLoading ?? false}
 					loadingEarlier={chatLoadingEarlier ?? false}
 					hasEarlierMessages={chatHasEarlier ?? false}
 					onLoadEarlier={onLoadEarlier}
@@ -289,9 +295,9 @@ export function AgentDetail({
 					onUndo={onUndo}
 					onRedo={onRedo}
 					isReverted={isReverted}
-					onRevertToMessage={onRevertToMessage}
 					onForkFromTurn={onForkFromTurn}
-					onDeletePart={onDeletePart}
+					onEditUserMessage={onEditUserMessage}
+					parentSessionName={parentSessionName}
 					reviewPanelOpen={reviewPanelOpen}
 				/>
 			</div>
@@ -299,20 +305,23 @@ export function AgentDetail({
 	)
 
 	return (
-		<div className="flex h-full">
-			{/* Chat panel -- takes remaining space */}
-			<div className="min-w-0 flex-1 flex flex-col">{chatContent}</div>
-
-			{/* Review panel -- slides in/out from right */}
+		<div className="flex h-full min-w-0">
+			{/* Chat panel -- collapses when Changes is expanded full-width */}
 			<div
-				className="shrink-0 overflow-hidden border-l border-border transition-[width] duration-250 ease-in-out"
-				style={{ width: reviewPanelOpen ? (reviewSettings.expanded ? "100%" : "40%") : 0 }}
+				className={
+					reviewExpanded
+						? "w-0 flex-none overflow-hidden"
+						: "flex min-w-0 flex-1 flex-col"
+				}
 			>
-				{/* Keep ReviewPanel mounted so it retains state, just hidden at 0 width */}
-				<div className="h-full" style={{ minWidth: reviewSettings.expanded ? "100vw" : "40vw" }}>
-					<ReviewPanel sessionId={agent.sessionId} directory={agent.directory} />
-				</div>
+				{chatContent}
 			</div>
+
+			<ReviewSideRail
+				key={agent.worktreePath || agent.directory}
+				sessionId={agent.sessionId}
+				directory={agent.worktreePath || agent.directory}
+			/>
 		</div>
 	)
 }
@@ -321,7 +330,7 @@ export function AgentDetail({
 // Session panel header
 // ============================================================
 
-function SessionPanelHeader({
+export function SessionPanelHeader({
 	agent,
 	isEditingTitle,
 	titleValue,
@@ -351,27 +360,17 @@ function SessionPanelHeader({
 	return (
 		<div
 			data-slot="session-panel-header"
-			className="flex h-[46px] w-full min-w-0 shrink-0 items-center gap-2.5 border-b border-border/50 px-4"
+			className="flex h-[44px] w-full min-w-0 shrink-0 items-center gap-2.5 border-b border-border/40 px-5"
 		>
-			{/* Breadcrumb: project / [branch badge] / session name */}
+			{/* Session title (+ optional worktree branch badge) */}
 			<div className="flex min-w-0 flex-1 items-center gap-1.5 overflow-hidden">
-				{/* Project name */}
-				<span className="hidden shrink-0 text-xs font-semibold leading-none text-foreground sm:inline">
-					{agent.project}
-				</span>
-
-				{/* Worktree branch badge */}
 				{agent.worktreeBranch && <WorktreeBranchBadge branch={agent.worktreeBranch} />}
-
-				<span className="hidden shrink-0 text-xs leading-none text-muted-foreground/40 sm:inline">
-					/
-				</span>
 
 				{/* Session name — click to edit */}
 				{isEditingTitle ? (
 					<div className="inline-grid min-w-0 max-w-full flex-1 items-center">
 						{/* Ghost span — sizes the grid column to match the text width */}
-						<span className="invisible col-start-1 row-start-1 truncate text-xs font-semibold leading-none">
+						<span className="invisible col-start-1 row-start-1 truncate text-[13px] font-medium leading-none">
 							{titleValue}
 						</span>
 						<Input
@@ -384,7 +383,7 @@ function SessionPanelHeader({
 								if (e.key === "Escape") onCancelEditing()
 							}}
 							onBlur={onConfirmTitle}
-							className="col-start-1 row-start-1 h-7 min-w-0 border-none bg-transparent p-0 text-xs md:text-xs font-semibold leading-none shadow-none focus-visible:ring-0"
+							className="col-start-1 row-start-1 h-7 min-w-0 border-none bg-transparent p-0 text-[13px] md:text-[13px] font-medium leading-none shadow-none focus-visible:ring-0"
 						/>
 					</div>
 				) : (
@@ -393,7 +392,7 @@ function SessionPanelHeader({
 						onClick={onRename ? onStartEditing : undefined}
 						className={`group flex min-w-0 items-center gap-1.5 ${onRename ? "cursor-pointer" : "cursor-default"}`}
 					>
-						<h2 className="min-w-0 truncate text-xs font-semibold leading-none">
+						<h2 className="min-w-0 truncate text-[13px] font-medium leading-none">
 							{agent.name}
 						</h2>
 						{onRename && (
@@ -415,8 +414,8 @@ function SessionPanelHeader({
 						<OpenInButton directory={agent.worktreePath ?? agent.directory} />
 					</div>
 
-					<div className="flex shrink-0 items-center gap-1 rounded-lg border border-border/70 bg-background/70 p-0.5">
-						<SessionMetricsOverviewButton sessionId={agent.sessionId} />
+					<div className="flex shrink-0 items-center gap-0.5">
+						<ContextUsageButton sessionId={agent.sessionId} />
 						<TerminalToggleButton />
 						<ChangesPanelToggleButton
 							reviewPanelOpen={reviewPanelOpen}

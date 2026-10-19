@@ -1,4 +1,5 @@
 use std::collections::BTreeMap;
+use std::collections::BTreeSet;
 use std::collections::HashSet;
 use std::fs;
 use std::path::Path;
@@ -6,8 +7,6 @@ use std::path::PathBuf;
 
 use devo_protocol::CollaborationMode;
 use devo_protocol::PermissionPreset;
-use devo_protocol::ProviderModelBinding;
-use devo_protocol::ProviderVendor;
 use serde::Deserialize;
 use serde::Serialize;
 
@@ -16,7 +15,6 @@ use devo_util_paths::APP_CONFIG_DIR_NAME;
 use devo_util_paths::APP_CONFIG_FILE_NAME;
 use devo_util_paths::FileSystemConfigPathResolver;
 
-use crate::AUTH_CONFIG_FILE_NAME;
 use crate::AppConfigError;
 use crate::ExperimentalConfig;
 use crate::HooksConfig;
@@ -24,27 +22,31 @@ use crate::LogRotation;
 use crate::LoggingConfig;
 use crate::LoggingFileConfig;
 use crate::McpConfig;
-use crate::ModelBindingConfig;
+use crate::McpHostConfig;
+use crate::McpServerId;
+use crate::McpServerRecordToml;
 use crate::OAuthCredentialsStoreMode;
 use crate::PermissionConfig;
 use crate::ProviderConfigError;
+use crate::ProviderConfigFile;
 use crate::ProviderConfigSection;
 use crate::ProviderHttpConfig;
-use crate::ResolvedProviderSettings;
 use crate::ServerConfig;
 use crate::SkillsConfig;
 use crate::ToolsConfig;
 use crate::non_empty_string;
-use crate::provider_vendor_from_config;
-use crate::read_provider_config;
+use crate::provider::migrate_legacy_provider_config_on_startup;
+use crate::read_provider_catalog_config;
 use crate::read_provider_config_document;
-use crate::read_user_auth_config;
-use crate::resolve_provider_settings_from_config_and_auth;
-use crate::upsert_user_auth_api_key;
+use crate::remove_user_auth_credential;
 use crate::write_atomic;
-use crate::write_provider_config;
+use crate::write_provider_catalog_config;
 
 mod mcp_store;
+#[path = "provider_connection.rs"]
+mod provider_connection;
+
+pub use provider_connection::sparsify_provider_entry_against_builtin;
 
 pub use mcp_store::mcp_server_record_for_cli;
 
@@ -68,9 +70,15 @@ pub struct AppConfig {
     /// auto (default): Use the OS-specific keyring service if available, otherwise use a file.
     #[serde(default)]
     pub mcp_oauth_credentials_store: Option<OAuthCredentialsStoreMode>,
-    /// MCP server discovery and runtime configuration.
+    /// MCP host settings stored under `[mcp]`.
     #[serde(default)]
-    pub mcp: McpConfig,
+    pub mcp: McpHostConfig,
+    /// MCP server records stored under `[mcp_servers.<server_id>]`.
+    #[serde(default)]
+    pub mcp_servers: BTreeMap<McpServerId, McpServerRecordToml>,
+    /// Normalized MCP runtime configuration built from `mcp` + `mcp_servers`.
+    #[serde(skip, default)]
+    pub mcp_runtime: McpConfig,
     /// Tool-specific runtime configuration.
     #[serde(default, skip_serializing_if = "ToolsConfig::is_empty")]
     pub tools: ToolsConfig,
@@ -83,9 +91,15 @@ pub struct AppConfig {
     /// Provider, model, and active model defaults.
     #[serde(flatten)]
     pub provider: ProviderConfigSection,
+    /// Effective standalone provider/model JSON configuration.
+    #[serde(skip, default)]
+    pub provider_catalog: ProviderConfigFile,
     /// HTTP transport settings shared by model-provider requests.
     #[serde(default, skip_serializing_if = "ProviderHttpConfig::is_empty")]
     pub provider_http: ProviderHttpConfig,
+    /// Remote/offline model-directory refresh settings.
+    #[serde(default)]
+    pub catalog: CatalogConfig,
     /// Startup update-check defaults.
     pub updates: UpdatesConfig,
     /// Marker names used to discover the project root for instruction discovery.
@@ -93,12 +107,6 @@ pub struct AppConfig {
     pub project_root_markers: Vec<String>,
     /// User-level settings remembered per project key.
     pub projects: BTreeMap<String, ProjectConfig>,
-    /// Global absolute auto-compaction token limit.
-    ///
-    /// When set, sessions clamp this value to each model's `context_window`.
-    /// When unset, sessions use the model effective context window.
-    #[serde(default, skip_serializing_if = "Option::is_none")]
-    pub compaction_token_limit: Option<u64>,
     /// Default collaboration/input mode (Build or Plan) for new sessions.
     #[serde(default)]
     pub default_collaboration_mode: CollaborationMode,
@@ -126,6 +134,50 @@ pub struct UpdatesConfig {
     pub check_interval_hours: u64,
 }
 
+/// Controls remote model-directory refresh from models.dev (or a local dump).
+///
+/// Offline / air-gapped setups set `offline = true` and optionally point
+/// `source` at a local `api.json` file instead of the public URL.
+#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
+pub struct CatalogConfig {
+    /// When true, never fetch over the network. Local `source` file paths still
+    /// refresh the on-disk cache; the embedded builtin catalog always remains.
+    #[serde(default)]
+    pub offline: bool,
+    /// `https://models.dev/api.json` or a filesystem path to a models.dev dump.
+    #[serde(default = "default_catalog_source")]
+    pub source: String,
+    /// Whether bootstrap should refresh the cached remote directory.
+    #[serde(default = "default_catalog_refresh_on_startup")]
+    pub refresh_on_startup: bool,
+    /// Minimum hours between network refreshes when `source` is a URL.
+    #[serde(default = "default_catalog_refresh_interval_hours")]
+    pub refresh_interval_hours: u64,
+}
+
+impl Default for CatalogConfig {
+    fn default() -> Self {
+        Self {
+            offline: false,
+            source: default_catalog_source(),
+            refresh_on_startup: default_catalog_refresh_on_startup(),
+            refresh_interval_hours: default_catalog_refresh_interval_hours(),
+        }
+    }
+}
+
+fn default_catalog_source() -> String {
+    "https://models.dev/api.json".to_string()
+}
+
+fn default_catalog_refresh_on_startup() -> bool {
+    true
+}
+
+fn default_catalog_refresh_interval_hours() -> u64 {
+    1
+}
+
 /// Selects the model used for summary generation.
 #[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
 pub enum SummaryModelSelection {
@@ -141,8 +193,9 @@ pub enum SummaryModelSelection {
 /// priority order:
 ///
 /// 1. command-line startup arguments
-/// 2. `<workspace>/.devo/config.toml` for the currently opened project
-/// 3. the user config file under the configured config directory
+/// 2. `<workspace>/.devo/config.toml` and `providers.json` overlays for the
+///    currently opened project
+/// 3. the user config files under the configured config directory
 ///
 /// When the same field appears in multiple sources, the higher-priority source
 /// must win.
@@ -181,12 +234,16 @@ impl Default for AppConfig {
             skills: SkillsConfig::default(),
             experimental: ExperimentalConfig::default(),
             mcp_oauth_credentials_store: Some(OAuthCredentialsStoreMode::default()),
-            mcp: McpConfig::default(),
+            mcp: McpHostConfig::default(),
+            mcp_servers: BTreeMap::new(),
+            mcp_runtime: McpConfig::default(),
             tools: ToolsConfig::default(),
             hooks: HooksConfig::default(),
             permission: PermissionConfig::default(),
             provider: ProviderConfigSection::default(),
+            provider_catalog: ProviderConfigFile::default(),
             provider_http: ProviderHttpConfig::default(),
+            catalog: CatalogConfig::default(),
             updates: UpdatesConfig {
                 enabled: true,
                 check_on_startup: true,
@@ -194,7 +251,6 @@ impl Default for AppConfig {
             },
             project_root_markers: vec![".git".into()],
             projects: BTreeMap::new(),
-            compaction_token_limit: None,
             default_collaboration_mode: CollaborationMode::Build,
         }
     }
@@ -237,150 +293,109 @@ impl AppConfigStore {
         &self.config
     }
 
+    /// Reloads the effective config from disk.
+    ///
+    /// Connection mutations often land through a different [`AppConfigStore`]
+    /// instance (for example the process store inside a provider/upsert RPC)
+    /// and only touch the files; runtime contexts own their own store
+    /// instance and need this reload to observe those files.
+    pub fn reload(&mut self) -> Result<(), AppConfigError> {
+        self.config = self.loader.load(self.workspace_root.as_deref())?;
+        Ok(())
+    }
+
     pub fn user_config_dir(&self) -> &Path {
         self.user_config_file
             .parent()
             .expect("user config file should have a parent directory")
     }
 
-    /// Returns the configured provider vendors from the effective config.
-    pub fn provider_vendors(&self) -> Vec<ProviderVendor> {
-        self.config
-            .provider
+    /// Returns the standalone user provider/model configuration path.
+    pub fn user_provider_config_file(&self) -> PathBuf {
+        self.user_config_dir()
+            .join(crate::PROVIDER_CONFIG_FILE_NAME)
+    }
+
+    /// Returns the user-owned custom providers/models path.
+    pub fn user_custom_provider_config_file(&self) -> PathBuf {
+        self.user_config_dir()
+            .join(crate::CUSTOM_PROVIDER_CONFIG_FILE_NAME)
+    }
+
+    /// Returns provider ids that have a user-created Connection.
+    ///
+    /// Built-in directory entries are intentionally excluded. A provider is
+    /// connected when it exists in the user provider overlay (or in the old
+    /// TOML provider section that is still being migrated).
+    pub fn provider_connection_ids(&self) -> anyhow::Result<Vec<String>> {
+        let mut ids = read_provider_catalog_config(&self.user_provider_config_file())?
             .providers
-            .iter()
-            .map(|(provider_id, provider_config)| {
-                provider_vendor_from_config(provider_id, provider_config)
-            })
-            .collect()
-    }
-
-    /// Upserts a provider vendor and refreshes the shared effective app config.
-    pub fn upsert_provider_vendor(
-        &mut self,
-        provider_id: String,
-        provider_vendor: ProviderVendor,
-        model_binding: Option<ProviderModelBinding>,
-        default_model_binding: Option<String>,
-        api_key: Option<String>,
-    ) -> anyhow::Result<ProviderVendor> {
-        if provider_vendor.wire_apis.is_empty() {
-            anyhow::bail!("wire_apis must contain at least one wire API");
-        }
-        if let Some(binding) = &model_binding {
-            validate_provider_model_binding(&provider_id, &provider_vendor, binding)?;
-        }
-
-        let target_config_file = self.user_config_file.as_path();
-        let mut config = read_provider_config(target_config_file)?;
-        let credential_id = if let Some(api_key) = api_key.as_deref().and_then(non_empty_string) {
-            let credential_id = provider_vendor
-                .credential
-                .as_deref()
-                .and_then(non_empty_string)
-                .unwrap_or_else(|| credential_id_for_provider(&provider_id));
-            let user_config_dir = self
-                .user_config_file
-                .parent()
-                .ok_or_else(|| anyhow::anyhow!("user config file has no parent directory"))?;
-            upsert_user_auth_api_key(user_config_dir, &credential_id, &api_key)?;
-            Some(credential_id)
-        } else {
-            provider_vendor
-                .credential
-                .as_deref()
-                .and_then(non_empty_string)
-        };
-        let entry = config.providers.entry(provider_id.clone()).or_default();
-        entry.name = provider_vendor.name.trim().to_string();
-        entry.base_url = provider_vendor
-            .base_url
-            .as_deref()
-            .and_then(non_empty_string);
-        entry.credential = credential_id;
-        entry.headers = provider_vendor
-            .headers
-            .as_deref()
-            .and_then(non_empty_string);
-        entry.wire_apis = provider_vendor.wire_apis.clone();
-        entry.enabled = provider_vendor.enabled;
-
-        if let Some(binding) = &model_binding {
-            config.model_bindings.insert(
-                binding.binding_id.clone(),
-                ModelBindingConfig {
-                    model_slug: binding.model_slug.trim().to_string(),
-                    provider: binding.provider.trim().to_string(),
-                    request_model: binding.request_model.trim().to_string(),
-                    display_name: binding.display_name.as_deref().and_then(non_empty_string),
-                    invocation_method: binding.invocation_method,
-                    default_reasoning_effort: binding
-                        .default_reasoning_effort
-                        .as_deref()
-                        .and_then(non_empty_string),
-                    web_search: None,
-                    web_fetch: None,
-                    enabled: binding.enabled,
-                },
-            );
-        }
-        if let Some(binding_id) = default_model_binding.as_deref().and_then(non_empty_string) {
-            if !config.model_bindings.contains_key(&binding_id) {
-                anyhow::bail!("default model binding `{binding_id}` does not exist");
-            }
-            config.defaults.model_binding = Some(binding_id);
-        }
-
-        write_provider_config(target_config_file, &config)?;
-
-        self.config = self
-            .loader
-            .load(self.workspace_root.as_deref())
-            .map_err(|error| anyhow::anyhow!(error))?;
-
-        Ok(provider_vendor_from_config(
-            &provider_id,
-            self.config
-                .provider
+            .into_keys()
+            .collect::<Vec<_>>();
+        ids.extend(
+            read_provider_catalog_config(&self.user_custom_provider_config_file())?
                 .providers
-                .get(&provider_id)
-                .expect("provider entry should exist after upsert"),
-        ))
+                .into_keys(),
+        );
+        ids.sort();
+        ids.dedup();
+        Ok(ids)
     }
 
-    /// Persists a user-level model default option and refreshes effective config.
-    pub fn set_model_config_option(&mut self, config_id: &str, value: &str) -> anyhow::Result<()> {
-        let value = value.trim();
-        if value.is_empty() {
-            anyhow::bail!("model config value must not be empty");
+    /// Disconnects a user-created provider Connection.
+    ///
+    /// This removes the user's provider overlay, model entries rooted at that
+    /// provider, and an unshared credential from auth.json. Built-in catalog
+    /// entries remain available for a future connection.
+    pub fn disconnect_provider(&mut self, provider_id: &str) -> anyhow::Result<()> {
+        let provider_id = non_empty_string(provider_id)
+            .ok_or_else(|| anyhow::anyhow!("provider id must not be empty"))?;
+        let connection_path = self.user_provider_config_file();
+        let custom_path = self.user_custom_provider_config_file();
+        let mut connection = read_provider_catalog_config(&connection_path)?;
+        let mut custom = read_provider_catalog_config(&custom_path)?;
+
+        let removed_provider = connection
+            .providers
+            .remove(&provider_id)
+            .or_else(|| custom.providers.remove(&provider_id));
+        let Some(removed_provider) = removed_provider else {
+            return Ok(());
+        };
+        let credential_id = removed_provider.credential;
+        for config in [&mut connection, &mut custom] {
+            let provider_prefix = format!("{provider_id}/");
+            if config
+                .model
+                .as_deref()
+                .is_some_and(|model| model == provider_id || model.starts_with(&provider_prefix))
+            {
+                config.model = None;
+            }
+            if config
+                .small_model
+                .as_deref()
+                .is_some_and(|model| model == provider_id || model.starts_with(&provider_prefix))
+            {
+                config.small_model = None;
+            }
         }
 
-        let target_config_file = self.user_config_file.as_path();
-        if let Some(parent) = target_config_file.parent() {
-            fs::create_dir_all(parent)?;
+        let remaining_credentials = connection
+            .providers
+            .values()
+            .chain(custom.providers.values())
+            .filter_map(|provider| provider.credential.as_deref())
+            .collect::<BTreeSet<_>>();
+        write_provider_catalog_config(&connection_path, &connection)?;
+        write_provider_catalog_config(&custom_path, &custom)?;
+        migrate_legacy_provider_config_file(&self.user_config_file)?;
+        if let Some(credential_id) = credential_id
+            && !remaining_credentials.contains(credential_id.as_str())
+        {
+            remove_user_auth_credential(self.user_config_dir(), &credential_id)
+                .map_err(|error| anyhow::anyhow!(error))?;
         }
-        let mut config = read_provider_config(target_config_file)?;
-
-        match config_id {
-            "model" => {
-                let binding = config
-                    .model_bindings
-                    .get(value)
-                    .ok_or_else(|| anyhow::anyhow!("model binding `{value}` does not exist"))?;
-                if !binding.enabled {
-                    anyhow::bail!("model binding `{value}` is disabled");
-                }
-                config.defaults.model_binding = Some(value.to_string());
-            }
-            "thought_level" => {
-                config.model_reasoning_effort_selection = Some(value.to_string());
-            }
-            _ => {
-                anyhow::bail!("unknown model config option `{config_id}`");
-            }
-        }
-
-        write_provider_config(target_config_file, &config)?;
 
         self.config = self
             .loader
@@ -389,28 +404,48 @@ impl AppConfigStore {
         Ok(())
     }
 
-    /// Persists the global compaction token limit and refreshes effective config.
-    pub fn set_compaction_token_limit(&mut self, limit: u64) -> anyhow::Result<()> {
-        if limit == 0 {
-            anyhow::bail!("compaction_token_limit must be at least 1");
+    pub fn set_model_config_option(&mut self, config_id: &str, value: &str) -> anyhow::Result<()> {
+        let value = value.trim();
+        if value.is_empty() {
+            anyhow::bail!("model config value must not be empty");
         }
 
-        let target_config_file = self.user_config_file.as_path();
-        if let Some(parent) = target_config_file.parent() {
-            fs::create_dir_all(parent)?;
+        match config_id {
+            "model" => {
+                let (provider_id, model_id) = value
+                    .split_once('/')
+                    .ok_or_else(|| anyhow::anyhow!("model must use `provider/model` form"))?;
+                let catalog = self.config.provider_catalog_config();
+                // Sparse overlays omit unchanged builtin models. Reject only an
+                // explicitly disabled Connection / model in the user overlay;
+                // builtin inheritance is validated at runtime via the effective
+                // (builtin + overlay) catalog.
+                if let Some(provider) = catalog.providers.get(provider_id) {
+                    if provider.enabled == Some(false) {
+                        anyhow::bail!("provider `{provider_id}` is disabled");
+                    }
+                    if provider
+                        .models
+                        .get(model_id)
+                        .or_else(|| provider.model_overrides.get(model_id))
+                        .is_some_and(|model| model.enabled == Some(false))
+                    {
+                        anyhow::bail!("model `{value}` is disabled");
+                    }
+                }
+                write_user_session_default(&self.user_config_file, "model", value)?;
+            }
+            "thought_level" => {
+                write_user_session_default(
+                    &self.user_config_file,
+                    "model_reasoning_effort_selection",
+                    value,
+                )?;
+            }
+            _ => {
+                anyhow::bail!("unknown model config option `{config_id}`");
+            }
         }
-        let mut document = read_provider_config_document(target_config_file)?;
-        let document = ensure_toml_table(&mut document);
-        let limit_i64 = i64::try_from(limit).map_err(|_| {
-            anyhow::anyhow!("compaction_token_limit is too large to store in config.toml")
-        })?;
-        document.insert(
-            "compaction_token_limit".to_string(),
-            toml::Value::Integer(limit_i64),
-        );
-
-        let data = toml::to_string_pretty(&document)?;
-        write_atomic(target_config_file, data.as_bytes())?;
 
         self.config = self
             .loader
@@ -499,67 +534,146 @@ impl AppConfigStore {
     }
 }
 
-fn validate_provider_model_binding(
-    provider_id: &str,
-    provider_vendor: &ProviderVendor,
-    binding: &ProviderModelBinding,
-) -> anyhow::Result<()> {
-    if binding.binding_id.trim().is_empty() {
-        anyhow::bail!("model binding id cannot be empty");
+/// Removes provider/model binding tables after they have been migrated to JSON.
+///
+/// Session defaults (`model`, `model_reasoning_effort_selection`) stay in
+/// `config.toml` — they are preferences, not catalog overlays.
+pub fn migrate_legacy_provider_config_file(config_file: &Path) -> Result<(), ProviderConfigError> {
+    if !config_file.exists() {
+        return Ok(());
     }
-    if binding.model_slug.trim().is_empty() {
-        anyhow::bail!("model binding model_slug cannot be empty");
+
+    let mut document = read_provider_config_document(config_file)?;
+    let table = ensure_toml_table(&mut document);
+    let mut changed = false;
+    for key in [
+        "model_provider",
+        "providers",
+        "model_bindings",
+        "model_providers",
+    ] {
+        changed |= table.remove(key).is_some();
     }
-    if binding.request_model.trim().is_empty() {
-        anyhow::bail!("model binding request_model cannot be empty");
-    }
-    if binding.provider.trim() != provider_id {
-        anyhow::bail!("model binding provider must match provider vendor");
-    }
-    if !provider_vendor
-        .wire_apis
-        .contains(&binding.invocation_method)
+    if let Some(defaults) = table
+        .get_mut("defaults")
+        .and_then(toml::Value::as_table_mut)
     {
-        anyhow::bail!("model binding invocation_method must be supported by provider vendor");
+        changed |= defaults.remove("model_binding").is_some();
+        if defaults.is_empty() {
+            changed |= table.remove("defaults").is_some();
+        }
+    }
+    if changed {
+        let data =
+            toml::to_string_pretty(&document).map_err(|error| ProviderConfigError::Serialize {
+                message: error.to_string(),
+            })?;
+        write_atomic(config_file, data.as_bytes())?;
     }
     Ok(())
 }
 
-fn credential_id_for_provider(provider_id: &str) -> String {
-    let mut out = String::with_capacity(provider_id.len());
-    for ch in provider_id.chars() {
-        if ch.is_ascii_alphanumeric() {
-            out.push(ch.to_ascii_lowercase());
-        } else if !out.is_empty() && !out.ends_with('_') {
-            out.push('_');
-        }
+/// Moves top-level `model` / `reasoning_effort` / `small_model` out of
+/// `providers.json` into `config.toml` (preferences ≠ catalog).
+pub fn migrate_session_defaults_to_config_toml(
+    user_config_dir: &Path,
+) -> Result<bool, ProviderConfigError> {
+    let providers_path = user_config_dir.join(crate::PROVIDER_CONFIG_FILE_NAME);
+    let config_path = user_config_dir.join(APP_CONFIG_FILE_NAME);
+    if !providers_path.exists() {
+        return Ok(false);
     }
-    if out.ends_with('_') {
-        out.pop();
+
+    let mut providers = read_provider_catalog_config(&providers_path)?;
+    let mut document = if config_path.exists() {
+        read_provider_config_document(&config_path)?
+    } else {
+        toml::Value::Table(Default::default())
+    };
+    let table = ensure_toml_table(&mut document);
+    let mut changed = false;
+
+    if let Some(model) = providers.model.take() {
+        // One-time move: providers.json selection wins over a stale toml value.
+        table.insert("model".to_string(), toml::Value::String(model));
+        changed = true;
     }
-    out.push_str("_api_key");
-    out
+    if let Some(effort) = providers.reasoning_effort.take() {
+        table.insert(
+            "model_reasoning_effort_selection".to_string(),
+            toml::Value::String(effort),
+        );
+        table.remove("reasoning_effort");
+        changed = true;
+    }
+    if let Some(small_model) = providers.small_model.take() {
+        table.insert("small_model".to_string(), toml::Value::String(small_model));
+        changed = true;
+    }
+
+    if !changed {
+        return Ok(false);
+    }
+
+    let data =
+        toml::to_string_pretty(&document).map_err(|error| ProviderConfigError::Serialize {
+            message: error.to_string(),
+        })?;
+    if let Some(parent) = config_path.parent() {
+        fs::create_dir_all(parent).map_err(|source| ProviderConfigError::Io {
+            action: "create",
+            path: parent.to_path_buf(),
+            source,
+        })?;
+    }
+    write_atomic(&config_path, data.as_bytes())?;
+    write_provider_catalog_config(&providers_path, &providers)?;
+    Ok(true)
 }
 
-#[cfg(test)]
-mod app_tests {
-    use pretty_assertions::assert_eq;
-
-    use super::credential_id_for_provider;
-
-    #[test]
-    fn credential_id_normalizes_provider_id_without_extra_allocation_suffix() {
-        let cases = [
-            ("OpenRouter", "openrouter_api_key"),
-            ("deep-seek", "deep_seek_api_key"),
-            ("__custom/provider__", "custom_provider_api_key"),
-            ("---", "_api_key"),
-        ];
-
-        for (provider_id, expected) in cases {
-            assert_eq!(credential_id_for_provider(provider_id), expected);
-        }
+pub(crate) fn write_user_session_default(
+    config_file: &Path,
+    key: &str,
+    value: &str,
+) -> anyhow::Result<()> {
+    if let Some(parent) = config_file.parent() {
+        fs::create_dir_all(parent)?;
     }
+    let mut document = read_provider_config_document(config_file)?;
+    let table = ensure_toml_table(&mut document);
+    table.insert(key.to_string(), toml::Value::String(value.to_string()));
+    // Prefer the canonical effort key; drop short alias if present.
+    if key == "model_reasoning_effort_selection" {
+        table.remove("reasoning_effort");
+    }
+    let data = toml::to_string_pretty(&document)?;
+    write_atomic(config_file, data.as_bytes())?;
+    Ok(())
+}
+
+pub(crate) fn clear_user_session_default_if_matches(
+    config_file: &Path,
+    key: &str,
+    model_prefix: &str,
+) -> anyhow::Result<()> {
+    if !config_file.exists() {
+        return Ok(());
+    }
+    let mut document = read_provider_config_document(config_file)?;
+    let table = ensure_toml_table(&mut document);
+    let matches = table
+        .get(key)
+        .and_then(toml::Value::as_str)
+        .is_some_and(|model| {
+            model == model_prefix || model.starts_with(&format!("{model_prefix}/"))
+        });
+    if !matches {
+        return Ok(());
+    }
+    table.remove(key);
+    let data = toml::to_string_pretty(&document)?;
+    write_atomic(config_file, data.as_bytes())?;
+    Ok(())
 }
 
 #[cfg(test)]
@@ -567,26 +681,20 @@ mod app_tests {
 mod app_store_tests;
 
 impl AppConfig {
-    /// Resolves the active provider settings from this already-merged config.
-    ///
-    /// `user_config_dir` is used only for user-scoped auth material such as
-    /// `auth.json`; provider selection itself comes from this `AppConfig`.
-    pub fn resolve_provider_settings(
-        &self,
-        user_config_dir: &Path,
-    ) -> Result<ResolvedProviderSettings, ProviderConfigError> {
-        let auth = read_user_auth_config(&user_config_dir.join(AUTH_CONFIG_FILE_NAME))?;
-        let mut resolved = resolve_provider_settings_from_config_and_auth(&self.provider, &auth)?;
-        resolved.proxy_url = self.provider_http.proxy_url.clone();
-        resolved.no_proxy = self.provider_http.no_proxy.clone();
-        Ok(resolved)
-    }
-
     /// Returns true when the merged config contains any provider-era setup.
     pub fn has_provider_configuration(&self) -> bool {
-        !self.provider.providers.is_empty()
-            || !self.provider.model_bindings.is_empty()
-            || !self.provider.model_providers.is_empty()
+        let provider_catalog = self.provider_catalog_config();
+        !provider_catalog.providers.is_empty()
+    }
+
+    /// Returns the effective JSON provider/model catalog, with a compatibility
+    /// projection for callers that construct only the legacy TOML shape.
+    pub fn provider_catalog_config(&self) -> ProviderConfigFile {
+        if self.provider_catalog == ProviderConfigFile::default() {
+            ProviderConfigFile::from_provider_config_section(&self.provider)
+        } else {
+            self.provider_catalog.clone()
+        }
     }
 }
 
@@ -687,6 +795,28 @@ impl FileSystemAppConfigLoader {
             .join(APP_CONFIG_DIR_NAME)
             .join(APP_CONFIG_FILE_NAME)
     }
+
+    fn user_provider_config_path(&self) -> PathBuf {
+        self.config_folder_home
+            .join(crate::PROVIDER_CONFIG_FILE_NAME)
+    }
+
+    fn user_custom_provider_config_path(&self) -> PathBuf {
+        self.config_folder_home
+            .join(crate::CUSTOM_PROVIDER_CONFIG_FILE_NAME)
+    }
+
+    fn project_provider_config_path(&self, workspace_root: &Path) -> PathBuf {
+        workspace_root
+            .join(APP_CONFIG_DIR_NAME)
+            .join(crate::PROVIDER_CONFIG_FILE_NAME)
+    }
+
+    fn project_custom_provider_config_path(&self, workspace_root: &Path) -> PathBuf {
+        workspace_root
+            .join(APP_CONFIG_DIR_NAME)
+            .join(crate::CUSTOM_PROVIDER_CONFIG_FILE_NAME)
+    }
 }
 
 impl AppConfigLoader for FileSystemAppConfigLoader {
@@ -696,34 +826,147 @@ impl AppConfigLoader for FileSystemAppConfigLoader {
         let mut merged = toml::Value::try_from(AppConfig::default())
             .expect("default app config must serialize to TOML");
         let mut provider_config = ProviderConfigSection::default();
+        let mut provider_catalog = ProviderConfigFile::default();
 
         let user_path = self.user_config_path();
+        let user_provider_path = self.user_provider_config_path();
+        migrate_legacy_provider_config_on_startup(
+            &user_path,
+            &user_provider_path,
+            &self.config_folder_home,
+        )
+        .map_err(|source| AppConfigError::Provider { source })?;
+        migrate_session_defaults_to_config_toml(&self.config_folder_home)
+            .map_err(|source| AppConfigError::Provider { source })?;
         if user_path.exists() {
             let user_config = read_config_value(&user_path)?;
             provider_config.merge_overlay(
                 provider_section_from_value(&user_path, &user_config)?,
                 &user_config,
             );
+            provider_catalog.merge_overlay(ProviderConfigFile::from_provider_config_section(
+                &provider_section_from_value(&user_path, &user_config)?,
+            ));
             merge_app_config_values(&mut merged, user_config);
+        }
+
+        if user_provider_path.exists() {
+            let user_provider_file = read_provider_catalog_config(&user_provider_path)
+                .map_err(|source| AppConfigError::Provider { source })?;
+            let user_provider_section = user_provider_file.to_provider_config_section();
+            let user_provider_source =
+                toml::Value::try_from(&user_provider_section).map_err(|error| {
+                    AppConfigError::Provider {
+                        source: ProviderConfigError::Serialize {
+                            message: error.to_string(),
+                        },
+                    }
+                })?;
+            provider_config.merge_overlay(user_provider_section, &user_provider_source);
+            provider_catalog.merge_overlay(user_provider_file);
+        }
+
+        let user_custom_provider_path = self.user_custom_provider_config_path();
+        if user_custom_provider_path.exists() {
+            let user_custom_file = read_provider_catalog_config(&user_custom_provider_path)
+                .map_err(|source| AppConfigError::Provider { source })?;
+            let user_custom_section = user_custom_file.to_provider_config_section();
+            let user_custom_source =
+                toml::Value::try_from(&user_custom_section).map_err(|error| {
+                    AppConfigError::Provider {
+                        source: ProviderConfigError::Serialize {
+                            message: error.to_string(),
+                        },
+                    }
+                })?;
+            provider_config.merge_overlay(user_custom_section, &user_custom_source);
+            provider_catalog.merge_overlay(user_custom_file);
         }
 
         if let Some(workspace_root) = workspace_root {
             let project_path = self.project_config_path(workspace_root);
+            let project_provider_path = self.project_provider_config_path(workspace_root);
+            migrate_legacy_provider_config_on_startup(
+                &project_path,
+                &project_provider_path,
+                &self.config_folder_home,
+            )
+            .map_err(|source| AppConfigError::Provider { source })?;
             if project_path.exists() {
                 let project_config = read_config_value(&project_path)?;
                 provider_config.merge_overlay(
                     provider_section_from_value(&project_path, &project_config)?,
                     &project_config,
                 );
+                provider_catalog.merge_overlay(ProviderConfigFile::from_provider_config_section(
+                    &provider_section_from_value(&project_path, &project_config)?,
+                ));
                 merge_app_config_values(&mut merged, project_config);
+            }
+
+            if project_provider_path.exists() {
+                let project_provider_file = read_provider_catalog_config(&project_provider_path)
+                    .map_err(|source| AppConfigError::Provider { source })?;
+                let project_provider_section = project_provider_file.to_provider_config_section();
+                let project_provider_source = toml::Value::try_from(&project_provider_section)
+                    .map_err(|error| AppConfigError::Provider {
+                        source: ProviderConfigError::Serialize {
+                            message: error.to_string(),
+                        },
+                    })?;
+                provider_config.merge_overlay(project_provider_section, &project_provider_source);
+                provider_catalog.merge_overlay(project_provider_file);
+            }
+
+            let project_custom_provider_path =
+                self.project_custom_provider_config_path(workspace_root);
+            if project_custom_provider_path.exists() {
+                let project_custom_file =
+                    read_provider_catalog_config(&project_custom_provider_path)
+                        .map_err(|source| AppConfigError::Provider { source })?;
+                let project_custom_section = project_custom_file.to_provider_config_section();
+                let project_custom_source = toml::Value::try_from(&project_custom_section)
+                    .map_err(|error| AppConfigError::Provider {
+                        source: ProviderConfigError::Serialize {
+                            message: error.to_string(),
+                        },
+                    })?;
+                provider_config.merge_overlay(project_custom_section, &project_custom_source);
+                provider_catalog.merge_overlay(project_custom_file);
             }
         }
 
-        provider_config.merge_overlay(
-            provider_section_from_value(Path::new("<cli overrides>"), &self.cli_overrides)?,
-            &self.cli_overrides,
-        );
+        let cli_provider_section =
+            provider_section_from_value(Path::new("<cli overrides>"), &self.cli_overrides)?;
+        provider_catalog.merge_overlay(ProviderConfigFile::from_provider_config_section(
+            &cli_provider_section,
+        ));
+        provider_config.merge_overlay(cli_provider_section, &self.cli_overrides);
         merge_app_config_values_ref(&mut merged, &self.cli_overrides);
+
+        provider_catalog.apply_model_overrides(&provider_config.model_overrides);
+
+        // Session default `model` lives in config.toml; keep the legacy
+        // defaults.model_binding projection in sync for runtime readers.
+        if provider_config.defaults.model_binding.is_none()
+            && let Some(model) = provider_config.model.clone()
+        {
+            provider_config.defaults.model_binding = Some(model);
+        }
+        if provider_catalog.model.is_none() {
+            provider_catalog.model = provider_config.model.clone();
+        }
+
+        // Top-level small_model in config.toml is a session default (not in
+        // ProviderConfigSection); fold it into the catalog after overlays.
+        if provider_catalog.small_model.is_none()
+            && let Some(small_model) = merged
+                .get("small_model")
+                .and_then(toml::Value::as_str)
+                .map(str::to_string)
+        {
+            provider_catalog.small_model = Some(small_model);
+        }
 
         let mut config: AppConfig =
             merged
@@ -733,7 +976,23 @@ impl AppConfigLoader for FileSystemAppConfigLoader {
                     message: source.to_string(),
                 })?;
         config.provider = provider_config;
-        config.mcp.ensure_bundled_servers();
+        config.provider_catalog = provider_catalog;
+
+        // Build normalized MCP runtime config from the persisted TOML shape.
+        let servers = config
+            .mcp_servers
+            .iter()
+            .map(|(id, record)| {
+                record
+                    .clone()
+                    .into_runtime(id.clone())
+                    .map_err(|message| AppConfigError::Validation { message })
+            })
+            .collect::<Result<Vec<_>, AppConfigError>>()?;
+        config.mcp_runtime = McpConfig {
+            servers,
+            auto_start: config.mcp.auto_start,
+        };
         validate_app_config(&config)?;
         Ok(config)
     }

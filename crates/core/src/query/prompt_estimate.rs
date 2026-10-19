@@ -93,7 +93,8 @@ fn classify_message(message: &RequestMessage) -> MessageCategory {
             RequestContent::Reasoning { .. }
             | RequestContent::ProviderReasoning { .. }
             | RequestContent::HostedToolUse { .. }
-            | RequestContent::ToolUse { .. } => {}
+            | RequestContent::ToolUse { .. }
+            | RequestContent::Image { .. } => {}
         }
     }
     MessageCategory::Conversation

@@ -2,6 +2,11 @@ import { readFileSync } from "node:fs"
 import { describe, expect, test } from "bun:test"
 
 const popoverSource = readFileSync(new URL("./slash-command-popover.tsx", import.meta.url), "utf8")
+const chipSource = readFileSync(new URL("./composer-mode-chip.tsx", import.meta.url), "utf8")
+const composerPopoverSource = readFileSync(
+	new URL("./composer-popover.tsx", import.meta.url),
+	"utf8",
+)
 const chatViewSource = readFileSync(new URL("./chat-view.tsx", import.meta.url), "utf8")
 const newChatSource = readFileSync(new URL("../new-chat.tsx", import.meta.url), "utf8")
 const desktopChromeSource = readFileSync(new URL("../../desktop-chrome.css", import.meta.url), "utf8")
@@ -16,55 +21,78 @@ describe("Desktop slash command composer", () => {
 			showsPlan: clientCommandsBlock.includes('name: "plan"'),
 			showsResearch: clientCommandsBlock.includes('name: "research"'),
 			omitsUndo: !clientCommandsBlock.includes('name: "undo"'),
-			omitsSkills: !clientCommandsBlock.includes('name: "skills"'),
+			showsSkills: clientCommandsBlock.includes('name: "skills"'),
 			omitsServerCommands: !popoverSource.includes("useServerCommands"),
 			omitsUserCommandDispatch: !chatViewSource.includes("session.command"),
 			omitsSearchHeader:
 				!popoverSource.includes("SearchIcon") && !popoverSource.includes("Commands</span>"),
+			usesSharedPopover: popoverSource.includes("<ComposerPopover"),
+			usesSharedPopoverItem: popoverSource.includes("ComposerPopoverItem"),
+			singleOuterScroll:
+				!popoverSource.includes("@devo/ui/components/scroll-area") &&
+				composerPopoverSource.includes("overflow-y-auto"),
 		}).toEqual({
 			showsCompact: true,
 			showsGoal: true,
 			showsPlan: true,
 			showsResearch: true,
 			omitsUndo: true,
-			omitsSkills: true,
+			showsSkills: true,
 			omitsServerCommands: true,
 			omitsUserCommandDispatch: true,
 			omitsSearchHeader: true,
+			usesSharedPopover: true,
+			usesSharedPopoverItem: true,
+			singleOuterScroll: true,
 		})
 	})
 
-	test("turns goal and plan selections into footer trigger chips", () => {
+	test("turns goal into a footer trigger chip and plan into plan mode", () => {
 		expect({
 			requirementComment: chatViewSource.includes(
 				"Desktop slash commands are limited to first-party",
 			),
-			chipComponent: chatViewSource.includes("function ComposerTriggerChip"),
-			footerChip: chatViewSource.includes("<ComposerTriggerChip"),
-			goalIcon: chatViewSource.includes("GoalIcon"),
-			planIcon: chatViewSource.includes("ListTodoIcon"),
+			chipComponent: chipSource.includes("export function ComposerModeChip"),
+			goalFooterChip:
+				chatViewSource.includes('variant="goal"') &&
+				chatViewSource.includes("ComposerModeChip"),
+			newChatGoalChip:
+				newChatSource.includes('variant="goal"') &&
+				newChatSource.includes("ComposerModeChip"),
+			newChatPlanChip: newChatSource.includes('variant="plan"'),
+			planModeBadge:
+				chatViewSource.includes('variant="plan"') &&
+				chatViewSource.includes("ComposerModeChip"),
+			planTint: chipSource.includes("bg-amber-500/12"),
+			goalIcon: chipSource.includes("GoalIcon"),
+			planIcon: chipSource.includes("ListTodoIcon"),
 			researchIcon: popoverSource.includes("MicroscopeIcon"),
 			goalInsertText: popoverSource.includes('insertText: "/goal "'),
 			planInsertText: popoverSource.includes('insertText: "/plan "'),
 			researchInsertText: popoverSource.includes('insertText: "/research "'),
 			researchPromptPath: chatViewSource.includes('case "research":'),
 			closeOnlyOnHover:
-				chatViewSource.includes("opacity-0") &&
-				chatViewSource.includes("group-hover:opacity-100"),
+				chipSource.includes("opacity-0") && chipSource.includes("group-hover:opacity-100"),
 			closeReplacesIconInPlace:
-				chatViewSource.includes("hover replaces the trigger icon in-place") &&
-				chatViewSource.includes("group-hover:opacity-0"),
-			hoverBackground: chatViewSource.includes("hover:bg-muted"),
+				chipSource.includes("group-hover:opacity-0") &&
+				chipSource.includes("group-hover:opacity-100"),
+			hoverBackground: chipSource.includes("hover:bg-muted"),
 			shiftTabToggle: chatViewSource.includes('e.key === "Tab" && e.shiftKey'),
-			triggeredPrompt: chatViewSource.includes("text: `/${trigger} ${text.trim()}`"),
+			triggeredPrompt:
+				chatViewSource.includes("goalPromptText(text)") &&
+				chatViewSource.includes("`/${trigger} ${text.trim()}`"),
 			iconStrokeMatchesSidebar:
-				popoverSource.includes('commandIconClass = "size-3.5') &&
-				popoverSource.includes("stroke-[1.5]") &&
-				chatViewSource.includes("size-3.5 stroke-[1.5]"),
+				popoverSource.includes("composerPopoverIconClass") &&
+				composerPopoverSource.includes("stroke-[1.5]") &&
+				chipSource.includes("size-3.5 stroke-[1.5]"),
 		}).toEqual({
 			requirementComment: true,
 			chipComponent: true,
-			footerChip: true,
+			goalFooterChip: true,
+			newChatGoalChip: true,
+			newChatPlanChip: true,
+			planModeBadge: true,
+			planTint: true,
 			goalIcon: true,
 			planIcon: true,
 			researchIcon: true,

@@ -29,14 +29,14 @@ export function ModelSelectorOptionRow({
 				{selected && (
 					<CheckIcon
 						data-slot="model-selector-check-icon"
-						className="size-3.5 text-primary"
+						className="size-3.5 text-muted-foreground"
 					/>
 				)}
 			</span>
 			<div className="min-w-0 flex-1">
 				<div className="truncate">{displayName}</div>
 				{providerName && (
-					<div className="truncate text-[10px] text-muted-foreground/40">{providerName}</div>
+					<div className="break-all text-[11px] text-muted-foreground" title={providerName}>{providerName}</div>
 				)}
 			</div>
 		</SearchableListPopoverItem>

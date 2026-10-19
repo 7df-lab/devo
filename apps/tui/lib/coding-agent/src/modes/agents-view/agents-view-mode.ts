@@ -1,0 +1,2611 @@
+import { existsSync } from "node:fs";
+import { resolve as resolvePath } from "node:path";
+import {
+	type AutocompleteProvider,
+	CombinedAutocompleteProvider,
+	type Component,
+	clippedFullscreenDockHeight,
+	type Focusable,
+	ProcessTerminal,
+	setKeybindings,
+	TUI,
+	truncateToWidth,
+	visibleWidth,
+	wrapTextWithAnsi,
+} from "@earendil-works/pi-tui";
+import { APP_TITLE, appendRotatingLog, getAgentDir, getClientErrorLogPath, VERSION } from "../../config.js";
+import type { AgentSessionRuntimeConfig } from "../../core/agent-session-config.js";
+import { KeybindingsManager } from "../../core/keybindings.js";
+import { SessionManager } from "../../core/session-manager.js";
+import {
+	BUILTIN_SLASH_COMMANDS,
+	isBuiltinSlashCommandName,
+	isSessionSlashCommandName,
+	parseSlashCommand,
+	resolveBuiltinSlashCommandName,
+} from "../../core/slash-commands.js";
+import { canonicalizePath } from "../../utils/paths.js";
+import { ensureTool } from "../../utils/tools-manager.js";
+import type { AgentConnection, AgentConnectionHeartbeat, AgentConnectionSavedSessionInfo } from "../agent-connection/types.js";
+import type { DaemonClosingReason, DaemonCommand } from "../daemon/daemon-protocol.js";
+import type { DaemonSavedSessionCatalogContext } from "../daemon/saved-session-catalog.js";
+import { resolveAttachModelFallbackMessage, type SessionSummary } from "../daemon/daemon-session-list.js";
+import { CustomEditor } from "../interactive/components/custom-editor.js";
+import { keyText } from "../interactive/components/keybinding-hints.js";
+import { BrandSplashHeader, InteractiveMode, type BrandSplashHeaderOptions } from "../interactive/interactive-mode.js";
+import type { InteractiveModeUiServices } from "../interactive/interactive-mode-services.js";
+import { ClientPromptStashStore } from "../interactive/prompt-stash-state.js";
+import {
+	getEditorTheme,
+	initTheme,
+	onThemeChange,
+	setRegisteredThemes,
+	stopThemeWatcher,
+	theme,
+} from "../interactive/theme/theme.js";
+import { WORKING_ICON_INTERVAL_MS, workingIconFrame } from "../interactive/theme/working-icon.js";
+import {
+	formatPackageUpdateNotice,
+	formatTmuxWarningNotice,
+	formatUpdateAvailableNotice,
+	gatherStartupNotices,
+	type StartupNotices,
+} from "../shared/startup-notices.js";
+import {
+	type AgentsViewRow,
+	type AgentsViewScopeFrame,
+	type AgentsViewScopeKey,
+	type AgentsViewSection,
+	type AgentsViewSelectionKey,
+	buildAgentsViewRows,
+	buildUnifiedSessionIndex,
+	computeRecursiveRollups,
+	createUnattachableChildOpenResult,
+	filterEmptyAgentsViewSessions,
+	filterUnifiedSessions,
+	formatHeartbeatBadge,
+	getAgentsViewSelectionKey,
+	getAgentsViewSessionTitle,
+	getAgentsViewSummaryIdentity as getSummaryIdentity,
+	getUnifiedSessionAncestorSessionIds,
+	hasUnifiedSessionChildren,
+	migrateAgentsViewIdentitySet,
+	reconcileUnifiedSessions,
+	resolveAgentsViewLeftResult,
+	resolveAgentsViewScopeFrames,
+	resolveAgentsViewSelectionState,
+	scopeToSessionSubtree,
+	sectionTitle,
+	shouldApplyScopeResolution,
+	shouldShowAgentsViewSession,
+	summaryForUnifiedRecord,
+	transitionAgentsViewScope,
+	type UnifiedSessionIndex,
+	type UnifiedSessionRecord,
+} from "./agents-view-state.js";
+import { AgentsViewRosterStore, STALE_ROSTER_DAEMON_MESSAGE } from "./roster-store.js";
+import type {
+	AgentsViewNativeBackend,
+	AgentsViewNativeRoster,
+} from "./agents-view-native-backend.js";
+export type { AgentsViewNativeBackend, AgentsViewNativeRoster, AgentsViewNativeOpenedSession } from "./agents-view-native-backend.js";
+export type { SessionSummary } from "../daemon/daemon-session-list.js";
+import { matchesSearchText } from "./session-view-search.js";
+
+const HEARTBEAT_POLL_INTERVAL_MS = 15000;
+const RECONNECT_TIMEOUT_MS = 120000;
+const RECONNECT_RETRY_MS = 1000;
+const EXIT_HINT_DURATION_MS = 2000;
+const DELETE_CONFIRM_DURATION_MS = 2000;
+const STATUS_MESSAGE_DURATION_MS = 4500;
+const SEARCH_PROMPT_PLACEHOLDER = "Search sessions";
+const REPLY_PROMPT_FALLBACK_PLACEHOLDER = "Write a reply to this agent";
+const RESUME_PROMPT_PLACEHOLDER = "Write a prompt to resume this session";
+const STATUS_ROW_ICON = "•";
+const SELECTED_ROW_MARKER = "\0agents-view-selected-row\0";
+const CODE_ROW_MARKER = "\0agents-view-code-row\0";
+
+export interface AgentsViewModeOptions {
+	/** Native session/agent RPCs. Devo Agents View is Native-only. */
+	nativeBackend: AgentsViewNativeBackend;
+	/** Optional Devo/skinnned splash overrides (logo + title). */
+	brandSplash?: Pick<BrandSplashHeaderOptions, "logo" | "title">;
+	version?: string;
+	/** Terminal / product title when opening chat from Agents View. */
+	appTitle?: string;
+	/** Forwarded into InteractiveMode for /login provider filtering. */
+	excludedLoginProviderIds?: ReadonlyArray<string>;
+	/** Forwarded into InteractiveMode for host-owned builtin commands. */
+	excludedBuiltinCommands?: ReadonlyArray<string>;
+	config: AgentSessionRuntimeConfig;
+	uiServices: InteractiveModeUiServices;
+	createUiServicesForSession?: (summary: SessionSummary) => Promise<InteractiveModeUiServices>;
+	migratedProviders?: string[];
+	modelFallbackMessage?: string;
+	verbose?: boolean;
+	reconnectTimeoutMs?: number;
+	promptStashStore?: ClientPromptStashStore;
+	initialSession?: SessionSummary;
+	/** When set, the first view is rooted at this session's direct children. */
+	initialScopeKey?: AgentsViewScopeKey;
+}
+
+export type AgentsViewRunResult =
+	| { type: "exit" }
+	| {
+			type: "scope_back";
+			selection: SessionSummary;
+			expandedAncestorSessionIds: string[];
+			returnChat?: SessionSummary;
+			hasChildren: boolean;
+	  }
+	| {
+			type: "open";
+			summary: SessionSummary;
+			/** Row restored after chat closes; differs from summary only for an unattachable-child fallback. */
+			selection?: SessionSummary;
+			expandedAncestorSessionIds?: string[];
+			hasChildren?: boolean;
+			statusMessage?: string;
+	  };
+export type AgentsViewPersistentState = {
+	selectedRowIdentity?: string;
+	backSession?: SessionSummary;
+	scopeFrames?: AgentsViewScopeFrame[];
+	scopeRootSummary?: SessionSummary;
+	selectedSessionKey?: AgentsViewSelectionKey;
+	// Ancestor chain to re-expand on return to a nested agent. Kept by sessionId,
+	// not row identity, so it survives an active→persisted identity flip.
+	pendingExpandedAncestorSessionIds?: string[];
+	expandedSubagentParents?: Set<string>;
+	programShownParents?: Set<string>;
+	statusMessage?: string;
+	// Gathered once and reused across agents-view instances so the notices survive
+	// re-entry and render the moment they resolve, even if the first view was left early.
+	startupNotices?: StartupNotices;
+	startupNoticesPromise?: Promise<StartupNotices>;
+	query?: string;
+	rosterStore?: AgentsViewRosterStore;
+	nativeRoster?: AgentsViewNativeRoster;
+	savedSessions?: AgentConnectionSavedSessionInfo[];
+	lastSuccessfulSavedSessions?: AgentConnectionSavedSessionInfo[];
+	savedCatalogLoaded?: boolean;
+	lastSuccessfulLiveSummaries?: SessionSummary[];
+	savedCatalogGeneration?: number;
+	heartbeats?: AgentConnectionHeartbeat[];
+};
+
+type PendingDeleteAgent = {
+	identity: string;
+	activeSessionId?: string;
+	sessionFile?: string;
+	summary: SessionSummary;
+	stopped: boolean;
+};
+type PendingKillSubagent = {
+	identity: string;
+	rootActiveSessionId: string;
+	childId: string;
+};
+
+export async function resolveAgentsViewSessionUiServices(
+	options: Pick<AgentsViewModeOptions, "createUiServicesForSession" | "uiServices">,
+	summary: SessionSummary,
+): Promise<InteractiveModeUiServices> {
+	return options.createUiServicesForSession ? await options.createUiServicesForSession(summary) : options.uiServices;
+}
+
+// Stripping cwd opens the session in its own stored directory; overrideCwd is
+// sent when that directory no longer exists so the daemon doesn't reject it.
+export function createAgentsViewResumeConfig(
+	config: AgentSessionRuntimeConfig,
+	overrideCwd?: string,
+): AgentSessionRuntimeConfig {
+	const resumeConfig: AgentSessionRuntimeConfig = { ...config };
+	if (overrideCwd) {
+		resumeConfig.cwd = overrideCwd;
+	} else {
+		delete resumeConfig.cwd;
+	}
+	return resumeConfig;
+}
+
+export function createAgentsViewListCommand(): Extract<DaemonCommand, { type: "list" }> {
+	// Omitting `all` returns daemon-resident sessions only; on-disk ones come back
+	// through the view's saved-session catalog.
+	return { type: "list" };
+}
+
+export function resolveAgentsViewActiveSummaryForPath(
+	sessionPath: string,
+	summaries: readonly SessionSummary[],
+): SessionSummary | undefined {
+	const selectedPath = resolvePath(canonicalizePath(sessionPath));
+	return summaries.find(
+		(summary) =>
+			summary.activeSessionId !== undefined &&
+			summary.sessionFile !== undefined &&
+			resolvePath(canonicalizePath(summary.sessionFile)) === selectedPath,
+	);
+}
+
+// Status messages render in a single-row hint slot below the editor; embedded
+// newlines would make that row taller than the layout accounts for and overlap
+// the input, so flatten all whitespace runs to single spaces.
+export function formatAgentsViewStatusLine(text: string): string {
+	return text.replace(/\s+/g, " ").trim();
+}
+
+export function combineAgentsViewStartupNotices(...notices: readonly (string | undefined)[]): string | undefined {
+	const formatted = notices
+		.map((notice) => (notice ? formatAgentsViewStatusLine(notice) : ""))
+		.filter((notice) => notice.length > 0);
+	return formatted.length > 0 ? formatted.join(" · ") : undefined;
+}
+
+export function shouldReconnectAgentsViewDaemon(reason: DaemonClosingReason | undefined): boolean {
+	return reason !== "shutdown";
+}
+
+export function createAgentsViewReplyHeadline(text: string | undefined): string | undefined {
+	return text
+		?.split("\n")
+		.map((line) => line.replace(/\s+/g, " ").trim())
+		.find((line) => line.length > 0);
+}
+
+export function getAgentsViewDepth(scopeRoot: SessionSummary | undefined): number {
+	return scopeRoot ? (scopeRoot.rlmDepth ?? 0) + 1 : 0;
+}
+
+export function createInitialAgentsViewScopeFrames(
+	initialScopeKey: AgentsViewScopeKey | undefined,
+	returnChat: SessionSummary | undefined,
+): AgentsViewScopeFrame[] {
+	if (!initialScopeKey) return [];
+	return [
+		{
+			scope: initialScopeKey,
+			...(returnChat?.sessionId === initialScopeKey.sessionId ? { returnChat } : {}),
+		},
+	];
+}
+
+export function createInitialAgentsViewPersistentState(
+	options: Pick<AgentsViewModeOptions, "initialScopeKey" | "initialSession">,
+): AgentsViewPersistentState {
+	const initialSession = options.initialSession;
+	// A scoped view excludes its root from its own rows, so anchoring the
+	// selection on the entered-from chat could never resolve there and would
+	// only arm the pending-anchor state for the whole catalog scan.
+	const seedSelection = initialSession && !options.initialScopeKey;
+	return {
+		...(initialSession ? { backSession: initialSession } : {}),
+		...(seedSelection
+			? {
+					selectedRowIdentity: getSummaryIdentity(initialSession),
+					selectedSessionKey: getAgentsViewSelectionKey(initialSession),
+				}
+			: {}),
+		...(options.initialScopeKey
+			? {
+					scopeFrames: createInitialAgentsViewScopeFrames(options.initialScopeKey, initialSession),
+					...(initialSession ? { lastSuccessfulLiveSummaries: [initialSession] } : {}),
+				}
+			: {}),
+	};
+}
+
+export function createScopeBackReturnChatOpenResult(
+	result: Extract<AgentsViewRunResult, { type: "scope_back" }>,
+): Extract<AgentsViewRunResult, { type: "open" }> | undefined {
+	if (!result.returnChat) return undefined;
+	return {
+		type: "open",
+		summary: result.returnChat,
+		expandedAncestorSessionIds: result.expandedAncestorSessionIds,
+		hasChildren: result.hasChildren,
+	};
+}
+
+interface OpenedAgentsViewSession {
+	connection: AgentConnection;
+	summary: SessionSummary;
+	cwdFallbackNotice?: string;
+}
+
+export function resolveAgentsViewOpenCwd(
+	summary: SessionSummary,
+	fallbackCwd: string | undefined,
+): { overrideCwd?: string; notice?: string } {
+	if (!summary.cwd || existsSync(summary.cwd) || !fallbackCwd) {
+		return {};
+	}
+	return {
+		overrideCwd: fallbackCwd,
+		notice: `Original directory is missing (${summary.cwd}); opened in ${fallbackCwd} instead.`,
+	};
+}
+
+async function openAgentsViewSession(
+	options: AgentsViewModeOptions,
+	summary: SessionSummary,
+): Promise<OpenedAgentsViewSession> {
+	return options.nativeBackend.openSession(summary);
+}
+
+function getRequiredActiveSessionId(summary: SessionSummary): string {
+	if (!summary.activeSessionId) {
+		throw new Error("Daemon returned a session without an active session id");
+	}
+	return summary.activeSessionId;
+}
+
+function isUnknownActiveSessionError(error: unknown): boolean {
+	return error instanceof Error && error.message.startsWith("Unknown active session:");
+}
+
+export async function runAgentsViewMode(options: AgentsViewModeOptions): Promise<void> {
+	const persistentState = createInitialAgentsViewPersistentState(options);
+	const promptStashStore = options.promptStashStore ?? new ClientPromptStashStore();
+
+	try {
+		await runAgentsViewLoop(options, persistentState, promptStashStore);
+	} finally {
+		// Close first: the supervisor drops the subscription with the socket.
+		await persistentState.rosterStore?.dispose();
+		await persistentState.nativeRoster?.dispose();
+		persistentState.rosterStore = undefined;
+		persistentState.nativeRoster = undefined;
+	}
+}
+
+async function runAgentsViewLoop(
+	options: AgentsViewModeOptions,
+	persistentState: AgentsViewPersistentState,
+	promptStashStore: ClientPromptStashStore,
+): Promise<void> {
+	while (true) {
+		const view = new AgentsViewMode(options, persistentState);
+		const viewResult = await view.run();
+		if (viewResult.type === "exit") return;
+		let result: Extract<AgentsViewRunResult, { type: "open" }>;
+		if (viewResult.type === "scope_back") {
+			persistentState.scopeFrames = transitionAgentsViewScope(persistentState.scopeFrames ?? [], { type: "back" });
+			persistentState.scopeRootSummary = undefined;
+			persistentState.selectedRowIdentity = getSummaryIdentity(viewResult.selection);
+			persistentState.selectedSessionKey = getAgentsViewSelectionKey(viewResult.selection);
+			persistentState.pendingExpandedAncestorSessionIds = viewResult.expandedAncestorSessionIds;
+			persistentState.query = "";
+			const returnChatResult = createScopeBackReturnChatOpenResult(viewResult);
+			if (!returnChatResult) continue;
+			result = returnChatResult;
+		} else {
+			result = viewResult;
+		}
+
+		const selection = result.selection ?? result.summary;
+		persistentState.selectedRowIdentity = getSummaryIdentity(selection);
+		persistentState.selectedSessionKey = getAgentsViewSelectionKey(selection);
+		persistentState.pendingExpandedAncestorSessionIds = result.expandedAncestorSessionIds;
+		if (result.statusMessage) persistentState.statusMessage = result.statusMessage;
+
+		view.beginOpeningSession(result.summary);
+		let opened: OpenedAgentsViewSession | undefined;
+		try {
+			opened = await openAgentsViewSession(options, result.summary);
+			persistentState.backSession = opened.summary;
+			if (opened.cwdFallbackNotice) {
+				persistentState.statusMessage = combineAgentsViewStartupNotices(
+					result.statusMessage,
+					opened.cwdFallbackNotice,
+				);
+			}
+			const uiServices = await resolveAgentsViewSessionUiServices(options, opened.summary);
+			view.finishOpeningSession();
+			const interactiveMode = new InteractiveMode({
+				agentConnection: opened.connection,
+				daemonSocketPath: undefined,
+				uiServices,
+				promptStashStore,
+				promptStashSessionId: opened.summary.sessionId,
+				bindLocalSessionExtensions: false,
+				migratedProviders: options.migratedProviders,
+				modelFallbackMessage: resolveAttachModelFallbackMessage(opened.summary, options.modelFallbackMessage),
+				startupNotice: combineAgentsViewStartupNotices(result.statusMessage, opened.cwdFallbackNotice),
+				verbose: options.verbose,
+				returnToAgentsView: true,
+				preserveAgentConnectionOnHandoff: true,
+				forceFullscreen: true,
+				// The agents view renders the global notices itself, so suppress them in-session.
+				agentsViewOwnsStartupNotices: true,
+				sessionDepth: opened.summary.rlmDepth ?? 0,
+				sessionHasChildren: result.hasChildren,
+				version: options.version,
+				appTitle: options.appTitle,
+				brandSplash: options.brandSplash,
+				excludedLoginProviderIds: options.excludedLoginProviderIds,
+				excludedBuiltinCommands: options.excludedBuiltinCommands,
+			});
+			try {
+				const interactiveResult = await interactiveMode.run();
+				const source = interactiveResult.source;
+				const returnedSession: SessionSummary = {
+					...opened.summary,
+					...source,
+					id: source.activeSessionId ?? opened.summary.id,
+				};
+				// Preserve an unattachable child's selection while its parent chat was open.
+				if (selection.sessionId === result.summary.sessionId) {
+					persistentState.selectedRowIdentity = getSummaryIdentity(returnedSession);
+					persistentState.selectedSessionKey = getAgentsViewSelectionKey(returnedSession);
+				}
+				if (interactiveResult.type === "scoped_agents_view") {
+					const nextScope = { sessionId: source.sessionId, activeSessionId: source.activeSessionId };
+					persistentState.scopeFrames = transitionAgentsViewScope(persistentState.scopeFrames ?? [], {
+						type: "push",
+						scope: nextScope,
+						returnChat: returnedSession,
+					});
+					const cachedLiveSummaries = persistentState.lastSuccessfulLiveSummaries ?? [];
+					const cachedIndex = cachedLiveSummaries.findIndex(
+						(summary) => summary.sessionId === returnedSession.sessionId,
+					);
+					persistentState.lastSuccessfulLiveSummaries =
+						cachedIndex === -1
+							? [...cachedLiveSummaries, returnedSession]
+							: cachedLiveSummaries.map((summary, index) => (index === cachedIndex ? returnedSession : summary));
+					persistentState.scopeRootSummary = undefined;
+					persistentState.query = "";
+				}
+				persistentState.backSession = returnedSession;
+			} catch (error) {
+				// The session opened fine and then threw while running; label it as a
+				// runtime crash so it isn't mixed in with true open failures.
+				logClientError("Agent session crashed", error);
+				persistentState.statusMessage = formatError("Agent session crashed", error);
+				// Tear down the session TUI exactly as a normal back-navigation would
+				// (drain input, stop renderer + theme watcher) so it doesn't fight the
+				// agents-view UI for the terminal, then drop the daemon connection.
+				await interactiveMode.teardownSessionUi({ preserveAltScreen: true });
+				
+			}
+		} catch (error) {
+			view.finishOpeningSession();
+			logClientError("Failed to open agent", error);
+			persistentState.statusMessage = formatError("Failed to open agent", error);
+		}
+	}
+}
+
+const AGENTS_VIEW_COMMAND_NAMES = ["name", "kill"] as const;
+export type AgentsViewCommandName = (typeof AGENTS_VIEW_COMMAND_NAMES)[number];
+const AGENTS_VIEW_COMMAND_NAME_SET: ReadonlySet<string> = new Set(AGENTS_VIEW_COMMAND_NAMES);
+
+export interface AgentsViewCommand {
+	name: AgentsViewCommandName;
+	args: string;
+}
+
+/** Row-targeted commands the armed composer maps onto existing RPCs. */
+export function parseAgentsViewCommand(text: string): AgentsViewCommand | undefined {
+	const parsed = parseSlashCommand(text);
+	if (!parsed) return undefined;
+	const name = resolveBuiltinSlashCommandName(parsed.name);
+	if (!AGENTS_VIEW_COMMAND_NAME_SET.has(name)) return undefined;
+	return { name: name as AgentsViewCommandName, args: parsed.args };
+}
+
+/**
+ * Reject recognized built-ins that are neither session-owned nor view
+ * commands, so they are never sent to the model as plain prompt text.
+ */
+export function getReplyComposerCommandRejection(text: string): string | undefined {
+	const parsed = parseSlashCommand(text);
+	if (!parsed) return undefined;
+	const name = resolveBuiltinSlashCommandName(parsed.name);
+	if (isSessionSlashCommandName(name)) return undefined;
+	if (AGENTS_VIEW_COMMAND_NAME_SET.has(name)) return undefined;
+	if (!isBuiltinSlashCommandName(parsed.name)) return undefined;
+	return `/${parsed.name} is not available here; open the session to run it`;
+}
+
+const AGENTS_VIEW_COMMAND_DESCRIPTIONS: Record<AgentsViewCommandName, { description: string; argumentHint?: string }> =
+	{
+		name: { description: "Set session display name", argumentHint: "<name>" },
+		kill: { description: "Stop this agent's runtime (session stays resumable)" },
+	};
+
+function agentsViewSlashCommands(): {
+	name: string;
+	aliases?: readonly string[];
+	description: string;
+	argumentHint?: string;
+	takesArgument?: boolean;
+}[] {
+	return AGENTS_VIEW_COMMAND_NAMES.map((name) => {
+		const builtin = BUILTIN_SLASH_COMMANDS.find((command) => command.name === name);
+		const display = AGENTS_VIEW_COMMAND_DESCRIPTIONS[name];
+		return {
+			name,
+			aliases: builtin?.aliases,
+			description: display.description,
+			argumentHint: display.argumentHint ?? builtin?.argumentHint,
+			takesArgument: name === "name" ? true : builtin?.takesArgument,
+		};
+	});
+}
+
+/** Autocomplete for the reply composer: session-owned plus view commands. */
+export function createReplyComposerAutocompleteProvider(cwd: string, fdPath?: string): AutocompleteProvider {
+	const sessionCommands = BUILTIN_SLASH_COMMANDS.filter((command) => isSessionSlashCommandName(command.name)).map(
+		(command) => ({
+			name: command.name,
+			aliases: command.aliases,
+			description: command.description,
+			argumentHint: command.argumentHint,
+			takesArgument: command.takesArgument,
+		}),
+	);
+	return new CombinedAutocompleteProvider([...sessionCommands, ...agentsViewSlashCommands()], cwd, fdPath ?? null);
+}
+
+export function resolveCurrentReplyTargetSummary(
+	records: readonly UnifiedSessionRecord[],
+	target: { key: string; summary: SessionSummary },
+	findLive: (activeSessionId: string) => SessionSummary | undefined,
+): SessionSummary {
+	const identity = getSummaryIdentity(target.summary);
+	const current = records.find((record) => record.identity === identity || record.identityAliases.includes(identity));
+	if (current) return summaryForUnifiedRecord(current);
+	const live = target.summary.activeSessionId ? findLive(target.summary.activeSessionId) : undefined;
+	if (live) return live;
+	// A persisted target missing from the current live catalog can still be
+	// resumed from its captured file, but its captured runtime id is stale.
+	if (target.summary.sessionFile && target.summary.activeSessionId) {
+		return { ...target.summary, activeSessionId: undefined, lifecycle: "archived", activity: "idle" };
+	}
+	return target.summary;
+}
+
+export function renderAgentsViewOpeningSession(
+	session: { title: string; cwd: string; model?: string },
+	width: number,
+	height: number,
+): string[] {
+	if (height <= 0) return [];
+	const safeWidth = Math.max(1, width);
+	const directory = session.cwd.split(/[\\/]/).filter(Boolean).at(-1) ?? session.cwd;
+	const content = [
+		"Opening session",
+		"",
+		session.title,
+		...(session.model ? [`Model: ${session.model}`] : []),
+		...(directory ? [`Directory: ${directory}`] : []),
+		"",
+		"Resuming the session and loading its history…",
+		"This screen is read-only until the session is ready.",
+	];
+	const centered = content.map((line) => {
+		const clipped = truncateToWidth(line, safeWidth);
+		const leftPadding = Math.max(0, Math.floor((safeWidth - visibleWidth(clipped)) / 2));
+		return `${" ".repeat(leftPadding)}${clipped}`;
+	});
+	const topPadding = Math.max(0, Math.floor((height - centered.length) / 2));
+	return [...Array.from({ length: topPadding }, () => ""), ...centered].slice(0, height);
+}
+
+export class AgentsViewMode implements Component, Focusable {
+	focused = false;
+
+	private readonly ui: TUI;
+	private readonly editor: CustomEditor;
+	private readonly splash: BrandSplashHeader;
+	private readonly fullscreenDock: Component;
+	private readonly keybindings: KeybindingsManager;
+	private unsubscribeClientClose: (() => void) | undefined;
+	private unsubscribeClientMessage: (() => void) | undefined;
+	private reconnectPromise: Promise<void> | undefined;
+	private reconnectTimedOut = false;
+	private daemonShutdownReceived = false;
+	private resolveRun: ((result: AgentsViewRunResult) => void) | undefined;
+	private heartbeatPollTimer: NodeJS.Timeout | undefined;
+	private animationTimer: NodeJS.Timeout | undefined;
+	private ctrlCExitHintExpiresAt = 0;
+	private ctrlCExitHintTimer: ReturnType<typeof setTimeout> | undefined;
+	private deleteConfirmExpiresAt = 0;
+	private deleteConfirmTimer: ReturnType<typeof setTimeout> | undefined;
+	private workingIconFrame = 0;
+	private rows: AgentsViewRow[] = [];
+	private lastListedSummaries: SessionSummary[] = [];
+	private lastVisibleSummaries: SessionSummary[] = [];
+	private savedSessions: AgentConnectionSavedSessionInfo[] = [];
+	private lastSuccessfulSavedSessions: AgentConnectionSavedSessionInfo[] = [];
+	private heartbeats: AgentConnectionHeartbeat[] = [];
+	private unifiedRecords: UnifiedSessionRecord[] = [];
+	private unifiedIndex: UnifiedSessionIndex = buildUnifiedSessionIndex([]);
+	private scopedRecords: UnifiedSessionRecord[] = [];
+	private scopeKey: AgentsViewScopeKey | undefined;
+	private scopeRootSummary: SessionSummary | undefined;
+	private savedCatalogReady = false;
+	private savedCatalogGeneration = 0;
+	private heartbeatCatalogGeneration = 0;
+	private savedCatalogRefreshPending = false;
+	private expandedSubagentParents = new Set<string>();
+	// Agent row identities whose full spawn program is currently shown.
+	// The program key toggles each agent shown ↔ hidden.
+	private programShownParents = new Set<string>();
+	private selectedIndex = 0;
+	private selectedRowIdentity: string | undefined;
+	private selectedActiveSessionId: string | undefined;
+	private selectedSessionKey: AgentsViewSelectionKey | undefined;
+	private selectionAnchorPending = false;
+	/** Armed reply composer target: a live agent or a saved session to resume on send. */
+	private replyTarget: { key: string; summary: SessionSummary } | undefined;
+	/** Provider bound to the armed target's cwd for file-path completions. */
+	private replyAutocomplete: AutocompleteProvider | undefined;
+	private fdPath: string | undefined;
+	private creatingNewSession = false;
+	private replyLastAssistantText: string | undefined;
+	private replyLastAssistantTextLoading = false;
+	private replyHeaderTime = "";
+	private pendingDeleteAgent: PendingDeleteAgent | undefined;
+	private pendingKillSubagent: PendingKillSubagent | undefined;
+	private renameTarget: { activeSessionId?: string; sessionFile?: string; summary: SessionSummary } | undefined;
+	private actionModeSearchQuery: string | undefined;
+	/** Session the view was entered from; exempt from the empty-session sort demotion. */
+	private readonly anchorSessionId: string | undefined;
+	private readonly inactiveAgentIdentities = new Set<string>();
+	private rosterStore: AgentsViewRosterStore | undefined;
+	private nativeRoster: AgentsViewNativeRoster | undefined;
+	private unsubscribeRosterUpdate: (() => void) | undefined;
+	private savedSearchFetchStarted = false;
+	private statusMessage: string | undefined;
+	private statusMessageTone: "muted" | "error" | "warning" = "muted";
+	private statusMessageSticky = false;
+	private statusMessageTimer: ReturnType<typeof setTimeout> | undefined;
+	private stopped = false;
+	private openingSummary: SessionSummary | undefined;
+	private openingShellActive = false;
+
+	constructor(
+		private readonly options: AgentsViewModeOptions,
+		private readonly persistentState: AgentsViewPersistentState = {},
+	) {
+		const initialFrames =
+			persistentState.scopeFrames ??
+			createInitialAgentsViewScopeFrames(
+				options.initialScopeKey,
+				persistentState.backSession ?? options.initialSession,
+			);
+		persistentState.scopeFrames = initialFrames;
+		this.anchorSessionId = (persistentState.backSession ?? options.initialSession)?.sessionId;
+		this.scopeKey = initialFrames.at(-1)?.scope;
+		this.scopeRootSummary = persistentState.scopeRootSummary;
+		this.selectedRowIdentity = persistentState.selectedRowIdentity;
+		this.selectedSessionKey = persistentState.selectedSessionKey;
+		this.selectedActiveSessionId = persistentState.selectedSessionKey?.activeSessionId;
+		this.lastListedSummaries = persistentState.lastSuccessfulLiveSummaries ?? [];
+		this.savedSessions = persistentState.savedSessions ?? [];
+		this.lastSuccessfulSavedSessions = persistentState.lastSuccessfulSavedSessions ?? this.savedSessions;
+		this.savedCatalogReady = persistentState.savedCatalogLoaded === true;
+		this.heartbeats = persistentState.heartbeats ?? [];
+		this.savedCatalogGeneration = persistentState.savedCatalogGeneration ?? 0;
+		this.expandedSubagentParents = persistentState.expandedSubagentParents ?? new Set();
+		persistentState.expandedSubagentParents = this.expandedSubagentParents;
+		this.programShownParents = persistentState.programShownParents ?? new Set();
+		persistentState.programShownParents = this.programShownParents;
+		this.keybindings = KeybindingsManager.create();
+		setKeybindings(this.keybindings);
+		setRegisteredThemes(options.uiServices.getThemes());
+		initTheme(options.uiServices.settingsManager.getTheme(), true);
+
+		this.ui = new TUI(new ProcessTerminal(), options.uiServices.settingsManager.getShowHardwareCursor());
+		this.ui.setClearOnShrink(options.uiServices.settingsManager.getClearOnShrink());
+		this.ui.terminal.setTitle(`${APP_TITLE} - Agents`);
+		this.editor = new CustomEditor(this.ui, getEditorTheme(), this.keybindings, {
+			paddingX: options.uiServices.settingsManager.getEditorPaddingX(),
+			autocompleteMaxVisible: options.uiServices.settingsManager.getAutocompleteMaxVisible(),
+			placeholder: SEARCH_PROMPT_PLACEHOLDER,
+			placeholderColor: (text) => theme.fg("dim", text),
+		});
+		void ensureTool("fd").then((fdPath) => {
+			this.fdPath = fdPath;
+			// Rebind an already-armed provider so @-completion picks up fd.
+			if (this.replyTarget) {
+				this.replyAutocomplete = createReplyComposerAutocompleteProvider(this.replyTarget.summary.cwd, fdPath);
+			}
+		});
+		// Search input never autocompletes; only the armed composer's provider answers.
+		this.editor.setAutocompleteProvider({
+			getSuggestions: async (lines, cursorLine, cursorCol, suggestOptions) => {
+				if (!this.replyTarget) return null;
+				return this.replyAutocomplete?.getSuggestions(lines, cursorLine, cursorCol, suggestOptions) ?? null;
+			},
+			applyCompletion: (lines, cursorLine, cursorCol, item, prefix) =>
+				this.replyAutocomplete?.applyCompletion(lines, cursorLine, cursorCol, item, prefix) ?? {
+					lines,
+					cursorLine,
+					cursorCol,
+				},
+		});
+		this.editor.focused = true;
+		this.editor.getHeaderLine = () => this.renderReplyHeaderLine();
+		this.editor.onSubmit = (value) => {
+			void this.submit(value);
+		};
+		this.editor.setText(persistentState.query ?? "");
+		this.editor.onCtrlD = () => {
+			this.finish({ type: "exit" });
+		};
+		this.editor.onAgentsBack = () => {
+			if (this.replyTarget) {
+				this.setReplyTarget(undefined);
+				return true;
+			}
+			if (this.editor.getText().length > 0) return false;
+			const ancestors = this.scopeKey
+				? getUnifiedSessionAncestorSessionIds(this.unifiedRecords, this.scopeKey, this.unifiedIndex)
+				: [];
+			const scopeRoot = this.scopeRootSummary;
+			const result = resolveAgentsViewLeftResult(
+				scopeRoot,
+				ancestors,
+				this.persistentState.scopeFrames?.at(-1)?.returnChat,
+			);
+			if (result && scopeRoot) {
+				this.finish({
+					...result,
+					hasChildren: hasUnifiedSessionChildren(
+						this.unifiedRecords,
+						getAgentsViewSelectionKey(scopeRoot),
+						this.unifiedIndex,
+					),
+				});
+			}
+			// Global view has no hierarchy parent: consume Left without opening chat.
+			return true;
+		};
+		this.editor.onEscape = () => {
+			if (this.replyTarget) {
+				this.setReplyTarget(undefined);
+			} else if (this.editor.getText().length > 0) {
+				this.setSearchQuery("");
+			} else {
+				const backSession = this.persistentState.backSession;
+				this.finish(
+					backSession
+						? {
+								type: "open",
+								summary: backSession,
+								hasChildren: hasUnifiedSessionChildren(
+									this.unifiedRecords,
+									getAgentsViewSelectionKey(backSession),
+									this.unifiedIndex,
+								),
+							}
+						: { type: "exit" },
+				);
+			}
+		};
+		this.fullscreenDock = {
+			render: (width) => this.renderDock(width),
+			invalidate: () => {
+				this.editor.invalidate();
+			},
+		};
+		this.splash = new BrandSplashHeader(this.options.version ?? VERSION, () => this.getSplashCwd(), undefined, {
+			topPadding: true,
+			logo: this.options.brandSplash?.logo,
+			title: this.options.brandSplash?.title,
+			getExtraMetadata: () => {
+				const root = this.scopeRootSummary;
+				return [
+					{ label: "agents", value: this.getAgentCountsText() },
+					...(root ? [{ label: "depth", value: String(getAgentsViewDepth(root)) }] : []),
+				];
+			},
+		});
+	}
+
+	async run(): Promise<AgentsViewRunResult> {
+		
+			this.persistentState.nativeRoster ??= await this.options.nativeBackend.createRoster();
+			this.nativeRoster = this.persistentState.nativeRoster;
+		
+
+		this.ui.addChild(this);
+		this.ui.setFocus(this);
+		this.ui.start();
+		this.ui.enterFullscreen({
+			scroll: [this],
+			dock: this.fullscreenDock,
+			mouse: false,
+			viewportControls: false,
+		});
+		this.openingShellActive = true;
+		const startupStatusMessage = this.persistentState.statusMessage;
+		this.persistentState.statusMessage = undefined;
+		if (startupStatusMessage) {
+			this.setStatusMessage(startupStatusMessage, { render: false });
+		}
+		this.ui.requestRender(true);
+		onThemeChange(() => {
+			this.ui.invalidate();
+			this.ui.requestRender();
+		});
+
+		const runPromise = new Promise<AgentsViewRunResult>((resolve) => {
+			this.resolveRun = resolve;
+		});
+		const liveRoster = this.nativeRoster ?? this.rosterStore;
+		if (!liveRoster) throw new Error("Agents view roster is not connected");
+		this.unsubscribeRosterUpdate = liveRoster.onUpdate(() => this.onRosterUpdate());
+		this.applySessionList(liveRoster.summaries(), true);
+		this.armSavedSearchFetch();
+		this.resolveMissingSelectionAnchor();
+		void this.refreshHeartbeats();
+		this.loadStartupNotices();
+		this.heartbeatPollTimer = setInterval(() => void this.refreshHeartbeats(), HEARTBEAT_POLL_INTERVAL_MS);
+		this.heartbeatPollTimer.unref?.();
+		this.animationTimer = setInterval(() => {
+			const hasRunning = this.rows.some((row) => row.section === "running");
+			const hasStaleAge = this.rows.some((row) => row.summary.lastHeardFromAt !== undefined);
+			if (!hasRunning && !hasStaleAge) return;
+			// Age labels are baked into rows at build time; ticking them needs a rebuild.
+			if (hasStaleAge) this.rebuildRows();
+			if (hasRunning) this.workingIconFrame += 1;
+			this.ui.requestRender();
+		}, WORKING_ICON_INTERVAL_MS);
+		this.animationTimer.unref?.();
+
+		return runPromise;
+	}
+
+	beginOpeningSession(summary: SessionSummary): void {
+		this.openingSummary = summary;
+		if (!this.openingShellActive) {
+			if (!this.ui.children.includes(this)) this.ui.addChild(this);
+			this.ui.setFocus(this);
+			this.ui.start();
+			this.ui.enterFullscreen({
+				scroll: [this],
+				dock: this.fullscreenDock,
+				mouse: false,
+				viewportControls: false,
+			});
+			this.openingShellActive = true;
+		}
+		this.ui.requestRender(true);
+	}
+
+	finishOpeningSession(): void {
+		this.openingSummary = undefined;
+		if (!this.openingShellActive) return;
+		this.ui.stop({ preserveAltScreen: true, flushFullscreen: false });
+		this.ui.removeChild(this);
+		this.openingShellActive = false;
+	}
+
+	handleInput(data: string): void {
+		if (this.openingSummary) return;
+		this.clearStickyStatusMessage();
+		if (this.renameTarget) {
+			if (this.keybindings.matches(data, "tui.select.cancel")) {
+				this.exitRenameMode();
+				return;
+			}
+			this.editor.handleInput(data);
+			return;
+		}
+		if (this.keybindings.matches(data, "app.clear")) {
+			// The composer hints advertise ctrl+c as cancel; it must not start the exit flow.
+			if (this.replyTarget) {
+				this.setReplyTarget(undefined);
+				return;
+			}
+			this.handleCtrlC();
+			return;
+		}
+		if (this.editor.getText().length === 0 && this.keybindings.matches(data, "app.agents.rename")) {
+			this.enterRenameMode();
+			return;
+		}
+		if (this.editor.getText().length === 0 && this.keybindings.matches(data, "app.agents.delete")) {
+			this.clearCtrlCExitHint({ render: false });
+			void this.handleDeleteSelected();
+			return;
+		}
+		this.clearCtrlCExitHint({ render: false });
+		this.clearDeleteConfirmation({ render: false });
+		if (this.keybindings.matches(data, "app.agents.reply") && this.editor.getText().length === 0) {
+			void this.toggleReplyTarget();
+			return;
+		}
+		if (!this.replyTarget && this.keybindings.matches(data, "app.agents.new")) {
+			void this.createNewSession();
+			return;
+		}
+		if (this.replyTarget && this.keybindings.matches(data, "app.message.followUp")) {
+			this.handleReplyFollowUp();
+			return;
+		}
+		if (this.editor.getText().length === 0 && this.keybindings.matches(data, "app.agents.program")) {
+			this.cycleProgramForSelected();
+			return;
+		}
+		if (!this.replyTarget && this.editor.getText().length === 0) {
+			if (this.keybindings.matches(data, "app.agents.expand")) {
+				const row = this.rows[this.selectedIndex];
+				if (row && (row.kind === "subagent-summary" || row.descendantCount > 0)) this.toggleSubagentList(row);
+				return;
+			}
+		}
+		if (!this.replyTarget && this.keybindings.matches(data, "app.agents.open")) {
+			if (this.editor.getText().length === 0 || this.isSearchCursorAtEnd()) {
+				this.openSelected();
+				return;
+			}
+		}
+		if (!this.replyTarget && this.handleListNavigation(data)) {
+			return;
+		}
+		const previous = this.editor.getText();
+		this.editor.handleInput(data);
+		if (!this.replyTarget && this.editor.getText() !== previous) {
+			this.queryChanged();
+		}
+	}
+
+	private isSearchCursorAtEnd(): boolean {
+		const lines = this.editor.getLines();
+		const cursor = this.editor.getCursor();
+		return cursor.line === lines.length - 1 && cursor.col === (lines[cursor.line]?.length ?? 0);
+	}
+
+	render(width: number): string[] {
+		const safeWidth = Math.max(1, width);
+		const height = this.contentHeight(safeWidth);
+		const lines = this.renderContent(safeWidth, height).slice(0, height);
+		while (lines.length < height) {
+			lines.push("");
+		}
+		return lines.slice(0, height).map((line) => this.finalizeRenderedLine(line, safeWidth));
+	}
+
+	invalidate(): void {
+		this.editor.invalidate();
+		this.splash.invalidate();
+	}
+
+	private renderContent(width: number, height: number): string[] {
+		if (height <= 0) {
+			return [];
+		}
+		if (this.openingSummary) {
+			const summary = this.openingSummary;
+			return renderAgentsViewOpeningSession(
+				{
+					title: getAgentsViewSessionTitle(summary),
+					cwd: summary.cwd,
+					model: summary.model?.name ?? summary.model?.id,
+				},
+				width,
+				height,
+			);
+		}
+		const headerLines = this.splash.render(width);
+		const noticeLines = this.renderStartupNotices(width);
+		if (noticeLines.length > 0) {
+			headerLines.push("", ...noticeLines);
+		}
+		const root = this.scopeRootSummary;
+		if (root) {
+			const scopeLabel = `${keyText("app.agents.back")} back · ${getAgentsViewSessionTitle(root)} › subagents`;
+			headerLines.push("", truncateToWidth(theme.fg("dim", scopeLabel), width));
+		}
+		headerLines.push("");
+
+		// The prompt belongs to the scroll pane rather than the fullscreen dock, but
+		// it must remain usable when a short viewport or wrapped notices exhaust the
+		// header. Trim optional header chrome first and reserve one session-list row.
+		const promptLines = this.renderPrompt(width);
+		const listGap = height >= promptLines.length + 2 ? 1 : 0;
+		const headerRows = Math.max(0, height - promptLines.length - listGap - 1);
+		const lines = headerLines.slice(0, headerRows);
+		lines.push(...promptLines);
+		if (listGap > 0) lines.push("");
+		const listRows = Math.max(0, height - lines.length);
+		lines.push(...this.renderSessionRows(width, listRows));
+		return lines;
+	}
+
+	private loadStartupNotices(): void {
+		// Notices live on persistentState (read directly in renderStartupNotices), so they
+		// survive leaving and re-entering the agents view regardless of which instance's
+		// gather resolved. Already have them? Nothing to do.
+		if (this.persistentState.startupNotices) {
+			return;
+		}
+		// Reuse an in-flight gather from an earlier agents-view instance so re-entry does
+		// not re-run the checks or lose a result that resolved meanwhile.
+		const promise =
+			this.persistentState.startupNoticesPromise ??
+			gatherStartupNotices({
+				version: VERSION,
+				cwd: this.options.uiServices.getInitialCwd(),
+				agentDir: getAgentDir(),
+				settingsManager: this.options.uiServices.settingsManager,
+			});
+		this.persistentState.startupNoticesPromise = promise;
+		void promise
+			.then((notices) => {
+				this.persistentState.startupNotices = notices;
+				this.ui.requestRender();
+			})
+			.catch(() => {});
+	}
+
+	private renderStartupNotices(width: number): string[] {
+		const notices = this.persistentState.startupNotices;
+		if (!notices) {
+			return [];
+		}
+		const formatted: string[] = [];
+		if (notices.newVersion) {
+			formatted.push(formatUpdateAvailableNotice(notices.newVersion));
+		}
+		if (notices.packageUpdates.length > 0) {
+			formatted.push(formatPackageUpdateNotice(notices.packageUpdates));
+		}
+		if (notices.tmuxWarning) {
+			formatted.push(formatTmuxWarningNotice(notices.tmuxWarning));
+		}
+		// Match the splash header's one-column gutter and wrap so long notices
+		// (e.g. the tmux fix instructions) stay readable instead of truncating.
+		const wrapWidth = Math.max(1, width - 1);
+		return formatted.flatMap((line) => wrapTextWithAnsi(line, wrapWidth).map((wrapped) => ` ${wrapped}`));
+	}
+
+	private handleListNavigation(data: string): boolean {
+		if (this.keybindings.matches(data, "tui.select.up")) {
+			this.moveSelection(-1);
+			return true;
+		}
+		if (this.keybindings.matches(data, "tui.select.down")) {
+			this.moveSelection(1);
+			return true;
+		}
+		if (this.keybindings.matches(data, "tui.select.pageUp")) {
+			this.moveSelection(-Math.max(1, this.visibleListRows()));
+			return true;
+		}
+		if (this.keybindings.matches(data, "tui.select.pageDown")) {
+			this.moveSelection(Math.max(1, this.visibleListRows()));
+			return true;
+		}
+		return false;
+	}
+
+	private handleCtrlC(): void {
+		if (this.isCtrlCExitHintVisible()) {
+			this.finish({ type: "exit" });
+			return;
+		}
+		this.showCtrlCExitHint();
+	}
+
+	private showCtrlCExitHint(): void {
+		if (this.ctrlCExitHintTimer) {
+			clearTimeout(this.ctrlCExitHintTimer);
+		}
+		this.ctrlCExitHintExpiresAt = Date.now() + EXIT_HINT_DURATION_MS;
+		this.ctrlCExitHintTimer = setTimeout(() => {
+			this.ctrlCExitHintTimer = undefined;
+			if (!this.isCtrlCExitHintVisible()) {
+				this.ctrlCExitHintExpiresAt = 0;
+				this.ui.requestRender();
+			}
+		}, EXIT_HINT_DURATION_MS);
+		this.ctrlCExitHintTimer.unref?.();
+		this.ui.requestRender();
+	}
+
+	private clearCtrlCExitHint(options: { render?: boolean } = {}): void {
+		if (!this.ctrlCExitHintTimer && this.ctrlCExitHintExpiresAt === 0) {
+			return;
+		}
+		if (this.ctrlCExitHintTimer) {
+			clearTimeout(this.ctrlCExitHintTimer);
+			this.ctrlCExitHintTimer = undefined;
+		}
+		this.ctrlCExitHintExpiresAt = 0;
+		if (options.render !== false) {
+			this.ui.requestRender();
+		}
+	}
+
+	private isCtrlCExitHintVisible(): boolean {
+		return this.ctrlCExitHintExpiresAt > Date.now();
+	}
+
+	private showDeleteConfirmation(): void {
+		if (this.deleteConfirmTimer) {
+			clearTimeout(this.deleteConfirmTimer);
+		}
+		this.deleteConfirmExpiresAt = Date.now() + DELETE_CONFIRM_DURATION_MS;
+		this.deleteConfirmTimer = setTimeout(() => {
+			this.deleteConfirmTimer = undefined;
+			if (!this.isDeleteConfirmationVisible()) {
+				this.deleteConfirmExpiresAt = 0;
+				this.ui.requestRender();
+			}
+		}, DELETE_CONFIRM_DURATION_MS);
+		this.deleteConfirmTimer.unref?.();
+		this.ui.requestRender();
+	}
+
+	private clearDeleteConfirmation(options: { render?: boolean } = {}): void {
+		this.pendingKillSubagent = undefined;
+		if (!this.deleteConfirmTimer && this.deleteConfirmExpiresAt === 0) {
+			return;
+		}
+		if (this.deleteConfirmTimer) {
+			clearTimeout(this.deleteConfirmTimer);
+			this.deleteConfirmTimer = undefined;
+		}
+		this.deleteConfirmExpiresAt = 0;
+		if (options.render !== false) {
+			this.ui.requestRender();
+		}
+	}
+
+	private isDeleteConfirmationVisible(): boolean {
+		return this.deleteConfirmExpiresAt > Date.now();
+	}
+
+	private setStatusMessage(
+		message: string | undefined,
+		options: { render?: boolean; tone?: "muted" | "error" | "warning"; sticky?: boolean } = {},
+	): void {
+		const statusLine = message === undefined ? undefined : formatAgentsViewStatusLine(message);
+		if (this.statusMessageTimer) {
+			clearTimeout(this.statusMessageTimer);
+			this.statusMessageTimer = undefined;
+		}
+		this.statusMessage = statusLine;
+		// Errors come both from explicit tones and from formatError-style messages.
+		this.statusMessageTone = options.tone ?? (statusLine?.startsWith("Failed") ? "error" : "muted");
+		// Sticky messages stay up until the next keypress instead of a timer.
+		this.statusMessageSticky = options.sticky === true && statusLine !== undefined;
+		if (statusLine && !this.statusMessageSticky) {
+			this.statusMessageTimer = setTimeout(() => {
+				this.statusMessageTimer = undefined;
+				if (this.statusMessage === statusLine) {
+					this.statusMessage = undefined;
+					this.ui.requestRender();
+				}
+			}, STATUS_MESSAGE_DURATION_MS);
+			this.statusMessageTimer.unref?.();
+		}
+		if (options.render !== false) {
+			this.ui.requestRender();
+		}
+	}
+
+	/** Sticky messages (e.g. billing warnings) stay until the user acknowledges them with any keypress. */
+	private clearStickyStatusMessage(): void {
+		if (!this.statusMessageSticky || this.daemonShutdownReceived || this.reconnectPromise) {
+			return;
+		}
+		this.statusMessageSticky = false;
+		this.statusMessage = undefined;
+		this.ui.requestRender();
+	}
+
+	private moveSelection(delta: number): void {
+		const selectableIndexes = this.getSelectableRowIndexes();
+		if (selectableIndexes.length === 0) {
+			return;
+		}
+		const currentPosition = selectableIndexes.includes(this.selectedIndex)
+			? selectableIndexes.indexOf(this.selectedIndex)
+			: 0;
+		const nextPosition = Math.max(0, Math.min(selectableIndexes.length - 1, currentPosition + delta));
+		this.selectedIndex = selectableIndexes[nextPosition] ?? 0;
+		this.syncSelectedRowState();
+		this.clearDeleteConfirmation({ render: false });
+		// Reply stays armed only while the selection sits on the agent row it
+		// targets; nested rows share the parent's session id but are read-only.
+		const selectedRow = this.rows[this.selectedIndex];
+		if (
+			this.replyTarget &&
+			(selectedRow?.kind !== "agent" || this.replyTarget.key !== this.selectedActiveSessionId)
+		) {
+			this.setReplyTarget(undefined);
+		}
+		this.ui.requestRender();
+	}
+
+	// Resolve the persisted sessionId breadcrumb to live row identities once, so
+	// the rest of the expansion lifecycle stays uniformly identity-keyed.
+	private applyPendingAncestorExpansion(): void {
+		const sessionIds = this.persistentState.pendingExpandedAncestorSessionIds;
+		if (!sessionIds || sessionIds.length === 0) {
+			this.persistentState.pendingExpandedAncestorSessionIds = undefined;
+			return;
+		}
+		this.persistentState.pendingExpandedAncestorSessionIds = undefined;
+		const wanted = new Set(sessionIds);
+		// A nested ancestor's row only appears once its own parent is expanded, so
+		// expand-and-rebuild until a pass reveals nothing new.
+		let added = true;
+		while (added) {
+			added = false;
+			for (const row of this.rows) {
+				// Summary/code rows reuse their parent's summary; only session rows own expansion keys.
+				if (row.kind !== "agent" && row.kind !== "subagent") continue;
+				if (wanted.has(row.summary.sessionId) && !this.expandedSubagentParents.has(row.identity)) {
+					this.expandedSubagentParents.add(row.identity);
+					added = true;
+				}
+			}
+			if (added) {
+				this.rebuildRows();
+			}
+		}
+	}
+
+	private setSearchQuery(query: string): void {
+		this.editor.setText(query);
+		this.queryChanged();
+	}
+
+	private armSavedSearchFetch(options: { duringReconnect?: boolean } = {}): void {
+		
+			// Native list already includes durable sessions; no separate saved-file catalog.
+			this.savedCatalogReady = true;
+			this.persistentState.savedCatalogLoaded = true;
+			return;
+		
+		// The inactive section is catalog-fed, so no query gate: load on view open.
+		if (this.savedSearchFetchStarted || this.persistentState.savedCatalogLoaded === true) {
+			return;
+		}
+		this.savedSearchFetchStarted = true;
+		void this.refreshSavedSessions({ ...options, preserveStatusOnError: true });
+	}
+
+	private queryChanged(): void {
+		this.persistentState.query = this.editor.getText();
+		this.armSavedSearchFetch();
+		this.rebuildRows();
+		// Searching is explicit user intent: claim the visible row as the new
+		// anchor even if a remembered one is still waiting for its catalog row.
+		this.syncSelectedRowState();
+		this.ui.requestRender();
+	}
+
+	private getFilteredRecords(): UnifiedSessionRecord[] {
+		const query = this.replyTarget || this.renameTarget ? (this.actionModeSearchQuery ?? "") : this.editor.getText();
+		const preservedSessionIds = new Set([
+			...(this.anchorSessionId ? [this.anchorSessionId] : []),
+			...(this.scopeKey ? [this.scopeKey.sessionId] : []),
+			...this.heartbeats.map((heartbeat) => heartbeat.job.sessionId),
+		]);
+		const records = filterEmptyAgentsViewSessions(this.scopedRecords, preservedSessionIds);
+		return query.trim()
+			? filterUnifiedSessions(records, (record) =>
+					matchesSearchText(record.searchableText, record.searchableFuzzyText, query),
+				)
+			: records;
+	}
+
+	/** Rebuild rows from the last fetched summaries, keeping selection on the same row. */
+	private rebuildRows(): void {
+		const selectedIdentity = this.rows[this.selectedIndex]?.identity;
+		this.rows = buildAgentsViewRows(
+			this.getFilteredRecords(),
+			this.expandedSubagentParents,
+			this.programShownParents,
+			this.scopeKey,
+			computeRecursiveRollups(this.unifiedRecords, this.unifiedIndex),
+			this.anchorSessionId,
+		);
+		const index =
+			selectedIdentity === undefined ? -1 : this.rows.findIndex((row) => row.identity === selectedIdentity);
+		if (index >= 0) {
+			this.selectedIndex = index;
+		} else {
+			this.restoreSelection();
+		}
+	}
+
+	private async submit(value: string, delivery: "steer" | "followUp" = "steer"): Promise<void> {
+		if (this.renameTarget) {
+			await this.confirmRename(value);
+			return;
+		}
+		if (this.replyTarget) {
+			const target = this.replyTarget;
+			const text = value.trim();
+			const viewCommand = parseAgentsViewCommand(text);
+			if (viewCommand) {
+				// Stale summaries mis-route the RPCs after a runtime replacement.
+				const currentSummary = resolveCurrentReplyTargetSummary(
+					this.unifiedRecords ?? [],
+					target,
+					(activeSessionId) => this.findSummaryByActiveSessionId(activeSessionId),
+				);
+				const succeeded = await this.runAgentsViewCommand(viewCommand, currentSummary);
+				if (!succeeded && this.replyTarget === target && this.editor.getText().length === 0) {
+					this.editor.setText(value);
+				}
+				return;
+			}
+			const rejection = getReplyComposerCommandRejection(text);
+			if (rejection) {
+				// submitValue cleared the buffer before onSubmit; keep the draft.
+				if (this.editor.getText().length === 0) this.editor.setText(value);
+				this.setStatusMessage(rejection, { tone: "warning" });
+				return;
+			}
+			if (text) {
+				this.editor.setText("");
+				const sent = await this.sendReply(target, text, delivery);
+				if (sent) {
+					if (this.replyTarget === target && this.editor.getText().length === 0) {
+						this.setReplyTarget(undefined);
+					}
+					// Keep the send outcome (or sticky cwd notice) that sendReply just surfaced.
+					await this.refreshSessions();
+				} else if (this.replyTarget === target && this.editor.getText().length === 0) {
+					this.editor.setText(value);
+				}
+			}
+			return;
+		}
+		// Search text is never a prompt or a command; Enter opens the selection.
+		this.openSelected();
+	}
+
+	/** Alt+Enter in the reply composer queues the reply as a follow-up. */
+	private handleReplyFollowUp(): void {
+		if (!this.replyTarget) return;
+		// Unlike Enter, this path skips submitValue, so expand paste markers here.
+		const text = this.editor.getExpandedText();
+		if (!text.trim()) return;
+		void this.submit(text, "followUp");
+	}
+
+	private getSavedSessionCwd(): string {
+		return this.options.config.cwd ?? this.options.uiServices.getInitialCwd();
+	}
+
+	private getSavedSessionCatalogContext(): DaemonSavedSessionCatalogContext {
+		return { cwd: this.getSavedSessionCwd(), sessionDir: this.options.config.sessionDir };
+	}
+
+	private openSelected(): void {
+		const row = this.rows[this.selectedIndex];
+		if (!row?.selectable || this.isPendingDeleteRow(row)) {
+			return;
+		}
+		if (row.kind === "subagent-summary") {
+			this.toggleSubagentList(row);
+			return;
+		}
+		if (row.kind === "subagent") {
+			this.openSelectedSubagent(row);
+			return;
+		}
+		if (!row.summary.activeSessionId && !row.summary.sessionFile) {
+			this.setStatusMessage("Cannot open agent without an active runtime or saved session file");
+			return;
+		}
+		this.finish({
+			type: "open",
+			summary: row.summary,
+			hasChildren: hasUnifiedSessionChildren(
+				this.unifiedRecords,
+				getAgentsViewSelectionKey(row.summary),
+				this.unifiedIndex,
+			),
+		});
+	}
+
+	private toggleSubagentList(row: AgentsViewRow): void {
+		const target = row.kind === "subagent-summary" ? (row.parentIdentity ?? row.identity) : row.identity;
+		if (this.expandedSubagentParents.has(target)) {
+			this.expandedSubagentParents.delete(target);
+			this.programShownParents.delete(target);
+		} else {
+			this.expandedSubagentParents.add(target);
+		}
+		this.rebuildRows();
+		this.syncSelectedRowState();
+		this.ui.requestRender();
+	}
+
+	/**
+	 * Toggle the full spawn program for the agent owning the selected row:
+	 * one press shows it, another hides it. The subagent list is expanded as
+	 * needed so the code sits directly above the subagents it launched.
+	 */
+	private cycleProgramForSelected(): void {
+		const row = this.rows[this.selectedIndex];
+		if (!row) {
+			return;
+		}
+		const target = row.kind === "agent" ? row.identity : row.parentIdentity;
+		if (!target) {
+			return;
+		}
+		if (!this.targetHasSpawnCode(target)) {
+			this.setStatusMessage("No program recorded for these subagents");
+			return;
+		}
+		// Code only renders inside an expanded subagent list, so reveal it too.
+		this.expandedSubagentParents.add(target);
+		if (this.programShownParents.has(target)) {
+			this.programShownParents.delete(target);
+		} else {
+			this.programShownParents.add(target);
+		}
+		this.rebuildRows();
+		this.syncSelectedRowState();
+		this.ui.requestRender();
+	}
+
+	/** Whether any subagent under the given agent identity carries spawn code. */
+	private targetHasSpawnCode(target: string): boolean {
+		for (const row of this.rows) {
+			if (row.parentIdentity !== target) {
+				continue;
+			}
+			if (row.kind === "subagent-summary") {
+				return row.hasSpawnCode === true;
+			}
+			if (row.kind === "subagent" && rowHasSpawnCode(row)) {
+				return true;
+			}
+		}
+		return false;
+	}
+
+	private openSelectedSubagent(row: AgentsViewRow): void {
+		const expandedAncestorSessionIds = this.collectSubagentAncestorSessionIds(row);
+		if (row.summary.activeSessionId || row.summary.sessionFile) {
+			this.finish({
+				type: "open",
+				summary: row.summary,
+				expandedAncestorSessionIds,
+				hasChildren: hasUnifiedSessionChildren(
+					this.unifiedRecords,
+					getAgentsViewSelectionKey(row.summary),
+					this.unifiedIndex,
+				),
+			});
+			return;
+		}
+		const root = this.findSubagentRootRow(row);
+		if (!root || !(root.summary.activeSessionId || root.summary.sessionFile)) {
+			this.setStatusMessage("Cannot open agent without an active runtime or saved session file");
+			return;
+		}
+		this.finish(
+			createUnattachableChildOpenResult(
+				row.summary,
+				root.summary,
+				expandedAncestorSessionIds,
+				hasUnifiedSessionChildren(this.unifiedRecords, getAgentsViewSelectionKey(root.summary), this.unifiedIndex),
+			),
+		);
+	}
+
+	/** Session ids of every ancestor of a subagent row, root-most first. */
+	private collectSubagentAncestorSessionIds(row: AgentsViewRow): string[] {
+		const ancestors: string[] = [];
+		let parentIdentity = row.parentIdentity;
+		while (parentIdentity !== undefined) {
+			const parent = this.rows.find((candidate) => candidate.identity === parentIdentity);
+			if (!parent) {
+				break;
+			}
+			ancestors.unshift(parent.summary.sessionId);
+			parentIdentity = parent.parentIdentity;
+		}
+		return ancestors;
+	}
+
+	/**
+	 * The whole subagent tree belongs to the root agent's session, so nested
+	 * subagents also resolve to their top-level ancestor.
+	 */
+	private findSubagentRootRow(row: AgentsViewRow): AgentsViewRow | undefined {
+		let root = this.rows.find((candidate) => candidate.identity === row.parentIdentity);
+		while (root && root.kind !== "agent") {
+			const parentIdentity = root.parentIdentity;
+			root = this.rows.find((candidate) => candidate.identity === parentIdentity);
+		}
+		return root;
+	}
+
+	private async toggleReplyTarget(): Promise<void> {
+		const selectedRow = this.rows[this.selectedIndex];
+		// Subagents are read-only; replying is reserved for top-level agents.
+		if (selectedRow?.kind !== "agent") {
+			return;
+		}
+		const summary = selectedRow.summary;
+		// Live agents reply directly; saved sessions are resumed when the reply is
+		// sent. Rows with neither runtime nor file have nothing to receive a prompt.
+		if (!summary.activeSessionId && !summary.sessionFile) {
+			return;
+		}
+		if (this.pendingDeleteAgent?.identity === getSelectedRowIdentity(selectedRow)) {
+			return;
+		}
+		const key = summary.activeSessionId ?? summary.id;
+		if (this.replyTarget?.key === key) {
+			this.setReplyTarget(undefined);
+			return;
+		}
+		this.setReplyTarget({ key, summary });
+		if (!summary.activeSessionId) {
+			// Inactive sessions have no live transcript endpoint; the persisted recap
+			// (or opener) is the best preview and needs no daemon round-trip.
+			this.replyLastAssistantText = summary.summary ?? summary.firstMessage;
+			this.ui.requestRender();
+			return;
+		}
+		const activeSessionId = summary.activeSessionId;
+		this.replyLastAssistantTextLoading = true;
+		try {
+			const latestAssistantText = await this.getLastAssistantText(activeSessionId);
+			if (this.replyTarget?.key === key) {
+				this.replyLastAssistantText = latestAssistantText;
+				this.replyLastAssistantTextLoading = false;
+				this.ui.requestRender();
+			}
+		} catch (error) {
+			if (this.replyTarget?.key === key) {
+				this.replyLastAssistantTextLoading = false;
+				this.setStatusMessage(formatError("Failed to load latest response", error));
+			}
+		}
+	}
+
+	private setReplyTarget(target: { key: string; summary: SessionSummary } | undefined): void {
+		if (target && !this.replyTarget) {
+			this.actionModeSearchQuery = this.editor.getText();
+			this.editor.setText("");
+		} else if (!target && this.replyTarget) {
+			this.editor.setText(this.actionModeSearchQuery ?? this.persistentState.query ?? "");
+			this.actionModeSearchQuery = undefined;
+		}
+		this.replyTarget = target;
+		this.replyAutocomplete = target
+			? createReplyComposerAutocompleteProvider(target.summary.cwd, this.fdPath)
+			: undefined;
+		this.replyLastAssistantText = undefined;
+		this.replyLastAssistantTextLoading = false;
+		this.replyHeaderTime = target
+			? formatAgentsViewRelativeTime(target.summary.modified ?? target.summary.created)
+			: "";
+		this.editor.setPlaceholder(
+			target
+				? target.summary.activeSessionId
+					? REPLY_PROMPT_FALLBACK_PLACEHOLDER
+					: RESUME_PROMPT_PLACEHOLDER
+				: SEARCH_PROMPT_PLACEHOLDER,
+		);
+		if (!target) this.rebuildRows();
+		this.ui.requestRender();
+	}
+
+	private enterRenameMode(): void {
+		const row = this.rows[this.selectedIndex];
+		// Only top-level agents carry a renameable session; subagents do not.
+		if (row?.kind !== "agent" || !row.selectable) {
+			return;
+		}
+		const activeSessionId = row.summary.activeSessionId;
+		const sessionFile = row.summary.sessionFile;
+		if (!activeSessionId && !sessionFile) {
+			this.setStatusMessage("This session cannot be renamed");
+			return;
+		}
+		this.setReplyTarget(undefined);
+		this.actionModeSearchQuery = this.editor.getText();
+		this.pendingDeleteAgent = undefined;
+		this.pendingKillSubagent = undefined;
+		this.renameTarget = { activeSessionId, sessionFile, summary: row.summary };
+		this.editor.setPlaceholder("Name this agent session");
+		this.editor.setText(row.summary.sessionName ?? "");
+		this.ui.requestRender();
+	}
+
+	private exitRenameMode(): void {
+		this.renameTarget = undefined;
+		this.editor.setText(this.actionModeSearchQuery ?? this.persistentState.query ?? "");
+		this.actionModeSearchQuery = undefined;
+		this.editor.setPlaceholder(SEARCH_PROMPT_PLACEHOLDER);
+		this.rebuildRows();
+		this.ui.requestRender();
+	}
+
+	private async confirmRename(value: string): Promise<void> {
+		const target = this.renameTarget;
+		if (!target) {
+			return;
+		}
+		const name = value.trim();
+		if (!name) {
+			this.exitRenameMode();
+			return;
+		}
+		this.exitRenameMode();
+		await this.renameSession(target.summary, name);
+	}
+
+	/** Shared by rename mode and /name: rename, refresh both catalogs, report. */
+	private async renameSession(summary: SessionSummary, name: string): Promise<boolean> {
+		this.setStatusMessage("Renaming agent...");
+		try {
+			if (!this.options.nativeBackend.renameSession) {
+				this.setStatusMessage("This session cannot be renamed", { tone: "warning" });
+				return false;
+			}
+			await this.options.nativeBackend.renameSession(summary, name);
+			await this.refreshSessions();
+			this.refreshSavedSessionsIfLoaded();
+			this.setStatusMessage(`Renamed to ${name}`);
+			return true;
+		} catch (error) {
+			this.setStatusMessage(formatError("Failed to rename agent", error));
+			return false;
+		}
+	}
+
+	private findSummaryByActiveSessionId(activeSessionId: string): SessionSummary | undefined {
+		return this.rows.find((row) => (row.summary.activeSessionId ?? row.summary.id) === activeSessionId)?.summary;
+	}
+
+	private renderReplyHeaderLine(): string | undefined {
+		if (this.renameTarget) {
+			return theme.fg("warning", "Rename agent session");
+		}
+		if (!this.replyTarget) {
+			return undefined;
+		}
+		const headline =
+			createAgentsViewReplyHeadline(this.replyLastAssistantText) ??
+			theme.fg("dim", this.replyLastAssistantTextLoading ? "Loading last response..." : "No response yet");
+		return this.replyHeaderTime ? `${theme.fg("warning", this.replyHeaderTime)} ${headline}` : headline;
+	}
+
+	private async getLastAssistantText(activeSessionId: string): Promise<string | undefined> {
+		return this.options.nativeBackend.getLastAssistantText?.(activeSessionId);
+	}
+
+	private async sendReply(
+		target: { key: string; summary: SessionSummary },
+		text: string,
+		delivery: "steer" | "followUp" = "steer",
+	): Promise<boolean> {
+		const currentSummary = resolveCurrentReplyTargetSummary(this.unifiedRecords ?? [], target, (activeSessionId) =>
+			this.findSummaryByActiveSessionId(activeSessionId),
+		);
+		let activeSessionId = currentSummary.activeSessionId;
+		let liveSummary = activeSessionId ? currentSummary : undefined;
+		try {
+			if (!activeSessionId) {
+				this.setStatusMessage("Resuming session...");
+				const opened = await this.options.nativeBackend.openSession(currentSummary);
+				activeSessionId = opened.summary.activeSessionId ?? opened.summary.sessionId ?? opened.summary.id;
+				liveSummary = opened.summary;
+				this.inactiveAgentIdentities.delete(getSummaryIdentity(target.summary));
+				if (this.replyTarget === target) this.selectSummary(opened.summary);
+			}
+			const behavior = delivery === "followUp" ? "followUp" : liveSummary?.isStreaming ? "steer" : undefined;
+			this.setStatusMessage("Sending reply...");
+			await this.sendPrompt(activeSessionId, text, behavior);
+			this.setStatusMessage("Reply sent");
+			return true;
+		} catch (error) {
+			this.setStatusMessage(formatError("Failed to send reply", error));
+			return false;
+		}
+	}
+
+	/** Create a fresh daemon/Native session and open it in the chat view. */
+	private async createNewSession(): Promise<boolean> {
+		if (this.creatingNewSession || this.stopped) return false;
+		this.creatingNewSession = true;
+		try {
+			this.setStatusMessage("Creating session...");
+			const created = await this.options.nativeBackend.createSession();
+			if (this.stopped) {
+				await this.options.nativeBackend.killSession?.(created.summary).catch(() => undefined);
+				return false;
+			}
+			this.selectSummary(created.summary);
+			this.finish({ type: "open", summary: created.summary });
+			return true;
+		} catch (error) {
+			if (!this.stopped) this.setStatusMessage(formatError("Failed to create session", error));
+			return false;
+		} finally {
+			this.creatingNewSession = false;
+		}
+	}
+
+	/**
+	 * Run a view command against the armed composer's target. Returns whether
+	 * it completed so callers can restore the draft; disarms are guarded
+	 * against a composer re-armed during the awaited RPCs.
+	 */
+	private async runAgentsViewCommand(command: AgentsViewCommand, target: SessionSummary): Promise<boolean> {
+		const armedAtStart = this.replyTarget;
+		const disarmIfUnchanged = () => {
+			if (armedAtStart && this.replyTarget === armedAtStart) this.setReplyTarget(undefined);
+		};
+		try {
+			switch (command.name) {
+				case "name": {
+					const name = command.args.trim();
+					if (!name) {
+						this.setStatusMessage("Usage: /name <session name>", { tone: "warning" });
+						return false;
+					}
+					const renamed = await this.renameSession(target, name);
+					if (renamed) disarmIfUnchanged();
+					return renamed;
+				}
+				case "kill": {
+					if (!target.activeSessionId) {
+						this.setStatusMessage("/kill needs a running agent; this session is inactive", { tone: "warning" });
+						return false;
+					}
+					try {
+							if (!this.options.nativeBackend.killSession) {
+								this.setStatusMessage("Cannot stop agent from this host", { tone: "warning" });
+								return false;
+							}
+							await this.options.nativeBackend.killSession(target);
+					} catch (error) {
+						// As in deactivatePendingAgent: an agent that already finished counts as stopped.
+						if (!isUnknownActiveSessionError(error)) throw error;
+					}
+					disarmIfUnchanged();
+					this.setStatusMessage("Agent stopped");
+					await this.refreshSessions();
+					return true;
+				}
+			}
+		} catch (error) {
+			this.setStatusMessage(formatError(`Failed to run /${command.name}`, error));
+			return false;
+		}
+		return false;
+	}
+
+	/**
+	 * Outlives finish(), which closes the shared client and would reject an
+	 * in-flight create while the daemon still materializes the session.
+	 */
+
+	/** Point selection (and its persisted key) at a freshly resumed session row. */
+	private selectSummary(summary: SessionSummary): void {
+		this.selectedRowIdentity = getSummaryIdentity(summary);
+		this.selectedActiveSessionId = summary.activeSessionId ?? summary.id;
+		this.selectedSessionKey = getAgentsViewSelectionKey(summary);
+		this.persistentState.selectedRowIdentity = this.selectedRowIdentity;
+		this.persistentState.selectedSessionKey = this.selectedSessionKey;
+	}
+
+	private async handleDeleteSelected(): Promise<void> {
+		const row = this.rows[this.selectedIndex];
+		if (!row?.selectable) {
+			return;
+		}
+		if (row.kind === "subagent") {
+			this.pendingDeleteAgent = undefined;
+			await this.handleKillSubagentSelected(row);
+			return;
+		}
+		if (row.kind !== "agent") {
+			return;
+		}
+		this.pendingKillSubagent = undefined;
+		const identity = getSummaryIdentity(row.summary);
+		if (!row.summary.activeSessionId && row.summary.sessionFile) {
+			if (this.pendingDeleteAgent?.identity === identity && this.isDeleteConfirmationVisible()) {
+				this.clearDeleteConfirmation({ render: false });
+				try {
+					if (!this.options.nativeBackend.deleteSession) {
+						this.setStatusMessage("Cannot delete session from this host", { tone: "warning" });
+						return;
+					}
+					await this.options.nativeBackend.deleteSession(row.summary);
+					this.pendingDeleteAgent = undefined;
+					this.setStatusMessage("Session deleted");
+					await this.refreshSessions();
+				} catch (error) {
+					this.setStatusMessage(formatError("Failed to delete session", error));
+				}
+				return;
+			}
+			this.pendingDeleteAgent = {
+				identity,
+				sessionFile: row.summary.sessionFile,
+				summary: row.summary,
+				stopped: false,
+			};
+			this.showDeleteConfirmation();
+			return;
+		}
+		if (this.pendingDeleteAgent?.identity === identity) {
+			if (this.isDeleteConfirmationVisible()) {
+				await this.deactivatePendingAgent();
+				return;
+			}
+			this.showDeleteConfirmation();
+			return;
+		}
+		await this.stopAgentForDeletion(row);
+	}
+
+	private async handleKillSubagentSelected(row: AgentsViewRow): Promise<void> {
+		const identity = getSummaryIdentity(row.summary);
+		if (this.pendingKillSubagent?.identity === identity && this.isDeleteConfirmationVisible()) {
+			const pending = this.pendingKillSubagent;
+			this.clearDeleteConfirmation({ render: false });
+			await this.killSubagent(pending, row);
+			return;
+		}
+		const childId = row.summary.rlmChildId;
+		const rootActiveSessionId = this.findSubagentRootRow(row)?.summary.activeSessionId;
+		if (!childId || !rootActiveSessionId) {
+			this.setStatusMessage("Cannot stop subagent without its parent agent");
+			return;
+		}
+		this.pendingKillSubagent = { identity, rootActiveSessionId, childId };
+		this.showDeleteConfirmation();
+	}
+
+	private async killSubagent(pending: PendingKillSubagent, currentRow: AgentsViewRow): Promise<void> {
+		const running = hasLiveWork(currentRow);
+		this.setStatusMessage(running ? "Stopping subagent..." : "Deleting subagent...");
+		try {
+			if (!this.options.nativeBackend.cancelSubagent) {
+				this.setStatusMessage("Cannot update subagent from this host", { tone: "warning" });
+				return;
+			}
+			await this.options.nativeBackend.cancelSubagent(pending.rootActiveSessionId, pending.childId);
+			this.setStatusMessage(running ? "Subagent stopped" : "Subagent deleted", { render: false });
+			await this.refreshSessions();
+		} catch (error) {
+			this.setStatusMessage(formatError("Failed to update subagent", error));
+		}
+	}
+
+	private async stopAgentForDeletion(row: AgentsViewRow): Promise<void> {
+		const identity = getSummaryIdentity(row.summary);
+		const activeSessionId = row.summary.activeSessionId;
+		if (!activeSessionId) {
+			this.pendingDeleteAgent = {
+				identity,
+				sessionFile: row.summary.sessionFile,
+				summary: row.summary,
+				stopped: false,
+			};
+			this.setStatusMessage(undefined, { render: false });
+			this.setReplyTarget(undefined);
+			this.showDeleteConfirmation();
+			return;
+		}
+		if (!hasLiveWork(row)) {
+			this.pendingDeleteAgent = {
+				identity,
+				activeSessionId,
+				sessionFile: row.summary.sessionFile,
+				summary: row.summary,
+				stopped: false,
+			};
+			this.setStatusMessage(undefined, { render: false });
+			this.setReplyTarget(undefined);
+			this.showDeleteConfirmation();
+			return;
+		}
+		this.setStatusMessage("Stopping agent...");
+		try {
+			if (!this.options.nativeBackend.killSession) {
+				this.setStatusMessage("Cannot stop agent from this host", { tone: "warning" });
+				return;
+			}
+			await this.options.nativeBackend.killSession(row.summary);
+			this.pendingDeleteAgent = {
+				identity,
+				activeSessionId,
+				sessionFile: row.summary.sessionFile,
+				summary: row.summary,
+				stopped: true,
+			};
+			this.selectedActiveSessionId = activeSessionId;
+			this.setReplyTarget(undefined);
+			this.setStatusMessage(undefined, { render: false });
+			this.showDeleteConfirmation();
+			await this.refreshSessions();
+		} catch (error) {
+			this.setStatusMessage(formatError("Failed to stop agent", error));
+		}
+	}
+
+	private async deactivatePendingAgent(): Promise<void> {
+		const pending = this.pendingDeleteAgent;
+		if (!pending) return;
+		this.setStatusMessage("Deactivating agent...");
+		try {
+			if (pending.activeSessionId) {
+				await this.options.nativeBackend.killSession?.(pending.summary).catch(() => undefined);
+			}
+			if (!this.options.nativeBackend.deleteSession) {
+				this.setStatusMessage("Cannot delete session from this host", { tone: "warning" });
+				return;
+			}
+			await this.options.nativeBackend.deleteSession(pending.summary);
+			this.inactiveAgentIdentities.add(pending.identity);
+			this.pendingDeleteAgent = undefined;
+			this.clearDeleteConfirmation({ render: false });
+			this.selectedActiveSessionId = undefined;
+			this.setStatusMessage("Agent inactive", { render: false });
+			await this.refreshSessions();
+			this.refreshSavedSessionsIfLoaded();
+		} catch (error) {
+			this.setStatusMessage(formatError("Failed to deactivate agent", error));
+		}
+	}
+
+	private async sendPrompt(
+		activeSessionId: string,
+		message: string,
+		streamingBehavior?: "steer" | "followUp",
+	): Promise<void> {
+		if (!this.options.nativeBackend.prompt) {
+			throw new Error("Native backend cannot send prompts from Agents View");
+		}
+		await this.options.nativeBackend.prompt(activeSessionId, message, streamingBehavior);
+	}
+
+	private onRosterUpdate(): void {
+		const liveRoster = this.nativeRoster ?? this.rosterStore;
+		if (this.stopped || !liveRoster) return;
+		this.applySessionList(liveRoster.summaries(), true);
+		this.resolveMissingSelectionAnchor();
+	}
+
+	private refreshSavedSessionsIfLoaded(): void {
+		if (this.persistentState.savedCatalogLoaded) void this.refreshSavedSessions({ preserveStatusOnError: true });
+	}
+
+	private async refreshSessions(): Promise<void> {
+		if (this.nativeRoster) {
+			await this.nativeRoster.refresh();
+			this.applySessionList(this.nativeRoster.summaries(), true);
+			this.resolveMissingSelectionAnchor();
+			return;
+		}
+		if (this.reconnectPromise || this.daemonShutdownReceived || !this.rosterStore) return;
+		this.applySessionList(this.rosterStore.summaries(), true);
+		this.resolveMissingSelectionAnchor();
+	}
+
+	private applySessionList(sessions: SessionSummary[], successful = false): void {
+		this.lastListedSummaries = sessions;
+		if (successful) this.persistentState.lastSuccessfulLiveSummaries = sessions;
+		this.reconcileCatalogs();
+	}
+
+	private reconcileCatalogs(): void {
+		const visibleSessions = this.lastListedSummaries.filter((summary) =>
+			shouldShowAgentsViewSession(summary, this.inactiveAgentIdentities.has(getSummaryIdentity(summary))),
+		);
+		this.lastVisibleSummaries = this.withPendingDeleteSession(visibleSessions);
+		this.unifiedRecords = reconcileUnifiedSessions(this.lastVisibleSummaries, this.savedSessions, this.heartbeats);
+		this.unifiedIndex = buildUnifiedSessionIndex(this.unifiedRecords);
+		migrateAgentsViewIdentitySet(this.expandedSubagentParents, this.unifiedIndex.byKey);
+		migrateAgentsViewIdentitySet(this.programShownParents, this.unifiedIndex.byKey);
+
+		const frames = this.persistentState.scopeFrames ?? [];
+		const resolution = resolveAgentsViewScopeFrames(this.unifiedRecords, frames, this.unifiedIndex);
+		if (shouldApplyScopeResolution(resolution.droppedFrames, this.savedCatalogReady)) {
+			this.persistentState.scopeFrames = resolution.frames;
+			this.scopeKey = resolution.frames.at(-1)?.scope;
+			this.scopeRootSummary = resolution.root ? summaryForUnifiedRecord(resolution.root) : undefined;
+			this.persistentState.scopeRootSummary = this.scopeRootSummary;
+			if (resolution.droppedFrames > 0) {
+				const destination = resolution.root ? "the nearest available parent" : "the global view";
+				this.setStatusMessage(`Scope is no longer available; returned to ${destination}`, { render: false });
+			}
+		}
+		this.scopedRecords = scopeToSessionSubtree(this.unifiedRecords, this.scopeKey, this.unifiedIndex);
+		this.rows = buildAgentsViewRows(
+			this.getFilteredRecords(),
+			this.expandedSubagentParents,
+			this.programShownParents,
+			this.scopeKey,
+			computeRecursiveRollups(this.unifiedRecords, this.unifiedIndex),
+			this.anchorSessionId,
+		);
+		this.applyPendingAncestorExpansion();
+		this.restoreSelection();
+		this.ui.requestRender();
+	}
+
+	private rearmSavedSearchFetch(): void {
+		if (this.persistentState.savedCatalogLoaded !== true) this.savedSearchFetchStarted = false;
+	}
+
+	private async refreshSavedSessions(
+		_options: { duringReconnect?: boolean; preserveStatusOnError?: boolean } = {},
+	): Promise<boolean> {
+		this.savedCatalogReady = true;
+		this.persistentState.savedCatalogLoaded = true;
+		return true;
+	}
+
+	private async refreshHeartbeats(_options: { duringReconnect?: boolean } = {}): Promise<boolean> {
+		try {
+			this.heartbeats = (await this.options.nativeBackend.listHeartbeats?.()) ?? [];
+			this.persistentState.heartbeats = this.heartbeats;
+			this.rebuildRows();
+			return true;
+		} catch {
+			return false;
+		}
+	}
+
+	private withPendingDeleteSession(sessions: readonly SessionSummary[]): SessionSummary[] {
+		const pending = this.pendingDeleteAgent;
+		// Saved-only rows already come from the durable catalog. Injecting their
+		// synthetic archived summary as a daemon record would move confirmation
+		// from Inactive to Idle.
+		if (!pending || pending.summary.lifecycle !== "live") {
+			return [...sessions];
+		}
+		if (!this.isDeleteConfirmationVisible()) {
+			return [...sessions];
+		}
+		let replaced = false;
+		const merged = sessions.map((summary) => {
+			if (getSummaryIdentity(summary) !== pending.identity) {
+				return summary;
+			}
+			replaced = true;
+			return pending.summary;
+		});
+		return replaced ? merged : [...merged, pending.summary];
+	}
+
+	private resolveMissingSelectionAnchor(): void {
+		if (!this.selectionAnchorPending || this.savedCatalogRefreshPending) {
+			return;
+		}
+		this.selectionAnchorPending = false;
+		const row = this.rows[this.selectedIndex];
+		this.selectedActiveSessionId = row?.selectable ? (row.summary.activeSessionId ?? row.summary.id) : undefined;
+	}
+
+	private restoreSelection(): void {
+		if (this.rows.length === 0) {
+			this.selectedIndex = 0;
+			this.selectedActiveSessionId = undefined;
+			return;
+		}
+		const selectedIdentity = this.selectedRowIdentity ?? this.persistentState.selectedRowIdentity;
+		const resolution = resolveAgentsViewSelectionState(
+			this.rows,
+			this.selectedIndex,
+			selectedIdentity,
+			this.selectedSessionKey ?? this.persistentState.selectedSessionKey,
+		);
+		this.selectedIndex = resolution.index;
+		if (resolution.resolved) {
+			this.syncSelectedRowState();
+			return;
+		}
+		this.selectionAnchorPending = Boolean(
+			this.selectedRowIdentity ??
+				this.persistentState.selectedRowIdentity ??
+				this.selectedSessionKey ??
+				this.persistentState.selectedSessionKey,
+		);
+		// Catalogs stream independently. Show a temporary fallback row without
+		// replacing the source-session anchor before its daemon row arrives.
+		const fallback = this.rows[this.selectedIndex];
+		this.selectedActiveSessionId = fallback?.selectable
+			? (fallback.summary.activeSessionId ?? fallback.summary.id)
+			: undefined;
+	}
+
+	private getSelectableRowIndexes(): number[] {
+		return this.rows.flatMap((row, index) => (row.selectable ? [index] : []));
+	}
+
+	private syncSelectedRowState(): void {
+		this.selectionAnchorPending = false;
+		const row = this.rows[this.selectedIndex];
+		this.selectedActiveSessionId = row?.selectable ? (row.summary.activeSessionId ?? row.summary.id) : undefined;
+		this.selectedRowIdentity = getSelectedRowIdentity(row);
+		this.selectedSessionKey = row?.selectable ? getAgentsViewSelectionKey(row.summary) : undefined;
+		this.persistentState.selectedRowIdentity = this.selectedRowIdentity;
+		this.persistentState.selectedSessionKey = this.selectedSessionKey;
+	}
+
+	private finish(result: AgentsViewRunResult): void {
+		if (this.stopped) {
+			return;
+		}
+		this.stopped = true;
+		this.savedCatalogGeneration += 1;
+		this.heartbeatCatalogGeneration += 1;
+		if (this.heartbeatPollTimer) {
+			clearInterval(this.heartbeatPollTimer);
+			this.heartbeatPollTimer = undefined;
+		}
+		if (this.animationTimer) {
+			clearInterval(this.animationTimer);
+			this.animationTimer = undefined;
+		}
+		this.clearCtrlCExitHint({ render: false });
+		this.clearDeleteConfirmation({ render: false });
+		this.setStatusMessage(undefined, { render: false });
+		if (result.type === "open") {
+			this.openingSummary = result.summary;
+			this.ui.requestRender(true);
+		} else {
+			this.ui.stop({
+				preserveAltScreen: result.type !== "exit",
+				flushFullscreen: false,
+			});
+			this.openingShellActive = false;
+		}
+		stopThemeWatcher();
+		this.unsubscribeClientClose?.();
+		this.unsubscribeClientClose = undefined;
+		this.unsubscribeClientMessage?.();
+		this.unsubscribeClientMessage = undefined;
+		this.unsubscribeRosterUpdate?.();
+		this.unsubscribeRosterUpdate = undefined;
+		this.resolveRun?.(result);
+		this.resolveRun = undefined;
+	}
+
+
+	private requireClient(): never {
+		throw new Error("Devo Agents View is Native-only");
+	}
+
+	private getAgentCountsText(): string {
+		const counts = countRowsBySection(this.rows);
+		return `${counts.running} running, ${counts.idle} idle, ${counts.inactive} inactive`;
+	}
+
+	private renderSessionRows(width: number, maxRows: number): string[] {
+		if (maxRows <= 0) return [];
+		const layout = buildCompactAgentsViewLayout(this.rows, width);
+		const displayItems: DisplayItem[] = [];
+		const counts = countRowsBySection(this.rows);
+		for (const section of ["running", "idle", "inactive"] as const) {
+			if (counts[section] === 0) continue;
+			if (displayItems.length > 0) displayItems.push({ type: "spacer" });
+			displayItems.push({ type: "heading", section });
+			for (const row of getDisplayRowsForSection(this.rows, section)) {
+				displayItems.push({ type: "row", row });
+			}
+		}
+		if (displayItems.length === 0) {
+			const query =
+				this.replyTarget || this.renameTarget ? (this.actionModeSearchQuery ?? "") : this.editor.getText();
+			return [theme.fg("dim", query.trim() ? "No sessions match your search." : "No sessions yet.")];
+		}
+		// Reserve the column header and its spacer, leaving at least one session row visible.
+		const headerRows = Math.min(2, maxRows - 1);
+		const visibleRows = maxRows - headerRows;
+		const selectedIdentity = this.rows[this.selectedIndex]?.identity;
+		const selectedDisplayIndex = displayItems.findIndex(
+			(item) => item.type === "row" && item.row.identity === selectedIdentity,
+		);
+		const start = Math.max(
+			0,
+			Math.min(displayItems.length - visibleRows, selectedDisplayIndex - Math.floor(visibleRows / 2)),
+		);
+		const showLeadingEllipsis = start > 0 && visibleRows > 1;
+		const showTrailingEllipsis = start + visibleRows < displayItems.length && visibleRows > 2;
+		const contentRows = visibleRows - Number(showLeadingEllipsis) - Number(showTrailingEllipsis);
+		const sliceStart = selectedDisplayIndex >= start + contentRows ? selectedDisplayIndex - contentRows + 1 : start;
+		const lines = displayItems.slice(sliceStart, sliceStart + contentRows).map((item) => {
+			if (item.type === "spacer") return "";
+			if (item.type === "heading") {
+				return theme.fg("muted", truncateToWidth(`${sectionTitle(item.section)} (${counts[item.section]})`, width));
+			}
+			return this.renderRow(item.row, width, layout);
+		});
+		if (showLeadingEllipsis) lines.unshift(theme.fg("dim", "  ..."));
+		if (showTrailingEllipsis) lines.push(theme.fg("dim", "  ..."));
+		if (headerRows > 1) lines.unshift("");
+		if (headerRows > 0) lines.unshift(theme.bold(layout.legend));
+		return lines;
+	}
+
+	private renderRow(
+		row: AgentsViewRow,
+		width: number,
+		layout: AgentsViewUsageLayout = buildCompactAgentsViewLayout(this.rows.length > 0 ? this.rows : [row], width),
+	): string {
+		const selected = row.selectable && row.identity === this.rows[this.selectedIndex]?.identity;
+		const markRow = (line: string): string => (selected ? `${SELECTED_ROW_MARKER}${line}` : line);
+		if (row.kind === "subagent-code") return this.renderCodeRow(row);
+		if (row.kind === "subagent-summary") {
+			const indent = "  ".repeat(row.depth);
+			return markRow(formatTableCell(`${indent}${row.expanded ? "▾" : "▸"} ${row.title}`, width));
+		}
+		const pendingDelete = row.kind === "agent" && this.isPendingDeleteRow(row);
+		const pendingKill = row.kind === "subagent" && this.isPendingKillSubagentRow(row);
+		const details = layout.details.get(row.identity) ?? "";
+		if (pendingDelete || pendingKill) {
+			const armed = row.summary.hasActiveHeartbeat === true || (row.heartbeat?.activeCount ?? 0) > 0;
+			const title =
+				(armed ? "has an armed heartbeat — " : "") +
+				(pendingDelete
+					? this.getPendingDeleteTitle()
+					: `${keyText("app.agents.delete")} again to ${hasLiveWork(row) ? "stop" : "delete"}`);
+			return markRow(formatTableCell(theme.fg("error", title), width));
+		}
+		const icon = this.formatRowIcon(row.section, this.getRowIcon(row.section));
+		const badge = formatHeartbeatBadge(row.heartbeat);
+		const heartbeat = badge ? `${theme.fg((row.heartbeat?.activeCount ?? 0) > 0 ? "error" : "dim", badge)} ` : "";
+		const title = `${"  ".repeat(row.depth)}${icon} ${heartbeat}${styleRowTitle(row)}`;
+		const status =
+			row.summary.statusLabel !== undefined || row.summary.lastHeardFromAt !== undefined
+				? row.statusLabel
+				: undefined;
+		const activity = [status, row.summary.summary].filter(Boolean).join(" · ");
+		const cells = [
+			formatTableCell(title, layout.nameWidth),
+			formatTableCell(theme.fg("muted", formatSessionModel(row)), layout.modelWidth),
+		];
+		if (layout.activityWidth > 0) cells.push(formatTableCell(theme.fg("dim", activity), layout.activityWidth));
+		cells.push(theme.fg("dim", details));
+		return markRow(formatTableCell(cells.join("  "), width));
+	}
+	// Spawn-code rows are read-only context. They render deemphasized — muted
+	// text on a panel background (applied in finalizeRenderedLine) so the program
+	// reads as one quiet segmented block rather than competing with agent rows.
+	private renderCodeRow(row: AgentsViewRow): string {
+		const indent = "  ".repeat(row.depth);
+		const body = theme.fg("muted", row.code || " ");
+		return `${CODE_ROW_MARKER}${indent}  ${body}`;
+	}
+
+	private finalizeRenderedLine(line: string, width: number): string {
+		const code = line.startsWith(CODE_ROW_MARKER);
+		const selected = !code && line.startsWith(SELECTED_ROW_MARKER);
+		let content = code
+			? line.slice(CODE_ROW_MARKER.length)
+			: selected
+				? line.slice(SELECTED_ROW_MARKER.length)
+				: line;
+		// Each rendered line must occupy exactly one terminal row; a stray
+		// newline would shift every line below it and overlap the editor.
+		if (content.includes("\n") || content.includes("\r")) {
+			content = content.replace(/[\r\n]+/g, " ");
+		}
+		const padded = padLine(truncateToWidth(content, width), width);
+		if (code) {
+			return theme.bg("toolPanelBg", padded);
+		}
+		if (!selected) {
+			return padded;
+		}
+		// Truncating styled cells embeds full \x1b[0m resets; re-open the
+		// selection background after each so the highlight spans the whole row.
+		const applySelectionBg = theme.getSelectionBackgroundColor();
+		return padded.split("\x1b[0m").map(applySelectionBg).join("\x1b[0m");
+	}
+
+	private isPendingDeleteRow(row: AgentsViewRow): boolean {
+		return (
+			getSummaryIdentity(row.summary) === this.pendingDeleteAgent?.identity && this.isDeleteConfirmationVisible()
+		);
+	}
+
+	private isPendingKillSubagentRow(row: AgentsViewRow): boolean {
+		return (
+			getSummaryIdentity(row.summary) === this.pendingKillSubagent?.identity && this.isDeleteConfirmationVisible()
+		);
+	}
+
+	private getPendingDeleteTitle(): string {
+		const deleteKey = keyText("app.agents.delete");
+		return this.pendingDeleteAgent?.stopped
+			? `stopped - ${deleteKey} again to remove`
+			: `${deleteKey} again to remove`;
+	}
+
+	private renderPrompt(width: number): string[] {
+		const inline = !this.replyTarget && !this.renameTarget;
+		// A transparent surface preserves the editor's padding, scroll hints, and cursor without input chrome.
+		this.editor.backgroundColor = inline ? (text) => text : theme.getEditorBackgroundColor();
+		const lines = this.editor.render(width);
+		if (!inline) return lines;
+		return lines
+			.filter((line, index) => (index > 0 && index < lines.length - 1) || line.trim().length > 0)
+			.map((line) => theme.fg("muted", line));
+	}
+
+	private renderDock(width: number): string[] {
+		if (this.openingSummary) return [];
+		const safeWidth = Math.max(1, width);
+		return [this.renderHints(safeWidth)].map((line) => this.finalizeRenderedLine(line, safeWidth));
+	}
+
+	private renderHints(width: number): string {
+		if (this.isCtrlCExitHintVisible()) {
+			const clearKey = keyText("app.clear");
+			const hint = clearKey ? `Press ${clearKey} again to exit` : "Press again to exit";
+			return truncateToWidth(theme.fg("muted", hint), width);
+		}
+		if (this.statusMessage) {
+			return truncateToWidth(theme.fg(this.statusMessageTone, this.statusMessage), width);
+		}
+		if (this.renameTarget) {
+			const hint = `${keyText("tui.select.confirm")} save   ${keyText("tui.select.cancel")} cancel`;
+			return truncateToWidth(theme.fg("muted", hint), width);
+		}
+		if (this.replyTarget) {
+			return truncateToWidth(theme.fg("muted", this.renderReplyComposerHints()), width);
+		}
+		const selected = this.rows[this.selectedIndex];
+		// Enter and Right both toggle the list on a summary row and open everywhere
+		// else; Left only has a parent scope to return to below the root view.
+		const rightAction = selected?.kind === "subagent-summary" ? (selected.expanded ? "collapse" : "expand") : "open";
+		const hints = [
+			`${keyText("tui.select.up")}/${keyText("tui.select.down")} navigate`,
+			`${keyText("tui.select.confirm")}/${keyText("app.agents.open")} ${rightAction}`,
+			this.scopeRootSummary ? `${keyText("app.agents.back")} parent` : undefined,
+			`${keyText("app.agents.new")} new`,
+		]
+			.filter((hint): hint is string => hint !== undefined)
+			.join("   ");
+		return truncateToWidth(theme.fg("muted", hints), width);
+	}
+
+	private renderReplyComposerHints(): string {
+		const target = this.replyTarget!;
+		const current = resolveCurrentReplyTargetSummary(this.unifiedRecords ?? [], target, (activeSessionId) =>
+			this.findSummaryByActiveSessionId(activeSessionId),
+		);
+		const streaming = current.activeSessionId !== undefined && current.isStreaming;
+		const hasText = this.editor.getText().trim().length > 0;
+		return [
+			`${keyText("tui.select.confirm")} ${streaming ? "steer" : current.activeSessionId ? "send" : "resume & send"}`,
+			hasText ? `${keyText("app.message.followUp")} queue` : undefined,
+			`${keyText("tui.select.cancel")} cancel`,
+		]
+			.filter((hint): hint is string => hint !== undefined)
+			.join("   ");
+	}
+
+	private visibleListRows(): number {
+		return Math.max(4, this.ui.terminal.rows - 9);
+	}
+
+	private contentHeight(width: number): number {
+		const rows = this.ui.terminal.rows;
+		const dockHeight = clippedFullscreenDockHeight(this.renderDock(width).length, rows);
+		return Math.max(0, rows - dockHeight);
+	}
+
+	private getSplashCwd(): string | undefined {
+		if (this.scopeRootSummary) return undefined;
+		return this.rows[this.selectedIndex]?.summary.cwd ?? this.options.uiServices.getInitialCwd();
+	}
+
+	private getRowIcon(section: AgentsViewSection): string {
+		switch (section) {
+			case "running":
+				return workingIconFrame(this.workingIconFrame);
+			case "idle":
+			case "inactive":
+				return STATUS_ROW_ICON;
+			default: {
+				const _exhaustive: never = section;
+				return _exhaustive;
+			}
+		}
+	}
+
+	private formatRowIcon(section: AgentsViewSection, icon: string): string {
+		switch (section) {
+			case "running":
+				return theme.bold(icon);
+			case "idle":
+				return theme.bold(theme.fg("warning", icon));
+			case "inactive":
+				return theme.bold(theme.fg("dim", icon));
+			default: {
+				const _exhaustive: never = section;
+				return _exhaustive;
+			}
+		}
+	}
+}
+
+type DisplayItem =
+	| { type: "spacer" }
+	| { type: "heading"; section: AgentsViewSection }
+	| { type: "row"; row: AgentsViewRow };
+
+// Nested rows (subagent summaries and expanded subagents) always render in
+// their top-level agent's section block, regardless of their own section.
+function getDisplayRowsForSection(rows: readonly AgentsViewRow[], section: AgentsViewSection): AgentsViewRow[] {
+	const result: AgentsViewRow[] = [];
+	let include = false;
+	for (const row of rows) {
+		if (row.depth === 0) {
+			include = row.section === section;
+		}
+		if (include) {
+			result.push(row);
+		}
+	}
+	return result;
+}
+
+function countRowsBySection(rows: readonly AgentsViewRow[]): Record<AgentsViewSection, number> {
+	const agents = rows.filter((row) => row.kind === "agent");
+	return {
+		running: agents.filter((row) => row.section === "running").length,
+		idle: agents.filter((row) => row.section === "idle").length,
+		inactive: agents.filter((row) => row.section === "inactive").length,
+	};
+}
+
+function getSelectedRowIdentity(row: AgentsViewRow | undefined): string | undefined {
+	return row?.identity;
+}
+
+function rowHasSpawnCode(row: AgentsViewRow): boolean {
+	const code = row.summary.spawnCode;
+	return typeof code === "string" && code.trim().length > 0;
+}
+
+// Destructive actions gate on live work anywhere in the subtree, never on the display section.
+function hasLiveWork(row: AgentsViewRow): boolean {
+	return row.section === "running" || row.runningSubagentCount > 0 || row.summary.hasRunningRlmChildren === true;
+}
+
+export interface AgentsViewUsageLayout {
+	legend: string;
+	details: ReadonlyMap<string, string>;
+	nameWidth: number;
+	modelWidth: number;
+	activityWidth: number;
+}
+
+export function buildCompactAgentsViewLayout(rows: readonly AgentsViewRow[], width = 120): AgentsViewUsageLayout {
+	const sessions = rows.filter((row) => row.kind === "agent" || row.kind === "subagent");
+	const entries = sessions.map((row) => ({
+		identity: row.identity,
+		cost: `$${row.recursiveCost.toFixed(2)}`,
+		age: formatSessionDuration(row.summary),
+	}));
+	const costWidth = entries.reduce((size, entry) => Math.max(size, visibleWidth(entry.cost)), 4);
+	const ageWidth = entries.reduce((size, entry) => Math.max(size, visibleWidth(entry.age)), 3);
+	const detailsWidth = costWidth + 2 + ageWidth;
+	const available = Math.max(0, width - detailsWidth - 4);
+	const desiredModelWidth = sessions.reduce((size, row) => Math.max(size, visibleWidth(formatSessionModel(row))), 12);
+	const modelWidth = Math.min(desiredModelWidth, 32, Math.max(0, available - 12));
+	const nameWidth = Math.min(28, Math.max(0, available - modelWidth));
+	const activityWidth = Math.max(0, available - modelWidth - nameWidth - 2);
+	const detailLine = (cost: string, age: string) => `${padCellStart(cost, costWidth)}  ${padCellStart(age, ageWidth)}`;
+	const headings = [formatTableCell("Session", nameWidth), formatTableCell("Model", modelWidth)];
+	if (activityWidth > 0) headings.push(formatTableCell("Activity", activityWidth));
+	headings.push(detailLine("Cost", "Age"));
+	return {
+		legend: formatTableCell(headings.join("  "), width),
+		details: new Map(entries.map((entry) => [entry.identity, detailLine(entry.cost, entry.age)])),
+		nameWidth,
+		modelWidth,
+		activityWidth,
+	};
+}
+
+function padCellStart(value: string, width: number): string {
+	return " ".repeat(Math.max(0, width - visibleWidth(value))) + value;
+}
+
+// Explicit session names read bold so they stand out from fallback titles
+// (first prompt, cwd, ids); the "(no messages)" placeholder reads italic.
+function styleRowTitle(row: AgentsViewRow): string {
+	if (row.summary.sessionName?.replace(/\s+/g, " ").trim()) {
+		return theme.bold(row.title);
+	}
+	if (row.title === "(no messages)") {
+		return theme.italic(row.title);
+	}
+	return row.title;
+}
+
+function formatTableCell(value: string, width: number): string {
+	const truncated = truncateToWidth(value, width, "");
+	return truncated + " ".repeat(Math.max(0, width - visibleWidth(truncated)));
+}
+
+// Model ids can embed a provider path ("moonshotai/kimi-k2"); the column shows
+// the bare model name plus the thinking level ("kimi-k2:high") when one is
+// active — "off" reads as noise, so it and absent levels render bare (saved
+// rows carry no level).
+function formatSessionModel(row: AgentsViewRow): string {
+	const id = row.summary.model?.id ?? row.record?.saved?.model?.modelId;
+	if (!id) return "-";
+	const bare = id.slice(id.lastIndexOf("/") + 1) || id;
+	const level = row.summary.thinkingLevel;
+	return level && level !== "off" ? `${bare}:${level}` : bare;
+}
+
+function formatSessionDuration(summary: SessionSummary): string {
+	return formatAgentsViewRelativeTime(
+		summary.activeSessionId ? (summary.created ?? summary.modified) : (summary.modified ?? summary.created),
+	);
+}
+
+export function formatAgentsViewRelativeTime(value: string | undefined, now: number = Date.now()): string {
+	const timestamp = parseSessionTimestamp(value);
+	if (!timestamp) {
+		return "";
+	}
+	const seconds = Math.max(0, Math.floor((now - timestamp) / 1000));
+	if (seconds < 60) {
+		return `${seconds}s`;
+	}
+	const minutes = Math.floor(seconds / 60);
+	if (minutes < 60) {
+		return `${minutes}m`;
+	}
+	const hours = Math.floor(minutes / 60);
+	if (hours < 24) {
+		return `${hours}h`;
+	}
+	const days = Math.floor(hours / 24);
+	return `${days}d`;
+}
+
+function parseSessionTimestamp(value: string | undefined): number | undefined {
+	if (!value) {
+		return undefined;
+	}
+	const timestamp = Date.parse(value);
+	return Number.isNaN(timestamp) ? undefined : timestamp;
+}
+
+function formatError(prefix: string, error: unknown): string {
+	const message = error instanceof Error ? error.message : String(error);
+	return formatAgentsViewStatusLine(`${prefix}: ${message}`);
+}
+
+// The agents view shows open failures as a one-line status only, so a client-side
+// crash (e.g. "Maximum call stack size exceeded") leaves no stack to debug from.
+// Persist the full stack to a file — the TUI owns stdout/stderr, so a log file is
+// the only safe sink.
+function logClientError(prefix: string, error: unknown): void {
+	const detail = error instanceof Error ? (error.stack ?? error.message) : String(error);
+	appendRotatingLog(getClientErrorLogPath(), `[${new Date().toISOString()}] ${prefix}: ${detail}`);
+}
+
+function padLine(line: string, width: number): string {
+	return line + " ".repeat(Math.max(0, width - visibleWidth(line)));
+}

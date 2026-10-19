@@ -21,35 +21,6 @@ impl GeneratedTitleError {
     }
 }
 
-/// Derives a cheap deterministic provisional session title from the first user prompt.
-pub(crate) fn derive_provisional_title(input: &str) -> Option<String> {
-    let mut text = strip_code_fences(input);
-    text = collapse_whitespace(&text);
-    text = strip_prompt_noise(&text);
-    text = trim_title_candidate(&text);
-
-    if text.len() < 8 {
-        return None;
-    }
-    if looks_like_code_only(&text) {
-        return None;
-    }
-
-    let candidate = first_clause(&text);
-    let candidate = candidate.trim_matches(|ch: char| ch.is_ascii_punctuation() && ch != '\'');
-    let candidate = collapse_whitespace(candidate);
-    if candidate.is_empty() {
-        return None;
-    }
-
-    let candidate = sentence_case(&candidate);
-    let visible = candidate.chars().count();
-    if !(8..=80).contains(&visible) {
-        return None;
-    }
-    Some(candidate)
-}
-
 /// Builds a non-tool model request used to generate one final session title.
 pub(crate) fn build_title_generation_request(
     model_slug: String,
@@ -60,13 +31,13 @@ pub(crate) fn build_title_generation_request(
         model_slug: devo_protocol::ModelProfileKey::CatalogSlug(model_slug),
         model,
         system: Some(
-            "Generate a short session title. Respond with only the title in sentence case. Use 3 to 8 words. No markdown, no quotes, no trailing punctuation unless required by a proper noun.".to_string(),
+            "Generate a short session title. Respond with only the title. Match the language of the first user message exactly — do not translate. Prefer 3 to 8 words (or a similarly short phrase in that language). Use sentence case when the language has case. No markdown, no quotes, no trailing punctuation unless required by a proper noun.".to_string(),
         ),
         messages: vec![RequestMessage {
             role: "user".to_string(),
             content: vec![RequestContent::Text {
                 text: format!(
-                    "First user message:\n{user_input}\n\nReturn only the best concise title."
+                    "First user message:\n{user_input}\n\nReturn only the best concise title in the same language as the message above."
                 ),
             }],
         }],
@@ -78,6 +49,26 @@ pub(crate) fn build_title_generation_request(
         reasoning_effort: None,
         extra_body: None,
     }
+}
+
+const HEURISTIC_TITLE_MAX_CHARS: usize = 48;
+
+/// Immediate display title from the first user message (no LLM).
+///
+/// Prefers the first non-empty line, collapses whitespace, truncates to 48
+/// Unicode scalars. Empty input returns `None`. Short strings (< 3 chars) are kept.
+pub(crate) fn heuristic_title_from_user_input(input: &str) -> Option<String> {
+    let first_line = input.lines().map(str::trim).find(|line| !line.is_empty())?;
+    let collapsed = collapse_whitespace(first_line);
+    if collapsed.is_empty() {
+        return None;
+    }
+    let truncated: String = collapsed.chars().take(HEURISTIC_TITLE_MAX_CHARS).collect();
+    let trimmed = truncated.trim_end().to_string();
+    if trimmed.is_empty() {
+        return None;
+    }
+    Some(trimmed)
 }
 
 /// Extracts and normalizes one title candidate from a complete provider response.
@@ -152,22 +143,6 @@ fn strip_generated_title_prefix(input: &str) -> &str {
     trimmed
 }
 
-fn strip_code_fences(input: &str) -> String {
-    let mut output = String::new();
-    let mut inside_fence = false;
-    for line in input.lines() {
-        if line.trim_start().starts_with("```") {
-            inside_fence = !inside_fence;
-            continue;
-        }
-        if !inside_fence {
-            output.push_str(line);
-            output.push('\n');
-        }
-    }
-    output
-}
-
 fn collapse_whitespace(input: &str) -> String {
     let mut words = input.split_whitespace();
     let Some(first) = words.next() else {
@@ -180,37 +155,6 @@ fn collapse_whitespace(input: &str) -> String {
         output.push_str(word);
     }
     output
-}
-
-fn strip_prompt_noise(input: &str) -> String {
-    input
-        .trim()
-        .trim_start_matches('>')
-        .trim_start_matches('$')
-        .trim_start_matches('#')
-        .trim()
-        .to_string()
-}
-
-fn trim_title_candidate(input: &str) -> String {
-    let compact = input.trim();
-    compact.chars().take(160).collect::<String>()
-}
-
-fn looks_like_code_only(input: &str) -> bool {
-    let alpha_count = input.chars().filter(|ch| ch.is_alphabetic()).count();
-    let symbol_count = input
-        .chars()
-        .filter(|ch| !ch.is_alphanumeric() && !ch.is_whitespace())
-        .count();
-    alpha_count < 4 || symbol_count > alpha_count * 2
-}
-
-fn first_clause(input: &str) -> &str {
-    input
-        .split(['.', '!', '?', '\n', ';', ':'])
-        .next()
-        .unwrap_or(input)
 }
 
 fn sentence_case(input: &str) -> String {
@@ -227,29 +171,8 @@ mod tests {
     use pretty_assertions::assert_eq;
 
     use super::GeneratedTitleError;
-    use super::derive_provisional_title;
+    use super::heuristic_title_from_user_input;
     use super::normalize_generated_title;
-
-    #[test]
-    fn derives_title_from_plain_text_prompt() {
-        assert_eq!(
-            derive_provisional_title("help me add rollout persistence to the server"),
-            Some("Help me add rollout persistence to the server".to_string())
-        );
-    }
-
-    #[test]
-    fn ignores_fenced_code_only_input() {
-        assert_eq!(derive_provisional_title("```rust\nfn main() {}\n```"), None);
-    }
-
-    #[test]
-    fn trims_shell_prompt_noise() {
-        assert_eq!(
-            derive_provisional_title("> list the current sessions and switch to the newest one"),
-            Some("List the current sessions and switch to the newest one".to_string())
-        );
-    }
 
     #[test]
     fn normalizes_generated_title_text() {
@@ -291,5 +214,23 @@ mod tests {
             }]),
             Err(GeneratedTitleError::NoTextContent)
         );
+    }
+
+    /// Trace: L2-DES-SERVER-title-generation
+    /// Verifies: heuristic titles truncate and prefer the first line.
+    #[test]
+    fn heuristic_title_truncates_and_prefers_first_line() {
+        assert_eq!(
+            heuristic_title_from_user_input("  hello   world  \nsecond line"),
+            Some("hello world".to_string())
+        );
+        let long = "字".repeat(60);
+        let title = heuristic_title_from_user_input(&long).expect("title");
+        assert_eq!(title.chars().count(), 48);
+        assert_eq!(
+            heuristic_title_from_user_input("ok"),
+            Some("ok".to_string())
+        );
+        assert_eq!(heuristic_title_from_user_input("   \n  "), None);
     }
 }

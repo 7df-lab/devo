@@ -67,7 +67,7 @@ pub fn create_edit_records(
     workspace_restore_policy: WorkspaceRestorePolicy,
 ) -> Vec<DurableRecord> {
     let edit_id = EditId::new();
-    let replacement_turn_id = target_turn_id.map(|_| TurnId::new());
+    let replacement_turn_id = target_turn_id.as_ref().map(|_| TurnId::new());
     let now = Utc::now();
 
     let mut records: Vec<DurableRecord> = Vec::new();

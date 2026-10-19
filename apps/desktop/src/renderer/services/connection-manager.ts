@@ -1,28 +1,26 @@
+import { deleteProjectSessionBatch } from "./project-session-deletion"
 import type { DevoClient } from "@devo-ai/sdk/v2/client"
 import { processEvent } from "../atoms/actions/event-processor"
 import { authHeaderAtom, serverConnectedAtom, serverUrlAtom } from "../atoms/connection"
-import { batchUpsertPartsAtom } from "../atoms/parts"
+import { discoveryAtom } from "../atoms/discovery"
 import {
 	SESSIONS_PAGE_SIZE,
 	projectPaginationFamily,
 	removeSessionAtom,
+	resetProjectPaginationAtom,
+	sessionFamily,
+	sessionIdsAtom,
 	setProjectPaginationLoadingAtom,
 	setSessionsAtom,
 	updateProjectPaginationAtom,
 } from "../atoms/sessions"
 import { appStore } from "../atoms/store"
-import {
-	applyStreamingDelta,
-	flushStreamingParts,
-	isStreamingField,
-	isStreamingPartType,
-	streamingVersionFamily,
-	updateStreamingPart,
-} from "../atoms/streaming"
 import { createLogger } from "../lib/logger"
+import { directoriesMatch } from "../lib/directory-path"
 import type { Event, Session } from "../lib/types"
 import {
 	connectToServer,
+	deleteSession,
 	disposeAllInstances,
 	getSession,
 	getSessionStatuses,
@@ -38,14 +36,14 @@ const log = createLogger("connection-manager")
 // ============================================================
 
 /**
- * Lightweight ACP health probe. Devo desktop talks to the runtime through
+ * Lightweight Native health probe. Devo desktop talks to the runtime through
  * Electron's preload bridge, so readiness means the main-process stdio
  * transport is connected.
  */
 async function checkHealth(url: string, authHeader: string | null): Promise<boolean> {
 	void url
 	void authHeader
-	return typeof window !== "undefined" && "devo" in window ? window.devo.acp.connected() : true
+	return typeof window !== "undefined" && "devo" in window ? window.devo.native.connected() : true
 }
 
 // ============================================================
@@ -57,7 +55,7 @@ let connection: {
 	url: string
 	/** Auth header for stdio compatibility (currently null). */
 	authHeader: string | null
-	/** Base client (no directory) — used for the ACP event subscription */
+	/** Base client (no directory) — used for the Native event subscription */
 	baseClient: DevoClient
 	abortController: AbortController
 } | null = null
@@ -77,35 +75,107 @@ const projectEventBridgeDirs = new Set<string>()
 let eventLoopGeneration = 0
 
 /**
- * Global reference to the ACP event AbortController that survives Vite HMR
- * module replacement. When HMR replaces this module, the old module's
- * `connection` variable is lost, but the old event loop keeps running
- * with an unreachable AbortController. By storing it on `window`, the
- * new module can abort the stale loop on reconnect.
+ * Global reference to the Native event AbortController that survives Vite HMR.
+ * The dispose hook normally stops the old module's loop and clients before
+ * replacement; this reference also lets recovery abort a loop from an older
+ * module instance that did not run the cleanup hook.
  */
-const ACP_ABORT_KEY = "__devo_acp_abort__" as const
+const NATIVE_ABORT_KEY = "__devo_native_abort__" as const
+const NATIVE_CLIENTS_KEY = "__devo_native_clients__" as const
 
 function getGlobalAbort(): AbortController | undefined {
-	// biome-ignore lint/suspicious/noExplicitAny: accessing dynamic window property for ACP event abort controller
-	return (window as any)[ACP_ABORT_KEY]
+	// biome-ignore lint/suspicious/noExplicitAny: accessing dynamic window property for Native event abort controller
+	return (window as any)[NATIVE_ABORT_KEY]
 }
 
 function setGlobalAbort(controller: AbortController | null) {
-	// biome-ignore lint/suspicious/noExplicitAny: accessing dynamic window property for ACP event abort controller
-	;(window as any)[ACP_ABORT_KEY] = controller
+	// biome-ignore lint/suspicious/noExplicitAny: accessing dynamic window property for Native event abort controller
+	;(window as any)[NATIVE_ABORT_KEY] = controller
+}
+
+function getGlobalClientRegistry(): Set<DevoClient> {
+	// biome-ignore lint/suspicious/noExplicitAny: accessing dynamic window property for Native SDK client registry
+	const globals = window as any
+	const current = globals[NATIVE_CLIENTS_KEY]
+	if (current instanceof Set) return current as Set<DevoClient>
+	const clients = new Set<DevoClient>()
+	globals[NATIVE_CLIENTS_KEY] = clients
+	return clients
+}
+
+function createManagedClient(
+	url: string,
+	options?: Parameters<typeof connectToServer>[1],
+): DevoClient {
+	const client = connectToServer(url, options)
+	getGlobalClientRegistry().add(client)
+	return client
+}
+
+/** Detach this SDK client's event subscription without closing the shared transport. */
+function disposeClient(client: DevoClient, scope: string): void {
+	getGlobalClientRegistry().delete(client)
+	try {
+		client.dispose()
+	} catch (err) {
+		log.warn("Failed to dispose Native SDK client", { scope }, err)
+	}
+}
+
+function disposeRegisteredClients(): void {
+	for (const client of [...getGlobalClientRegistry()]) {
+		disposeClient(client, "stale HMR")
+	}
+}
+
+function disposeStaleModuleState(): void {
+	const staleAbort = getGlobalAbort()
+	if (staleAbort && !staleAbort.signal.aborted) {
+		log.info("Aborting stale Native event loop from previous module")
+		staleAbort.abort()
+	}
+	disposeRegisteredClients()
+	setGlobalAbort(null)
+}
+
+function disposeProjectClients(directory: string): void {
+	for (const [cachedDirectory, client] of [...projectClients]) {
+		if (!directoriesMatch(cachedDirectory, directory)) continue
+		projectClients.delete(cachedDirectory)
+		projectEventBridgeDirs.delete(cachedDirectory)
+		disposeClient(client, cachedDirectory)
+	}
 }
 
 function clearProjectClients(): void {
+	for (const [directory, client] of projectClients) {
+		disposeClient(client, directory)
+	}
 	projectClients.clear()
 	projectEventBridgeDirs.clear()
 }
 
-function clearDiscoverySessionCache(): void {
-	discoveredSessions = null
+function disposeConnectionResources(): void {
+	const active = connection
+	connection = null
+
+	if (active) {
+		active.abortController.abort()
+		disposeClient(active.baseClient, "base")
+	}
+	clearProjectClients()
+	disposeStaleModuleState()
+	eventLoopGeneration++
 }
 
-function normalizeDirectoryPath(value: string): string {
-	return value.replace(/\\/g, "/").replace(/\/+$/, "").toLowerCase()
+if (import.meta.hot) {
+	import.meta.hot.dispose(() => {
+		disposeConnectionResources()
+	})
+}
+
+function clearDiscoverySessionCache(): void {
+	discoveredSessions = null
 }
 
 function filterDiscoveredSessions(
@@ -113,13 +183,12 @@ function filterDiscoveredSessions(
 	directory: string,
 	options?: { limit?: number; roots?: boolean; search?: string },
 ): Session[] {
-	const target = normalizeDirectoryPath(directory)
 	let filtered = sessions.filter((session) => {
 		if (!session.directory) return false
-		return normalizeDirectoryPath(session.directory) === target
+		return directoriesMatch(session.directory, directory)
 	})
 	if (options?.roots) {
-		filtered = filtered.filter((session) => !session.parentID)
+		filtered = filtered.filter((session) => !session.parentId)
 	}
 	if (options?.search) {
 		const query = options.search.toLowerCase()
@@ -138,31 +207,18 @@ async function hydrateProjectSessionsFromCache(
 	sandboxDirs: Set<string> | undefined,
 	options: { limit?: number; roots?: boolean; search?: string } | undefined,
 ): Promise<boolean> {
+	// Paginated sidebar loads must go to session/list with that project's cwd.
+	// The unscoped discovery snapshot is newest-first across every project, so
+	// hydrating from it hides older projects and cannot refill after deletes.
+	if (options?.limit !== undefined) return false
 	if (!discoveredSessions) return false
 
 	const baseClient = getBaseClient()
 	if (!baseClient) return false
 
-	const allMatchingSessions = filterDiscoveredSessions(discoveredSessions, directory, {
-		...options,
-		limit: undefined,
-	})
-	const sessions =
-		options?.limit === undefined
-			? allMatchingSessions
-			: allMatchingSessions.slice(0, options.limit)
+	const sessions = filterDiscoveredSessions(discoveredSessions, directory, options)
 	const statuses = await getSessionStatuses(baseClient)
 	appStore.set(setSessionsAtom, { sessions, statuses, directory, sandboxDirs })
-
-	if (options?.limit !== undefined) {
-		appStore.set(updateProjectPaginationAtom, {
-			directory,
-			fetchedCount: sessions.length,
-			limit: options.limit,
-			hasMore: allMatchingSessions.length > options.limit,
-		})
-	}
-
 	return true
 }
 
@@ -172,7 +228,7 @@ async function hydrateProjectSessionsFromCache(
 
 /**
  * Connect to an Devo server.
- * Starts ACP event subscription for all-project events.
+ * Starts Native event subscription for all-project events.
  *
  * @param url       Base URL of the Devo server
  * @param authHeader  Deprecated compatibility auth header
@@ -181,21 +237,10 @@ export async function connectToDevo(url: string, authHeader?: string | null): Pr
 	// Disconnect existing connection if any
 	if (connection) {
 		log.info("Disconnecting previous connection", { url: connection.url })
-		connection.abortController.abort()
-		clearProjectClients()
-		clearDiscoverySessionCache()
 	}
+	disposeConnectionResources()
+	clearDiscoverySessionCache()
 
-	// Also abort any stale ACP event loop from a previous HMR module that we can't
-	// reach through the module-level `connection` variable.
-	const staleAbort = getGlobalAbort()
-	if (staleAbort && !staleAbort.signal.aborted) {
-		log.info("Aborting stale ACP event loop from previous module")
-		staleAbort.abort()
-	}
-
-	// Bump generation — any previous event loop will see it's stale and exit
-	eventLoopGeneration++
 	const gen = eventLoopGeneration
 
 	const resolvedAuth = authHeader ?? null
@@ -203,7 +248,7 @@ export async function connectToDevo(url: string, authHeader?: string | null): Pr
 	appStore.set(authHeaderAtom, resolvedAuth)
 
 	// Base client has no directory — used for events that cover all projects.
-	const baseClient = connectToServer(url, { authHeader: resolvedAuth ?? undefined })
+	const baseClient = createManagedClient(url, { authHeader: resolvedAuth ?? undefined })
 	const abortController = new AbortController()
 
 	connection = { url, authHeader: resolvedAuth, baseClient, abortController }
@@ -218,10 +263,10 @@ export async function connectToDevo(url: string, authHeader?: string | null): Pr
 	if (healthy) {
 		log.info("Server health check passed", { url })
 	} else {
-		log.warn("Server health check failed, will retry via ACP event loop", { url })
+		log.warn("Server health check failed, will retry via Native event loop", { url })
 	}
 
-	// Start ACP event loop in the background.
+	// Start Native event loop in the background.
 	// Connected state is updated when the event stream opens or fails.
 	startEventLoop(baseClient, abortController.signal, gen)
 }
@@ -248,6 +293,21 @@ export async function loadAllProjects() {
 	}
 }
 
+async function fetchProjectSessionPage(
+	client: DevoClient,
+	options: { limit?: number; roots?: boolean; search?: string },
+): Promise<{ sessions: Session[]; hasMore: boolean }> {
+	if (options.limit === undefined) {
+		return { sessions: await listSessions(client, options), hasMore: false }
+	}
+	const fetched = await listSessions(client, { ...options, limit: options.limit + 1 })
+	const hasMore = fetched.length > options.limit
+	return {
+		sessions: hasMore ? fetched.slice(0, options.limit) : fetched,
+		hasMore,
+	}
+}
+
 /**
  * Load sessions for a specific project directory from the server.
  * Merges them into the Jotai store.
@@ -262,6 +322,8 @@ export async function loadProjectSessions(
 	sandboxDirs?: Set<string>,
 	options?: { limit?: number; roots?: boolean; search?: string },
 ): Promise<void> {
+	const client = getProjectClient(directory)
+	if (!client) return
 	if (options?.limit) {
 		appStore.set(setProjectPaginationLoadingAtom, directory)
 	}
@@ -275,11 +337,8 @@ export async function loadProjectSessions(
 		return
 	}
 
-	const client = getProjectClient(directory)
-	if (!client) return
-
 	try {
-		const sessions = await listSessions(client, options)
+		const { sessions, hasMore } = await fetchProjectSessionPage(client, options ?? {})
 		const statuses = await getSessionStatuses(client)
 		log.info("Loaded sessions for project", {
 			directory,
@@ -289,12 +348,12 @@ export async function loadProjectSessions(
 		})
 		appStore.set(setSessionsAtom, { sessions, statuses, directory, sandboxDirs })
 
-		// Update pagination state if a limit was specified
 		if (options?.limit) {
 			appStore.set(updateProjectPaginationAtom, {
 				directory,
 				fetchedCount: sessions.length,
 				limit: options.limit,
+				hasMore,
 			})
 		}
 	} catch (err) {
@@ -345,7 +404,10 @@ export async function loadMoreProjectSessions(
 	}
 
 	try {
-		const sessions = await listSessions(client, { limit: nextLimit, roots: true })
+		const { sessions, hasMore } = await fetchProjectSessionPage(client, {
+			limit: nextLimit,
+			roots: true,
+		})
 		const statuses = await getSessionStatuses(client)
 		log.info("Loaded more sessions for project", {
 			directory,
@@ -357,6 +419,7 @@ export async function loadMoreProjectSessions(
 			directory,
 			fetchedCount: sessions.length,
 			limit: nextLimit,
+			hasMore,
 		})
 	} catch (err) {
 		log.error("Failed to load more sessions", { directory }, err)
@@ -403,6 +466,59 @@ export async function refillProjectSessionsAfterDelete(
 }
 
 /**
+ * Permanently delete every listed session for a project directory.
+ * Used when removing a folder from Devo Desktop; the folder on disk is left untouched.
+ */
+export async function deleteProjectSessions(projectDirectory: string): Promise<void> {
+	const client = getProjectClient(projectDirectory)
+	if (!client) throw new Error("Not connected to Devo server")
+
+	const sessions = await listSessions(client, { roots: true })
+	log.info("Deleting all sessions for project", {
+		directory: projectDirectory,
+		count: sessions.length,
+	})
+
+	await deleteProjectSessionBatch({
+		sessionIds: sessions.map((session) => session.id),
+		deleteSession: (sessionId) => deleteSession(client, sessionId),
+		onDeleted: (sessionId) => {
+			if (discoveredSessions) {
+				discoveredSessions = discoveredSessions.filter((session) => session.id !== sessionId)
+			}
+			appStore.set(removeSessionAtom, sessionId)
+		},
+	})
+
+	if (discoveredSessions) {
+		const deletedIds = new Set(sessions.map((session) => session.id))
+		discoveredSessions = discoveredSessions.filter((session) => {
+			if (deletedIds.has(session.id)) return false
+			return !session.directory || !directoriesMatch(session.directory, projectDirectory)
+		})
+	}
+
+	for (const sessionId of [...appStore.get(sessionIdsAtom)]) {
+		const entry = appStore.get(sessionFamily(sessionId))
+		if (entry && directoriesMatch(entry.directory, projectDirectory)) {
+			appStore.set(removeSessionAtom, sessionId)
+		}
+	}
+
+	const discovery = appStore.get(discoveryAtom)
+	appStore.set(discoveryAtom, {
+		...discovery,
+		projects: discovery.projects.filter((project) => {
+			if (!project.worktree) return true
+			return !directoriesMatch(project.worktree, projectDirectory)
+		}),
+	})
+
+	appStore.set(resetProjectPaginationAtom, [projectDirectory])
+	disposeProjectClients(projectDirectory)
+}
+
+/**
  * Get or create a project-scoped SDK client.
  *
  * If the module-level connection was lost (e.g. Vite HMR wiped it) but
@@ -415,21 +531,15 @@ export function getProjectClient(directory: string): DevoClient | null {
 		if (storeUrl) {
 			log.warn("Connection lost (likely HMR), reconnecting to", { url: storeUrl })
 
-			// Abort any stale ACP event loop from the previous module
-			const staleAbort = getGlobalAbort()
-			if (staleAbort && !staleAbort.signal.aborted) {
-				log.info("Aborting stale ACP event connection from previous module")
-				staleAbort.abort()
-			}
-
+			disposeStaleModuleState()
 			const storeAuth = appStore.get(authHeaderAtom)
-			const baseClient = connectToServer(storeUrl, { authHeader: storeAuth ?? undefined })
+			const baseClient = createManagedClient(storeUrl, { authHeader: storeAuth ?? undefined })
 			const abortController = new AbortController()
 			eventLoopGeneration++
 			connection = { url: storeUrl, authHeader: storeAuth, baseClient, abortController }
 			setGlobalAbort(abortController)
 			startEventLoop(baseClient, abortController.signal, eventLoopGeneration)
-			// Connected state is set by startEventLoop once ACP event stream opens
+			// Connected state is set by startEventLoop once Native event stream opens
 		} else {
 			return null
 		}
@@ -437,7 +547,7 @@ export function getProjectClient(directory: string): DevoClient | null {
 
 	let client = projectClients.get(directory)
 	if (!client) {
-		client = connectToServer(connection.url, {
+		client = createManagedClient(connection.url, {
 			directory,
 			authHeader: connection.authHeader ?? undefined,
 		})
@@ -451,7 +561,7 @@ export function getProjectClient(directory: string): DevoClient | null {
  * Fetch a single session by ID using the global (non-directory-scoped) client.
  *
  * Used as a fallback when navigating directly to a session that is not yet in
- * the Jotai store — for example, subagent sessions that arrived while the ACP
+ * the Jotai store — for example, subagent sessions that arrived while the Native
  * event stream was reconnecting, or sessions absent from the initial batch load.
  *
  * Returns `null` if the session is not found, the server is unreachable, or
@@ -474,13 +584,14 @@ export function getBaseClient(): DevoClient | null {
 		const storeUrl = appStore.get(serverUrlAtom)
 		if (storeUrl) {
 			const storeAuth = appStore.get(authHeaderAtom)
-			const baseClient = connectToServer(storeUrl, { authHeader: storeAuth ?? undefined })
+			disposeStaleModuleState()
+			const baseClient = createManagedClient(storeUrl, { authHeader: storeAuth ?? undefined })
 			const abortController = new AbortController()
 			eventLoopGeneration++
 			connection = { url: storeUrl, authHeader: storeAuth, baseClient, abortController }
 			setGlobalAbort(abortController)
 			startEventLoop(baseClient, abortController.signal, eventLoopGeneration)
-			// Connected state is set by startEventLoop once ACP event stream opens
+			// Connected state is set by startEventLoop once Native event stream opens
 		} else {
 			return null
 		}
@@ -489,8 +600,8 @@ export function getBaseClient(): DevoClient | null {
 }
 
 /**
- * Clear cached ACP model/config options on every active SDK client.
- * Provider updates mutate server config, so model/config must be reloaded.
+ * Clear cached Native model preferences on every active SDK client.
+ * Provider updates mutate server config, so model/preferences/read must be reloaded.
  */
 export function invalidateConfigOptionCaches(): void {
 	const clients = new Set<DevoClient>()
@@ -522,7 +633,7 @@ export function getServerUrl(): string | null {
 /**
  * Reload all Devo configuration by disposing all server instances.
  * This forces the server to re-read config files, agents, skills, commands, etc.
- * The resulting ACP events automatically invalidate UI queries.
+ * The resulting Native events automatically invalidate UI queries.
  */
 export async function reloadConfig(): Promise<void> {
 	if (!connection) {
@@ -538,13 +649,7 @@ export async function reloadConfig(): Promise<void> {
  */
 export function disconnect(): void {
 	log.info("Disconnecting from Devo server")
-	if (connection) {
-		connection.abortController.abort()
-		connection = null
-		clearProjectClients()
-	}
-	setGlobalAbort(null)
-	eventLoopGeneration++
+	disposeConnectionResources()
 	appStore.set(serverConnectedAtom, false)
 }
 
@@ -556,14 +661,12 @@ const FRAME_BUDGET_MS = 16
 
 function coalescingKey(event: Event): string | undefined {
 	switch (event.type) {
-		case "message.part.updated": {
-			const part = event.properties.part
-			return `part:${part.messageID}:${part.id}`
-		}
-		case "message.part.delta":
-			return `part:${event.properties.messageID}:${event.properties.partID}`
 		case "session.status":
-			return `status:${event.properties.sessionID}`
+			return `status:${event.properties.sessionId}`
+		case "context.usage.updated":
+			return `context-usage:${event.properties.sessionId}`
+		case "item.updated":
+			return `item:${event.properties.info.sessionId}:${event.properties.info.id}`
 		default:
 			return undefined
 	}
@@ -584,80 +687,18 @@ function createEventBatcher() {
 
 		if (events.length === 0) return
 
-		// Collect non-streaming parts across all events in the batch so we can
-		// write them in a single batchUpsertPartsAtom call instead of N individual
-		// upsertPartAtom calls. This significantly reduces Jotai atom writes and
-		// React reconciliation passes during heavy tool-call activity.
-		const batchedParts: import("../lib/types").Part[] = []
-		const batchedPartSessionIds = new Set<string>()
-
 		for (const event of events) {
-			if (event.type === "message.part.updated" && !isStreamingPartType(event.properties.part)) {
-				batchedParts.push(event.properties.part)
-				batchedPartSessionIds.add(event.properties.part.sessionID)
-			} else {
-				processEvent(event)
+			if (event.type === "session.deleted") {
+				const deletedId = event.properties.info?.id
+				if (deletedId && discoveredSessions) {
+					discoveredSessions = discoveredSessions.filter((session) => session.id !== deletedId)
+				}
 			}
-		}
-
-		// Flush collected non-streaming parts in a single batch write
-		if (batchedParts.length > 0) {
-			appStore.set(batchUpsertPartsAtom, batchedParts)
-			// Bump per-session streaming version so the UI picks up the new parts
-			for (const sid of batchedPartSessionIds) {
-				appStore.set(streamingVersionFamily(sid), (v: number) => v + 1)
-			}
+			processEvent(event)
 		}
 	}
 
 	function enqueue(event: Event) {
-		// Fast path: route high-frequency text/reasoning part updates to streaming buffer
-		if (event.type === "message.part.updated") {
-			const part = event.properties.part
-			if (isStreamingPartType(part)) {
-				updateStreamingPart(part)
-				const key = coalescingKey(event)
-				if (key) coalesced.set(key, event)
-				if (scheduled !== undefined) return
-				const elapsed = performance.now() - lastFlush
-				if (elapsed < FRAME_BUDGET_MS) {
-					scheduled = requestAnimationFrame(flush)
-				} else {
-					flush()
-				}
-				return
-			}
-		}
-
-		// Fast path: route incremental text/reasoning deltas to streaming buffer
-		if (event.type === "message.part.delta") {
-			const { messageID, partID, field, delta, sessionID } = event.properties
-			if (isStreamingField(field)) {
-				const applied = applyStreamingDelta(messageID, partID, field, delta, sessionID)
-				if (applied) {
-					const key = coalescingKey(event)
-					if (key) coalesced.set(key, event)
-					if (scheduled !== undefined) return
-					const elapsed = performance.now() - lastFlush
-					if (elapsed < FRAME_BUDGET_MS) {
-						scheduled = requestAnimationFrame(flush)
-					} else {
-						flush()
-					}
-					return
-				}
-				// Part not in streaming buffer yet, fall through to normal processing
-			}
-		}
-
-		// When a session goes idle, flush streaming parts to main store
-		if (event.type === "session.status" && event.properties.status.type === "idle") {
-			const flushedParts = flushStreamingParts()
-			if (flushedParts.length > 0) {
-				appStore.set(batchUpsertPartsAtom, flushedParts)
-			}
-		}
-
 		const key = coalescingKey(event)
 		if (key) {
 			coalesced.set(key, event)
@@ -696,7 +737,7 @@ function createEventBatcher() {
 }
 
 // ============================================================
-// ACP Event Loop
+// Native Event Loop
 // ============================================================
 
 async function startEventLoop(
@@ -713,11 +754,11 @@ async function startEventLoop(
 		if (!isStale()) appStore.set(serverConnectedAtom, value)
 	}
 
-	log.info("ACP event loop started", { generation })
+	log.info("Native event loop started", { generation })
 
 	while (!isStale()) {
-		// Before opening the ACP event stream, check if the server is reachable.
-		// This avoids firing expensive IPC/ACP event requests against a dead server.
+		// Before opening the Native event stream, check if the server is reachable.
+		// This avoids firing expensive IPC event requests against a dead server.
 		// On the first iteration the caller already ran a health check, so
 		// we only probe when retrying (retryDelay > 1000 means we already failed once).
 		if (retryDelay > 1000 || !appStore.get(serverConnectedAtom)) {
@@ -735,13 +776,13 @@ async function startEventLoop(
 		const batcher = createEventBatcher()
 
 		try {
-			log.debug("Opening ACP event stream", { generation })
+			log.debug("Opening Native event stream", { generation })
 			const stream = await subscribeToGlobalEvents(client)
 			if (isStale()) break
 			retryDelay = 1000
-			log.info("ACP event stream connected", { generation })
+			log.info("Native event stream connected", { generation })
 
-			// ACP event stream opened successfully, server is reachable
+			// Native event stream opened successfully, server is reachable
 			setConnected(true)
 
 			for await (const globalEvent of stream) {
@@ -752,12 +793,12 @@ async function startEventLoop(
 				}
 			}
 			if (!isStale()) {
-				log.warn("ACP event stream ended (server closed connection)", { generation })
+				log.warn("Native event stream ended (server closed connection)", { generation })
 				setConnected(false)
 			}
 		} catch (err) {
 			if (isStale()) break
-			log.error("ACP event stream disconnected", { generation, retryDelay }, err)
+			log.error("Native event stream disconnected", { generation, retryDelay }, err)
 			setConnected(false)
 		} finally {
 			// Discard pending events when the loop is stale (server switched / disconnected).
@@ -767,12 +808,12 @@ async function startEventLoop(
 
 		if (isStale()) break
 
-		log.info("Reconnecting ACP event stream in", { delayMs: retryDelay, generation })
+		log.info("Reconnecting Native event stream in", { delayMs: retryDelay, generation })
 		await new Promise((resolve) => setTimeout(resolve, retryDelay))
 		retryDelay = Math.min(retryDelay * 2, 30000)
 	}
 
-	log.info("ACP event loop exited", { generation, stale: generation !== eventLoopGeneration })
+	log.info("Native event loop exited", { generation, stale: generation !== eventLoopGeneration })
 }
 
 function startProjectEventBridge(client: DevoClient, directory: string, signal: AbortSignal): void {
@@ -780,23 +821,33 @@ function startProjectEventBridge(client: DevoClient, directory: string, signal: 
 	projectEventBridgeDirs.add(directory)
 
 	void (async () => {
-		const batcher = createEventBatcher()
+		let retryDelay = 1000
+		const isStale = () => signal.aborted || projectClients.get(directory) !== client
 		try {
-			const stream = await subscribeToGlobalEvents(client)
-			for await (const globalEvent of stream) {
-				if (signal.aborted) break
-				const event = globalEvent.payload
-				if (event) {
-					batcher.enqueue(event)
+			while (!isStale()) {
+				const batcher = createEventBatcher()
+				try {
+					const stream = await subscribeToGlobalEvents(client)
+					if (isStale()) break
+					retryDelay = 1000
+					for await (const globalEvent of stream) {
+						if (isStale()) break
+						const event = globalEvent.payload
+						if (event) batcher.enqueue(event)
+					}
+				} catch (err) {
+					if (!isStale()) {
+						log.warn("Project event bridge disconnected", { directory, retryDelay }, err)
+					}
+				} finally {
+					batcher.dispose(isStale())
 				}
-			}
-		} catch (err) {
-			if (!signal.aborted) {
-				log.warn("Project event bridge stopped", { directory }, err)
+				if (isStale()) break
+				await new Promise((resolve) => setTimeout(resolve, retryDelay))
+				retryDelay = Math.min(retryDelay * 2, 30000)
 			}
 		} finally {
-			batcher.dispose(signal.aborted)
-			projectEventBridgeDirs.delete(directory)
+			if (projectClients.get(directory) === client) projectEventBridgeDirs.delete(directory)
 		}
 	})()
 }

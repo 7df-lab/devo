@@ -7,10 +7,12 @@ use std::sync::Mutex;
 use std::sync::atomic::{AtomicBool, AtomicI32, Ordering};
 use std::time::Instant;
 
+use devo_sandbox::SandboxPermissionOverlay;
+use devo_util_process::SandboxProcessOptions;
 use devo_util_process::SpawnedProcess;
 pub use devo_util_process::TerminalSize;
 use devo_util_process::combine_output_receivers;
-use devo_util_process::spawn_pipe_process_no_stdin_sandboxed;
+use devo_util_process::spawn_process_no_stdin_sandboxed_with_overlay;
 use devo_util_process::spawn_pty_process;
 use tokio::sync::Mutex as AsyncMutex;
 use tokio::sync::broadcast;
@@ -142,6 +144,7 @@ fn command_for_shell(cmd: &str, shell_spec: &ShellSpec) -> String {
 }
 
 pub struct UnifiedExecProcess {
+    output_capture: Option<Result<devo_tools::output_store::SharedOutputCapture, String>>,
     session: Arc<devo_util_process::ProcessHandle>,
     exit_code: Arc<AtomicI32>,
     terminated_flag: Arc<AtomicBool>,
@@ -151,6 +154,15 @@ pub struct UnifiedExecProcess {
     last_stdin_interaction: Arc<Mutex<Instant>>,
     process_id: i32,
     tty: bool,
+}
+
+/// Sandbox settings for a unified-exec process.
+pub struct SandboxExecutionOptions {
+    pub output_capture: Option<Result<devo_tools::output_store::SharedOutputCapture, String>>,
+    /// Named sandbox profile applied before the child process starts.
+    pub sandbox_profile: Option<String>,
+    /// Per-invocation permissions merged into the named profile.
+    pub sandbox_overlay: Option<SandboxPermissionOverlay>,
 }
 
 impl UnifiedExecProcess {
@@ -174,6 +186,36 @@ impl UnifiedExecProcess {
         tty: bool,
         sandbox_profile: Option<String>,
     ) -> Result<(Self, broadcast::Receiver<Vec<u8>>), String> {
+        Self::spawn_with_sandbox_overlay(
+            process_id,
+            cmd,
+            cwd,
+            shell,
+            login,
+            tty,
+            SandboxExecutionOptions {
+                output_capture: None,
+                sandbox_profile,
+                sandbox_overlay: None,
+            },
+        )
+        .await
+    }
+
+    pub async fn spawn_with_sandbox_overlay(
+        process_id: i32,
+        cmd: &str,
+        cwd: &Path,
+        shell: Option<&str>,
+        login: bool,
+        tty: bool,
+        sandbox: SandboxExecutionOptions,
+    ) -> Result<(Self, broadcast::Receiver<Vec<u8>>), String> {
+        let SandboxExecutionOptions {
+            output_capture,
+            sandbox_profile,
+            sandbox_overlay,
+        } = sandbox;
         let shell_spec = resolve_shell(shell, login);
         let command = command_for_shell(cmd, &shell_spec);
         let mut args = shell_spec.args.clone();
@@ -191,23 +233,32 @@ impl UnifiedExecProcess {
                     cols: PTY_COLS,
                 },
                 sandbox_profile.as_deref(),
+                sandbox_overlay.as_ref(),
             )
             .await?
         } else {
-            spawn_pipe_process_no_stdin_sandboxed(
+            spawn_process_no_stdin_sandboxed_with_overlay(
                 &shell_spec.program,
                 &args,
                 cwd,
                 &env,
                 /*arg0*/ &None,
                 &[],
-                sandbox_profile,
+                SandboxProcessOptions {
+                    sandbox_profile,
+                    sandbox_overlay,
+                },
             )
             .await
             .map_err(|error| format!("failed to spawn command: {error}"))?
         };
 
-        Ok(Self::from_spawned_process(process_id, tty, spawned))
+        Ok(Self::from_spawned_process(
+            process_id,
+            tty,
+            spawned,
+            output_capture,
+        ))
     }
 
     pub async fn spawn_interactive_shell(
@@ -217,6 +268,27 @@ impl UnifiedExecProcess {
         login: bool,
         size: Option<TerminalSize>,
         sandbox_profile: Option<String>,
+    ) -> Result<(Self, broadcast::Receiver<Vec<u8>>), String> {
+        Self::spawn_interactive_shell_with_overlay(
+            process_id,
+            cwd,
+            shell,
+            login,
+            size,
+            sandbox_profile,
+            None,
+        )
+        .await
+    }
+
+    pub async fn spawn_interactive_shell_with_overlay(
+        process_id: i32,
+        cwd: &Path,
+        shell: Option<&str>,
+        login: bool,
+        size: Option<TerminalSize>,
+        sandbox_profile: Option<String>,
+        sandbox_overlay: Option<SandboxPermissionOverlay>,
     ) -> Result<(Self, broadcast::Receiver<Vec<u8>>), String> {
         let shell_spec = resolve_shell(shell, login);
         let args = interactive_shell_args(&shell_spec.program, login);
@@ -232,11 +304,12 @@ impl UnifiedExecProcess {
                 cols: PTY_COLS,
             }),
             sandbox_profile.as_deref(),
+            sandbox_overlay.as_ref(),
         )
         .await?;
 
         Ok(Self::from_spawned_process(
-            process_id, /*tty*/ true, spawned,
+            process_id, /*tty*/ true, spawned, /*output_capture*/ None,
         ))
     }
 
@@ -244,6 +317,7 @@ impl UnifiedExecProcess {
         process_id: i32,
         tty: bool,
         spawned: SpawnedProcess,
+        output_capture: Option<Result<devo_tools::output_store::SharedOutputCapture, String>>,
     ) -> (Self, broadcast::Receiver<Vec<u8>>) {
         let SpawnedProcess {
             session,
@@ -256,7 +330,12 @@ impl UnifiedExecProcess {
         let output_buffer = Arc::new(AsyncMutex::new(HeadTailBuffer::new()));
         let (output_tx, proc_output_rx) = broadcast::channel(256);
         let combined_rx = combine_output_receivers(stdout_rx, stderr_rx);
-        forward_output(combined_rx, output_tx.clone(), Arc::clone(&output_buffer));
+        forward_output(
+            combined_rx,
+            output_tx.clone(),
+            Arc::clone(&output_buffer),
+            output_capture.clone(),
+        );
 
         let exit_code = Arc::new(AtomicI32::new(-1));
         let terminated_flag = Arc::new(AtomicBool::new(false));
@@ -277,6 +356,7 @@ impl UnifiedExecProcess {
 
         (
             UnifiedExecProcess {
+                output_capture,
                 session,
                 exit_code,
                 terminated_flag,
@@ -358,12 +438,14 @@ async fn spawn_pty_with_sandbox_wrap(
     env: &HashMap<String, String>,
     size: TerminalSize,
     sandbox_profile: Option<&str>,
+    sandbox_overlay: Option<&SandboxPermissionOverlay>,
 ) -> Result<SpawnedProcess, String> {
-    let wrap = devo_sandbox::wrap_command_for_profile(
+    let wrap = devo_sandbox::wrap_command_for_profile_with_overlay(
         sandbox_profile,
         cwd,
         devo_sandbox::WrapMode::PtyOnly,
         &devo_sandbox::SandboxLogger::new(),
+        sandbox_overlay,
     )
     .map_err(|error| format!("failed to set up sandbox: {error}"))?;
     let (program, args) = match &wrap {
@@ -413,16 +495,35 @@ fn forward_output(
     mut output_rx: broadcast::Receiver<Vec<u8>>,
     output_tx: broadcast::Sender<Vec<u8>>,
     output_buffer: Arc<AsyncMutex<HeadTailBuffer>>,
+    output_capture: Option<Result<devo_tools::output_store::SharedOutputCapture, String>>,
 ) {
     tokio::spawn(async move {
         loop {
             match output_rx.recv().await {
                 Ok(bytes) => {
+                    if let Some(Ok(capture)) = &output_capture {
+                        let mut capture = capture.lock().expect("output capture lock");
+                        if capture.append(&bytes).is_err() {
+                            capture.mark_incomplete();
+                        }
+                    }
                     output_buffer.lock().await.push(&bytes);
                     let _ = output_tx.send(bytes);
                 }
-                Err(broadcast::error::RecvError::Lagged(_)) => continue,
-                Err(broadcast::error::RecvError::Closed) => break,
+                Err(broadcast::error::RecvError::Lagged(_)) => {
+                    if let Some(Ok(capture)) = &output_capture {
+                        capture
+                            .lock()
+                            .expect("output capture lock")
+                            .mark_incomplete();
+                    }
+                }
+                Err(broadcast::error::RecvError::Closed) => {
+                    if let Some(Ok(capture)) = &output_capture {
+                        let _ = capture.lock().expect("output capture lock").finish();
+                    }
+                    break;
+                }
             }
         }
     });
@@ -553,7 +654,17 @@ pub async fn collect_output(
     let raw_output = String::from_utf8_lossy(&collected).to_string();
     let (output, truncated) = formatted_truncate_tokens(&raw_output, max_output_tokens);
 
+    let (output_artifact, capture_error) = match &process.output_capture {
+        Some(Ok(capture)) => match capture.lock().expect("output capture lock").snapshot() {
+            Ok(artifact) => (Some(artifact), None),
+            Err(error) => (None, Some(error.to_string())),
+        },
+        Some(Err(error)) => (None, Some(error.clone())),
+        None => (None, None),
+    };
     ProcessOutput {
+        output_artifact,
+        capture_error,
         output,
         exit_code: process.exit_code(),
         wall_time_secs: started.elapsed().as_secs_f64(),

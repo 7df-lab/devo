@@ -130,7 +130,23 @@ async fn pipe_spawn_enforces_profile_without_child_side_seatbelt() {
         }
     }
 
-    for process_id in 10..20 {
+    let output = run_sandboxed_command("cat control.txt", &workspace, 10, /*tty*/ false).await;
+    if output.contains("bwrap: setting up uid map: Permission denied")
+        || output.contains("bwrap: setting up uid map: Operation not permitted")
+        || output.contains("bwrap: setting up uid map: No space left on device")
+        || output.contains("bwrap: unshare user ns: Permission denied")
+        || output.contains("bwrap: unshare user ns: Operation not permitted")
+        || output.contains("bwrap: unshare user ns: No space left on device")
+    {
+        eprintln!("skipping: this host does not permit Bubblewrap user-namespace mapping");
+        return;
+    }
+    assert!(
+        output.contains("hello workspace"),
+        "pipe child must read the control file:\n{output}"
+    );
+
+    for process_id in 11..20 {
         let output = run_sandboxed_command(
             "cat control.txt",
             &workspace,

@@ -3,27 +3,36 @@
 This crate defines the protocol types shared by Devo clients and the Devo
 server.
 
-## ACP and Devo extension methods
+## ACP protocol
 
-Devo uses ACP JSON-RPC methods for the portable protocol surface. The current
-client-to-server ACP methods are:
+ACP support targets the stable v1.20 schema in `protocol-lock.json`. The schema
+and v1 protocol documentation are normative for ACP wire behavior; the v2
+draft is out of scope.
+
+### Client-to-server methods
 
 - `initialize`: negotiate protocol version, client capabilities, and server
   metadata.
+- `authenticate`: authenticate when the server advertises an ACP authentication
+  capability.
 - `session/new`: create a new session for a working directory.
 - `session/list`: list persisted sessions.
-- `session/resume`: load a persisted session.
+- `session/load`: load a persisted session and replay its conversation.
+- `session/resume`: resume a persisted session without replaying its history.
+- `session/close`: close an active session.
+- `session/delete`: delete a persisted session.
 - `session/prompt`: submit a prompt to an active session. The JSON-RPC response
   returns when the turn completes (`AcpPromptResult.stopReason`). Streaming
   progress is delivered through `session/update` notifications during the turn.
-- `session/cancel`: cancel the active session turn (including manual
-  `/compact`, which is admitted as a `ManualCompaction` turn).
+- `session/cancel`: cancel the active session turn. This is an ACP notification
+  and has no JSON-RPC response.
+- `session/set_mode`: select an advertised ACP session mode.
+- `session/set_config_option`: update an advertised ACP session configuration
+  option.
+- `logout`: end the authenticated ACP client session when the server advertises
+  the ACP logout capability.
 
-Event-driven clients that need an immediate turn acknowledgement should use the
-Devo extension `_devo/turn/start`, which returns `TurnStartResult::Started`
-promptly and streams turn progress through server notifications.
-
-The current server-to-client ACP notification method is:
+### Server-to-client notifications
 
 - `session/update`: stream session lifecycle, item, plan, usage, and turn-status
   updates to subscribed clients. The payload is an `AcpSessionNotification`
@@ -45,92 +54,181 @@ The current server-to-client ACP notification method is:
     by the server.
   - `usage_update`: context-window usage and optional cost information.
 
-The current server-to-client ACP request methods are:
+### Server-to-client requests
 
-- `session/request_permission`: ask the client to approve or reject a tool or
-  runtime action.
-- `fs/read_text_file`: ask the client to read an absolute text-file path.
-- `fs/write_text_file`: ask the client to write text to an absolute file path.
+- `session/request_permission`: ask an ACP client to approve or reject a tool
+  or runtime action.
+- `fs/read_text_file`: ask an ACP client to read an absolute text-file path.
+- `fs/write_text_file`: ask an ACP client to write text to an absolute file
+  path.
 
-Devo-specific client-to-server APIs are sent with the `_devo/` method prefix.
-The prefix is applied by the client transport, then removed by the server before
-dispatching to `ClientMethod`. These methods remain non-standard ACP extension
-points because they expose Devo-specific TUI, runtime, or local workflow
-behavior that is not represented by the portable ACP method set.
+### ACP behavior and compatibility
 
-### Session extensions
+ACP `session/load` always replays the complete conversation before returning.
+The desktop SDK applies display history limits locally after replay; it does
+not send a Devo-specific history-limit extension.
 
-- `_devo/session/title/update`: rename a session from the client.
-- `_devo/session/metadata/update`: update session metadata such as the active
-  model or reasoning-effort selection.
-- `_devo/session/permissions/update`: update the current permission preset.
-- `_devo/session/compact`: start a manual compaction turn (`TurnStartResult`);
-  keep emitting `session/compaction/*` for UI.
-- `_devo/session/fork`: fork a new session from an existing turn.
-- `_devo/session/rollback`: roll back a session to a selected user turn.
+ACP paths (`cwd`, additional directories, file-system paths, and tool-call
+locations) are absolute. ACP stdio MCP commands are absolute executable paths.
 
-### Turn extensions
+ACP extensions must follow ACP's underscore-prefixed method/notification rule.
+Devo metadata may be carried in `_meta`, but it must not add non-standard root
+fields or change standard ACP replay semantics.
 
-- `_devo/turn/start`: start a Devo turn with the full Devo turn request shape.
-  If an older server does not support it, the client falls back to ACP
-  `session/prompt`.
-- `_devo/turn/shell_command`: run a user shell command through the server
-  runtime.
-- `_devo/turn/interrupt`: interrupt the active Devo turn.
-- `_devo/turn/steer`: send steering input into a running turn.
+ACP clients use only standard ACP request/response methods advertised during
+initialization. In particular, `userInput/request` is not an ACP extension.
 
-### Workspace extensions
+## Native protocol
 
-- `_devo/workspace/changes/read`: read branch, uncommitted, or turn-scoped
+Native is Devo's first-party protocol surface. Devo-specific APIs belong here;
+they are not ACP methods. Existing route modules may retain their historical
+internal layout during migration, but new user-facing documentation should call
+this surface Native.
+
+On a shared JSON-RPC transport, Native is selected during `initialize` with
+`_meta: { "devo": { "protocol": "native" } }`. Without that marker, the
+connection remains on the ACP adapter surface.
+
+Native clients use Native approval requests rather than ACP reverse requests.
+Event-driven clients that need an immediate turn acknowledgement should use
+Native `turn/start`, which returns a turn snapshot promptly and streams turn
+progress through server notifications.
+
+### Server-to-client requests
+
+- `approval/command/request`, `approval/fileChange/request`, and
+  `approval/permission/request`: request a decision for the corresponding
+  pending approval.
+- `userInput/request`: request structured user input.
+- `session/goal/completionApproval/request`: request approval before completing
+  a goal.
+
+### Connection and subscription methods
+
+- `initialize`: negotiate the Native connection and capabilities.
+- `runtime/ping`: return the server time.
+- `subscription/create`, `subscription/update`, `subscription/ack`, and
+  `subscription/unsubscribe`: create, manage, acknowledge, and stop durable
+  event subscriptions.
+
+### Session methods
+
+- `session/new`, `session/list`, `session/read`, and `session/resume`: create,
+  list, read, and resume Native sessions.
+- `session/metadata/update`: update session metadata and settings with the
+  Native patch shape, including title, model, reasoning effort, permission
+  preset, sandbox profile, and compaction threshold.
+- `session/compact/start`: start a manual compaction turn; keep emitting
+  `session/compaction/*` for UI.
+- `session/fork`: fork a new session from an existing turn.
+- `session/rollback/preview` followed by `session/rollback/commit`: roll back
+  a session to a selected user turn with an explicit restore plan.
+- `session/interrupt`: stop the active session turn, a Native task, or a
+  sessionless command process through one scoped request.
+
+### Turn methods
+
+- `turn/start`: start a Devo turn with the Native turn request shape.
+- `turn/steer`: send steering input directly to the active turn.
+- `turn/read`: read a turn snapshot.
+
+### Queue methods
+
+- `session/queue/push`: add input to the session queue, starting it immediately
+  when the session is available.
+- `session/queue/list`, `session/queue/update`, and `session/queue/remove`:
+  inspect, reorder or edit, and remove queued input.
+
+### Workspace methods
+
+- `workspace/changes/read`: read branch, uncommitted, or turn-scoped
   workspace change views. Git workspaces support branch and uncommitted scopes;
   non-Git workspaces report those scopes as unsupported and only expose
   turn-scoped bounded filesystem snapshots.
 - `workspace/changes/updated`: notify subscribed clients that the turn-scoped
   workspace change summary was finalized or updated. The notification carries a
-  summary only; clients call `_devo/workspace/changes/read` for full diffs.
+  summary only; clients call `workspace/changes/read` for full diffs.
 
-### Provider and model extensions
+### Provider and model methods
 
-- `_devo/provider/list`: list configured provider vendors.
-- `_devo/provider/upsert`: add or update a provider vendor and optional model
-  binding.
-- `_devo/provider/validate`: validate provider credentials and model settings.
-- `_devo/model/catalog`: read the effective model catalog.
-- `_devo/model/saved`: notify the server that model configuration was saved.
+- `provider/list`: list configured providers using the Native camelCase
+  result. The result separates read-only directory templates from connected
+  user providers.
+- `provider/upsert`: add or update a provider Connection and its nested model directory.
+- `provider/disconnect`: remove a user provider Connection while preserving
+  its built-in directory template.
+- `provider/model/remove`: remove one saved model from a user provider
+  Connection while preserving the provider template and built-in directory.
+- `provider/validate`: validate provider credentials and model settings.
+- `provider/discover`: fetch a connected provider's model directory and persist
+  the discovered metadata into its `providers.json` Connection record.
 
-### Skills extensions
+`provider/list` returns `connectionModels` separately from each provider's
+effective `models` map. The former contains only models explicitly saved in
+each user Connection and is the source for Connection model management in
+onboarding.
+- `model/list` and `model/preferences/*`: read and update the Native model
+  catalog and preferences.
+- `context/usage/read`: read the context-window usage for a session.
+- `session/systemPrompt/read`: read the exact system prompt the server would
+  send on the next model call for a session.
 
-- `_devo/skills/list`: list available skills for a working directory.
-- `_devo/skills/changed`: notify the server that skill files changed.
-- `_devo/skills/set_enabled`: persistently enable or disable a skill.
+### MCP methods
 
-### Command execution extensions
+- `mcp/list`: list configured MCP servers.
+- `mcp/tools`: list tools exposed by one MCP server.
+- `mcp/set_enabled`: enable or disable one MCP server.
 
-- `_devo/command/exec`: launch a command execution request.
-- `_devo/command/exec/write`: write input to a running command.
-- `_devo/command/exec/resize`: resize a running command terminal.
-- `_devo/command/exec/terminate`: terminate a running command.
+### Skills methods
 
-### Goal extensions
+- `skill/list`: list available skills for a working directory; pass
+  `forceReload: true` after workspace changes.
+- `skill/set_enabled`: persistently enable or disable a skill.
 
-- `_devo/goal/create`: create a goal for the active thread.
-- `_devo/goal/set`: update the current goal objective.
-- `_devo/goal/status`: read the current goal state.
-- `_devo/goal/pause`: pause goal continuation.
-- `_devo/goal/resume`: resume goal continuation.
-- `_devo/goal/complete`: mark the goal complete.
-- `_devo/goal/clear`: clear the current goal.
+### Command execution methods
 
-### Agent extensions
+- `task/start` with `kind: "process"`: launch a command execution task.
+- `task/read` and `task/list`: inspect one task or all tasks in a session.
+- `task/write_stdin`, `task/resize`, and `task/interrupt`: control the
+  session-owned process task returned by `task/start`.
 
-- `_devo/agent/list`: list subagents associated with a session.
-- `_devo/agent/spawn`: spawn a subagent.
-- `_devo/agent/close`: close a subagent.
+### Goal methods
 
-### Reference search and user-input extensions
+- `session/goal/set`: create or replace a session goal.
+- `session/goal/read`: read the current goal state.
+- `session/goal/update`: edit the current goal in place.
+- `session/goal/pause`, `session/goal/resume`, `session/goal/complete`,
+  `session/goal/cancel`, and `session/goal/clear`: transition or clear a goal.
 
-- `_devo/search/start`: start a server-backed composer reference search.
-- `_devo/search/update`: update the active reference-search query.
-- `_devo/search/cancel`: cancel the active reference search.
-- `_devo/request_user_input/respond`: answer a pending structured user-input
-  request.
+### Message methods
+
+- `session/message/edit`: replace a user message and supersede the affected
+  turn.
+
+### Agent methods
+
+- `task/start` with `kind: "agent"`: spawn a subagent task.
+- `agent/list` and `agent/read`: inspect subagent tasks.
+- `agent/message`: send a follow-up message to a subagent.
+- `agent/cancel`: stop a subagent task.
+
+### Reference search methods
+
+- `search/start`: start a server-backed composer reference search.
+- `search/update`: update the active reference-search query.
+- `search/cancel`: cancel the active reference search.
+
+### Current implementation exceptions
+
+`NATIVE_METHODS` in `src/native/methods.rs` is the Native API contract and the
+source for generated schemas and client bindings. The server runtime is not yet
+fully aligned with that contract:
+
+- Registered but not routed by the server: none of the remaining
+  `NATIVE_METHODS` entries. `session/cwd/change`, `session/archive`,
+  `turn/read`, `tool/list`, and `credential/*` are live.
+- `task/start` and `task/resize` are registered and routed. Process list
+  and kill live on `task/list` and `task/interrupt`.
+- Transitional routes outside the Native registry: `session/start` and
+  `command/exec` (plus `command/exec/write|resize|terminate` aliases).
+  New clients should use `task/*` rather than depending on these routes.

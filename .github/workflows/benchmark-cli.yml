@@ -1,0 +1,40 @@
+name: Benchmark CLI build
+
+on:
+  pull_request:
+    paths:
+      - crates/cli/**
+      - crates/sandbox/**
+      - .github/workflows/benchmark-cli.yml
+  workflow_dispatch:
+
+permissions:
+  contents: read
+
+jobs:
+  linux-cli:
+    runs-on: ubuntu-24.04
+    steps:
+      - uses: actions/checkout@v4
+      - uses: dtolnay/rust-toolchain@stable
+        with:
+          targets: x86_64-unknown-linux-musl
+      - uses: mlugg/setup-zig@v2
+      - uses: taiki-e/install-action@v2
+        with:
+          tool: cargo-zigbuild@0.23.0
+      - uses: Swatinem/rust-cache@v2
+        with:
+          key: benchmark-linux-cli
+      - name: Verify detached Linux kernel fence
+        run: cargo test -p devo-sandbox --test headless_tty -- --nocapture
+      - name: Build native Linux CLI for container smoke runs
+        run: cargo zigbuild --target x86_64-unknown-linux-musl -p devo-cli
+      - name: Strip debug information from the benchmark artifact
+        run: strip target/x86_64-unknown-linux-musl/debug/devo
+      - uses: actions/upload-artifact@v4
+        with:
+          name: devo-benchmark-linux-${{ github.event.pull_request.head.sha || github.sha }}
+          path: target/x86_64-unknown-linux-musl/debug/devo
+          if-no-files-found: error
+          retention-days: 7

@@ -7,6 +7,7 @@
 pub mod anthropic;
 mod dsml;
 pub mod error;
+pub mod google;
 mod hosted_tools;
 mod http;
 pub mod openai;
@@ -14,6 +15,7 @@ mod provider;
 pub mod recovery_hint;
 mod request;
 pub mod router;
+mod sse;
 mod text_normalization;
 pub mod timeout;
 
@@ -23,5 +25,5 @@ pub use recovery_hint::{
     AUTH_HINT, MODEL_NOT_FOUND_HINT, NETWORK_PROXY_HINT, recovery_hint_for_anyhow,
     recovery_hint_for_message,
 };
-pub(crate) use request::merge_extra_body;
+pub(crate) use request::{merge_extra_body, request_headers};
 pub use router::*;

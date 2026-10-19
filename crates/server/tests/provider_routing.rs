@@ -4,13 +4,7 @@ use std::sync::Mutex;
 use anyhow::Context;
 use anyhow::Result;
 use async_trait::async_trait;
-use devo_core::AppConfigStore;
-use devo_core::BundledSkillsConfig;
-use devo_core::FileSystemSkillCatalog;
 use devo_core::PresetModelCatalog;
-use devo_core::ProviderVendorCatalog;
-use devo_core::SkillsConfig;
-use devo_core::tools::ToolRegistry;
 use devo_protocol::Model;
 use devo_protocol::ModelProfileKey;
 use devo_protocol::ModelRequest;
@@ -37,7 +31,6 @@ use tokio::time::timeout;
 
 use devo_server::ClientTransportKind;
 use devo_server::ServerRuntime;
-use devo_server::ServerRuntimeDependencies;
 
 #[derive(Debug, Clone, PartialEq, Eq)]
 struct RecordedRequest {
@@ -147,10 +140,11 @@ async fn duplicate_slug_session_binding_routes_turn_and_title_to_selected_bindin
     let runtime = build_runtime_with_models(
         data_root.path(),
         router.clone(),
-        "deepseek-v4-flash",
+        "deepseek-ac/deepseek-v4-flash",
         vec![Model {
-            slug: "deepseek-v4-flash".to_string(),
+            slug: "deepseek-ac/deepseek-v4-flash".to_string(),
             display_name: "DeepSeek V4 Flash".to_string(),
+            reasoning_capability: ReasoningCapability::Toggle,
             ..Model::default()
         }],
     )?;
@@ -160,8 +154,8 @@ async fn duplicate_slug_session_binding_routes_turn_and_title_to_selected_bindin
         &runtime,
         connection_id,
         data_root.path(),
-        "deepseek-v4-flash",
-        Some("deepseek-v4-flash-deepseek-ac"),
+        "deepseek-ac/deepseek-v4-flash",
+        Some("deepseek-ac/deepseek-v4-flash"),
     )
     .await?;
     start_turn(&runtime, connection_id, session_id).await?;
@@ -169,21 +163,22 @@ async fn duplicate_slug_session_binding_routes_turn_and_title_to_selected_bindin
     wait_for_notification_value(&mut notifications_rx, "turn/completed").await?;
     wait_for_complete_request(&router).await?;
 
-    let expected_route = ProviderRoute::binding("deepseek-ac", ProviderWireApi::AnthropicMessages);
+    let expected_route =
+        ProviderRoute::connection("deepseek-ac", ProviderWireApi::AnthropicMessages);
     assert_eq!(
         router.stream_requests(),
         vec![RecordedRequest {
             route: expected_route.clone(),
-            model_slug: ModelProfileKey::CatalogSlug("deepseek-v4-flash".to_string()),
+            model_slug: ModelProfileKey::CatalogSlug("deepseek-ac/deepseek-v4-flash".to_string()),
             request_model: "deepseek-v4-flash".to_string(),
-            request_thinking: Some("enabled".to_string()),
+            request_thinking: None,
         }]
     );
     assert_eq!(
         router.complete_requests(),
         vec![RecordedRequest {
             route: expected_route,
-            model_slug: ModelProfileKey::CatalogSlug("deepseek-v4-flash".to_string()),
+            model_slug: ModelProfileKey::CatalogSlug("deepseek-ac/deepseek-v4-flash".to_string()),
             request_model: "deepseek-v4-flash".to_string(),
             request_thinking: Some("disabled".to_string()),
         }]
@@ -201,19 +196,25 @@ async fn session_model_switch_routes_turn_and_title_to_selected_provider_binding
     let (connection_id, mut notifications_rx) = initialize_connection(&runtime).await?;
 
     let session_id = start_session(&runtime, connection_id, data_root.path()).await?;
-    update_session_model(&runtime, connection_id, session_id, "alt-model").await?;
+    update_session_model(
+        &runtime,
+        connection_id,
+        session_id,
+        "alternate/vendor/alt-model",
+    )
+    .await?;
     start_turn(&runtime, connection_id, session_id).await?;
 
     wait_for_notification_value(&mut notifications_rx, "turn/completed").await?;
     wait_for_complete_request(&router).await?;
 
     let expected_route =
-        ProviderRoute::binding("alternate", ProviderWireApi::OpenAIChatCompletions);
+        ProviderRoute::connection("alternate", ProviderWireApi::OpenAIChatCompletions);
     assert_eq!(
         router.stream_requests(),
         vec![RecordedRequest {
             route: expected_route.clone(),
-            model_slug: ModelProfileKey::CatalogSlug("alt-model".to_string()),
+            model_slug: ModelProfileKey::CatalogSlug("alternate/vendor/alt-model".to_string()),
             request_model: "vendor/alt-model".to_string(),
             request_thinking: None,
         }]
@@ -222,7 +223,7 @@ async fn session_model_switch_routes_turn_and_title_to_selected_provider_binding
         router.complete_requests(),
         vec![RecordedRequest {
             route: expected_route,
-            model_slug: ModelProfileKey::CatalogSlug("alt-model".to_string()),
+            model_slug: ModelProfileKey::CatalogSlug("alternate/vendor/alt-model".to_string()),
             request_model: "vendor/alt-model".to_string(),
             request_thinking: Some("disabled".to_string()),
         }]
@@ -239,9 +240,9 @@ async fn explicit_binding_controls_route_request_model_and_catalog_profile() -> 
     let runtime = build_runtime_with_models(
         data_root.path(),
         router.clone(),
-        "glm-5.2",
+        "zai/renamed-provider-model",
         vec![Model {
-            slug: "glm-5.2".to_string(),
+            slug: "zai/renamed-provider-model".to_string(),
             display_name: "GLM 5.2".to_string(),
             reasoning_capability: ReasoningCapability::Toggle,
             ..Model::default()
@@ -252,8 +253,8 @@ async fn explicit_binding_controls_route_request_model_and_catalog_profile() -> 
         &runtime,
         connection_id,
         data_root.path(),
-        "glm-5.2",
-        Some("glm-zai"),
+        "zai/renamed-provider-model",
+        Some("zai/renamed-provider-model"),
     )
     .await?;
 
@@ -263,32 +264,32 @@ async fn explicit_binding_controls_route_request_model_and_catalog_profile() -> 
         session_id,
         4,
         Some("legacy-wrong-model"),
-        Some("glm-zai"),
+        Some("zai/renamed-provider-model"),
         Some("enabled"),
     )
     .await?
     .context("turn/start response")?;
-    let _: devo_server::SuccessResponse<devo_server::TurnStartResult> =
+    let _: devo_server::SuccessResponse<devo_protocol::native::rpc_turn::TurnStartResult> =
         serde_json::from_value(response)?;
 
     wait_for_notification_value(&mut notifications_rx, "turn/completed").await?;
     wait_for_complete_request(&router).await?;
 
-    let expected_route = ProviderRoute::binding("zai", ProviderWireApi::OpenAIChatCompletions);
+    let expected_route = ProviderRoute::connection("zai", ProviderWireApi::OpenAIChatCompletions);
     assert_eq!(
         router.stream_requests(),
         vec![RecordedRequest {
             route: expected_route.clone(),
-            model_slug: ModelProfileKey::CatalogSlug("glm-5.2".to_string()),
+            model_slug: ModelProfileKey::CatalogSlug("zai/renamed-provider-model".to_string()),
             request_model: "renamed-provider-model".to_string(),
-            request_thinking: Some("enabled".to_string()),
+            request_thinking: None,
         }]
     );
     assert_eq!(
         router.complete_requests(),
         vec![RecordedRequest {
             route: expected_route,
-            model_slug: ModelProfileKey::CatalogSlug("glm-5.2".to_string()),
+            model_slug: ModelProfileKey::CatalogSlug("zai/renamed-provider-model".to_string()),
             request_model: "renamed-provider-model".to_string(),
             request_thinking: Some("disabled".to_string()),
         }]
@@ -298,96 +299,68 @@ async fn explicit_binding_controls_route_request_model_and_catalog_profile() -> 
 }
 
 #[tokio::test]
-async fn turn_start_rejects_invalid_explicit_bindings() -> Result<()> {
+async fn session_settings_survive_restart_without_resume() -> Result<()> {
     let data_root = TempDir::new()?;
-    write_glm_provider_config(data_root.path())?;
-    let router = Arc::new(RecordingRouter::default());
-    let runtime = build_runtime_with_models(
-        data_root.path(),
-        router,
-        "glm-5.2",
-        vec![Model {
-            slug: "glm-5.2".to_string(),
-            display_name: "GLM 5.2".to_string(),
-            ..Model::default()
-        }],
-    )?;
+    write_session_settings_provider_config(data_root.path())?;
+    let runtime = build_runtime(data_root.path(), Arc::new(RecordingRouter::default()))?;
     let (connection_id, _notifications_rx) = initialize_connection(&runtime).await?;
-    let session_id = start_session_with_binding(
-        &runtime,
-        connection_id,
-        data_root.path(),
-        "glm-5.2",
-        Some("glm-zai"),
-    )
-    .await?;
+    let session_id = start_session(&runtime, connection_id, data_root.path()).await?;
 
-    let response = send_turn_start(
-        &runtime,
-        connection_id,
-        session_id,
-        4,
-        Some("glm-5.2"),
-        Some("missing-binding"),
-        /*reasoning_effort_selection*/ None,
-    )
-    .await?
-    .context("turn/start response")?;
-    let error: devo_server::ErrorResponse = serde_json::from_value(response)?;
+    let response = runtime
+        .handle_incoming(
+            connection_id,
+            serde_json::json!({
+                "id": 4,
+                "method": "session/metadata/update",
+                "params": {
+                    "sessionId": session_id,
+                    "expectedVersion": 0,
+                    "model": { "provider": "", "model": "alternate/vendor/alt-model" },
+                    "settings": {
+                        "reasoningEffort": "high",
+                        "mode": "plan"
+                    }
+                }
+            }),
+        )
+        .await
+        .context("session/metadata/update response")?;
+    let _: devo_server::SuccessResponse<
+        devo_protocol::native::rpc_session::SessionMetadataUpdateResult,
+    > = serde_json::from_value(response)?;
 
-    assert_eq!(
-        error.error,
-        devo_server::ProtocolError {
-            code: devo_server::ProtocolErrorCode::InvalidParams,
-            message: "model binding `missing-binding` does not exist".to_string(),
-            data: serde_json::json!({}),
-        }
-    );
+    drop(runtime);
 
-    let response = send_turn_start(
-        &runtime,
-        connection_id,
-        session_id,
-        5,
-        /*model*/ None,
-        Some("glm-disabled"),
-        /*reasoning_effort_selection*/ None,
-    )
-    .await?
-    .context("turn/start response")?;
-    let error: devo_server::ErrorResponse = serde_json::from_value(response)?;
-    assert_eq!(
-        error.error,
-        devo_server::ProtocolError {
-            code: devo_server::ProtocolErrorCode::InvalidParams,
-            message: "model binding `glm-disabled` is disabled".to_string(),
-            data: serde_json::json!({}),
-        }
-    );
+    let rebuilt = build_runtime(data_root.path(), Arc::new(RecordingRouter::default()))?;
+    rebuilt.load_persisted_sessions().await?;
+    let (rebuilt_connection_id, _notifications_rx) = initialize_connection(&rebuilt).await?;
+    let response = rebuilt
+        .handle_incoming(
+            rebuilt_connection_id,
+            serde_json::json!({
+                "id": 5,
+                "method": "session/list",
+                "params": {}
+            }),
+        )
+        .await
+        .context("session/list response")?;
+    let result: devo_server::SuccessResponse<
+        devo_protocol::native::rpc_session::SessionListResult,
+    > = serde_json::from_value(response)?;
+    let persisted = result
+        .result
+        .data
+        .into_iter()
+        .find(|session| session.id.as_str() == session_id.to_string())
+        .context("persisted session missing from Native session/list")?;
 
-    let response = send_turn_start(
-        &runtime,
-        connection_id,
-        session_id,
-        6,
-        /*model*/ None,
-        Some("glm-disabled-provider"),
-        /*reasoning_effort_selection*/ None,
-    )
-    .await?
-    .context("turn/start response")?;
-    let error: devo_server::ErrorResponse = serde_json::from_value(response)?;
-    assert_eq!(
-        error.error,
-        devo_server::ProtocolError {
-            code: devo_server::ProtocolErrorCode::InvalidParams,
-            message:
-                "model binding `glm-disabled-provider` references disabled provider `disabled-zai`"
-                    .to_string(),
-            data: serde_json::json!({}),
-        }
-    );
-
+    // A qualified `provider/model` reference must survive restart verbatim;
+    // a bare slug is not a durable model selection (it cannot be resolved
+    // against the catalog on replay).
+    assert_eq!(persisted.model.model, "alternate/vendor/alt-model");
+    assert_eq!(persisted.settings.reasoning_effort.as_deref(), Some("high"));
+    assert_eq!(persisted.settings.mode.as_deref(), Some("plan"));
     Ok(())
 }
 
@@ -469,45 +442,62 @@ invocation_method = "openai_chat_completions"
 
 fn write_glm_provider_config(data_root: &std::path::Path) -> Result<()> {
     write_test_auth_config(data_root)?;
+    // `providers.json` is the durable catalog; config.toml only carries
+    // session defaults. The custom model id doubles as the wire request
+    // model, exercising the explicit-binding route below.
+    let catalog = serde_json::json!({
+        "provider": {
+            "zai": {
+                "name": "ZAI",
+                "credential": "test_api_key",
+                "wire_api": "openai_chat_completions",
+                "enabled": true,
+                "models": {
+                    "renamed-provider-model": { "name": "Renamed Provider Model" }
+                }
+            },
+            "disabled-zai": {
+                "name": "Disabled ZAI",
+                "credential": "test_api_key",
+                "wire_api": "openai_chat_completions",
+                "enabled": false,
+                "models": {
+                    "disabled-provider-model": { "name": "Disabled Provider Model" }
+                }
+            }
+        }
+    });
     std::fs::write(
-        data_root.join("config.toml"),
-        r#"
-[defaults]
-model_binding = "glm-zai"
+        data_root.join("providers.json"),
+        serde_json::to_vec_pretty(&catalog)?,
+    )?;
+    Ok(())
+}
 
-[providers.zai]
-enabled = true
-name = "ZAI"
-credential = "test_api_key"
-wire_apis = ["openai_chat_completions"]
-
-[providers.disabled-zai]
-enabled = false
-name = "Disabled ZAI"
-credential = "test_api_key"
-wire_apis = ["openai_chat_completions"]
-
-[model_bindings.glm-zai]
-enabled = true
-model_slug = "glm-5.2"
-provider = "zai"
-request_model = "renamed-provider-model"
-invocation_method = "openai_chat_completions"
-
-[model_bindings.glm-disabled]
-enabled = false
-model_slug = "glm-5.2"
-provider = "zai"
-request_model = "disabled-provider-model"
-invocation_method = "openai_chat_completions"
-
-[model_bindings.glm-disabled-provider]
-enabled = true
-model_slug = "glm-5.2"
-provider = "disabled-zai"
-request_model = "disabled-provider-model"
-invocation_method = "openai_chat_completions"
-"#,
+fn write_session_settings_provider_config(data_root: &std::path::Path) -> Result<()> {
+    write_test_auth_config(data_root)?;
+    // `providers.json` is the durable catalog and carries the reasoning
+    // levels, so a persisted "high" effort selection survives restart
+    // normalization instead of collapsing to "off".
+    let catalog = serde_json::json!({
+        "provider": {
+            "alternate": {
+                "name": "Alternate",
+                "credential": "test_api_key",
+                "wire_api": "openai_chat_completions",
+                "enabled": true,
+                "models": {
+                    "vendor/alt-model": {
+                        "name": "Alt Model",
+                        "reasoning_capability": { "levels": ["off", "high"] }
+                    }
+                }
+            }
+        }
+    });
+    std::fs::write(
+        data_root.join("providers.json"),
+        serde_json::to_vec_pretty(&catalog)?,
     )?;
     Ok(())
 }
@@ -535,15 +525,15 @@ fn build_runtime(
     build_runtime_with_models(
         data_root,
         router,
-        "default-model",
+        "default/vendor/default-model",
         vec![
             Model {
-                slug: "default-model".to_string(),
+                slug: "default/vendor/default-model".to_string(),
                 display_name: "Default Model".to_string(),
                 ..Model::default()
             },
             Model {
-                slug: "alt-model".to_string(),
+                slug: "alternate/vendor/alt-model".to_string(),
                 display_name: "Alt Model".to_string(),
                 ..Model::default()
             },
@@ -557,33 +547,14 @@ fn build_runtime_with_models(
     default_model: &str,
     models: Vec<Model>,
 ) -> Result<Arc<ServerRuntime>> {
-    let provider: Arc<dyn ModelProviderSDK> = Arc::new(UnusedProvider);
-    let provider_router: Arc<dyn ProviderRouter> = router;
-    let db = Arc::new(devo_server::db::Database::open(
-        data_root.join("provider_routing.db"),
-    )?);
-    Ok(ServerRuntime::new(
-        data_root.to_path_buf(),
-        ServerRuntimeDependencies::new(
-            provider,
-            provider_router,
-            Arc::new(ToolRegistry::new()),
-            devo_server::empty_mcp_manager(),
-            default_model.to_string(),
-            Arc::new(PresetModelCatalog::new(models)),
-            Arc::new(ProviderVendorCatalog::default()),
-            Box::new(FileSystemSkillCatalog::new(SkillsConfig {
-                bundled: Some(BundledSkillsConfig { enabled: false }),
-                ..SkillsConfig::default()
-            })),
-            devo_core::AgentsMdConfig::default(),
-            db,
-            Arc::new(std::sync::Mutex::new(AppConfigStore::load(
-                data_root.to_path_buf(),
-                /*workspace_root*/ None,
-            )?)),
-        ),
-    ))
+    Ok(
+        devo_server::test_support::TestRuntime::new(Arc::new(UnusedProvider))
+            .router(router)
+            .default_model(default_model)
+            .catalog(Arc::new(PresetModelCatalog::new(models)))
+            .db_file("provider_routing.db")
+            .runtime(data_root),
+    )
 }
 
 async fn initialize_connection(
@@ -602,6 +573,7 @@ async fn initialize_connection(
                 "params": {
                     "protocolVersion": 1,
                     "clientCapabilities": {},
+                    "_meta": { "devo": { "protocol": "native" } },
                     "clientInfo": {
                         "name": "provider-routing-test",
                         "title": "provider-routing-test",
@@ -629,7 +601,7 @@ async fn start_session(
         runtime,
         connection_id,
         cwd,
-        "default-model",
+        "default/vendor/default-model",
         /*model_binding_id*/ None,
     )
     .await
@@ -647,23 +619,43 @@ async fn start_session_with_binding(
             connection_id,
             serde_json::json!({
                 "id": 2,
-                "method": "session/start",
+                "method": "session/new",
                 "params": {
                     "cwd": cwd,
-                    "ephemeral": false,
-                    "title": null,
-                    "model": model,
-                    "model_binding_id": model_binding_id
+                    "idempotencyKey": "provider-routing-session"
                 }
             }),
         )
         .await
-        .context("session/start response")?;
+        .context("session/new response")?;
     let response_value = response.clone();
-    let response: devo_server::SuccessResponse<devo_server::SessionStartResult> =
-        serde_json::from_value(response)
-            .with_context(|| format!("decode session/start response: {response_value}"))?;
-    Ok(response.result.session.session_id)
+    let response: devo_server::SuccessResponse<
+        devo_protocol::native::rpc_session::SessionNewResult,
+    > = serde_json::from_value(response)
+        .with_context(|| format!("decode session/new response: {response_value}"))?;
+    let session_id = SessionId::from(response.result.session.id.as_str());
+    let metadata_response = runtime
+        .handle_incoming(
+            connection_id,
+            serde_json::json!({
+                "id": 3,
+                "method": "session/metadata/update",
+                "params": {
+                    "sessionId": session_id,
+                    "expectedVersion": 0,
+                    "model": { "provider": "", "model": model },
+                    "modelBindingId": model_binding_id
+                }
+            }),
+        )
+        .await
+        .context("session/metadata/update response")?;
+    let metadata_value = metadata_response.clone();
+    let _: devo_server::SuccessResponse<
+        devo_protocol::native::rpc_session::SessionMetadataUpdateResult,
+    > = serde_json::from_value(metadata_response)
+        .with_context(|| format!("decode session/metadata/update response: {metadata_value}"))?;
+    Ok(session_id)
 }
 
 async fn update_session_model(
@@ -677,22 +669,21 @@ async fn update_session_model(
             connection_id,
             serde_json::json!({
                 "id": 3,
-                "method": "_devo/session/metadata/update",
+                "method": "session/metadata/update",
                 "params": {
-                    "session_id": session_id,
-                    "model": model,
-                    "model_binding_id": null,
-                    "thinking": null
+                    "sessionId": session_id,
+                    "expectedVersion": 0,
+                    "model": { "provider": "", "model": model }
                 }
             }),
         )
         .await
         .context("session/metadata/update response")?;
     let response_value = response.clone();
-    let _: devo_server::SuccessResponse<devo_server::SessionMetadataUpdateResult> =
-        serde_json::from_value(response).with_context(|| {
-            format!("decode session/metadata/update response: {response_value}")
-        })?;
+    let _: devo_server::SuccessResponse<
+        devo_protocol::native::rpc_session::SessionMetadataUpdateResult,
+    > = serde_json::from_value(response)
+        .with_context(|| format!("decode session/metadata/update response: {response_value}"))?;
     Ok(())
 }
 
@@ -713,7 +704,7 @@ async fn start_turn(
     .await?
     .context("turn/start response")?;
     let response_value = response.clone();
-    let _: devo_server::SuccessResponse<devo_server::TurnStartResult> =
+    let _: devo_server::SuccessResponse<devo_protocol::native::rpc_turn::TurnStartResult> =
         serde_json::from_value(response)
             .with_context(|| format!("decode turn/start response: {response_value}"))?;
     Ok(())
@@ -728,25 +719,56 @@ async fn send_turn_start(
     model_binding_id: Option<&str>,
     reasoning_effort_selection: Option<&str>,
 ) -> Result<Option<serde_json::Value>> {
-    Ok(runtime
+    let mut metadata = serde_json::json!({
+        "sessionId": session_id,
+        "expectedVersion": 0
+    });
+    if model_binding_id.is_none()
+        && let Some(model) = model
+    {
+        metadata["model"] = serde_json::json!({ "provider": "", "model": model });
+    }
+    if let Some(model_binding_id) = model_binding_id {
+        metadata["modelBindingId"] = serde_json::json!(model_binding_id);
+    }
+    if let Some(reasoning_effort_selection) = reasoning_effort_selection {
+        metadata["settings"] = serde_json::json!({
+            "reasoningEffort": reasoning_effort_selection
+        });
+    }
+    if model.is_some() || model_binding_id.is_some() || reasoning_effort_selection.is_some() {
+        let Some(response) = runtime
+            .handle_incoming(
+                connection_id,
+                serde_json::json!({
+                    "id": id * 10,
+                    "method": "session/metadata/update",
+                    "params": metadata
+                }),
+            )
+            .await
+        else {
+            return Ok(None);
+        };
+        if response.get("error").is_some() {
+            return Ok(Some(response));
+        }
+    }
+    let response = runtime
         .handle_incoming(
             connection_id,
             serde_json::json!({
                 "id": id,
-                "method": "_devo/turn/start",
+                "method": "turn/start",
                 "params": {
-                    "session_id": session_id,
+                    "sessionId": session_id,
                     "input": [{ "type": "text", "text": "use the selected provider" }],
-                    "model": model,
-                    "model_binding_id": model_binding_id,
-                    "reasoning_effort_selection": reasoning_effort_selection,
-                    "sandbox": null,
-                    "approval_policy": null,
-                    "cwd": null
+                    "idempotencyKey": format!("provider-routing-turn-{id}")
                 }
             }),
         )
-        .await)
+        .await;
+    Ok(response)
 }
 
 async fn wait_for_notification_value(
@@ -756,7 +778,7 @@ async fn wait_for_notification_value(
     let wanted = serde_json::json!(method);
     timeout(Duration::from_secs(5), async {
         while let Some(value) = notifications_rx.recv().await {
-            if value.get("method") == Some(&wanted) || has_original_method(&value, method) {
+            if value.get("method") == Some(&wanted) {
                 return Ok(value);
             }
         }
@@ -777,11 +799,6 @@ async fn wait_for_complete_request(router: &RecordingRouter) -> Result<()> {
     })
     .await
     .context("timed out waiting for title completion request")?
-}
-
-fn has_original_method(value: &serde_json::Value, method: &str) -> bool {
-    value.get("method") == Some(&serde_json::json!("session/update"))
-        && value["params"]["_meta"]["devo/originalMethod"].as_str() == Some(method)
 }
 
 fn model_response(text: &str) -> ModelResponse {

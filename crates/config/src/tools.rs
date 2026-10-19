@@ -21,11 +21,33 @@ pub struct ToolsConfig {
     pub web_search: WebSearchConfig,
     #[serde(default, skip_serializing_if = "WebFetchConfig::is_default")]
     pub web_fetch: WebFetchConfig,
+    #[serde(default, skip_serializing_if = "ToolExecutionSurface::is_default")]
+    pub execution_surface: ToolExecutionSurface,
 }
 
 impl ToolsConfig {
     pub fn is_empty(&self) -> bool {
-        self.web_search.is_default() && self.web_fetch.is_default()
+        self.web_search.is_default()
+            && self.web_fetch.is_default()
+            && self.execution_surface.is_default()
+    }
+}
+
+/// Selects the model-facing tool surface for turns.
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize, Deserialize, Default)]
+#[serde(rename_all = "snake_case")]
+pub enum ToolExecutionSurface {
+    /// Start the RLM Python kernel when available. Only `ipython` is exposed to
+    /// the model; internal host handlers stay server-side.
+    #[default]
+    Rlm,
+    /// Do not start the RLM kernel. No model-facing tool is exposed.
+    Discrete,
+}
+
+impl ToolExecutionSurface {
+    pub fn is_default(&self) -> bool {
+        *self == Self::default()
     }
 }
 
@@ -85,6 +107,7 @@ impl WebFetchConfig {
 #[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
 pub struct LocalWebSearchProviderConfig {
     pub kind: LocalWebSearchProviderKind,
+    #[serde(default, skip_serializing_if = "String::is_empty")]
     pub credential: String,
     #[serde(skip_serializing_if = "Option::is_none")]
     pub base_url: Option<String>,
@@ -98,6 +121,8 @@ pub struct LocalWebSearchProviderConfig {
 pub enum LocalWebSearchProviderKind {
     Exa,
     Tavily,
+    /// Anonymous Parallel Search MCP over Streamable HTTP.
+    Parallel,
 }
 
 /// Fully resolved web search behavior for one model invocation.
@@ -153,10 +178,10 @@ pub struct ResolvedLocalWebSearchConfig {
 pub fn resolve_web_search_config(
     global: &WebSearchConfig,
     provider_override: Option<&WebSearchConfig>,
-    binding_override: Option<&WebSearchConfig>,
+    model_override: Option<&WebSearchConfig>,
     auth: &UserAuthConfigFile,
 ) -> Result<ResolvedWebSearchConfig, ProviderConfigError> {
-    let effective = binding_override.or(provider_override).unwrap_or(global);
+    let effective = model_override.or(provider_override).unwrap_or(global);
     match effective.mode {
         WebSearchMode::Disabled => Ok(ResolvedWebSearchConfig::Disabled),
         WebSearchMode::Provider => Ok(ResolvedWebSearchConfig::Provider),
@@ -169,9 +194,9 @@ pub fn resolve_web_search_config(
 pub fn resolve_web_fetch_config(
     global: &WebFetchConfig,
     provider_override: Option<&WebFetchConfig>,
-    binding_override: Option<&WebFetchConfig>,
+    model_override: Option<&WebFetchConfig>,
 ) -> ResolvedWebFetchConfig {
-    let effective = binding_override.or(provider_override).unwrap_or(global);
+    let effective = model_override.or(provider_override).unwrap_or(global);
     match effective.mode {
         WebFetchMode::Disabled => ResolvedWebFetchConfig::Disabled,
         WebFetchMode::Provider => ResolvedWebFetchConfig::Provider,
@@ -207,6 +232,24 @@ fn resolve_local_web_search(
                     "tools.web_search references missing local provider `{provider_id}`"
                 ),
             })?;
+    if provider.kind == LocalWebSearchProviderKind::Parallel
+        && !provider.credential.trim().is_empty()
+    {
+        return Err(ProviderConfigError::Validation {
+            message: format!(
+                "web search local provider `{provider_id}` uses anonymous Parallel MCP and must omit credential"
+            ),
+        });
+    }
+    if provider.kind == LocalWebSearchProviderKind::Parallel {
+        return Ok(ResolvedLocalWebSearchConfig {
+            provider_id: provider_id.to_string(),
+            kind: provider.kind,
+            api_key: String::new(),
+            base_url: provider.base_url.clone(),
+            max_results: provider.max_results,
+        });
+    }
     if provider.credential.trim().is_empty() {
         return Err(ProviderConfigError::Validation {
             message: format!("web search local provider `{provider_id}` has an empty credential"),
@@ -228,6 +271,11 @@ fn resolve_local_web_search(
             api_key: credential.value.clone(),
             base_url: provider.base_url.clone(),
             max_results: provider.max_results,
+        }),
+        AuthCredentialKind::Oauth => Err(ProviderConfigError::Validation {
+            message: format!(
+                "web search local provider `{provider_id}` requires an api_key credential, found oauth"
+            ),
         }),
     }
 }
@@ -256,6 +304,11 @@ mod tests {
                 AuthCredentialConfig {
                     kind: AuthCredentialKind::ApiKey,
                     value: "secret".to_string(),
+                    access: None,
+                    refresh: None,
+                    expires_at: None,
+                    account_id: None,
+                    enterprise_url: None,
                 },
             )]),
             ..UserAuthConfigFile::default()
@@ -292,6 +345,64 @@ mod tests {
     }
 
     #[test]
+    fn parallel_config_resolves_without_saved_credentials() {
+        let global: WebSearchConfig = toml::from_str(
+            "mode = 'local'\nlocal_provider = 'parallel'\n[local_providers.parallel]\nkind = 'parallel'\nmax_results = 3",
+        )
+        .expect("keyless config");
+        assert_eq!(
+            resolve_web_search_config(
+                &global,
+                /*provider_override*/ None,
+                /*model_override*/ None,
+                &UserAuthConfigFile::default(),
+            )
+            .expect("anonymous provider"),
+            ResolvedWebSearchConfig::Local(ResolvedLocalWebSearchConfig {
+                provider_id: "parallel".into(),
+                kind: LocalWebSearchProviderKind::Parallel,
+                api_key: String::new(),
+                base_url: None,
+                max_results: Some(3),
+            })
+        );
+    }
+
+    #[test]
+    fn keyless_config_does_not_weaken_exa_or_tavily_authentication() {
+        for kind in ["exa", "tavily"] {
+            let global: WebSearchConfig = toml::from_str(&format!(
+                "mode = 'local'\n[local_providers.search]\nkind = '{kind}'"
+            ))
+            .expect("deserialize config");
+            let error = resolve_web_search_config(
+                &global,
+                /*provider_override*/ None,
+                /*model_override*/ None,
+                &UserAuthConfigFile::default(),
+            )
+            .expect_err("existing providers still require credentials");
+            assert!(error.to_string().contains("empty credential"));
+        }
+    }
+
+    #[test]
+    fn parallel_rejects_a_saved_credential_reference() {
+        let global: WebSearchConfig = toml::from_str(
+            "mode = 'local'\n[local_providers.parallel]\nkind = 'parallel'\ncredential = 'exa_api_key'",
+        )
+        .expect("deserialize config");
+        let error = resolve_web_search_config(
+            &global,
+            /*provider_override*/ None,
+            /*model_override*/ None,
+            &auth(),
+        )
+        .expect_err("anonymous provider must not send saved keys");
+        assert!(error.to_string().contains("must omit credential"));
+    }
+
+    #[test]
     fn default_web_fetch_mode_resolves_local() {
         // Trace: L2-DES-APP-005
         // Verifies: missing web_fetch config preserves the local webfetch default.
@@ -303,13 +414,13 @@ mod tests {
     }
 
     #[test]
-    fn provider_and_binding_overrides_global() {
+    fn provider_and_model_overrides_global() {
         let global = WebSearchConfig::default();
         let provider = WebSearchConfig {
             mode: WebSearchMode::Provider,
             ..WebSearchConfig::default()
         };
-        let binding = WebSearchConfig {
+        let model = WebSearchConfig {
             mode: WebSearchMode::Disabled,
             ..WebSearchConfig::default()
         };
@@ -320,8 +431,8 @@ mod tests {
             ResolvedWebSearchConfig::Provider
         );
         assert_eq!(
-            resolve_web_search_config(&global, Some(&provider), Some(&binding), &auth())
-                .expect("binding override"),
+            resolve_web_search_config(&global, Some(&provider), Some(&model), &auth())
+                .expect("model override"),
             ResolvedWebSearchConfig::Disabled
         );
     }

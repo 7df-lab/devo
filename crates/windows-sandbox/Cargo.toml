@@ -4,10 +4,18 @@ edition.workspace = true
 license.workspace = true
 name = "devo-windows-sandbox"
 version.workspace = true
-# Elevated setup / command-runner bins are Phase 8b (WFP + UAC). Keep them
-# out of the default package build so legacy restricted-token launch can
-# cross-compile cleanly without wiring those helpers yet.
-autobins = false
+
+# Restored per upstream (codex declares both bins): the elevated setup helper
+# and command-runner must be built, or provisioning can never find them
+# (helper_materialization expects these exact names). Non-Windows hosts get a
+# stub main that panics — same as upstream.
+[[bin]]
+name = "devo-windows-sandbox-setup"
+path = "src/bin/setup_main/main.rs"
+
+[[bin]]
+name = "devo-command-runner"
+path = "src/bin/command_runner/main.rs"
 
 [lib]
 doctest = false

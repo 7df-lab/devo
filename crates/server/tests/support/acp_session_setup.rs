@@ -1,8 +1,15 @@
 #![allow(dead_code)]
 
+#[path = "cargo_test_binary.rs"]
+mod cargo_test_binary;
+
+pub(crate) use cargo_test_binary::devo_command;
+// Some suites use only the CLI fixture.
+#[allow(unused_imports)]
+pub(crate) use cargo_test_binary::mcp_server_binary as build_test_mcp_server_binary;
+
 use std::io;
 use std::path::Path;
-use std::path::PathBuf;
 use std::time::Duration;
 
 use anyhow::Context;
@@ -10,12 +17,12 @@ use anyhow::Result;
 use pretty_assertions::assert_eq;
 use serde_json::Value;
 use tempfile::TempDir;
+use tokio::io::AsyncBufReadExt;
 use tokio::io::AsyncReadExt;
 use tokio::io::AsyncWriteExt;
 use tokio::io::BufReader as AsyncBufReader;
 use tokio::net::TcpListener;
 use tokio::net::TcpStream;
-use tokio::process::Command;
 use tokio::sync::mpsc;
 use tokio::time::timeout;
 
@@ -28,6 +35,15 @@ pub(crate) fn write_test_config(
     listen: &[&str],
     openai_base_url: &str,
 ) -> Result<()> {
+    write_test_config_with_extra(home_dir, listen, openai_base_url, "")
+}
+
+pub(crate) fn write_test_config_with_extra(
+    home_dir: &TempDir,
+    listen: &[&str],
+    openai_base_url: &str,
+    extra: &str,
+) -> Result<()> {
     let config_dir = home_dir.path().join(".devo");
     std::fs::create_dir_all(&config_dir)?;
     let listen_entries = listen
@@ -37,10 +53,250 @@ pub(crate) fn write_test_config(
         .join(", ");
     let openai_base_url = toml_string(openai_base_url);
     let config = format!(
-        "[server]\nlisten = [{listen_entries}]\nmax_connections = 32\nevent_buffer_size = 128\nidle_session_timeout_secs = 300\npersist_ephemeral_sessions = false\n\n[defaults]\nmodel_binding = \"test-openai\"\n\n[providers.openai]\nenabled = true\nname = \"OpenAI\"\nbase_url = \"{openai_base_url}\"\nwire_apis = [\"openai_chat_completions\"]\n\n[model_bindings.alt-openai]\nenabled = true\nmodel_slug = \"alt-model\"\nprovider = \"openai\"\nmodel_name = \"alt-model\"\ninvocation_method = \"openai_chat_completions\"\n\n[model_bindings.test-openai]\nenabled = true\nmodel_slug = \"test-model\"\nprovider = \"openai\"\nmodel_name = \"test-model\"\ninvocation_method = \"openai_chat_completions\"\n"
+        "[server]\nlisten = [{listen_entries}]\nmax_connections = 32\nevent_buffer_size = 128\nidle_session_timeout_secs = 300\npersist_ephemeral_sessions = false\n\n[defaults]\nmodel_binding = \"test-openai\"\n\n[providers.openai]\nenabled = true\nname = \"OpenAI\"\nbase_url = \"{openai_base_url}\"\nwire_apis = [\"openai_chat_completions\"]\n\n[model_bindings.alt-openai]\nenabled = true\nmodel_slug = \"alt-model\"\nprovider = \"openai\"\nmodel_name = \"alt-model\"\ninvocation_method = \"openai_chat_completions\"\n\n[model_bindings.test-openai]\nenabled = true\nmodel_slug = \"test-model\"\nprovider = \"openai\"\nmodel_name = \"test-model\"\ninvocation_method = \"openai_chat_completions\"\n{extra}"
     );
     std::fs::write(config_dir.join("config.toml"), config)?;
     Ok(())
+}
+
+pub(crate) fn write_stdio_test_config(
+    home_dir: &TempDir,
+    listen: &[&str],
+    extra: &str,
+) -> Result<()> {
+    write_test_config_with_extra(home_dir, listen, "http://127.0.0.1:1", extra)
+}
+
+pub(crate) struct AcpStdioClientInfo {
+    pub name: &'static str,
+    pub title: &'static str,
+}
+
+pub(crate) struct StdioAcpProcess {
+    pub child: tokio::process::Child,
+    pub stdin: tokio::process::ChildStdin,
+    pub stdout_reader: tokio::io::Lines<AsyncBufReader<tokio::process::ChildStdout>>,
+    pub stderr_reader: AsyncBufReader<tokio::process::ChildStderr>,
+}
+
+pub(crate) async fn spawn_stdio_acp_process(home_dir: &Path) -> Result<StdioAcpProcess> {
+    let mut command = devo_command().await?;
+    let mut child = command
+        .arg("server")
+        .arg("--protocols")
+        .arg("acp")
+        .arg("--transport")
+        .arg("stdio")
+        .env("DEVO_HOME", home_dir.join(".devo"))
+        .stdin(std::process::Stdio::piped())
+        .stdout(std::process::Stdio::piped())
+        .stderr(std::process::Stdio::piped())
+        .spawn()
+        .context("spawn devo child process in server mode")?;
+    Ok(StdioAcpProcess {
+        stdin: child.stdin.take().context("capture child stdin")?,
+        stdout_reader: AsyncBufReader::new(child.stdout.take().context("capture child stdout")?)
+            .lines(),
+        stderr_reader: AsyncBufReader::new(child.stderr.take().context("capture child stderr")?),
+        child,
+    })
+}
+
+pub(crate) async fn stdio_initialize(
+    process: &mut StdioAcpProcess,
+    id: i64,
+    client: AcpStdioClientInfo,
+    client_capabilities: Value,
+) -> Result<Value> {
+    write_stdio_json(
+        &mut process.stdin,
+        serde_json::json!({
+            "jsonrpc": "2.0",
+            "id": id,
+            "method": "initialize",
+            "params": {
+                "protocolVersion": 1,
+                "clientCapabilities": client_capabilities,
+                "clientInfo": {
+                    "name": client.name,
+                    "title": client.title,
+                    "version": "1.0.0"
+                }
+            }
+        }),
+    )
+    .await?;
+    read_stdio_json(
+        &mut process.child,
+        &mut process.stdout_reader,
+        &mut process.stderr_reader,
+        "ACP initialize response",
+        STDIO_SERVER_STARTUP_TIMEOUT,
+    )
+    .await
+}
+
+pub(crate) async fn stdio_request_until(
+    process: &mut StdioAcpProcess,
+    id: i64,
+    method: &str,
+    params: Value,
+    context: &str,
+) -> Result<Value> {
+    write_stdio_json(
+        &mut process.stdin,
+        serde_json::json!({
+            "jsonrpc": "2.0",
+            "id": id,
+            "method": method,
+            "params": params
+        }),
+    )
+    .await?;
+    read_stdio_json_until(
+        &mut process.child,
+        &mut process.stdout_reader,
+        &mut process.stderr_reader,
+        context,
+        |value| value.get("id") == Some(&serde_json::json!(id)),
+    )
+    .await
+}
+
+pub(crate) async fn stdio_collect_until(
+    process: &mut StdioAcpProcess,
+    id: i64,
+    method: &str,
+    params: Value,
+    context: &str,
+) -> Result<Vec<Value>> {
+    write_stdio_json(
+        &mut process.stdin,
+        serde_json::json!({
+            "jsonrpc": "2.0",
+            "id": id,
+            "method": method,
+            "params": params
+        }),
+    )
+    .await?;
+    read_stdio_json_collect_until(
+        &mut process.child,
+        &mut process.stdout_reader,
+        &mut process.stderr_reader,
+        context,
+        |value| value.get("id") == Some(&serde_json::json!(id)),
+    )
+    .await
+}
+
+#[allow(clippy::too_many_arguments)]
+pub(crate) async fn assert_stdio_prompt_turn(
+    process: &mut StdioAcpProcess,
+    provider: &mut CapturingOpenAiServer,
+    request_id: i64,
+    session_id: &str,
+    prompt: &str,
+    context: &str,
+    provider_context: &str,
+    has_tool: Option<&str>,
+    lacks_tool: Option<&str>,
+) -> Result<Value> {
+    write_acp_prompt(&mut process.stdin, request_id, session_id, prompt).await?;
+    let messages = read_stdio_json_collect_until(
+        &mut process.child,
+        &mut process.stdout_reader,
+        &mut process.stderr_reader,
+        context,
+        |value| value.get("id") == Some(&serde_json::json!(request_id)),
+    )
+    .await?;
+    let response = messages
+        .last()
+        .context("session/prompt produced a response")?;
+    assert_prompt_response(response, request_id);
+    assert_prompt_updates_before_response(&messages, session_id)?;
+    let provider_request =
+        recv_provider_prompt_request(&mut provider.requests, provider_context, prompt).await?;
+    if let Some(tool_name) = has_tool {
+        assert_openai_request_has_mcp_tool(&provider_request, tool_name)?;
+    }
+    if let Some(tool_name) = lacks_tool {
+        assert_openai_request_lacks_mcp_tool(&provider_request, tool_name)?;
+    }
+    Ok(provider_request)
+}
+
+pub(crate) fn assert_stdio_auth_required(response: &Value) {
+    assert_eq!(response["jsonrpc"], serde_json::json!("2.0"));
+    assert_eq!(response["error"]["code"], serde_json::json!(-32000));
+    assert_eq!(
+        response["error"]["message"],
+        serde_json::json!("Authentication required")
+    );
+    assert_eq!(
+        response["error"]["data"],
+        serde_json::json!({ "reason": "auth_required" })
+    );
+}
+
+pub(crate) fn acp_model_config_option(result: &Value) -> Result<&Value> {
+    acp_config_option(result, "model")
+}
+
+pub(crate) fn acp_config_option<'a>(result: &'a Value, config_id: &str) -> Result<&'a Value> {
+    acp_config_option_optional(result, config_id)
+        .with_context(|| format!("ACP result included {config_id} config option"))
+}
+
+pub(crate) fn acp_config_option_optional<'a>(
+    result: &'a Value,
+    config_id: &str,
+) -> Option<&'a Value> {
+    result["configOptions"].as_array().and_then(|options| {
+        options
+            .iter()
+            .find(|option| option.get("id").and_then(Value::as_str) == Some(config_id))
+    })
+}
+
+pub(crate) fn assert_config_option_values(option: &Value, expected_values: &[&str]) -> Result<()> {
+    let values = option["options"]
+        .as_array()
+        .context("config option includes options")?
+        .iter()
+        .filter_map(|option| option.get("value").and_then(Value::as_str))
+        .collect::<Vec<_>>();
+    for expected_value in expected_values {
+        anyhow::ensure!(
+            values.contains(expected_value),
+            "model config option values should contain {expected_value}: {values:?}"
+        );
+    }
+    Ok(())
+}
+
+pub(crate) fn assert_config_option_lacks_value(
+    option: &Value,
+    unexpected_value: &str,
+) -> Result<()> {
+    let values = option["options"]
+        .as_array()
+        .context("config option includes options")?
+        .iter()
+        .filter_map(|option| option.get("value").and_then(Value::as_str))
+        .collect::<Vec<_>>();
+    anyhow::ensure!(
+        !values.contains(&unexpected_value),
+        "config option values should not contain {unexpected_value}: {values:?}"
+    );
+    Ok(())
+}
+
+pub(crate) async fn shutdown_stdio_acp_process(mut process: StdioAcpProcess) {
+    drop(process.stdin);
+    process.child.kill().await.ok();
+    let _ = process.child.wait().await;
 }
 
 fn toml_string(value: &str) -> String {
@@ -353,138 +609,15 @@ fn content_length(headers: &str) -> io::Result<usize> {
 }
 
 fn openai_streaming_response_body() -> String {
-    [
-        sse_data(serde_json::json!({
-            "id": "chatcmpl-acp-e2e",
-            "object": "chat.completion.chunk",
-            "created": 0,
-            "model": "test-model",
-            "choices": [
-                {
-                    "index": 0,
-                    "delta": {
-                        "role": "assistant",
-                        "content": ""
-                    },
-                    "finish_reason": null
-                }
-            ]
-        })),
-        sse_data(serde_json::json!({
-            "id": "chatcmpl-acp-e2e",
-            "object": "chat.completion.chunk",
-            "created": 0,
-            "model": "test-model",
-            "choices": [
-                {
-                    "index": 0,
-                    "delta": {
-                        "content": "ACP compatibility response."
-                    },
-                    "finish_reason": null
-                }
-            ]
-        })),
-        sse_data(serde_json::json!({
-            "id": "chatcmpl-acp-e2e",
-            "object": "chat.completion.chunk",
-            "created": 0,
-            "model": "test-model",
-            "choices": [
-                {
-                    "index": 0,
-                    "delta": {},
-                    "finish_reason": "stop"
-                }
-            ]
-        })),
-        "data: [DONE]\n\n".to_string(),
-    ]
-    .concat()
+    "data: {\"id\":\"chatcmpl-acp-e2e\",\"object\":\"chat.completion.chunk\",\"created\":0,\"model\":\"test-model\",\"choices\":[{\"index\":0,\"delta\":{\"role\":\"assistant\",\"content\":\"\"},\"finish_reason\":null}]}\n\ndata: {\"id\":\"chatcmpl-acp-e2e\",\"object\":\"chat.completion.chunk\",\"created\":0,\"model\":\"test-model\",\"choices\":[{\"index\":0,\"delta\":{\"content\":\"ACP compatibility response.\"},\"finish_reason\":null}]}\n\ndata: {\"id\":\"chatcmpl-acp-e2e\",\"object\":\"chat.completion.chunk\",\"created\":0,\"model\":\"test-model\",\"choices\":[{\"index\":0,\"delta\":{},\"finish_reason\":\"stop\"}]}\n\ndata: [DONE]\n\n".to_string()
 }
 
 fn openai_completion_response_body() -> String {
-    serde_json::json!({
-        "id": "chatcmpl-acp-title-e2e",
-        "object": "chat.completion",
-        "choices": [
-            {
-                "index": 0,
-                "finish_reason": "stop",
-                "message": {
-                    "role": "assistant",
-                    "content": "ACP compatibility proof"
-                }
-            }
-        ],
-        "usage": {
-            "prompt_tokens": 1,
-            "completion_tokens": 1,
-            "total_tokens": 2
-        }
-    })
-    .to_string()
+    r#"{"id":"chatcmpl-acp-title-e2e","object":"chat.completion","choices":[{"index":0,"finish_reason":"stop","message":{"role":"assistant","content":"ACP compatibility proof"}}],"usage":{"prompt_tokens":1,"completion_tokens":1,"total_tokens":2}}"#.to_string()
 }
 
 fn sse_data(value: Value) -> String {
     format!("data: {value}\n\n")
-}
-
-pub(crate) async fn build_test_mcp_server_binary() -> Result<PathBuf> {
-    let workspace = workspace_root()?;
-    let binary = target_debug_binary(&workspace, "test_stdio_server");
-    if binary.is_file() {
-        return Ok(binary);
-    }
-
-    let manifest = workspace.join("Cargo.toml");
-    let cargo_path = std::env::var_os("CARGO")
-        .map(PathBuf::from)
-        .unwrap_or_else(|| PathBuf::from("cargo"));
-    let status = Command::new(cargo_path)
-        .current_dir(&workspace)
-        .arg("build")
-        .arg("--quiet")
-        .arg("--manifest-path")
-        .arg(&manifest)
-        .arg("-p")
-        .arg("devo-rmcp-client")
-        .arg("--bin")
-        .arg("test_stdio_server")
-        .status()
-        .await
-        .context("build MCP test stdio server")?;
-    anyhow::ensure!(status.success(), "MCP test stdio server build failed");
-    anyhow::ensure!(
-        binary.is_file(),
-        "MCP test stdio server binary was not built at {}",
-        binary.display()
-    );
-    Ok(binary)
-}
-
-fn workspace_root() -> Result<PathBuf> {
-    PathBuf::from(env!("CARGO_MANIFEST_DIR"))
-        .join("..")
-        .join("..")
-        .canonicalize()
-        .context("canonicalize workspace root")
-}
-
-fn target_debug_binary(workspace: &Path, name: &str) -> PathBuf {
-    let target_dir = std::env::var_os("CARGO_TARGET_DIR")
-        .map(PathBuf::from)
-        .unwrap_or_else(|| workspace.join("target"));
-    let target_dir = if target_dir.is_absolute() {
-        target_dir
-    } else {
-        workspace.join(target_dir)
-    };
-    let mut binary = target_dir.join("debug").join(name);
-    if cfg!(windows) {
-        binary.set_extension("exe");
-    }
-    binary
 }
 
 pub(crate) async fn write_stdio_json(
@@ -556,8 +689,15 @@ pub(crate) async fn read_stdio_json(
     let line = timeout(line_timeout, stdout_reader.next_line())
         .await
         .with_context(|| format!("timed out waiting for {context}"))?
-        .with_context(|| format!("failed reading {context} from child stdout"))?
-        .with_context(|| format!("{context} reached EOF before a line was produced"))?;
+        .with_context(|| format!("failed reading {context} from child stdout"))?;
+    let Some(line) = line else {
+        let mut stderr_output = String::new();
+        stderr_reader.read_to_string(&mut stderr_output).await?;
+        let exit_status = child.try_wait()?;
+        anyhow::bail!(
+            "{context} reached EOF before a line was produced; child_exit_status={exit_status:?}; child_stderr={stderr_output:?}"
+        );
+    };
     parse_stdio_json_line(child, stderr_reader, context, &line).await
 }
 
@@ -585,39 +725,20 @@ async fn parse_stdio_json_line(
     })
 }
 
-pub(crate) fn devo_command() -> Result<Command> {
-    if let Some(binary_path) = std::env::var_os("CARGO_BIN_EXE_devo").map(PathBuf::from)
-        && binary_path.is_file()
-    {
-        return Ok(Command::new(binary_path));
-    }
-
-    let binary_path = devo_binary_path()?;
-    if binary_path.is_file() {
-        return Ok(Command::new(binary_path));
-    }
-
-    let cargo_path = std::env::var_os("CARGO")
-        .map(PathBuf::from)
-        .unwrap_or_else(|| PathBuf::from("cargo"));
-    let mut command = Command::new(cargo_path);
-    command
-        .current_dir(env!("CARGO_MANIFEST_DIR"))
-        .arg("run")
-        .arg("--quiet")
-        .arg("-p")
-        .arg("devo-cli")
-        .arg("--bin")
-        .arg("devo")
-        .arg("--");
-    Ok(command)
-}
-
-fn devo_binary_path() -> Result<PathBuf> {
-    let workspace = workspace_root()?;
-    let mut binary = workspace.join("target").join("debug").join("devo");
-    if cfg!(windows) {
-        binary.set_extension("exe");
-    }
-    Ok(binary)
+#[test]
+fn stdio_fixture_binaries_follow_the_test_profile() -> Result<()> {
+    let executable = std::fs::canonicalize(std::env::current_exe()?)?;
+    let expected = executable
+        .parent()
+        .context("test deps directory")?
+        .parent()
+        .context("test profile directory")?
+        .to_path_buf();
+    let mcp = cargo_test_binary::current_binary_path("test_stdio_server")?;
+    let devo = cargo_test_binary::current_binary_path("devo")?;
+    assert_eq!(
+        [mcp.parent(), devo.parent()],
+        [Some(expected.as_path()), Some(expected.as_path())],
+    );
+    Ok(())
 }

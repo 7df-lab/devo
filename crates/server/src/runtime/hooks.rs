@@ -25,14 +25,14 @@ impl ServerRuntime {
     ) -> Option<devo_core::HookRuntimeContext> {
         let runner = state.runtime_context.hook_runner()?;
         let transcript_path = state
-            .record
+            .rollout_path
             .as_ref()
-            .map(|record| record.rollout_path.display().to_string())
+            .map(|path| path.display().to_string())
             .unwrap_or_default();
         let permission_mode = Some(permission_mode_label(state.config.permission_mode));
         let agent_id = state
             .summary
-            .parent_session_id
+            .parent_session_id()
             .is_some()
             .then(|| session_id.to_string());
         let agent_type = state
@@ -43,7 +43,7 @@ impl ServerRuntime {
         Some(devo_core::HookRuntimeContext {
             runner,
             base: devo_core::HookBaseInput {
-                session_id: session_id.to_string(),
+                session_id,
                 transcript_path,
                 cwd: state.summary.cwd.clone(),
                 permission_mode,
@@ -74,14 +74,14 @@ impl ServerRuntime {
     ) -> Option<devo_core::HookRuntimeContext> {
         let runner = snapshot.runtime_context.hook_runner()?;
         let transcript_path = snapshot
-            .record
+            .rollout_path
             .as_ref()
-            .map(|record| record.rollout_path.display().to_string())
+            .map(|path| path.display().to_string())
             .unwrap_or_default();
         let permission_mode = Some(permission_mode_label(snapshot.config.permission_mode));
         let agent_id = snapshot
             .summary
-            .parent_session_id
+            .parent_session_id()
             .is_some()
             .then(|| session_id.to_string());
         let agent_type = snapshot
@@ -92,7 +92,7 @@ impl ServerRuntime {
         Some(devo_core::HookRuntimeContext {
             runner,
             base: devo_core::HookBaseInput {
-                session_id: session_id.to_string(),
+                session_id,
                 transcript_path,
                 cwd: snapshot.summary.cwd.clone(),
                 permission_mode,
@@ -139,7 +139,7 @@ impl ServerRuntime {
         };
         let cwd = std::env::current_dir().unwrap_or_else(|_| std::path::PathBuf::from("."));
         let base = devo_core::HookBaseInput {
-            session_id: String::new(),
+            session_id: SessionId::from(""),
             transcript_path: String::new(),
             cwd,
             permission_mode: None,

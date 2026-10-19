@@ -54,7 +54,7 @@ pub(crate) const DEVICE_DIRS: &[&str] = &[
 /// `/private/var/folders/` (the real `TMPDIR` / `NSTemporaryDirectory()`).
 /// git, compilers, and other tools write temp files to `$TMPDIR` which
 /// resolves to `/private/var/folders/xx/.../T/` on macOS.
-pub(crate) fn temp_writable_paths() -> Vec<PathBuf> {
+pub fn temp_writable_paths() -> Vec<PathBuf> {
     let mut paths = vec![PathBuf::from("/tmp"), PathBuf::from("/var/tmp")];
 
     // macOS: /tmp → /private/tmp, but the real TMPDIR is under /private/var/folders.

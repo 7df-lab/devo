@@ -32,6 +32,7 @@ mod logging;
 mod managed_network;
 mod network_policy;
 mod paths;
+mod permissions;
 mod profiles;
 #[cfg(all(feature = "enforce", target_os = "macos"))]
 mod seatbelt;
@@ -65,6 +66,8 @@ pub use network_policy::{
     ChildNetworkPolicy, NETWORK_POLICY_SNAPSHOT_VERSION, NetworkPolicySnapshot,
     NetworkPolicySnapshotError, WebsiteAction, WebsiteOrigin, WebsiteOriginError, WebsitePolicy,
 };
+pub use paths::temp_writable_paths;
+pub use permissions::{SandboxNetworkPermission, SandboxPermissionOverlay};
 pub use profiles::{
     ProfileName, SandboxConfig, SandboxProfile, load_sandbox_config, sandbox_profile_conflicts,
     unsandboxed_execution_allowed,
@@ -73,6 +76,7 @@ pub use types::{SandboxEvent, SandboxEventType, SandboxMetrics};
 pub use wrap::{
     PLACEHOLDER_CLEANUP_DELAY, SandboxWrap, WrapMode, WrappedCommand,
     cleanup_stale_placeholder_dirs, remove_placeholder_dir, wrap_command_for_profile,
+    wrap_command_for_profile_with_overlay,
 };
 
 #[cfg(windows)]
@@ -146,6 +150,16 @@ pub fn resolve_enforcement_plan(
     profile: Option<&str>,
     workspace: &Path,
 ) -> anyhow::Result<Option<ResolvedEnforcementPlan>> {
+    resolve_enforcement_plan_with_overlay(profile, workspace, None)
+}
+
+/// Resolve a named profile and merge a per-invocation sandbox overlay before
+/// the child enforcement plan is built.
+pub fn resolve_enforcement_plan_with_overlay(
+    profile: Option<&str>,
+    workspace: &Path,
+    overlay: Option<&SandboxPermissionOverlay>,
+) -> anyhow::Result<Option<ResolvedEnforcementPlan>> {
     let Some(profile_name) = profile else {
         return Ok(None);
     };
@@ -163,7 +177,8 @@ pub fn resolve_enforcement_plan(
     {
         let config = profiles::load_sandbox_config(workspace)?;
         let resolved = parsed.resolve_profile(workspace, &config)?;
-        let caps = ProfileName::capability_set_from_profile(workspace, &resolved)?;
+        let caps =
+            ProfileName::capability_set_from_profile_with_overlay(workspace, &resolved, overlay)?;
         Ok(Some(ResolvedEnforcementPlan {
             profile_name: profile_name.to_string(),
             caps,
@@ -171,7 +186,7 @@ pub fn resolve_enforcement_plan(
     }
     #[cfg(not(all(feature = "enforce", unix)))]
     {
-        let _ = workspace;
+        let _ = (workspace, overlay);
         Ok(Some(ResolvedEnforcementPlan {
             profile_name: profile_name.to_string(),
         }))
@@ -372,6 +387,7 @@ mod tests {
     }
 
     #[test]
+    #[cfg(all(feature = "enforce", unix))]
     fn resolve_enforcement_plan_rejects_unknown_profile_names() {
         let workspace = std::env::temp_dir();
         let error = resolve_enforcement_plan(Some("not-a-real-profile"), &workspace)

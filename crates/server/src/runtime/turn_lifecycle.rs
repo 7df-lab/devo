@@ -1,19 +1,19 @@
 use std::sync::Arc;
 
-use devo_core::SessionId;
+use devo_protocol::native::ids::SessionId;
 use tokio_util::sync::CancellationToken;
 
-use crate::turn::TurnMetadata;
+use crate::turn::RuntimeTurn;
 
 use super::ServerRuntime;
 
 impl ServerRuntime {
     /// Registers cancellation, metadata, and optional connection ownership for a
     /// turn that is about to run on a background task.
-    pub(crate) async fn register_active_turn_execution(
+    pub(crate) async fn register_active_runtime_turn_execution(
         &self,
         session_id: SessionId,
-        turn: TurnMetadata,
+        turn: RuntimeTurn,
         connection_id: Option<u64>,
     ) -> CancellationToken {
         let cancel_token = CancellationToken::new();
@@ -46,30 +46,53 @@ impl ServerRuntime {
         self.active_turns.remove_abort_handle(session_id).await;
     }
 
-    /// Cancels and aborts the active turn for `session_id` without clearing the
-    /// full runtime handle (used while waiting for terminal status).
+    /// Cancels the active turn for `session_id` without clearing the full
+    /// runtime handle (used while waiting for terminal status).
+    ///
+    /// Does not abort the join handle: the turn task must run
+    /// `finalize_executed_turn` + `MergeTurn` after seeing the cancel token.
+    /// Callers that need hard abort after a timed-out wait use
+    /// `ActiveTurnRegistry::abort_task` on the orphan path.
     pub(crate) async fn signal_active_turn_interrupt(&self, session_id: SessionId) {
         if let Some(cancel_token) = self.active_turns.cancel_token(session_id).await {
             cancel_token.cancel();
         }
-        self.active_turns.abort_task(session_id).await;
     }
 
-    pub(crate) async fn spawn_active_turn_task<F>(
+    pub(crate) async fn spawn_active_runtime_turn_task<F>(
         self: &Arc<Self>,
         session_id: SessionId,
-        turn: TurnMetadata,
+        turn: RuntimeTurn,
         connection_id: Option<u64>,
         task: F,
     ) where
         F: std::future::Future<Output = ()> + Send + 'static,
     {
-        self.register_active_turn_execution(session_id, turn, connection_id)
+        self.register_active_runtime_turn_execution(session_id, turn, connection_id)
             .await;
+        drop(
+            self.spawn_registered_active_turn_task(session_id, task)
+                .await,
+        );
+    }
+
+    /// Spawns work after its cancellation token and turn metadata are registered.
+    /// Queued turns register during admission, before publishing `turn/started`.
+    /// The returned handle lets a post-turn chain wait without losing the
+    /// dedicated abort handle required by interrupt timeout recovery.
+    pub(crate) async fn spawn_registered_active_turn_task<F>(
+        self: &Arc<Self>,
+        session_id: SessionId,
+        task: F,
+    ) -> tokio::task::JoinHandle<()>
+    where
+        F: std::future::Future<Output = ()> + Send + 'static,
+    {
         let runtime = Arc::clone(self);
         let join_handle = tokio::spawn(task);
         runtime
             .attach_active_turn_abort_handle(session_id, join_handle.abort_handle())
             .await;
+        join_handle
     }
 }

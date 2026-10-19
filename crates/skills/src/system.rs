@@ -14,7 +14,7 @@ const SYSTEM_SKILLS_DIR: Dir<'_> = include_dir::include_dir!("$DEVO_SKILLS_SAMPL
 const SYSTEM_SKILLS_DIR_NAME: &str = ".system";
 const SKILLS_DIR_NAME: &str = "skills";
 const SYSTEM_SKILLS_MARKER_FILENAME: &str = ".devo-system-skills.marker";
-const SYSTEM_SKILLS_MARKER_SALT: &str = "v1";
+const SYSTEM_SKILLS_MARKER_SALT: &str = "v2-prime-skills";
 
 pub fn system_cache_root_dir(devo_home: &Path) -> PathBuf {
     devo_home.join(SKILLS_DIR_NAME).join(SYSTEM_SKILLS_DIR_NAME)
@@ -172,30 +172,26 @@ mod tests {
         );
         assert!(
             paths
-                .binary_search(&"skill-creator/scripts/init_skill.py".to_string())
+                .binary_search(&"agent-message/SKILL.md".to_string())
                 .is_ok()
         );
-        assert!(
-            paths
-                .binary_search(&"deep-research/SKILL.md".to_string())
-                .is_ok()
-        );
+        assert!(paths.binary_search(&"goal/SKILL.md".to_string()).is_ok());
         assert_eq!(paths.is_empty(), false);
     }
 
     #[test]
-    fn bundled_deep_research_skill_installs_with_interface_metadata() {
+    fn bundled_goal_skill_installs() {
         let devo_home = TempDir::new().expect("devo home");
 
         install_system_skills(devo_home.path()).expect("install system skills");
 
-        let skill_root = system_cache_root_dir(devo_home.path()).join("deep-research");
-        assert_eq!(
-            [
-                skill_root.join("SKILL.md").is_file(),
-                skill_root.join("agents/openai.yaml").is_file(),
-            ],
-            [true, true]
+        let skill_root = system_cache_root_dir(devo_home.path()).join("goal");
+        assert!(skill_root.join("SKILL.md").is_file());
+        assert!(
+            system_cache_root_dir(devo_home.path())
+                .join("agent-message")
+                .join("SKILL.md")
+                .is_file()
         );
     }
 

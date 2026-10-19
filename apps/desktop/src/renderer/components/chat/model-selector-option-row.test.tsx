@@ -15,6 +15,19 @@ function firstButtonClassList(html: string): string[] {
 }
 
 describe("ModelSelectorOptionRow", () => {
+	test("shows a readable connection identifier when duplicate model names need context", () => {
+		const html = renderToStaticMarkup(
+			<ModelSelectorOptionRow
+				displayName="DeepSeek V4 Flash"
+				providerName="deepseek-direct/deepseek-v4-flash"
+				reasoning
+				selected={false}
+				onSelect={() => undefined}
+			/>,
+		)
+		expect(html).toContain('class="break-all text-[11px] text-muted-foreground" title="deepseek-direct/deepseek-v4-flash"')
+		expect(html).toContain("deepseek-direct/deepseek-v4-flash</div>")
+	})
 	test("reserves the same leading check slot for selected and unselected rows", () => {
 		const html = renderToStaticMarkup(
 			<>
@@ -74,18 +87,14 @@ describe("ModelSelectorOptionRow", () => {
 
 		expect(firstButtonClassList(html)).toEqual(
 			expect.arrayContaining([
-				"hover:bg-accent",
-				"hover:text-accent-foreground",
-				"focus-visible:bg-accent",
-				"focus-visible:text-accent-foreground",
+				"hover:bg-muted",
+				"hover:text-foreground",
+				"focus-visible:bg-muted",
+				"focus-visible:text-foreground",
 				"focus-visible:outline-none",
-				"dark:hover:bg-white/[0.08]",
-				"dark:hover:text-foreground",
-				"dark:focus-visible:bg-white/[0.08]",
-				"dark:focus-visible:text-foreground",
 			]),
 		)
-		expect(firstButtonClassList(html)).not.toContain("hover:bg-muted")
+		expect(firstButtonClassList(html)).not.toContain("hover:bg-accent")
 	})
 
 	test("does not render a reasoning badge for reasoning-capable models", () => {

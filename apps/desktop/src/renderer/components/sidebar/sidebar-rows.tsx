@@ -13,7 +13,6 @@ import {
 	DropdownMenuSeparator,
 	DropdownMenuTrigger,
 } from "@devo/ui/components/dropdown-menu"
-import { Input } from "@devo/ui/components/input"
 import {
 	optionMenuIconClass,
 	optionMenuSeparatorClass,
@@ -33,6 +32,7 @@ import {
 	PencilIcon,
 	PenLineIcon,
 	PinIcon,
+	SplitIcon,
 	TrashIcon,
 } from "lucide-react"
 import {
@@ -47,6 +47,8 @@ import {
 	type ReactNode,
 } from "react"
 import { formatRelativeTime } from "../../atoms/derived/agents"
+import { appStore } from "../../atoms/store"
+import { customizeOpenAtom } from "../../atoms/ui"
 import type { Agent, AgentStatus, SidebarProject } from "../../lib/types"
 import {
 	buildProjectRowActions,
@@ -96,14 +98,6 @@ function SessionRowStatusIndicator({
 			</>
 		)
 	}
-	if (agent.status === "running") {
-		return (
-			<>
-				<Loader2Icon className="size-3.5 animate-spin text-[#3396f4]" aria-hidden="true" />
-				{isWorktree && <GitForkIcon className="size-3.5 text-muted-foreground" />}
-			</>
-		)
-	}
 	if (agent.status === "failed") {
 		return (
 			<>
@@ -121,13 +115,21 @@ function SessionRowStatusIndicator({
 }
 
 const rowMenuIconClass = optionMenuIconClass
-const sidebarPrimaryIconClass = "size-4 stroke-[1.6]"
-const floatingRowActionButtonBaseClass =
-	"absolute right-2 top-1/2 flex size-7 -translate-y-1/2 items-center justify-center rounded-lg text-muted-foreground opacity-0 transition-[background-color,color,opacity] duration-150 hover:bg-black/[0.06] hover:text-sidebar-foreground focus-visible:bg-black/[0.06] focus-visible:text-sidebar-foreground focus-visible:opacity-100 focus-visible:outline-none data-popup-open:opacity-100 dark:hover:bg-white/[0.08] dark:focus-visible:bg-white/[0.08]"
-const floatingRowActionButtonClass = cn(
-	floatingRowActionButtonBaseClass,
-	"group-hover/sidebar-row:opacity-100 group-focus-within/sidebar-row:opacity-100",
+const sidebarPrimaryIconClass = "size-[15px] stroke-[1.5]"
+const sessionTitleTextClass = "text-[13px] font-normal leading-tight tracking-normal"
+const sessionStatusHiddenClass =
+	"transition-opacity duration-150 group-hover/sidebar-row:opacity-0 group-focus-within/sidebar-row:opacity-0 group-has-[[data-popup-open]]/sidebar-row:opacity-0"
+const sessionActionsVisibleClass =
+	"group-hover/sidebar-row:opacity-100 group-focus-within/sidebar-row:opacity-100 group-has-[[data-popup-open]]/sidebar-row:opacity-100"
+const rowActionButtonBaseClass =
+	"flex items-center justify-center rounded-lg bg-transparent text-muted-foreground opacity-0 transition-[color,opacity] hover:text-sidebar-foreground focus-visible:text-sidebar-foreground focus-visible:opacity-100 focus-visible:outline-none data-popup-open:opacity-100"
+const sessionRowActionButtonClass = cn(
+	"absolute inset-0 pointer-events-none group-hover/sidebar-row:pointer-events-auto group-focus-within/sidebar-row:pointer-events-auto group-has-[[data-popup-open]]/sidebar-row:pointer-events-auto focus-visible:pointer-events-auto",
+	rowActionButtonBaseClass,
+	sessionActionsVisibleClass,
 )
+const sessionStatusContainerClass =
+	"pointer-events-auto absolute right-2 top-1/2 flex min-h-7 min-w-7 -translate-y-1/2 items-center justify-center gap-1.5 rounded-lg px-1 text-[13px] tabular-nums text-muted-foreground"
 const inlineRowActionButtonClass =
 	"flex size-6 shrink-0 items-center justify-center rounded-md text-muted-foreground transition-colors hover:bg-black/[0.06] hover:text-sidebar-foreground focus-visible:bg-black/[0.06] focus-visible:text-sidebar-foreground focus-visible:outline-none dark:hover:bg-white/[0.08] dark:focus-visible:bg-white/[0.08]"
 const projectInlineRowActionButtonClass = cn(inlineRowActionButtonClass, "size-[22px] rounded-[6px]")
@@ -139,7 +141,7 @@ const projectInlineRowActionIconClass = "size-3.5 stroke-[1.5]"
 
 function sessionActionIcon(actionId: SessionRowActionId) {
 	if (actionId === "rename") return <PencilIcon className={rowMenuIconClass} />
-	if (actionId === "fork") return <GitForkIcon className={rowMenuIconClass} />
+	if (actionId === "fork") return <SplitIcon className={rowMenuIconClass} />
 	return <TrashIcon className={rowMenuIconClass} />
 }
 
@@ -188,7 +190,7 @@ function RowActionsDropdown<TId extends string>({
 	label,
 	iconForAction,
 	onAction,
-	triggerClassName = floatingRowActionButtonClass,
+	triggerClassName = sessionRowActionButtonClass,
 	triggerIconClassName = "size-4",
 	contentSide = "right",
 	contentAlign = "start",
@@ -288,7 +290,10 @@ export const ProjectRow = memo(function ProjectRow({
 	onRemoveProject?: () => void
 	isUnavailable?: boolean
 }) {
-	const actions = buildProjectRowActions({ canRevealInFinder: !!onRevealInFinder })
+	const actions = buildProjectRowActions({
+		canRevealInFinder: !!onRevealInFinder,
+		platform: typeof window !== "undefined" && "devo" in window ? window.devo.platform : undefined,
+	})
 	const handleAction = useCallback(
 		(actionId: ProjectRowActionId) => {
 			if (actionId === "reveal") {
@@ -339,7 +344,7 @@ export const ProjectRow = memo(function ProjectRow({
 						event.stopPropagation()
 						onSelect()
 					}}
-					className="flex h-full min-w-0 items-center gap-2.5 rounded-lg py-0 pr-1 pl-1.5 text-left text-sm leading-none"
+					className="flex h-full min-w-0 items-center gap-2.5 rounded-lg py-0 pr-1 pl-1.5 text-left text-[13px] leading-none"
 				>
 					<ProjectFolderIcon
 						className={cn(
@@ -428,6 +433,7 @@ export const SessionRow = memo(function SessionRow({
 			return
 		}
 		startTransition(() => {
+			appStore.set(customizeOpenAtom, false)
 			navigate({
 				to: "/project/$projectSlug/session/$sessionId",
 				params: { projectSlug: agent.projectSlug, sessionId: agent.id },
@@ -458,6 +464,7 @@ export const SessionRow = memo(function SessionRow({
 		canFork: !!onFork,
 		canDelete: !!onDelete,
 	})
+	const hasSessionActions = sessionActions.length > 0
 	const handleSessionAction = useCallback(
 		(actionId: SessionRowActionId) => {
 			if (actionId === "rename") {
@@ -491,18 +498,28 @@ export const SessionRow = memo(function SessionRow({
 				projectUnavailable && "text-muted-foreground opacity-55",
 			)}
 		>
+			{!isEditing && agent.status === "running" && (
+				<span
+					className="pointer-events-none absolute left-1.5 top-1/2 -translate-y-1/2"
+					aria-hidden="true"
+				>
+					<Loader2Icon className="size-3.5 animate-spin text-[#3396f4]" />
+				</span>
+			)}
 			<button
 				type="button"
 				onClick={isEditing ? undefined : onSelect}
 				className={cn(
-					"flex min-h-8 min-w-0 flex-1 items-center gap-2 rounded-lg py-1 pl-[34px] text-left text-sm leading-tight",
+					"flex min-h-8 min-w-0 flex-1 items-center gap-2 rounded-lg py-1 pl-[34px] text-left",
+					sessionTitleTextClass,
 					hasWideStatusIndicator ? "pr-28" : "pr-12",
 				)}
 			>
 				{isEditing ? (
-					<Input
+					<input
 						ref={inputRef}
 						value={editValue}
+						aria-label="Session name"
 						onChange={(event) => setEditValue(event.target.value)}
 						onKeyDown={(event) => {
 							event.stopPropagation()
@@ -511,13 +528,11 @@ export const SessionRow = memo(function SessionRow({
 						}}
 						onBlur={confirmRename}
 						onClick={(event) => event.stopPropagation()}
-						className="h-6 min-w-0 flex-1 border-none bg-transparent p-0 text-[13px] shadow-none focus-visible:ring-0"
+						className="min-w-0 flex-1 appearance-none border-0 bg-transparent p-0 [font:inherit] text-inherit outline-none"
 					/>
 				) : (
 					<div className="min-w-0 flex-1">
-						<span className="block truncate text-[13px] font-normal tracking-normal">
-							{agent.name}
-						</span>
+						<span className="block truncate">{agent.name}</span>
 						{showProject && (
 							<span className="block truncate text-[11px] leading-4 text-muted-foreground">
 								{agent.project}
@@ -527,23 +542,28 @@ export const SessionRow = memo(function SessionRow({
 				)}
 			</button>
 			{!isEditing && (
-				<span
-					className={cn(
-						"pointer-events-none absolute right-2 top-1/2 flex h-7 -translate-y-1/2 items-center justify-center gap-1.5 rounded-lg px-1 text-[13px] tabular-nums text-muted-foreground transition-opacity duration-150 group-hover/sidebar-row:opacity-0 group-focus-within/sidebar-row:opacity-0",
-						hasWideStatusIndicator ? "min-w-[86px]" : "min-w-7",
-					)}
+				<div
+					className={cn(sessionStatusContainerClass, hasWideStatusIndicator && "min-w-[86px]")}
+					onClick={onSelect}
 				>
-					<SessionRowStatusIndicator agent={agent} lastActive={lastActive} isWorktree={isWorktree} />
-				</span>
-			)}
-			{!isEditing && (
-				<RowActionsDropdown
-					actions={sessionActions}
-					label={`Session actions for ${agent.name}`}
-					iconForAction={sessionActionIcon}
-					onAction={handleSessionAction}
-					contentClassName={sessionMenuContentClass}
-				/>
+					<span
+						className={cn(
+							"pointer-events-none flex h-7 items-center",
+							hasSessionActions && sessionStatusHiddenClass,
+						)}
+					>
+						<SessionRowStatusIndicator agent={agent} lastActive={lastActive} isWorktree={isWorktree} />
+					</span>
+					{hasSessionActions && (
+						<RowActionsDropdown
+							actions={sessionActions}
+							label={`Session actions for ${agent.name}`}
+							iconForAction={sessionActionIcon}
+							onAction={handleSessionAction}
+							contentClassName={sessionMenuContentClass}
+						/>
+					)}
+				</div>
 			)}
 		</div>
 	)

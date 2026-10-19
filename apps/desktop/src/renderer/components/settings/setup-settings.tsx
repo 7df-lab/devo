@@ -15,6 +15,7 @@ import {
 import { useCallback, useEffect, useState } from "react"
 import type { DevoCheckResult } from "../../../preload/api"
 import { onboardingStateAtom } from "../../atoms/onboarding"
+import { SettingsHeader } from "./settings-header"
 import { SettingsRow } from "./settings-row"
 import { SettingsSection } from "./settings-section"
 
@@ -34,9 +35,7 @@ const PROVIDER_LABELS: Record<string, string> = {
 export function SetupSettings() {
 	return (
 		<div className="space-y-8">
-			<div>
-				<h2 className="text-xl font-semibold">Setup</h2>
-			</div>
+			<SettingsHeader title="Setup" />
 
 			<DevoStatusSection />
 			<MigrationSection />
@@ -106,7 +105,7 @@ function DevoStatusSection() {
 			</SettingsRow>
 
 			{result && !result.compatible && result.message && (
-				<div className="px-4 py-2 text-xs text-amber-500">{result.message}</div>
+				<div className="px-4 py-2.5 text-xs text-amber-500">{result.message}</div>
 			)}
 		</SettingsSection>
 	)
@@ -142,13 +141,7 @@ function MigrationSection() {
 	const migratedFrom = onboardingState.migratedFrom ?? []
 
 	if (!onboardingState.migrationPerformed || migratedFrom.length === 0) {
-		return (
-			<SettingsSection title="Configuration Migration">
-				<SettingsRow label="Status" description="No migration has been performed">
-					<span className="text-sm text-muted-foreground">N/A</span>
-				</SettingsRow>
-			</SettingsSection>
-		)
+		return null
 	}
 
 	const migratedLabels = migratedFrom.map((p) => PROVIDER_LABELS[p] ?? p).join(", ")

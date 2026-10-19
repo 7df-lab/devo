@@ -1,0 +1,1 @@
+- Fixed OpenCode Zen and Go requests to identify Devo and send the conversation ID across all supported adapters, including when prompt caching is disabled.

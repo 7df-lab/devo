@@ -40,8 +40,8 @@ impl ServerRuntime {
         let params = crate::AcpFsReadTextFileParams {
             session_id,
             path,
-            line,
-            limit,
+            line: line.and_then(|line| u32::try_from(line).ok()),
+            limit: limit.and_then(|limit| u32::try_from(limit).ok()),
             meta: None,
         };
         let response = self
@@ -112,6 +112,9 @@ impl ServerRuntime {
         let connection_id = self.active_turns.active_connection_id(session_id).await?;
         let connections = self.connections.lock().await;
         let connection = connections.get(&connection_id)?;
+        if connection.protocol != Some(super::connection::ConnectionProtocol::Acp) {
+            return None;
+        }
         client_capabilities_support_fs(&connection.acp_client_capabilities, capability)
             .then_some(connection_id)
     }
@@ -121,27 +124,23 @@ impl ServerRuntime {
 impl ClientFilesystem for ServerRuntime {
     async fn read_text_file(
         self: Arc<Self>,
-        session_id: String,
+        session_id: SessionId,
         path: PathBuf,
         line: Option<u64>,
         limit: Option<u64>,
         cancel_token: CancellationToken,
     ) -> Result<ClientTextFileRead, ToolCallError> {
-        let session_id = SessionId::try_from(session_id.as_str())
-            .map_err(|error| ToolCallError::InvalidInput(error.to_string()))?;
         self.read_acp_client_text_file_with_cancel(session_id, path, line, limit, cancel_token)
             .await
     }
 
     async fn write_text_file(
         self: Arc<Self>,
-        session_id: String,
+        session_id: SessionId,
         path: PathBuf,
         content: String,
         cancel_token: CancellationToken,
     ) -> Result<ClientTextFileWrite, ToolCallError> {
-        let session_id = SessionId::try_from(session_id.as_str())
-            .map_err(|error| ToolCallError::InvalidInput(error.to_string()))?;
         self.write_acp_client_text_file_with_cancel(session_id, path, content, cancel_token)
             .await
     }
@@ -170,6 +169,7 @@ mod tests {
                 meta: None,
             },
             terminal: false,
+            session: None,
             meta: None,
         };
 

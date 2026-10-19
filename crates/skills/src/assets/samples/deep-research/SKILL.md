@@ -36,7 +36,7 @@ This is the static system/initial prompt for the Skill, not a research stage. Lo
 
 Start every research turn with a clarification check. Identify ambiguity in the question, intended decision, audience, scope, time range, geography, terminology, source requirements, and desired output. Use `request_user_input` when an unresolved choice could materially change the research. Clarification may take multiple rounds in the same turn; preserve every non-empty answer in order and use the complete set downstream. If no answer is needed, state the assumptions that set the scope and continue without interrupting the user.
 
-`request_user_input` is available only in PLAN mode. If the current collaboration mode is not PLAN mode, do not call the tool and do not silently guess through a material ambiguity; ask the user to switch to PLAN mode first, then resume clarification. Once PLAN mode is active, use `request_user_input` for the meaningful choices that remain. This mode requirement applies only to clarification; the subsequent research and report-writing phases may proceed as ordinary skill work.
+Use `request_user_input` for the meaningful choices that remain. Do not silently guess through a material ambiguity. This applies to clarification in both build and plan mode; the subsequent research and report-writing phases may proceed as ordinary skill work.
 
 Do not begin broad searching or delegate work before this gate is complete. Do not ask low-value questions whose answers would not change the plan.
 
@@ -66,7 +66,7 @@ Act as a research supervisor after the brief is ready. The supervisor owns decom
 
 ### Worker contract
 
-Each delegated researcher/subagent focuses only on its assigned track. It may use available web search, fetch, code-search, local read, and inspection tools, but it cannot coordinate other agents. It must not write files or modify the workspace unless the parent explicitly assigns that artifact change. Start broad unless an authoritative source is already known, inspect underlying sources, use follow-up searches when evidence is incomplete, and stop when the track is confidently covered.
+Each delegated researcher/subagent focuses only on its assigned track. It may use available web search, fetch, local read, and inspection tools, but it cannot coordinate other agents. It must not write files or modify the workspace unless the parent explicitly assigns that artifact change. Start broad unless an authoritative source is already known, inspect underlying sources, use follow-up searches when evidence is incomplete, and stop when the track is confidently covered.
 
 Every worker returns dense, complete evidence notes (not a final report) with exactly these headings:
 

@@ -135,7 +135,8 @@ pub(crate) fn assistant_content_has_visible_content(content: &[ContentBlock]) ->
         | ContentBlock::ToolResult { content: text, .. } => !text.trim().is_empty(),
         ContentBlock::ProviderReasoning { .. }
         | ContentBlock::ToolUse { .. }
-        | ContentBlock::HostedToolUse { .. } => true,
+        | ContentBlock::HostedToolUse { .. }
+        | ContentBlock::Image { .. } => true,
     })
 }
 
@@ -148,7 +149,8 @@ fn assistant_content_contains_dsml_tool_call_text(content: &[ContentBlock]) -> b
         | ContentBlock::ProviderReasoning { .. }
         | ContentBlock::ToolUse { .. }
         | ContentBlock::HostedToolUse { .. }
-        | ContentBlock::ToolResult { .. } => false,
+        | ContentBlock::ToolResult { .. }
+        | ContentBlock::Image { .. } => false,
     })
 }
 

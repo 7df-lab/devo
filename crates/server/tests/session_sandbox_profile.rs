@@ -1,116 +1,66 @@
 //! Sandbox profile switching via project config seeding and the
-//! `session/sandbox_profile/update` JSON-RPC method. The ACP
+//! canonical `session/metadata/update` JSON-RPC method. The ACP
 //! `sandbox_profile` config option is intentionally hidden; sandbox follows
 //! `/permissions` (and Session Mode) for interactive clients.
 
 use std::path::Path;
-use std::pin::Pin;
 use std::sync::Arc;
 
 use anyhow::Context;
 use anyhow::Result;
-use async_trait::async_trait;
-use devo_core::AgentsMdConfig;
-use devo_core::AppConfigStore;
-use devo_core::BundledSkillsConfig;
-use devo_core::FileSystemSkillCatalog;
-use devo_core::PresetModelCatalog;
-use devo_core::ProviderVendorCatalog;
-use devo_core::SkillsConfig;
-use devo_core::tools::ToolRegistry;
-use devo_protocol::ModelRequest;
-use devo_protocol::ModelResponse;
-use devo_protocol::ResponseContent;
-use devo_protocol::ResponseMetadata;
 use devo_protocol::SessionId;
-use devo_protocol::StopReason;
-use devo_protocol::StreamEvent;
-use devo_protocol::Usage;
-use devo_provider::ModelProviderSDK;
-use devo_provider::SingleProviderRouter;
 use devo_server::ClientTransportKind;
 use devo_server::ServerRuntime;
-use devo_server::ServerRuntimeDependencies;
 use devo_server::SuccessResponse;
-use futures::Stream;
+use devo_server::test_support::NoopProvider;
+use devo_server::test_support::TestRuntime;
 use pretty_assertions::assert_eq;
 use tempfile::TempDir;
 
-struct NoopProvider;
-
-#[async_trait]
-impl ModelProviderSDK for NoopProvider {
-    async fn completion(&self, _request: ModelRequest) -> Result<ModelResponse> {
-        Ok(ModelResponse {
-            id: "noop-response".to_string(),
-            content: vec![ResponseContent::Text("noop".to_string())],
-            stop_reason: Some(StopReason::EndTurn),
-            usage: Usage::default(),
-            metadata: ResponseMetadata::default(),
-        })
-    }
-
-    async fn completion_stream(
-        &self,
-        _request: ModelRequest,
-    ) -> Result<Pin<Box<dyn Stream<Item = Result<StreamEvent>> + Send>>> {
-        Ok(Box::pin(futures::stream::empty()))
-    }
-
-    fn name(&self) -> &str {
-        "noop-sandbox-profile-provider"
-    }
-}
-
 fn build_runtime(data_root: &Path) -> Result<Arc<ServerRuntime>> {
-    let provider: Arc<dyn ModelProviderSDK> = Arc::new(NoopProvider);
-    let db = Arc::new(devo_server::db::Database::open(
-        data_root.join("sandbox_profile.db"),
-    )?);
-    Ok(ServerRuntime::new(
-        data_root.to_path_buf(),
-        ServerRuntimeDependencies::new(
-            Arc::clone(&provider),
-            Arc::new(SingleProviderRouter::new(provider)),
-            Arc::new(ToolRegistry::new()),
-            devo_server::empty_mcp_manager(),
-            "test-model".to_string(),
-            Arc::new(PresetModelCatalog::default()),
-            Arc::new(ProviderVendorCatalog::default()),
-            Box::new(FileSystemSkillCatalog::new(SkillsConfig {
-                bundled: Some(BundledSkillsConfig { enabled: false }),
-                ..SkillsConfig::default()
-            })),
-            AgentsMdConfig::default(),
-            db,
-            Arc::new(std::sync::Mutex::new(AppConfigStore::load(
-                data_root.to_path_buf(),
-                /*workspace_root*/ None,
-            )?)),
-        ),
+    Ok(TestRuntime::new(Arc::new(
+        NoopProvider::text().named("noop-sandbox-profile-provider"),
     ))
+    .db_file("sandbox_profile.db")
+    .runtime(data_root))
 }
 
-async fn initialize_connection(runtime: &Arc<ServerRuntime>) -> Result<u64> {
+#[derive(Clone, Copy)]
+enum TestProtocol {
+    Native,
+    Acp,
+}
+
+async fn initialize_connection(
+    runtime: &Arc<ServerRuntime>,
+    protocol: TestProtocol,
+) -> Result<u64> {
     let (notifications_tx, _notifications_rx) = devo_server::test_outbound_channel(128);
     let connection_id = runtime
         .register_connection(ClientTransportKind::Stdio, notifications_tx)
         .await;
+    let mut params = serde_json::json!({
+        "protocolVersion": 1,
+        "clientCapabilities": {},
+        "clientInfo": {
+            "name": "sandbox-profile-test",
+            "title": "Sandbox Profile Test",
+            "version": "1.0.0"
+        }
+    });
+    match protocol {
+        TestProtocol::Native => {
+            params["_meta"] = serde_json::json!({ "devo": { "protocol": "native" } });
+        }
+        TestProtocol::Acp => {}
+    }
     let initialize_response = runtime
         .handle_incoming(
             connection_id,
             serde_json::json!({
                 "id": 1,
                 "method": "initialize",
-                "params": {
-                    "protocolVersion": 1,
-                    "clientCapabilities": {},
-                    "clientInfo": {
-                        "name": "sandbox-profile-test",
-                        "title": "Sandbox Profile Test",
-                        "version": "1.0.0"
-                    }
-                }
+                "params": params
             }),
         )
         .await
@@ -132,20 +82,18 @@ async fn start_session(
             connection_id,
             serde_json::json!({
                 "id": 2,
-                "method": "session/start",
+                "method": "session/new",
                 "params": {
                     "cwd": cwd,
-                    "ephemeral": false,
-                    "title": null,
-                    "model": "test-model"
+                    "idempotencyKey": "sandbox-profile-session"
                 }
             }),
         )
         .await
-        .context("session/start response")?;
-    let response: SuccessResponse<devo_server::SessionStartResult> =
+        .context("session/new response")?;
+    let response: SuccessResponse<devo_protocol::native::rpc_session::SessionNewResult> =
         serde_json::from_value(response)?;
-    Ok(response.result.session.session_id)
+    Ok(SessionId::from(response.result.session.id.as_str()))
 }
 
 async fn new_acp_session(
@@ -231,8 +179,9 @@ async fn session_new_omits_sandbox_profile_config_option() -> Result<()> {
     write_project_config(data_root.path(), &project_key, "strict")?;
 
     let runtime = build_runtime(data_root.path())?;
-    let connection_id = initialize_connection(&runtime).await?;
-    let result = new_acp_session(&runtime, connection_id, &cwd).await?;
+    let acp_connection_id = initialize_connection(&runtime, TestProtocol::Acp).await?;
+    let native_connection_id = initialize_connection(&runtime, TestProtocol::Native).await?;
+    let result = new_acp_session(&runtime, acp_connection_id, &cwd).await?;
 
     assert!(
         config_option(&result, "sandbox_profile").is_err(),
@@ -241,16 +190,19 @@ async fn session_new_omits_sandbox_profile_config_option() -> Result<()> {
     assert!(config_option(&result, "mode").is_ok());
 
     // Project sandbox_profile still seeds the session; advanced clients use
-    // session/sandbox_profile/update.
+    // the canonical session settings patch.
     let session_id: SessionId = result["sessionId"]
         .as_str()
         .context("session/new included sessionId")?
         .parse()?;
-    let response: SuccessResponse<devo_server::SessionSandboxProfileUpdateResult> =
+    let response: SuccessResponse<devo_protocol::native::rpc_session::SessionMetadataUpdateResult> =
         serde_json::from_value(
-            update_sandbox_profile(&runtime, connection_id, session_id, "strict").await?,
+            update_sandbox_profile(&runtime, native_connection_id, session_id, "strict").await?,
         )?;
-    assert_eq!(response.result.profile, "strict");
+    assert_eq!(
+        response.result.session.settings.sandbox_profile.as_deref(),
+        Some("strict")
+    );
 
     Ok(())
 }
@@ -266,8 +218,9 @@ async fn acp_set_config_option_still_accepts_sandbox_profile_for_compat() -> Res
     )?;
 
     let runtime = build_runtime(data_root.path())?;
-    let connection_id = initialize_connection(&runtime).await?;
-    let result = new_acp_session(&runtime, connection_id, &cwd).await?;
+    let acp_connection_id = initialize_connection(&runtime, TestProtocol::Acp).await?;
+    let native_connection_id = initialize_connection(&runtime, TestProtocol::Native).await?;
+    let result = new_acp_session(&runtime, acp_connection_id, &cwd).await?;
     let session_id: SessionId = result["sessionId"]
         .as_str()
         .context("session/new included sessionId")?
@@ -275,7 +228,7 @@ async fn acp_set_config_option_still_accepts_sandbox_profile_for_compat() -> Res
 
     let response = set_acp_config_option(
         &runtime,
-        connection_id,
+        acp_connection_id,
         session_id,
         "sandbox_profile",
         "read-only",
@@ -289,7 +242,7 @@ async fn acp_set_config_option_still_accepts_sandbox_profile_for_compat() -> Res
 
     let response = set_acp_config_option(
         &runtime,
-        connection_id,
+        acp_connection_id,
         session_id,
         "sandbox_profile",
         "no-such-profile",
@@ -299,7 +252,7 @@ async fn acp_set_config_option_still_accepts_sandbox_profile_for_compat() -> Res
 
     let response = set_acp_config_option(
         &runtime,
-        connection_id,
+        acp_connection_id,
         session_id,
         "sandbox_profile",
         "team-ci",
@@ -308,14 +261,23 @@ async fn acp_set_config_option_still_accepts_sandbox_profile_for_compat() -> Res
     assert!(response.get("error").is_none(), "{response}");
 
     // Full Access implies sandbox off via session mode.
-    let response =
-        set_acp_config_option(&runtime, connection_id, session_id, "mode", "full-access").await?;
+    let response = set_acp_config_option(
+        &runtime,
+        acp_connection_id,
+        session_id,
+        "mode",
+        "full-access",
+    )
+    .await?;
     assert!(response.get("error").is_none(), "{response}");
-    let response: SuccessResponse<devo_server::SessionSandboxProfileUpdateResult> =
+    let response: SuccessResponse<devo_protocol::native::rpc_session::SessionMetadataUpdateResult> =
         serde_json::from_value(
-            update_sandbox_profile(&runtime, connection_id, session_id, "off").await?,
+            update_sandbox_profile(&runtime, native_connection_id, session_id, "off").await?,
         )?;
-    assert_eq!(response.result.profile, "off");
+    assert_eq!(
+        response.result.session.settings.sandbox_profile.as_deref(),
+        Some("off")
+    );
 
     Ok(())
 }
@@ -331,15 +293,16 @@ async fn update_sandbox_profile(
             connection_id,
             serde_json::json!({
                 "id": 5,
-                "method": "session/sandbox_profile/update",
+                "method": "session/metadata/update",
                 "params": {
-                    "session_id": session_id,
-                    "profile": profile
+                    "sessionId": session_id,
+                    "expectedVersion": 0,
+                    "settings": { "sandboxProfile": profile }
                 }
             }),
         )
         .await
-        .context("session/sandbox_profile/update response")
+        .context("session/metadata/update response")
 }
 
 #[tokio::test]
@@ -349,27 +312,27 @@ async fn session_sandbox_profile_update_applies_normalizes_and_rejects() -> Resu
     std::fs::create_dir_all(&cwd)?;
 
     let runtime = build_runtime(data_root.path())?;
-    let connection_id = initialize_connection(&runtime).await?;
+    let connection_id = initialize_connection(&runtime, TestProtocol::Native).await?;
     let session_id = start_session(&runtime, connection_id, &cwd).await?;
 
-    let response: SuccessResponse<devo_server::SessionSandboxProfileUpdateResult> =
+    let response: SuccessResponse<devo_protocol::native::rpc_session::SessionMetadataUpdateResult> =
         serde_json::from_value(
             update_sandbox_profile(&runtime, connection_id, session_id, "strict").await?,
         )?;
     assert_eq!(
-        response.result,
-        devo_server::SessionSandboxProfileUpdateResult {
-            session_id,
-            profile: "strict".to_string(),
-        }
+        response.result.session.settings.sandbox_profile.as_deref(),
+        Some("strict")
     );
 
     // Aliases normalize to the canonical profile name.
-    let response: SuccessResponse<devo_server::SessionSandboxProfileUpdateResult> =
+    let response: SuccessResponse<devo_protocol::native::rpc_session::SessionMetadataUpdateResult> =
         serde_json::from_value(
             update_sandbox_profile(&runtime, connection_id, session_id, "readonly").await?,
         )?;
-    assert_eq!(response.result.profile, "read-only".to_string());
+    assert_eq!(
+        response.result.session.settings.sandbox_profile.as_deref(),
+        Some("read-only")
+    );
 
     // Unknown profiles are rejected with InvalidParams and do not change the
     // active profile: a follow-up valid update still applies cleanly.
@@ -384,11 +347,14 @@ async fn session_sandbox_profile_update_applies_normalizes_and_rejects() -> Resu
         response["error"]["code"],
         serde_json::json!("InvalidParams")
     );
-    let response: SuccessResponse<devo_server::SessionSandboxProfileUpdateResult> =
+    let response: SuccessResponse<devo_protocol::native::rpc_session::SessionMetadataUpdateResult> =
         serde_json::from_value(
             update_sandbox_profile(&runtime, connection_id, session_id, "off").await?,
         )?;
-    assert_eq!(response.result.profile, "off".to_string());
+    assert_eq!(
+        response.result.session.settings.sandbox_profile.as_deref(),
+        Some("off")
+    );
 
     Ok(())
 }
