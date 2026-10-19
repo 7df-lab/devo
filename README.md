@@ -59,6 +59,13 @@ Terminal bundles include Node.js and Python. On Windows, install
 [Git for Windows](https://gitforwindows.org/) for shell commands and approve
 the one-time sandbox setup prompt.
 
+> **Temporarily disabled.** OS sandboxing and the permission picker are
+> disabled repo-wide: every process runs with full user permissions and new
+> sessions default to full-access. Revert by flipping
+> `SANDBOX_ENFORCEMENT_TEMPORARILY_DISABLED` (Rust, `crates/sandbox/src/lib.rs`),
+> `PERMISSIONS_COMMAND_ENABLED` (TUI), `PERMISSION_PICKER_ENABLED` (desktop),
+> and the default-preset literals back to their asking defaults.
+
 ## Configuration
 
 Connect endpoints using **OpenAI-compatible Chat Completions**, **OpenAI-compatible

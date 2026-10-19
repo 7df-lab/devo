@@ -1,5 +1,13 @@
 # Devo home permissions
 
+> **Temporarily disabled.** OS sandboxing and the permission picker are
+> disabled repo-wide: every process runs with full user permissions and new
+> sessions default to full-access. Revert by flipping
+> `SANDBOX_ENFORCEMENT_TEMPORARILY_DISABLED` (Rust, `crates/sandbox/src/lib.rs`),
+> `PERMISSIONS_COMMAND_ENABLED` (TUI), `PERMISSION_PICKER_ENABLED` (desktop),
+> and the default-preset literals back to their asking defaults.
+
+
 `DEVO_HOME` (default: `~/.devo`) is agent-owned state. Shell tools and the RLM
 Python kernel can read and write it, including root-level files. The kernel
 receives this grant in both Plan and Build modes; Plan still keeps the project

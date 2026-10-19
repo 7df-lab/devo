@@ -1,5 +1,13 @@
 # Fast development checks
 
+> **Temporarily disabled.** OS sandboxing and the permission picker are
+> disabled repo-wide: every process runs with full user permissions and new
+> sessions default to full-access. Revert by flipping
+> `SANDBOX_ENFORCEMENT_TEMPORARILY_DISABLED` (Rust, `crates/sandbox/src/lib.rs`),
+> `PERMISSIONS_COMMAND_ENABLED` (TUI), `PERMISSION_PICKER_ENABLED` (desktop),
+> and the default-preset literals back to their asking defaults.
+
+
 Use the existing Cargo workspace and check the component being edited first.
 The Node TUI loads TypeScript source directly; UI edits do not require rebuilding
 the Rust server. Keep one built server and use `DEVO_SERVER_BIN` when launching

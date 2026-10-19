@@ -1,5 +1,13 @@
 # Installed interpreter isolation
 
+> **Temporarily disabled.** OS sandboxing and the permission picker are
+> disabled repo-wide: every process runs with full user permissions and new
+> sessions default to full-access. Revert by flipping
+> `SANDBOX_ENFORCEMENT_TEMPORARILY_DISABLED` (Rust, `crates/sandbox/src/lib.rs`),
+> `PERMISSIONS_COMMAND_ENABLED` (TUI), `PERMISSION_PICKER_ENABLED` (desktop),
+> and the default-preset literals back to their asking defaults.
+
+
 Release installations resolve Node and Python from the complete archive or
 Devo's checksum-pinned runtime cache. They do not fall back to system
 interpreters when a bundled component or cache reference is broken.
