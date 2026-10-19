@@ -411,9 +411,13 @@ impl SessionRuntimeContext {
                 Some(devo_protocol::PermissionPreset::FullAccess) => {
                     devo_safety::PermissionPreset::FullAccess
                 }
-                Some(devo_protocol::PermissionPreset::AutoReview) | None => {
+                Some(devo_protocol::PermissionPreset::AutoReview) => {
                     devo_safety::PermissionPreset::AutoReview
                 }
+                // Sandbox temporarily disabled: new sessions default to
+                // FullAccess so nothing interrupts the user. Flip back to
+                // AutoReview to re-enable the asking default.
+                None => devo_safety::PermissionPreset::FullAccess,
             };
             let sandbox_from_project = project.and_then(|project| project.sandbox_profile.clone());
             let sandbox_from_global = config_store

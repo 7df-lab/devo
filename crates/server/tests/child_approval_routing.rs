@@ -89,6 +89,29 @@ async fn child_approval_routes_to_parent_subscriber_while_parent_idle() -> Resul
 
     let parent_session_id = start_parent_session(&runtime, connection_id, &workspace_root).await?;
 
+    // New sessions default to full-access while the sandbox is disabled;
+    // this test exercises interactive approval routing, so pin the preset
+    // back to "default" (same shape as approval_park_preemption).
+    let tighten_response = runtime
+        .handle_incoming(
+            connection_id,
+            serde_json::json!({
+                "id": 3,
+                "method": "session/metadata/update",
+                "params": {
+                    "sessionId": parent_session_id.to_string(),
+                    "expectedVersion": 1,
+                    "settings": { "permissionProfile": "default" }
+                }
+            }),
+        )
+        .await
+        .context("settings update response")?;
+    assert!(
+        tighten_response.get("error").is_none(),
+        "settings update failed: {tighten_response}"
+    );
+
     // The TUI subscribes with an explicit Session selector (subscription/
     // create); only these selectors count as "controlling" for approvals.
     let subscription_response = runtime

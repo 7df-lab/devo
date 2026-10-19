@@ -204,7 +204,9 @@ async fn park_turn_at_approval(
         subscription_response.get("error").is_none(),
         "subscription/create failed: {subscription_response}"
     );
-    // Sessions start at AutoReview. The explicit unadvertised network request
+    // The session is pinned to "default" below: the product default is
+    // temporarily full-access (sandbox disabled), but this test needs the
+    // interactive-approval behavior. The explicit unadvertised network request
     // on the `ipython` call still requires an interactive approval.
     let tighten_response = runtime
         .handle_incoming(

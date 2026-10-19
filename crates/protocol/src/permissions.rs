@@ -9,12 +9,14 @@ use ts_rs::TS;
 pub enum PermissionPreset {
     /// Read and edit workspace files and run shell commands; network and
     /// outside-workspace writes ask.
-    #[default]
     Default,
     /// Same base policy as default, but eligible approvals may be routed
     /// through an automatic reviewer before the user is interrupted.
     AutoReview,
     /// Allow all tool requests without approval.
+    /// Temporarily the product default while OS sandboxing is disabled; move
+    /// `#[default]` back to `Default` to re-enable the asking default.
+    #[default]
     FullAccess,
 }
 
