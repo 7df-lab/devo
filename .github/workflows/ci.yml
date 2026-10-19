@@ -279,8 +279,9 @@ jobs:
           DEVO_TUI_TEST_TIMEOUT_MS: "180000"
         run: DEVO_HOME="$DEVO_LIVE_ANTHROPIC_HOME" node scripts/run-tmux-smoke.js T2
       - name: Responses wire (real OpenAI)
-        # Optional second secret; skipped when absent.
-        if: secrets.OPENAI_API_KEY != ''
+        # Optional second secret; skipped when absent. The secrets context is
+        # not available in step-level `if`, so read the job env mirror.
+        if: env.OPENAI_API_KEY != ''
         working-directory: apps/tui
         env:
           DEVO_TUI_TEST_TIMEOUT_MS: "180000"
