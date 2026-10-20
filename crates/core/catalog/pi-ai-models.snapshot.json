@@ -1416,63 +1416,6 @@
       "contextWindow": 3500000,
       "maxTokens": 16384
     },
-    "minimax.minimax-m2": {
-      "id": "minimax.minimax-m2",
-      "name": "MiniMax M2",
-      "api": "bedrock-converse-stream",
-      "provider": "amazon-bedrock",
-      "baseUrl": "https://bedrock-runtime.us-east-1.amazonaws.com",
-      "reasoning": true,
-      "input": [
-        "text"
-      ],
-      "cost": {
-        "input": 0.3,
-        "output": 1.2,
-        "cacheRead": 0,
-        "cacheWrite": 0
-      },
-      "contextWindow": 204608,
-      "maxTokens": 128000
-    },
-    "minimax.minimax-m2.1": {
-      "id": "minimax.minimax-m2.1",
-      "name": "MiniMax M2.1",
-      "api": "bedrock-converse-stream",
-      "provider": "amazon-bedrock",
-      "baseUrl": "https://bedrock-runtime.us-east-1.amazonaws.com",
-      "reasoning": true,
-      "input": [
-        "text"
-      ],
-      "cost": {
-        "input": 0.3,
-        "output": 1.2,
-        "cacheRead": 0,
-        "cacheWrite": 0
-      },
-      "contextWindow": 204800,
-      "maxTokens": 131072
-    },
-    "minimax.minimax-m2.5": {
-      "id": "minimax.minimax-m2.5",
-      "name": "MiniMax M2.5",
-      "api": "bedrock-converse-stream",
-      "provider": "amazon-bedrock",
-      "baseUrl": "https://bedrock-runtime.us-east-1.amazonaws.com",
-      "reasoning": true,
-      "input": [
-        "text"
-      ],
-      "cost": {
-        "input": 0.3,
-        "output": 1.2,
-        "cacheRead": 0,
-        "cacheWrite": 0
-      },
-      "contextWindow": 196608,
-      "maxTokens": 98304
-    },
     "mistral.devstral-2-123b": {
       "id": "mistral.devstral-2-123b",
       "name": "Devstral 2 123B",
@@ -7207,94 +7150,6 @@
     }
   },
   "huggingface": {
-    "MiniMaxAI/MiniMax-M2": {
-      "id": "MiniMaxAI/MiniMax-M2",
-      "name": "MiniMax-M2",
-      "api": "openai-completions",
-      "provider": "huggingface",
-      "baseUrl": "https://router.huggingface.co/v1",
-      "compat": {
-        "supportsDeveloperRole": false
-      },
-      "reasoning": true,
-      "input": [
-        "text"
-      ],
-      "cost": {
-        "input": 0.3,
-        "output": 1.2,
-        "cacheRead": 0,
-        "cacheWrite": 0
-      },
-      "contextWindow": 204800,
-      "maxTokens": 131072
-    },
-    "MiniMaxAI/MiniMax-M2.1": {
-      "id": "MiniMaxAI/MiniMax-M2.1",
-      "name": "MiniMax-M2.1",
-      "api": "openai-completions",
-      "provider": "huggingface",
-      "baseUrl": "https://router.huggingface.co/v1",
-      "compat": {
-        "supportsDeveloperRole": false
-      },
-      "reasoning": true,
-      "input": [
-        "text"
-      ],
-      "cost": {
-        "input": 0.3,
-        "output": 1.2,
-        "cacheRead": 0,
-        "cacheWrite": 0
-      },
-      "contextWindow": 204800,
-      "maxTokens": 131072
-    },
-    "MiniMaxAI/MiniMax-M2.5": {
-      "id": "MiniMaxAI/MiniMax-M2.5",
-      "name": "MiniMax-M2.5",
-      "api": "openai-completions",
-      "provider": "huggingface",
-      "baseUrl": "https://router.huggingface.co/v1",
-      "compat": {
-        "supportsDeveloperRole": false
-      },
-      "reasoning": true,
-      "input": [
-        "text"
-      ],
-      "cost": {
-        "input": 0.3,
-        "output": 1.2,
-        "cacheRead": 0.03,
-        "cacheWrite": 0
-      },
-      "contextWindow": 204800,
-      "maxTokens": 131072
-    },
-    "MiniMaxAI/MiniMax-M2.7": {
-      "id": "MiniMaxAI/MiniMax-M2.7",
-      "name": "MiniMax-M2.7",
-      "api": "openai-completions",
-      "provider": "huggingface",
-      "baseUrl": "https://router.huggingface.co/v1",
-      "compat": {
-        "supportsDeveloperRole": false
-      },
-      "reasoning": true,
-      "input": [
-        "text"
-      ],
-      "cost": {
-        "input": 0.3,
-        "output": 1.2,
-        "cacheRead": 0.06,
-        "cacheWrite": 0
-      },
-      "contextWindow": 204800,
-      "maxTokens": 131072
-    },
     "MiniMaxAI/MiniMax-M3": {
       "id": "MiniMaxAI/MiniMax-M3",
       "name": "MiniMax-M3",
@@ -8916,83 +8771,119 @@
     }
   },
   "minimax": {
-    "MiniMax-M2.7": {
-      "id": "MiniMax-M2.7",
-      "name": "MiniMax-M2.7",
+    "MiniMax-M3": {
+      "id": "MiniMax-M3",
+      "name": "MiniMax-M3",
       "api": "anthropic-messages",
       "provider": "minimax",
       "baseUrl": "https://api.minimax.io/anthropic",
       "reasoning": true,
+      "thinkingLevelMap": {
+        "off": "disabled",
+        "minimal": null,
+        "low": null,
+        "medium": null,
+        "high": "high",
+        "xhigh": null,
+        "max": null
+      },
       "input": [
-        "text"
+        "text",
+        "image"
       ],
       "cost": {
         "input": 0.3,
         "output": 1.2,
-        "cacheRead": 0.06,
-        "cacheWrite": 0.375
+        "cacheRead": 0.06
       },
-      "contextWindow": 204800,
-      "maxTokens": 131072
+      "contextWindow": 1000000,
+      "maxTokens": 524288
     },
-    "MiniMax-M2.7-highspeed": {
-      "id": "MiniMax-M2.7-highspeed",
-      "name": "MiniMax-M2.7-highspeed",
+    "MiniMax-M3.1-Flash": {
+      "id": "MiniMax-M3.1-Flash",
+      "name": "MiniMax-M3.1-Flash",
       "api": "anthropic-messages",
       "provider": "minimax",
       "baseUrl": "https://api.minimax.io/anthropic",
       "reasoning": true,
+      "thinkingLevelMap": {
+        "off": null,
+        "minimal": null,
+        "low": "low",
+        "medium": "medium",
+        "high": "high",
+        "xhigh": "xhigh",
+        "max": "max"
+      },
       "input": [
-        "text"
+        "text",
+        "image"
       ],
       "cost": {
-        "input": 0.6,
-        "output": 2.4,
-        "cacheRead": 0.06,
-        "cacheWrite": 0.375
+        "input": 0.15,
+        "output": 0.6,
+        "cacheRead": 0.015
       },
-      "contextWindow": 204800,
-      "maxTokens": 131072
+      "contextWindow": 1000000,
+      "maxTokens": 524288
     }
   },
   "minimax-cn": {
-    "MiniMax-M2.7": {
-      "id": "MiniMax-M2.7",
-      "name": "MiniMax-M2.7",
+    "MiniMax-M3": {
+      "id": "MiniMax-M3",
+      "name": "MiniMax-M3",
       "api": "anthropic-messages",
       "provider": "minimax-cn",
       "baseUrl": "https://api.minimaxi.com/anthropic",
       "reasoning": true,
+      "thinkingLevelMap": {
+        "off": "disabled",
+        "minimal": null,
+        "low": null,
+        "medium": null,
+        "high": "high",
+        "xhigh": null,
+        "max": null
+      },
       "input": [
-        "text"
+        "text",
+        "image"
       ],
       "cost": {
         "input": 0.3,
         "output": 1.2,
-        "cacheRead": 0.06,
-        "cacheWrite": 0.375
+        "cacheRead": 0.06
       },
-      "contextWindow": 204800,
-      "maxTokens": 131072
+      "contextWindow": 1000000,
+      "maxTokens": 524288
     },
-    "MiniMax-M2.7-highspeed": {
-      "id": "MiniMax-M2.7-highspeed",
-      "name": "MiniMax-M2.7-highspeed",
+    "MiniMax-M3.1-Flash": {
+      "id": "MiniMax-M3.1-Flash",
+      "name": "MiniMax-M3.1-Flash",
       "api": "anthropic-messages",
       "provider": "minimax-cn",
       "baseUrl": "https://api.minimaxi.com/anthropic",
       "reasoning": true,
+      "thinkingLevelMap": {
+        "off": null,
+        "minimal": null,
+        "low": "low",
+        "medium": "medium",
+        "high": "high",
+        "xhigh": "xhigh",
+        "max": "max"
+      },
       "input": [
-        "text"
+        "text",
+        "image"
       ],
       "cost": {
-        "input": 0.6,
-        "output": 2.4,
-        "cacheRead": 0.06,
-        "cacheWrite": 0.375
+        "input": 0.15,
+        "output": 0.6,
+        "cacheRead": 0.015
       },
-      "contextWindow": 204800,
-      "maxTokens": 131072
+      "contextWindow": 1000000,
+      "maxTokens": 524288
     }
   },
   "mistral": {
@@ -12764,44 +12655,6 @@
       "contextWindow": 200000,
       "maxTokens": 32000
     },
-    "minimax-m2.5": {
-      "id": "minimax-m2.5",
-      "name": "MiniMax-M2.5",
-      "api": "openai-completions",
-      "provider": "opencode",
-      "baseUrl": "https://opencode.ai/zen/v1",
-      "reasoning": true,
-      "input": [
-        "text"
-      ],
-      "cost": {
-        "input": 0.3,
-        "output": 1.2,
-        "cacheRead": 0.06,
-        "cacheWrite": 0
-      },
-      "contextWindow": 204800,
-      "maxTokens": 131072
-    },
-    "minimax-m2.7": {
-      "id": "minimax-m2.7",
-      "name": "MiniMax-M2.7",
-      "api": "openai-completions",
-      "provider": "opencode",
-      "baseUrl": "https://opencode.ai/zen/v1",
-      "reasoning": true,
-      "input": [
-        "text"
-      ],
-      "cost": {
-        "input": 0.3,
-        "output": 1.2,
-        "cacheRead": 0.06,
-        "cacheWrite": 0
-      },
-      "contextWindow": 204800,
-      "maxTokens": 131072
-    },
     "minimax-m3": {
       "id": "minimax-m3",
       "name": "MiniMax-M3",
@@ -13363,25 +13216,6 @@
       },
       "contextWindow": 1048576,
       "maxTokens": 128000
-    },
-    "minimax-m2.7": {
-      "id": "minimax-m2.7",
-      "name": "MiniMax-M2.7",
-      "api": "openai-completions",
-      "provider": "opencode-go",
-      "baseUrl": "https://opencode.ai/zen/go/v1",
-      "reasoning": true,
-      "input": [
-        "text"
-      ],
-      "cost": {
-        "input": 0.3,
-        "output": 1.2,
-        "cacheRead": 0.06,
-        "cacheWrite": 0
-      },
-      "contextWindow": 204800,
-      "maxTokens": 131072
     },
     "minimax-m3": {
       "id": "minimax-m3",
@@ -16116,191 +15950,6 @@
       },
       "contextWindow": 1048576,
       "maxTokens": 943718
-    },
-    "minimax/minimax-m1": {
-      "id": "minimax/minimax-m1",
-      "name": "MiniMax: MiniMax M1",
-      "api": "openai-completions",
-      "provider": "openrouter",
-      "baseUrl": "https://openrouter.ai/api/v1",
-      "compat": {
-        "supportsReasoningEffort": false
-      },
-      "reasoning": true,
-      "thinkingLevelMap": {
-        "minimal": null,
-        "low": null,
-        "medium": null,
-        "high": "high",
-        "xhigh": null,
-        "max": null
-      },
-      "input": [
-        "text"
-      ],
-      "cost": {
-        "input": 0.55,
-        "output": 2.2,
-        "cacheRead": 0,
-        "cacheWrite": 0
-      },
-      "contextWindow": 1000000,
-      "maxTokens": 40000
-    },
-    "minimax/minimax-m2": {
-      "id": "minimax/minimax-m2",
-      "name": "MiniMax: MiniMax M2",
-      "api": "openai-completions",
-      "provider": "openrouter",
-      "baseUrl": "https://openrouter.ai/api/v1",
-      "compat": {
-        "supportsReasoningEffort": false
-      },
-      "reasoning": true,
-      "thinkingLevelMap": {
-        "off": null,
-        "minimal": null,
-        "low": null,
-        "medium": null,
-        "high": "high",
-        "xhigh": null,
-        "max": null
-      },
-      "input": [
-        "text"
-      ],
-      "cost": {
-        "input": 0.255,
-        "output": 1.02,
-        "cacheRead": 0,
-        "cacheWrite": 0
-      },
-      "contextWindow": 204800,
-      "maxTokens": 131072
-    },
-    "minimax/minimax-m2.1": {
-      "id": "minimax/minimax-m2.1",
-      "name": "MiniMax: MiniMax M2.1",
-      "api": "openai-completions",
-      "provider": "openrouter",
-      "baseUrl": "https://openrouter.ai/api/v1",
-      "compat": {
-        "supportsReasoningEffort": false
-      },
-      "reasoning": true,
-      "thinkingLevelMap": {
-        "off": null,
-        "minimal": null,
-        "low": null,
-        "medium": null,
-        "high": "high",
-        "xhigh": null,
-        "max": null
-      },
-      "input": [
-        "text"
-      ],
-      "cost": {
-        "input": 0.3,
-        "output": 1.2,
-        "cacheRead": 0.03,
-        "cacheWrite": 0
-      },
-      "contextWindow": 204800,
-      "maxTokens": 131072
-    },
-    "minimax/minimax-m2.5": {
-      "id": "minimax/minimax-m2.5",
-      "name": "MiniMax: MiniMax M2.5",
-      "api": "openai-completions",
-      "provider": "openrouter",
-      "baseUrl": "https://openrouter.ai/api/v1",
-      "compat": {
-        "supportsReasoningEffort": false
-      },
-      "reasoning": true,
-      "thinkingLevelMap": {
-        "off": null,
-        "minimal": null,
-        "low": null,
-        "medium": null,
-        "high": "high",
-        "xhigh": null,
-        "max": null
-      },
-      "input": [
-        "text"
-      ],
-      "cost": {
-        "input": 0.27,
-        "output": 1.08,
-        "cacheRead": 0.027,
-        "cacheWrite": 0
-      },
-      "contextWindow": 204800,
-      "maxTokens": 128000
-    },
-    "minimax/minimax-m2.7": {
-      "id": "minimax/minimax-m2.7",
-      "name": "MiniMax: MiniMax M2.7",
-      "api": "openai-completions",
-      "provider": "openrouter",
-      "baseUrl": "https://openrouter.ai/api/v1",
-      "compat": {
-        "supportsReasoningEffort": false
-      },
-      "reasoning": true,
-      "thinkingLevelMap": {
-        "off": null,
-        "minimal": null,
-        "low": null,
-        "medium": null,
-        "high": "high",
-        "xhigh": null,
-        "max": null
-      },
-      "input": [
-        "text"
-      ],
-      "cost": {
-        "input": 0.3,
-        "output": 1.2,
-        "cacheRead": 0.06,
-        "cacheWrite": 0
-      },
-      "contextWindow": 204800,
-      "maxTokens": 131072
-    },
-    "minimax/minimax-m2.7:free": {
-      "id": "minimax/minimax-m2.7:free",
-      "name": "MiniMax: MiniMax M2.7 (free)",
-      "api": "openai-completions",
-      "provider": "openrouter",
-      "baseUrl": "https://openrouter.ai/api/v1",
-      "compat": {
-        "supportsReasoningEffort": false
-      },
-      "reasoning": true,
-      "thinkingLevelMap": {
-        "off": null,
-        "minimal": null,
-        "low": null,
-        "medium": null,
-        "high": "high",
-        "xhigh": null,
-        "max": null
-      },
-      "input": [
-        "text"
-      ],
-      "cost": {
-        "input": 0,
-        "output": 0,
-        "cacheRead": 0,
-        "cacheWrite": 0
-      },
-      "contextWindow": 196608,
-      "maxTokens": 176947
     },
     "minimax/minimax-m3": {
       "id": "minimax/minimax-m3",
@@ -22801,78 +22450,6 @@
       "contextWindow": 1048576,
       "maxTokens": 115200
     },
-    "minimax/minimax-m2.5": {
-      "id": "minimax/minimax-m2.5",
-      "name": "Minimax M2.5",
-      "api": "openai-completions",
-      "provider": "prime-inference",
-      "baseUrl": "https://api.pinference.ai/api/v1",
-      "compat": {
-        "supportsStore": false,
-        "supportsDeveloperRole": false,
-        "supportsReasoningEffort": false,
-        "maxTokensField": "max_tokens",
-        "supportsStrictMode": false,
-        "thinkingFormat": "openrouter"
-      },
-      "reasoning": true,
-      "thinkingLevelMap": {
-        "off": null,
-        "minimal": null,
-        "low": null,
-        "medium": null,
-        "high": "high",
-        "xhigh": null,
-        "max": null
-      },
-      "input": [
-        "text"
-      ],
-      "cost": {
-        "input": 0.6,
-        "output": 2.4,
-        "cacheRead": 0,
-        "cacheWrite": 0
-      },
-      "contextWindow": 204800,
-      "maxTokens": 128000
-    },
-    "minimax/minimax-m2.7": {
-      "id": "minimax/minimax-m2.7",
-      "name": "Minimax M2.7",
-      "api": "openai-completions",
-      "provider": "prime-inference",
-      "baseUrl": "https://api.pinference.ai/api/v1",
-      "compat": {
-        "supportsStore": false,
-        "supportsDeveloperRole": false,
-        "supportsReasoningEffort": false,
-        "maxTokensField": "max_tokens",
-        "supportsStrictMode": false,
-        "thinkingFormat": "openrouter"
-      },
-      "reasoning": true,
-      "thinkingLevelMap": {
-        "off": null,
-        "minimal": null,
-        "low": null,
-        "medium": null,
-        "high": "high",
-        "xhigh": null,
-        "max": null
-      },
-      "input": [
-        "text"
-      ],
-      "cost": {
-        "input": 0.6,
-        "output": 2.4,
-        "cacheRead": 0,
-        "cacheWrite": 0
-      },
-      "contextWindow": 204800,
-      "maxTokens": 131072
-    },
     "minimax/minimax-m3": {
       "id": "minimax/minimax-m3",
       "name": "Minimax M3",
@@ -27312,158 +26889,6 @@
       },
       "contextWindow": 1048576,
       "maxTokens": 1048576
-    },
-    "minimax/minimax-m2": {
-      "id": "minimax/minimax-m2",
-      "name": "MiniMax M2",
-      "api": "anthropic-messages",
-      "provider": "vercel-ai-gateway",
-      "baseUrl": "https://ai-gateway.vercel.sh",
-      "reasoning": true,
-      "input": [
-        "text"
-      ],
-      "cost": {
-        "input": 0.3,
-        "output": 1.2,
-        "cacheRead": 0.03,
-        "cacheWrite": 0.375
-      },
-      "contextWindow": 205000,
-      "maxTokens": 205000
-    },
-    "minimax/minimax-m2.1": {
-      "id": "minimax/minimax-m2.1",
-      "name": "MiniMax M2.1",
-      "api": "anthropic-messages",
-      "provider": "vercel-ai-gateway",
-      "baseUrl": "https://ai-gateway.vercel.sh",
-      "reasoning": true,
-      "input": [
-        "text"
-      ],
-      "cost": {
-        "input": 0.3,
-        "output": 1.2,
-        "cacheRead": 0.03,
-        "cacheWrite": 0.375
-      },
-      "contextWindow": 204800,
-      "maxTokens": 131072
-    },
-    "minimax/minimax-m2.1-lightning": {
-      "id": "minimax/minimax-m2.1-lightning",
-      "name": "MiniMax M2.1 Lightning",
-      "api": "anthropic-messages",
-      "provider": "vercel-ai-gateway",
-      "baseUrl": "https://ai-gateway.vercel.sh",
-      "reasoning": true,
-      "input": [
-        "text"
-      ],
-      "cost": {
-        "input": 0.3,
-        "output": 2.4,
-        "cacheRead": 0.03,
-        "cacheWrite": 0.375
-      },
-      "contextWindow": 204800,
-      "maxTokens": 131072
-    },
-    "minimax/minimax-m2.5": {
-      "id": "minimax/minimax-m2.5",
-      "name": "MiniMax M2.5",
-      "api": "anthropic-messages",
-      "provider": "vercel-ai-gateway",
-      "baseUrl": "https://ai-gateway.vercel.sh",
-      "reasoning": true,
-      "input": [
-        "text"
-      ],
-      "cost": {
-        "input": 0.3,
-        "output": 1.2,
-        "cacheRead": 0.03,
-        "cacheWrite": 0.375
-      },
-      "contextWindow": 204800,
-      "maxTokens": 131000
-    },
-    "minimax/minimax-m2.5-highspeed": {
-      "id": "minimax/minimax-m2.5-highspeed",
-      "name": "MiniMax M2.5 High Speed",
-      "api": "anthropic-messages",
-      "provider": "vercel-ai-gateway",
-      "baseUrl": "https://ai-gateway.vercel.sh",
-      "reasoning": true,
-      "input": [
-        "text"
-      ],
-      "cost": {
-        "input": 0.6,
-        "output": 2.4,
-        "cacheRead": 0.03,
-        "cacheWrite": 0.375
-      },
-      "contextWindow": 204800,
-      "maxTokens": 131000
-    },
-    "minimax/minimax-m2.7": {
-      "id": "minimax/minimax-m2.7",
-      "name": "MiniMax M2.7",
-      "api": "anthropic-messages",
-      "provider": "vercel-ai-gateway",
-      "baseUrl": "https://ai-gateway.vercel.sh",
-      "reasoning": true,
-      "input": [
-        "text"
-      ],
-      "cost": {
-        "input": 0.3,
-        "output": 1.2,
-        "cacheRead": 0.06,
-        "cacheWrite": 0.375
-      },
-      "contextWindow": 204800,
-      "maxTokens": 131000
-    },
-    "minimax/minimax-m2.7-free": {
-      "id": "minimax/minimax-m2.7-free",
-      "name": "MiniMax M2.7 (Free)",
-      "api": "anthropic-messages",
-      "provider": "vercel-ai-gateway",
-      "baseUrl": "https://ai-gateway.vercel.sh",
-      "reasoning": true,
-      "input": [
-        "text"
-      ],
-      "cost": {
-        "input": 0,
-        "output": 0,
-        "cacheRead": 0,
-        "cacheWrite": 0
-      },
-      "contextWindow": 196608,
-      "maxTokens": 196608
-    },
-    "minimax/minimax-m2.7-highspeed": {
-      "id": "minimax/minimax-m2.7-highspeed",
-      "name": "MiniMax M2.7 High Speed",
-      "api": "anthropic-messages",
-      "provider": "vercel-ai-gateway",
-      "baseUrl": "https://ai-gateway.vercel.sh",
-      "reasoning": true,
-      "input": [
-        "text"
-      ],
-      "cost": {
-        "input": 0.6,
-        "output": 2.4,
-        "cacheRead": 0.06,
-        "cacheWrite": 0.375
-      },
-      "contextWindow": 204800,
-      "maxTokens": 131100
     },
     "minimax/minimax-m3": {
       "id": "minimax/minimax-m3",

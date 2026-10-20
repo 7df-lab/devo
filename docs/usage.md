@@ -91,6 +91,24 @@ Its bundled catalog includes model definitions for providers such as DeepSeek,
 Qwen, Kimi, GLM, and MiniMax. You can configure a compatible endpoint or private
 gateway rather than relying on the bundled entries.
 
+The built-in MiniMax endpoints offer `MiniMax-M3` and `MiniMax-M3.1-Flash`;
+Flash is the TUI's MiniMax default. Both have a 1,000,000-token context window
+and a documented 524,288-token output maximum. Devo exposes text and image
+input; the API also accepts video, which Devo's input types do not yet represent.
+Flash always uses adaptive thinking, with low/medium/high/xhigh/max effort
+(default max). M3 supports adaptive thinking or disabled thinking; its Anthropic
+API default is disabled and it ignores effort controls. MiniMax caching is
+automatic; no manual cache-control markers or unpublished cache-write rate are
+added. Cost totals omit cache writes when their price is unavailable.
+
+MiniMax catalog prices are USD per million tokens. Flash uses $0.15 input,
+$0.60 output and $0.015 cache read. M3's flat catalog estimate uses Standard
+prices for inputs up to 512k: $0.30/$1.20/$0.06; above 512k the published rates
+are $0.60/$2.40/$0.12. Priority pricing is 1.5 times the corresponding M3 rate.
+The flat estimator does not model those M3 tiers, and Flash has no service-tier
+parameter. See the [MiniMax API reference](https://platform.minimax.io/docs/api-reference/text-chat-anthropic.md)
+and [pricing](https://platform.minimax.io/docs/pricing/overview.md).
+
 Desktop onboarding, Settings, and the composer share the server's provider and
 model catalog. Onboarding shows all available providers, supports searching by
 provider or model, and refreshes remote model metadata. Use **Refresh catalog**

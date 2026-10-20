@@ -773,6 +773,7 @@ fn build_thinking(level: &str) -> Option<AnthropicThinkingConfig> {
     match level.trim().to_ascii_lowercase().as_str() {
         "" | "default" => None,
         "disabled" => Some(AnthropicThinkingConfig { r#type: "disabled" }),
+        "adaptive" => Some(AnthropicThinkingConfig { r#type: "adaptive" }),
         "enabled" | "low" | "medium" | "high" | "xhigh" | "max" => {
             Some(AnthropicThinkingConfig { r#type: "enabled" })
         }
@@ -1120,6 +1121,33 @@ mod tests {
         assert_eq!(disabled.get("output_config"), None);
         assert_eq!(unknown.get("thinking"), None);
         assert_eq!(unknown.get("output_config"), None);
+    }
+
+    #[test]
+    fn build_request_preserves_adaptive_thinking_and_flash_effort() {
+        let mut request = ModelRequest {
+            model_slug: devo_protocol::ModelProfileKey::Generic,
+            model: "MiniMax-M3.1-Flash".to_string(),
+            system: None,
+            messages: Vec::new(),
+            max_tokens: 1024,
+            tools: None,
+            hosted_tools: Vec::new(),
+            sampling: SamplingControls::default(),
+            request_thinking: Some("adaptive".to_string()),
+            reasoning_effort: Some(ReasoningEffort::Max),
+            extra_body: None,
+        };
+        let flash = build_request(&request, true);
+        assert_eq!(flash["thinking"], json!({ "type": "adaptive" }));
+        assert_eq!(flash["output_config"], json!({ "effort": "max" }));
+        assert_eq!(flash.get("service_tier"), None);
+
+        request.model = "MiniMax-M3".to_string();
+        request.reasoning_effort = None;
+        let m3 = build_request(&request, true);
+        assert_eq!(m3["thinking"], json!({ "type": "adaptive" }));
+        assert_eq!(m3.get("output_config"), None);
     }
 
     #[test]

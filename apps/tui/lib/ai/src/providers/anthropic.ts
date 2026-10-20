@@ -71,7 +71,7 @@ function getCacheControl(
 	cacheRetention?: CacheRetention,
 ): { retention: CacheRetention; cacheControl?: CacheControlEphemeral } {
 	const retention = resolveCacheRetention(cacheRetention);
-	if (retention === "none") {
+	if (retention === "none" || model.id === "MiniMax-M3" || model.id === "MiniMax-M3.1-Flash") {
 		return { retention };
 	}
 	const ttl = retention === "long" && getAnthropicCompat(model).supportsLongCacheRetention ? "1h" : undefined;
@@ -761,6 +761,8 @@ function isAlwaysOnAdaptiveThinkingModel(modelId: string): boolean {
 function supportsAdaptiveThinking(modelId: string): boolean {
 	// Adaptive-thinking model IDs (with or without date suffix).
 	return (
+		modelId === "MiniMax-M3" ||
+		modelId === "MiniMax-M3.1-Flash" ||
 		modelId.includes("opus-4-6") ||
 		modelId.includes("opus-4.6") ||
 		modelId.includes("opus-5") ||
@@ -1025,7 +1027,14 @@ function buildParams(
 
 	// Configure thinking mode: adaptive (Opus 4.6+ and Sonnet 4.6),
 	// budget-based (older models), or explicitly disabled.
-	if (model.reasoning) {
+	if (model.id === "MiniMax-M3.1-Flash") {
+		params.thinking = { type: "adaptive" };
+		params.output_config = { effort: options?.effort ?? "max" } as NonNullable<
+			MessageCreateParamsStreaming["output_config"]
+		>;
+	} else if (model.id === "MiniMax-M3") {
+		params.thinking = { type: options?.thinkingEnabled ? "adaptive" : "disabled" };
+	} else if (model.reasoning) {
 		if (options?.thinkingEnabled) {
 			// Default to "summarized" so Opus 4.7 and Mythos Preview behave like
 			// older Claude 4 models (whose API default is also "summarized").

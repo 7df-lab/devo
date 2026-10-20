@@ -441,7 +441,7 @@ export interface Model<TApi extends Api> {
 		input: number; // $/million tokens
 		output: number; // $/million tokens
 		cacheRead: number; // $/million tokens
-		cacheWrite: number; // $/million tokens
+		cacheWrite?: number; // $/million tokens, omitted when unpublished
 	};
 	contextWindow: number;
 	maxTokens: number;

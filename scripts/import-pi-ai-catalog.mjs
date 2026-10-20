@@ -195,6 +195,10 @@ function convertModels(MODELS) {
 
   for (const [providerId, modelMap] of Object.entries(MODELS)) {
     for (const model of Object.values(modelMap)) {
+      if (/minimax[./-]m[12](?:\D|$)/i.test(model.id)) {
+        skipped += 1;
+        continue;
+      }
       const wireApi = API_MAP[model.api];
       if (!wireApi) {
         skipped += 1;
@@ -260,6 +264,20 @@ function convertModels(MODELS) {
         ...(model.featured ? { priority: 50 } : { priority: 10 }),
         ...(model.cost ? { cost: model.cost } : {}),
       };
+      if (["minimax", "minimax-cn"].includes(providerId)) {
+        const flash = model.id === "MiniMax-M3.1-Flash";
+        converted.reasoning_capability = flash
+          ? { levels: ["low", "medium", "high", "xhigh", "max"] }
+          : "toggle";
+        converted.thinking_level_map = Object.fromEntries(
+          Object.entries(model.thinkingLevelMap).map(([level, value]) => [
+            level, value === null || level === "off" ? value : "adaptive",
+          ]),
+        );
+        converted.default_reasoning_selection = flash ? "max" : "off";
+        if (flash) converted.default_reasoning_effort = "max";
+        else delete converted.default_reasoning_effort;
+      }
       if (wireApi !== majorityApi) {
         converted.wire_api = wireApi;
       }

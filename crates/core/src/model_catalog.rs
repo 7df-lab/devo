@@ -525,6 +525,46 @@ mod tests {
     }
 
     #[test]
+    fn builtin_minimax_models_resolve_current_thinking_modes() {
+        let catalog = PresetModelCatalog::load().expect("load provider catalog");
+        for provider in ["minimax", "minimax-cn"] {
+            let flash = catalog
+                .get(&format!("{provider}/MiniMax-M3.1-Flash"))
+                .expect("Flash model");
+            assert_eq!(flash.context_window, 1_000_000);
+            assert_eq!(flash.max_tokens, Some(524_288));
+            let default = flash.resolve_reasoning_effort_selection(None);
+            assert_eq!(default.request_thinking.as_deref(), Some("adaptive"));
+            assert_eq!(
+                default.request_reasoning_effort,
+                Some(crate::ReasoningEffort::Max)
+            );
+            let off = flash.resolve_reasoning_effort_selection(Some("off"));
+            assert_eq!(off.request_thinking.as_deref(), Some("adaptive"));
+
+            let m3 = catalog
+                .get(&format!("{provider}/MiniMax-M3"))
+                .expect("M3 model");
+            assert_eq!(
+                m3.resolve_reasoning_effort_selection(None)
+                    .request_thinking
+                    .as_deref(),
+                Some("disabled")
+            );
+            assert_eq!(
+                m3.resolve_reasoning_effort_selection(Some("high"))
+                    .request_thinking
+                    .as_deref(),
+                Some("adaptive")
+            );
+        }
+        for model in catalog.list_visible() {
+            let id = model.slug.to_ascii_lowercase();
+            assert!(!id.contains("minimax-m2") && !id.contains("minimax-m1"));
+        }
+    }
+
+    #[test]
     fn builtin_catalog_resolves_visible_defaults() {
         let catalog = PresetModelCatalog::load().expect("load catalog");
         let model = catalog.resolve_for_turn(None).expect("resolve default");

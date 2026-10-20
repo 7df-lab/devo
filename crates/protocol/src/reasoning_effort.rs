@@ -386,6 +386,9 @@ pub(crate) fn nearest_effort(
     target: ReasoningEffort,
     supported: &[ReasoningEffort],
 ) -> ReasoningEffort {
+    if supported.contains(&target) {
+        return target;
+    }
     let target_rank = effort_rank(target);
     supported
         .iter()
@@ -561,6 +564,18 @@ mod tests {
         assert_eq!(
             " high ".parse::<ReasoningEffort>(),
             Err("invalid reasoning_effort:  high ".to_string())
+        );
+    }
+
+    #[test]
+    fn nearest_effort_preserves_distinct_max_and_xhigh_selections() {
+        let supported = [ReasoningEffort::XHigh, ReasoningEffort::Max];
+        for effort in supported {
+            assert_eq!(super::nearest_effort(effort, &supported), effort);
+        }
+        assert_eq!(
+            super::nearest_effort(ReasoningEffort::Max, &[ReasoningEffort::XHigh]),
+            ReasoningEffort::XHigh
         );
     }
 

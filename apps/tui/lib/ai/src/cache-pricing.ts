@@ -15,7 +15,7 @@ export function hasStandardAnthropicCachePricing<TApi extends Api>(model: Model<
 	const modelId = model.id.toLowerCase();
 	const isAnthropicModel =
 		model.provider === "anthropic" || modelId.startsWith("anthropic/") || modelId.startsWith("claude-");
-	if (!isAnthropicModel) {
+	if (!isAnthropicModel || model.cost.cacheWrite === undefined) {
 		return false;
 	}
 
