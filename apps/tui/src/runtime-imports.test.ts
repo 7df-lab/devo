@@ -1,7 +1,8 @@
-import { readdirSync, readFileSync } from "node:fs";
-import { join } from "node:path";
-import { test } from "bun:test";
 import assert from "node:assert/strict";
+import test from "node:test";
+import { readdirSync, readFileSync } from "node:fs";
+import { dirname, join } from "node:path";
+import { fileURLToPath } from "node:url";
 
 /**
  * The release bundle deletes apps/tui's `lib/` directory after materializing
@@ -11,7 +12,7 @@ import assert from "node:assert/strict";
  * specifiers (`@earendil-works/...`); `import type` is erased at transpile and
  * stays fine.
  */
-const repoTui = join(import.meta.dir, "..");
+const repoTui = join(dirname(fileURLToPath(import.meta.url)), "..");
 
 function collectSourceFiles(directory: string): string[] {
   const files: string[] = [];
