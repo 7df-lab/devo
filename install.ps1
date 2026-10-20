@@ -488,7 +488,10 @@ function Install-DevoOnline {
         try {
             foreach ($kind in @("node", "python")) {
                 $shell = [PowerShell]::Create()
-                $workerScript = "param(`$Kind, `$Digest, `$Asset, `$BaseUrl)`n`$ErrorActionPreference = 'Stop'`nfunction Receive-DevoAsset { $((Get-Command Receive-DevoAsset).Definition) }`nfunction Get-CachedDevoRuntime { $((Get-Command Get-CachedDevoRuntime).Definition) }`nGet-CachedDevoRuntime -Kind `$Kind -Digest `$Digest -Asset `$Asset -BaseUrl `$BaseUrl"
+                # Function definitions live only in this runspace; the worker
+                # runspaces get them re-declared, including the PS 3.0-safe
+                # SHA-256 helper used by Get-CachedDevoRuntime.
+                $workerScript = "param(`$Kind, `$Digest, `$Asset, `$BaseUrl)`n`$ErrorActionPreference = 'Stop'`nfunction Get-Sha256Hex { $((Get-Command Get-Sha256Hex).Definition) }`nfunction Receive-DevoAsset { $((Get-Command Receive-DevoAsset).Definition) }`nfunction Get-CachedDevoRuntime { $((Get-Command Get-CachedDevoRuntime).Definition) }`nGet-CachedDevoRuntime -Kind `$Kind -Digest `$Digest -Asset `$Asset -BaseUrl `$BaseUrl"
                 [void]$shell.AddScript($workerScript).AddArgument($kind).AddArgument($packs[$kind].Digest).AddArgument($packs[$kind].Asset).AddArgument($runtimeBase)
                 $workers += @{ Kind = $kind; Shell = $shell; Handle = $shell.BeginInvoke() }
             }
