@@ -36,7 +36,7 @@ import type {
 } from "@earendil-works/pi-coding-agent/agent-connection";
 import type { ThinkingLevel } from "@earendil-works/pi-agent-core";
 import type { ContextTreeNode } from "../lib/coding-agent/src/core/context-tree.js";
-import { PERMISSIONS_COMMAND_ENABLED } from "../lib/coding-agent/src/core/slash-commands.js";
+import { PERMISSIONS_COMMAND_ENABLED } from "@earendil-works/pi-coding-agent/slash-commands";
 import type { BashResult } from "../lib/coding-agent/src/core/bash-executor.js";
 import { measureAsync } from "@earendil-works/pi-coding-agent/timings";
 import { StdioJsonRpc, type JsonRpcId } from "./stdio-jsonrpc.js";

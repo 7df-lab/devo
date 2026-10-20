@@ -18,6 +18,7 @@
 		"./auth-storage": "./src/core/auth-storage.ts",
 		"./model-registry": "./src/core/model-registry.ts",
 		"./settings-manager": "./src/core/settings-manager.ts",
+		"./slash-commands": "./src/core/slash-commands.ts",
 		"./timings": "./src/core/timings.ts",
 		"./messages": "./src/core/messages.ts",
 		"./theme": "./src/modes/interactive/theme/theme.ts"
