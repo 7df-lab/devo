@@ -21,6 +21,19 @@ Add-Type -AssemblyName System.IO.Compression.FileSystem
 $Repo = "7df-lab/devo"
 $RipgrepRepo = "BurntSushi/ripgrep"
 
+# SHA-256 via .NET, uppercase hex like Get-FileHash: Get-FileHash requires
+# Windows PowerShell 4+, but `devo upgrade` must also work under 3.0
+# (the Windows 8 / Server 2012 default), where the cmdlet does not exist.
+function Get-Sha256Hex {
+    param([Parameter(Mandatory = $true)][string]$Path)
+    $sha = [System.Security.Cryptography.SHA256]::Create()
+    try {
+        $stream = [System.IO.File]::OpenRead($Path)
+        try { ($sha.ComputeHash($stream) | ForEach-Object { $_.ToString('X2') }) -join '' }
+        finally { $stream.Dispose() }
+    } finally { $sha.Dispose() }
+}
+
 # ── Platform detection ───────────────────────────────────────────────────
 function Get-Target {
     $arch = if ($env:PROCESSOR_ARCHITEW6432 -eq "ARM64" -or $env:PROCESSOR_ARCHITECTURE -eq "ARM64") { "aarch64" } elseif ([Environment]::Is64BitOperatingSystem) { "x86_64" } else {
@@ -318,7 +331,7 @@ function Install-RipgrepSidecar {
     Write-Host "Downloading ripgrep $rgVersion for $rgTarget ..."
 
     $rgZipPath = Join-Path $rgTmpDir "ripgrep.zip"
-    Invoke-WebRequest -Uri $rgArchiveUrl -OutFile $rgZipPath
+    Invoke-WebRequest -UseBasicParsing -Uri $rgArchiveUrl -OutFile $rgZipPath
     [IO.Compression.ZipFile]::ExtractToDirectory($rgZipPath, $rgTmpDir)
 
     $rgExe = Get-ChildItem -Recurse -Filter "rg.exe" -Path $rgTmpDir | Select-Object -First 1
@@ -368,7 +381,7 @@ function Test-DevoBundle {
             $complete = Join-Path $entry ".complete"
             $binaryHash = Join-Path $entry ".binary.sha256"
             if (-not (Test-Path -LiteralPath $complete) -or -not (Test-Path -LiteralPath $binaryHash)) { return $false }
-            if ([IO.File]::ReadAllText($complete).Trim() -ne (Split-Path $entry -Leaf) -or (Get-FileHash -LiteralPath (Join-Path $runtimeRoot "$kind.exe") -Algorithm SHA256).Hash -ine [IO.File]::ReadAllText($binaryHash).Trim()) { return $false }
+            if ([IO.File]::ReadAllText($complete).Trim() -ne (Split-Path $entry -Leaf) -or (Get-Sha256Hex (Join-Path $runtimeRoot "$kind.exe")) -ine [IO.File]::ReadAllText($binaryHash).Trim()) { return $false }
         }
     }
     try { return (Get-Content -LiteralPath (Join-Path $Directory "runtime\manifest.json") -Raw | ConvertFrom-Json).schema -eq 1 } catch { return $false }
@@ -408,7 +421,7 @@ function Get-CachedDevoRuntime {
         $complete = Join-Path $destination ".complete"
         $binaryHash = Join-Path $destination ".binary.sha256"
         if ((Test-Path -LiteralPath $complete) -and (Test-Path -LiteralPath $binary) -and (Test-Path -LiteralPath $binaryHash)) {
-            if ([IO.File]::ReadAllText($complete).Trim() -eq $Digest -and (Get-FileHash -LiteralPath $binary -Algorithm SHA256).Hash -ieq [IO.File]::ReadAllText($binaryHash).Trim()) {
+            if ([IO.File]::ReadAllText($complete).Trim() -eq $Digest -and (Get-Sha256Hex $binary) -ieq [IO.File]::ReadAllText($binaryHash).Trim()) {
                 Write-Host "Using cached $Kind runtime."
                 return (Join-Path $destination "runtime\$Kind")
             }
@@ -417,13 +430,13 @@ function Get-CachedDevoRuntime {
         $archive = Join-Path $stage "pack.tar.gz"
         Write-Host "Downloading $Kind runtime ..."
         Receive-DevoAsset -Url "$BaseUrl/$Asset" -Destination $archive
-        if ((Get-FileHash -LiteralPath $archive -Algorithm SHA256).Hash -ine $Digest) { throw "Runtime SHA-256 verification failed: $Asset" }
+        if ((Get-Sha256Hex $archive) -ine $Digest) { throw "Runtime SHA-256 verification failed: $Asset" }
         & "$env:SystemRoot\System32\tar.exe" -xzf $archive -C $stage
         if ($LASTEXITCODE -ne 0) { throw "Failed to extract $Asset" }
         Remove-Item -LiteralPath $archive
         $extractedBinary = Join-Path $stage "runtime\$Kind\$Kind.exe"
         if (-not (Test-Path -LiteralPath $extractedBinary -PathType Leaf)) { throw "Incomplete $Kind runtime pack" }
-        [IO.File]::WriteAllText((Join-Path $stage ".binary.sha256"), (Get-FileHash -LiteralPath $extractedBinary -Algorithm SHA256).Hash)
+        [IO.File]::WriteAllText((Join-Path $stage ".binary.sha256"), (Get-Sha256Hex $extractedBinary))
         [IO.File]::WriteAllText((Join-Path $stage ".complete"), $Digest)
         if (Test-Path -LiteralPath $destination) {
             # Preserve any in-use damaged tree; never delete or change a runtime
@@ -475,13 +488,16 @@ function Install-DevoOnline {
         try {
             foreach ($kind in @("node", "python")) {
                 $shell = [PowerShell]::Create()
-                $workerScript = "param(`$Kind, `$Digest, `$Asset, `$BaseUrl)`n`$ErrorActionPreference = 'Stop'`nfunction Receive-DevoAsset { $((Get-Command Receive-DevoAsset).Definition) }`nfunction Get-CachedDevoRuntime { $((Get-Command Get-CachedDevoRuntime).Definition) }`nGet-CachedDevoRuntime -Kind `$Kind -Digest `$Digest -Asset `$Asset -BaseUrl `$BaseUrl"
+                # Function definitions live only in this runspace; the worker
+                # runspaces get them re-declared, including the PS 3.0-safe
+                # SHA-256 helper used by Get-CachedDevoRuntime.
+                $workerScript = "param(`$Kind, `$Digest, `$Asset, `$BaseUrl)`n`$ErrorActionPreference = 'Stop'`nfunction Get-Sha256Hex { $((Get-Command Get-Sha256Hex).Definition) }`nfunction Receive-DevoAsset { $((Get-Command Receive-DevoAsset).Definition) }`nfunction Get-CachedDevoRuntime { $((Get-Command Get-CachedDevoRuntime).Definition) }`nGet-CachedDevoRuntime -Kind `$Kind -Digest `$Digest -Asset `$Asset -BaseUrl `$BaseUrl"
                 [void]$shell.AddScript($workerScript).AddArgument($kind).AddArgument($packs[$kind].Digest).AddArgument($packs[$kind].Asset).AddArgument($runtimeBase)
                 $workers += @{ Kind = $kind; Shell = $shell; Handle = $shell.BeginInvoke() }
             }
             $appArchive = Join-Path $TempRoot "app.tar.gz"
             Receive-DevoAsset -Url "$baseUrl/$($packs.app.Asset)" -Destination $appArchive
-            if ((Get-FileHash -LiteralPath $appArchive -Algorithm SHA256).Hash -ine $packs.app.Digest) { throw "App SHA-256 verification failed" }
+            if ((Get-Sha256Hex $appArchive) -ine $packs.app.Digest) { throw "App SHA-256 verification failed" }
             & "$env:SystemRoot\System32\tar.exe" -xzf $appArchive -C $extracted
             if ($LASTEXITCODE -ne 0) { throw "Failed to extract app archive" }
         } catch { $failure = $_ } finally {
@@ -515,7 +531,7 @@ function Install-DevoOnline {
 function Test-ArchiveChecksum {
     param([string]$Archive, [string]$ChecksumFile, [string]$AssetName)
     $line = Get-Content -LiteralPath $ChecksumFile | Where-Object { $_ -match ("^[a-fA-F0-9]{64}  " + [regex]::Escape($AssetName) + "$") } | Select-Object -First 1
-    if (-not $line -or (Get-FileHash -LiteralPath $Archive -Algorithm SHA256).Hash -ine $line.Substring(0, 64)) {
+    if (-not $line -or (Get-Sha256Hex $Archive) -ine $line.Substring(0, 64)) {
         throw "Release archive SHA-256 verification failed: $AssetName"
     }
 }
