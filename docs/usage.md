@@ -120,6 +120,20 @@ Local catalog files can still be refreshed, and the bundled catalog is always av
 Model requests go to the endpoint you configure. For local model traffic,
 choose a compatible local endpoint.
 
+### Errors during a conversation
+
+A saved API key does not guarantee available credits. If an OpenAI-compatible
+Responses stream reports `error` or `response.failed`, Devo ends that turn as a
+failure and displays the provider's error in the conversation, even when no
+assistant text arrived. Text already received remains visible.
+
+Within these stream events, `insufficient_quota` and `credit_balance_exhausted`
+are quota failures, not login failures. Devo does not automatically retry them
+or invalidate the saved credential. Add credits or choose another configured
+provider, then send a new message. The failed turn remains visible when the
+session is resumed. Non-success HTTP responses retain their existing status-code
+classification; this handling applies to failures inside an established SSE stream.
+
 ## Installation
 
 ### Desktop app

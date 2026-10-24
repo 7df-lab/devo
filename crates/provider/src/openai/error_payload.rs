@@ -40,6 +40,24 @@ pub(super) fn provider_error_from_payload(
         return Some(error);
     }
 
+    // A depleted balance is not a transient rate limit, even when the
+    // payload also carries numeric code 429. Keep this distinct from authentication.
+    if [
+        payload.kind.as_deref(),
+        payload.code.as_ref().and_then(Value::as_str),
+    ]
+    .into_iter()
+    .flatten()
+    .any(|value| {
+        value.eq_ignore_ascii_case("insufficient_quota")
+            || value.eq_ignore_ascii_case("credit_balance_exhausted")
+    }) {
+        return Some(ProviderError::QuotaExceededError {
+            message,
+            provider_name,
+        });
+    }
+
     Some(match status_code {
         Some(401 | 403) => ProviderError::AuthenticationError {
             message,
@@ -222,5 +240,39 @@ mod tests {
                 "limit": null
             })
         );
+    }
+
+    #[test]
+    fn quota_metadata_takes_precedence_over_retryable_status_codes() {
+        let request = ModelRequest {
+            model_slug: ModelProfileKey::Generic,
+            model: "provider-model".to_string(),
+            system: None,
+            messages: Vec::new(),
+            max_tokens: 16,
+            tools: None,
+            hosted_tools: Vec::new(),
+            sampling: Default::default(),
+            request_thinking: None,
+            reasoning_effort: None,
+            extra_body: None,
+        };
+        let expected = json!({
+            "error_kind": "quota_exceeded_error",
+            "message": "No credits remain",
+            "provider_name": "openai",
+        });
+        for payload in [
+            json!({"message": "No credits remain", "type": "insufficient_quota"}),
+            json!({"message": "No credits remain", "code": "credit_balance_exhausted"}),
+            json!({"message": "No credits remain", "type": "insufficient_quota", "code": 429}),
+        ] {
+            let error = provider_error_from_payload(&json!({"error": payload}), &request)
+                .expect("quota provider error");
+            assert_eq!(
+                serde_json::to_value(error).expect("serialize quota error"),
+                expected
+            );
+        }
     }
 }
