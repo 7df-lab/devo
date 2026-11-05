@@ -431,9 +431,7 @@ function Get-CachedDevoRuntime {
         Write-Host "Downloading $Kind runtime ..."
         Receive-DevoAsset -Url "$BaseUrl/$Asset" -Destination $archive
         if ((Get-Sha256Hex $archive) -ine $Digest) { throw "Runtime SHA-256 verification failed: $Asset" }
-        # Native bsdtar/libarchive 3.8.9 needs an explicit UTF-8 reader charset
-        # for non-ASCII entries (libarchive#3063).
-        & "$env:SystemRoot\System32\tar.exe" --options hdrcharset=UTF-8 -xzf $archive -C $stage
+        & "$env:SystemRoot\System32\tar.exe" -xzf $archive -C $stage
         if ($LASTEXITCODE -ne 0) { throw "Failed to extract $Asset" }
         Remove-Item -LiteralPath $archive
         $extractedBinary = Join-Path $stage "runtime\$Kind\$Kind.exe"
@@ -500,7 +498,7 @@ function Install-DevoOnline {
             $appArchive = Join-Path $TempRoot "app.tar.gz"
             Receive-DevoAsset -Url "$baseUrl/$($packs.app.Asset)" -Destination $appArchive
             if ((Get-Sha256Hex $appArchive) -ine $packs.app.Digest) { throw "App SHA-256 verification failed" }
-            & "$env:SystemRoot\System32\tar.exe" --options hdrcharset=UTF-8 -xzf $appArchive -C $extracted
+            & "$env:SystemRoot\System32\tar.exe" -xzf $appArchive -C $extracted
             if ($LASTEXITCODE -ne 0) { throw "Failed to extract app archive" }
         } catch { $failure = $_ } finally {
             foreach ($worker in $workers) {

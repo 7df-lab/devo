@@ -36,11 +36,6 @@ export async function bundleRuntime(target: string, output: string, rg: string, 
   const backendNames = [`devo${ext}`, ...(platform === "win32" ? WINDOWS_SANDBOX_HELPERS : [])];
   // Git Bash's GNU tar treats C: paths as remote hosts. Use native bsdtar.
   const tar = process.platform === "win32" ? join(process.env.SystemRoot ?? "C:/Windows", "System32/tar.exe") : "tar";
-  // Native Windows bsdtar/libarchive 3.8.9 needs an explicit UTF-8 reader
-  // charset for non-ASCII entries (libarchive#3063). Apply it only to tar
-  // inputs: the Windows Node source is a ZIP and format options are not shared.
-  const tarOptionsFor = (archive: string) =>
-    process.platform === "win32" && archive.endsWith(".tar.gz") ? ["--options", "hdrcharset=UTF-8"] : [];
   for (const file of [...backendNames.map(name => join(binaryDir, name)), rg]) {
     if (!existsSync(file)) throw new Error(`Missing release binary ${file}`);
   }
@@ -51,14 +46,14 @@ export async function bundleRuntime(target: string, output: string, rg: string, 
     const nodeArchive = await download(source.node, cache);
     const nodeExtract = join(work, "node");
     mkdirSync(nodeExtract);
-    run(tar, [...tarOptionsFor(nodeArchive), "-xf", nodeArchive, "-C", nodeExtract]);
+    run(tar, ["-xf", nodeArchive, "-C", nodeExtract]);
     const nodeRoot = join(nodeExtract, readdirSync(nodeExtract)[0]);
     const nodePath = join(output, "runtime/node", platform === "win32" ? "node.exe" : "bin/node");
     copyFileSync(join(nodeRoot, platform === "win32" ? "node.exe" : "bin/node"), nodePath);
     copyFileSync(join(nodeRoot, "LICENSE"), join(output, "runtime/node/LICENSE"));
     if (platform !== "win32") chmodSync(nodePath, 0o755);
     const pythonArchive = await download(source.python, cache);
-    run(tar, [...tarOptionsFor(pythonArchive), "-xf", pythonArchive, "-C", join(output, "runtime")]);
+    run(tar, ["-xf", pythonArchive, "-C", join(output, "runtime")]);
     const site = join(output, "runtime/python-site");
     run("uv", ["pip", "install", "--python-version", "3.13", "--python-platform", runtimeTarget,
       "--target", site, "--only-binary", ":all:", "--require-hashes", "--no-compile-bytecode",
