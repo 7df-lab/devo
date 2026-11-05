@@ -116,12 +116,7 @@ test("real installers reuse runtimes across upgrades, repair damage, reject corr
     const origin = `http://127.0.0.1:${server.port}`;
     let result = await installOnline(root, destination, cache, origin, target);
     if (result.exit !== 0) throw new Error(`${result.stdout}\n${result.stderr}`);
-    const runtimeRequests = requests.filter(name => name.startsWith("devo-runtime-")).sort();
-    if (JSON.stringify(runtimeRequests) !== JSON.stringify(first.slice(1).map(parts => parts[2]).sort())) {
-      console.log("CONCURRENT_REQUEST_LOG", JSON.stringify(requestLog));
-      console.log("CONCURRENT_CACHE", JSON.stringify(readdirSync(concurrentCache, { recursive: true })));
-    }
-    expect(runtimeRequests).toEqual(first.slice(1).map(parts => parts[2]).sort());
+    expect(requests.filter(name => name.startsWith("devo-runtime-")).sort()).toEqual(first.slice(1).map(parts => parts[2]).sort());
     expect(runtimeUrls.every(path => path.startsWith("/runtime-packs/"))).toBe(true);
     expect({ localNode: existsSync(join(destination, "runtime/node")), localPython: existsSync(join(destination, "runtime/python")), nodeReference: existsSync(join(destination, "runtime/node.path")), appModule: existsSync(join(destination, "runtime/python-site/rlm/repl.py")) }).toEqual({ localNode: false, localPython: false, nodeReference: true, appModule: true });
     requests.length = 0;
@@ -186,7 +181,12 @@ test("real installers reuse runtimes across upgrades, repair damage, reject corr
     const concurrentCache = join(root, "concurrent cache");
     const results = await Promise.all(["one", "two"].map(name => installOnline(root, join(root, name), concurrentCache, origin, target)));
     for (const item of results) if (item.exit !== 0) throw new Error(`${item.stdout}\n${item.stderr}`);
-    expect(requests.filter(name => name.startsWith("devo-runtime-")).sort()).toEqual(first.slice(1).map(parts => parts[2]).sort());
+    const concurrentRuntimeRequests = requests.filter(name => name.startsWith("devo-runtime-")).sort();
+    if (JSON.stringify(concurrentRuntimeRequests) !== JSON.stringify(first.slice(1).map(parts => parts[2]).sort())) {
+      console.log("CONCURRENT_REQUEST_LOG", JSON.stringify(requestLog));
+      console.log("CONCURRENT_CACHE", JSON.stringify(readdirSync(concurrentCache, { recursive: true })));
+    }
+    expect(concurrentRuntimeRequests).toEqual(first.slice(1).map(parts => parts[2]).sort());
     expect(readdirSync(concurrentCache).some(name => name.startsWith(".stage"))).toBe(false);
     const entrypoint = await installOnline(root, join(root, "entrypoint install"), cache, origin, target, "v0.2.0", "entrypoint");
     if (entrypoint.exit !== 0) throw new Error(`${entrypoint.stdout}\n${entrypoint.stderr}`);
