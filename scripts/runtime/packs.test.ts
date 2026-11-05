@@ -58,8 +58,26 @@ test("runtime tar archives are reproducible and preserve long Unicode paths, exe
     const extracted = join(root, "extracted");
     mkdirSync(extracted);
     const tar = process.platform === "win32" ? join(process.env.SystemRoot!, "System32/tar.exe") : "tar";
+    // DIAGNOSTIC: gather Windows native tar evidence without hiding exit/stderr.
+    const version = Bun.spawnSync([tar, "--version"], { stdout: "pipe", stderr: "pipe" });
+    console.log("DIAG tar --version", { exit: version.exitCode, stdout: version.stdout.toString(), stderr: version.stderr.toString() });
+    const listed = Bun.spawnSync([tar, "-tzf", first], { stdout: "pipe", stderr: "pipe" });
+    console.log("DIAG tar -tzf", { exit: listed.exitCode, stdout: listed.stdout.toString(), stderr: listed.stderr.toString() });
     const result = Bun.spawnSync([tar, "-xzf", first, "-C", extracted], { stdout: "pipe", stderr: "pipe" });
-    expect({ exit: result.exitCode, stderr: result.stderr.toString(), longPath: readFileSync(join(extracted, long), "utf8") }).toEqual({ exit: 0, stderr: "", longPath: "unicode payload" });
+    let extractedEntries: unknown;
+    try {
+      extractedEntries = readdirSync(extracted, { recursive: true });
+    } catch (error) {
+      extractedEntries = String(error);
+    }
+    let longPath: string | null = null;
+    try {
+      longPath = readFileSync(join(extracted, long), "utf8");
+    } catch (error) {
+      console.log("DIAG longPath error", String(error));
+    }
+    console.log("DIAG tar extract", { exit: result.exitCode, stderr: result.stderr.toString(), extractedEntries });
+    expect({ exit: result.exitCode, stderr: result.stderr.toString(), longPath }).toEqual({ exit: 0, stderr: "", longPath: "unicode payload" });
     if (process.platform !== "win32") expect(readFileSync(join(extracted, "runtime/python/python-link"), "utf8")).toBe("original runtime/python/bin/python3");
   } finally { rmSync(root, { recursive: true, force: true }); }
 });
