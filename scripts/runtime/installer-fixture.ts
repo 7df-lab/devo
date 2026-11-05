@@ -10,7 +10,7 @@ export function writeChecksums(assets: string): void {
 }
 
 /** Run the actual network/install functions without modifying the user's PATH. */
-export async function installOnline(root: string, destination: string, cache: string, origin: string, target: string, version = "v0.2.0", mode: "functions" | "entrypoint" = "functions") {
+export async function installOnline(root: string, destination: string, cache: string, origin: string, target: string, version = "v0.2.0", mode: "functions" | "entrypoint" = "functions", extraEnv: Record<string, string | undefined> = {}) {
   const work = join(root, `work-${crypto.randomUUID()}`);
   mkdirSync(work);
   const windows = process.platform === "win32";
@@ -32,7 +32,7 @@ export async function installOnline(root: string, destination: string, cache: st
     ? [join(process.env.SystemRoot!, "System32/WindowsPowerShell/v1.0/powershell.exe"), "-NoProfile", "-NonInteractive", "-ExecutionPolicy", "Bypass", "-File", path]
     : ["sh", path, "--no-modify-path"], {
     stdout: "pipe", stderr: "pipe",
-    env: { ...process.env, VERSION: version, DEVO_RUNTIME_CACHE: cache, DEVO_RELEASE_BASE_URL: origin, DEVO_RUNTIME_BASE_URL: `${origin}/runtime-packs`, DEVO_INSTALL_DIR: destination, DEVO_NO_MODIFY_PATH: "1",
+    env: { ...process.env, ...extraEnv, VERSION: version, DEVO_RUNTIME_CACHE: cache, DEVO_RELEASE_BASE_URL: origin, DEVO_RUNTIME_BASE_URL: `${origin}/runtime-packs`, DEVO_INSTALL_DIR: destination, DEVO_NO_MODIFY_PATH: "1",
       ...(windows ? { PSModulePath: join(process.env.SystemRoot!, "System32/WindowsPowerShell/v1.0/Modules") } : {}) },
   });
   const [exit, stdout, stderr] = await Promise.all([child.exited, new Response(child.stdout).text(), new Response(child.stderr).text()]);

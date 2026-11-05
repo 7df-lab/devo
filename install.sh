@@ -551,17 +551,19 @@ cached_runtime() (
     attempts=0
     while ! mkdir "$lock" 2>/dev/null; do
         attempts=$((attempts + 1))
-        [ "$attempts" -lt 300 ] || die "Timed out waiting for runtime cache lock: $lock"
-        if [ -f "$lock/pid" ]; then
-            owner="$(cat "$lock/pid")"
-            case "$owner" in ''|*[!0-9]*) ;; *)
-                if ! kill -0 "$owner" 2>/dev/null; then rm -f "$lock/pid"; rmdir "$lock" 2>/dev/null || true; fi ;;
-            esac
-        fi
+        [ "$attempts" -lt 300 ] || die "Timed out waiting for runtime cache lock. If no installer is running, remove the stale lock directory manually: $lock"
         sleep 1
     done
     stage=""
-    trap 'if [ -n "$stage" ]; then rm -rf "$stage"; fi; rm -f "$lock/pid"; rmdir "$lock"' EXIT
+    cleanup_runtime_lock() {
+        # A crash leaves the lock for explicit user cleanup. Only the process
+        # that wrote this pid token may release its own lock.
+        if [ -f "$lock/pid" ] && [ "$(cat "$lock/pid" 2>/dev/null || true)" = "$$" ]; then
+            rm -f "$lock/pid"
+            rmdir "$lock"
+        fi
+    }
+    trap 'if [ -n "$stage" ]; then rm -rf "$stage"; fi; cleanup_runtime_lock' EXIT
     trap 'exit 1' INT TERM
     printf '%s\n' "$$" > "$lock/pid"
     case "$kind" in node) executable="bin/node" ;; python) executable="bin/python3" ;; esac

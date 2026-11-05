@@ -147,6 +147,34 @@ test("real installers reuse runtimes across upgrades, repair damage, reject corr
     expect({ failed: corruptIndex.exit !== 0, version: JSON.parse(readFileSync(join(destination, "runtime/manifest.json"), "utf8")).version }).toEqual({ failed: true, version: "0.2.1" });
     corrupt = "";
     requests.length = 0;
+    if (process.platform !== "win32") {
+      // A stale lock must fail closed: no automatic deletion. A controlled
+      // `sleep` on PATH makes the 300-attempt wait deterministic without a
+      // production timeout knob.
+      const staleCache = join(root, "stale lock cache");
+      mkdirSync(staleCache);
+      const staleLock = join(staleCache, `${first[1][1]}.lock`);
+      mkdirSync(staleLock);
+      writeFileSync(join(staleLock, "pid"), "999999\n");
+      const fakeSleepDir = join(root, "fake sleep bin");
+      mkdirSync(fakeSleepDir);
+      writeFileSync(join(fakeSleepDir, "sleep"), "#!/bin/sh\nexit 0\n", { mode: 0o755 });
+      const blocked = await installOnline(root, join(root, "stale lock install"), staleCache, origin, target, "v0.2.0", "functions", {
+        PATH: `${fakeSleepDir}:${process.env.PATH ?? ""}`,
+      });
+      expect({
+        failed: blocked.exit !== 0,
+        lockPreserved: existsSync(staleLock),
+        pidPreserved: readFileSync(join(staleLock, "pid"), "utf8"),
+        manualCleanupMessage: blocked.stderr.includes("remove the stale lock directory manually"),
+      }).toEqual({ failed: true, lockPreserved: true, pidPreserved: "999999\n", manualCleanupMessage: true });
+      rmSync(staleLock, { recursive: true, force: true });
+      const retry = await installOnline(root, join(root, "stale lock retry install"), staleCache, origin, target);
+      if (retry.exit !== 0) throw new Error(`${retry.stdout}\n${retry.stderr}`);
+      expect(existsSync(staleLock)).toBe(false);
+      requests.length = 0;
+    }
+
     const concurrentCache = join(root, "concurrent cache");
     const results = await Promise.all(["one", "two"].map(name => installOnline(root, join(root, name), concurrentCache, origin, target)));
     for (const item of results) if (item.exit !== 0) throw new Error(`${item.stdout}\n${item.stderr}`);
