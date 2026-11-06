@@ -13,8 +13,6 @@ import { existsSync } from "node:fs"
 import { homedir } from "node:os"
 import path from "node:path"
 import { BrowserWindow } from "electron"
-import type { DevoCheckResult } from "./compatibility"
-import { checkDevo } from "./compatibility"
 import {
 	buildClaudeCodeProviderMigrationPreview,
 	executeClaudeCodeProviderMigration,
@@ -113,14 +111,6 @@ const PROVIDER_LABELS: Record<MigrationProvider, string> = {
 	cursor: "Cursor",
 	devo: "Devo",
 	opencode: "OpenCode",
-}
-
-// ============================================================
-// Devo check (delegates to compatibility module)
-// ============================================================
-
-export async function checkDevoInstallation(): Promise<DevoCheckResult> {
-	return checkDevo()
 }
 
 // ============================================================

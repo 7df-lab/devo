@@ -30,3 +30,24 @@ describe("checkDevoProgram", () => {
 		})
 	})
 })
+
+test("a failed selected runtime check does not fall back to PATH discovery", async () => {
+	const calls: Array<{ cmd: string; args: string[] }> = []
+	const result = await checkDevoProgram({
+		program: "selected-runtime",
+		env: { PATH: "other-runtime-directory" },
+		execFile: (cmd, args, _options, callback) => {
+			calls.push({ cmd, args })
+			callback(new Error("Unsupported --version"), "")
+		},
+	})
+	expect(calls).toEqual([{ cmd: "selected-runtime", args: ["--version"] }])
+	expect(result).toEqual({
+		installed: false,
+		version: null,
+		path: "selected-runtime",
+		compatible: false,
+		compatibility: "unknown",
+		message: "Devo runtime not found at selected-runtime",
+	})
+})

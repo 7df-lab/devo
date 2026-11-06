@@ -4,7 +4,6 @@ import path from "node:path"
 import { fileURLToPath } from "node:url"
 import { app, BrowserWindow, dialog, ipcMain, Menu, nativeImage, nativeTheme, session, shell } from "electron"
 import { initAutomations, shutdownAutomations } from "./automation"
-import { initCredentialStore } from "./credential-store"
 import { getOpaqueWindowsPref, registerIpcHandlers } from "./ipc-handlers"
 import { installLiquidGlass, resolveStartupWindowBackground, resolveWindowChrome } from "./liquid-glass"
 import { createLogger } from "./logger"
@@ -451,7 +450,6 @@ if (!gotLock) {
 		log.info("Registered PNA header injection for 127.0.0.1 requests")
 
 		initSettingsStore()
-		initCredentialStore()
 		registerIpcHandlers({
 			recreateWindows: async () => {
 				const previousWindows = BrowserWindow.getAllWindows()
