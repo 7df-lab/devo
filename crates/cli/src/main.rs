@@ -36,7 +36,6 @@ mod prompt_command;
 mod prompt_host;
 mod upgrade_command;
 
-use agent_command::launch_interactive_mode_client;
 use agent_command::run_agent;
 use app_exit::AppExit;
 use doctor_command::run_doctor;
