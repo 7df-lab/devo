@@ -82,7 +82,22 @@ impl ServerRuntime {
             ));
         }
 
-        let active_turn_id = self.runtime_active_turn_id(session_id).await;
+        // Serialize cancellation of an idle wait with Goal turn admission. If
+        // admission won, its runtime handle is visible before we choose what to
+        // interrupt; if cancellation won, the barrier stays suspended.
+        let (interrupted_wait, active_turn_id) = {
+            let handle = self.session(session_id).await.ok_or_else(|| {
+                (
+                    ProtocolErrorCode::SessionNotFound,
+                    "session does not exist".to_string(),
+                )
+            })?;
+            let _guard = handle.lock_state_change().await;
+            (
+                self.cancel_background_goal_wait(session_id),
+                self.runtime_active_turn_id(session_id).await,
+            )
+        };
         let interrupted_turn = if let Some(turn_id) = active_turn_id {
             let response = self
                 .interrupt_turn(
@@ -114,6 +129,6 @@ impl ServerRuntime {
                 crate::runtime::command_exec::SessionCommandOwner::Connection(connection_id),
             )
             .await;
-        Ok(interrupted_turn || task_count > 0)
+        Ok(interrupted_wait || interrupted_turn || task_count > 0)
     }
 }

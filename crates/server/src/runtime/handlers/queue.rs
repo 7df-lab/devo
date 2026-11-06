@@ -419,6 +419,13 @@ impl ServerRuntime {
                 "queue item is no longer queued",
             );
         }
+        if let Some((parent_session_id, _)) = self.child_parent_and_path(legacy_session_id).await {
+            self.complete_background_work(
+                parent_session_id,
+                format!("agent:{legacy_session_id}:queued:{pending_id}"),
+                "Queued child input was removed before execution.".to_string(),
+            );
+        }
         if !reservation.ephemeral
             && let Err(error) =
                 self.deps

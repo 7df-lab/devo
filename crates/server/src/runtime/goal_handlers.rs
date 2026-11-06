@@ -861,6 +861,7 @@ impl ServerRuntime {
         let thread_goal = goal
             .filter(|goal| goal.status == crate::goal::GoalStatus::Active)
             .map(Goal::to_thread_goal);
+        self.set_background_goal_active(session_id, thread_goal.is_some());
         let Some(session_handle) = self.session(session_id).await else {
             return;
         };
@@ -914,6 +915,7 @@ impl ServerRuntime {
         if !should_continue {
             return;
         }
+        self.enable_background_goal_wait(session_id);
         // Registration and cleanup share one registry lock: an activation is
         // either consumed after MergeTurn or admitted directly once idle.
         if self.active_turns.defer_goal_continuation(session_id).await {

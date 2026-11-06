@@ -107,6 +107,7 @@ pub(crate) mod context_occupancy;
 mod context_usage;
 mod control_requests;
 mod goal_accounting;
+mod goal_background;
 mod goal_continuation;
 mod goal_handlers;
 mod handlers;
@@ -196,6 +197,7 @@ pub struct ServerRuntime {
     next_connection_id: AtomicU64,
     /// Per-session goal stores for goal lifecycle management.
     goal_stores: Mutex<HashMap<SessionId, GoalStore>>,
+    background_work: std::sync::Mutex<goal_background::BackgroundWork>,
     /// Per-root-session agent registries for subagent coordination.
     agent_registries: Mutex<HashMap<SessionId, AgentRegistry>>,
     /// Per-session inboxes used by agent tools to exchange ordered messages.
@@ -438,6 +440,7 @@ impl ServerRuntime {
             goal_continuation_turn_goals: Mutex::new(HashMap::new()),
             next_connection_id: AtomicU64::new(1),
             goal_stores: Mutex::new(HashMap::new()),
+            background_work: std::sync::Mutex::new(Default::default()),
             agent_registries: Mutex::new(HashMap::new()),
             agent_mailboxes: Mutex::new(HashMap::new()),
             agent_output_buffers: Mutex::new(HashMap::new()),

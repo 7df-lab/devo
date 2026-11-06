@@ -1,0 +1,417 @@
+use std::sync::Arc;
+use std::sync::Mutex;
+use std::time::Duration;
+
+use anyhow::Context;
+use anyhow::Result;
+use devo_core::tools::AgentToolCoordinator;
+use devo_protocol::SessionId;
+use devo_protocol::native::goal::Goal;
+use devo_protocol::native::rpc_session::GoalIfExists;
+use devo_server::ServerRuntime;
+use pretty_assertions::assert_eq;
+use tempfile::TempDir;
+use tokio::sync::Notify;
+use tokio::sync::mpsc;
+use tokio::time::timeout;
+
+#[path = "support/goal_continuation.rs"]
+mod support;
+
+struct WaitingGoal {
+    _data_root: TempDir,
+    runtime: Arc<ServerRuntime>,
+    provider: Arc<support::QueuedPriorityProvider>,
+    notifications: mpsc::Receiver<serde_json::Value>,
+    connection_id: u64,
+    session_id: SessionId,
+    goal: Goal,
+}
+
+impl WaitingGoal {
+    async fn new() -> Result<Self> {
+        let data_root = TempDir::new()?;
+        let provider = Arc::new(support::QueuedPriorityProvider {
+            requests: Mutex::new(Vec::new()),
+            release_first: Arc::new(Notify::new()),
+        });
+        let runtime = support::build_runtime(data_root.path(), provider.clone())?;
+        let (connection_id, mut notifications) = support::initialize_connection(&runtime).await?;
+        let session_id = support::start_session(&runtime, connection_id, data_root.path()).await?;
+        let goal = support::create_goal(
+            &runtime,
+            connection_id,
+            session_id,
+            "Finish the objective after all managed background work settles",
+            /*token_budget*/ None,
+            GoalIfExists::Reject,
+            "background-wait-goal",
+        )
+        .await?;
+        support::wait_for_notification(&mut notifications, "turn/started").await?;
+        support::wait_for_captured_request_count(&provider.requests, /*expected*/ 1).await?;
+        Ok(Self {
+            _data_root: data_root,
+            runtime,
+            provider,
+            notifications,
+            connection_id,
+            session_id,
+            goal,
+        })
+    }
+
+    fn start_work(&self, id: &str) {
+        self.runtime
+            .background_work_started(self.session_id, id.to_string());
+    }
+
+    fn finish_work(&self, id: &str, result: &str) {
+        self.runtime
+            .background_work_completed(self.session_id, id.to_string(), result.to_string());
+    }
+
+    async fn finish_first_turn(&mut self) -> Result<()> {
+        self.provider.release_first.notify_one();
+        support::collect_until_turn_completed(&mut self.notifications).await?;
+        Ok(())
+    }
+
+    async fn assert_no_new_turn(&mut self, expected_requests: usize) -> Result<()> {
+        let next_turn = timeout(Duration::from_millis(/*millis*/ 150), async {
+            while let Some(notification) = self.notifications.recv().await {
+                if notification["method"] == "turn/started" {
+                    return notification;
+                }
+            }
+            panic!("notification channel unexpectedly closed");
+        })
+        .await;
+        assert!(next_turn.is_err(), "unexpected turn: {next_turn:?}");
+        assert_eq!(
+            self.provider.requests.lock().expect("lock requests").len(),
+            expected_requests
+        );
+        Ok(())
+    }
+
+    async fn wait_for_second_turn(&mut self) -> Result<()> {
+        support::wait_for_notification(&mut self.notifications, "turn/started").await?;
+        support::wait_for_captured_request_count(&self.provider.requests, /*expected*/ 2).await
+    }
+
+    async fn stop(&self) -> Result<()> {
+        support::pause_goal_and_interrupt_session(
+            &self.runtime,
+            self.connection_id,
+            self.session_id,
+        )
+        .await
+    }
+}
+
+#[tokio::test]
+async fn goal_waits_for_every_background_task_and_receives_terminal_results() -> Result<()> {
+    let mut test = WaitingGoal::new().await?;
+    test.start_work("slow-command");
+    test.start_work("child-agent");
+    test.finish_first_turn().await?;
+    test.assert_no_new_turn(/*expected_requests*/ 1).await?;
+
+    test.finish_work("slow-command", "command terminal output: build succeeded");
+    test.assert_no_new_turn(/*expected_requests*/ 1).await?;
+    test.finish_work("child-agent", "child terminal output: review complete");
+    test.wait_for_second_turn().await?;
+    {
+        let requests = test.provider.requests.lock().expect("lock requests");
+        assert!(support::request_contains_text(
+            &requests[1],
+            "command terminal output: build succeeded"
+        ));
+        assert!(support::request_contains_text(
+            &requests[1],
+            "child terminal output: review complete"
+        ));
+    }
+
+    // Duplicate delivery must not admit an additional continuation.
+    test.finish_work("child-agent", "child terminal output: review complete");
+    test.finish_work("slow-command", "command terminal output: build succeeded");
+    test.assert_no_new_turn(/*expected_requests*/ 2).await?;
+    test.stop().await
+}
+
+#[tokio::test]
+async fn completion_before_wait_is_armed_is_not_lost() -> Result<()> {
+    let mut test = WaitingGoal::new().await?;
+    test.start_work("fast-command");
+    test.finish_work("fast-command", "fast command finished before parent turn");
+    test.finish_first_turn().await?;
+    test.wait_for_second_turn().await?;
+    {
+        let requests = test.provider.requests.lock().expect("lock requests");
+        assert!(support::request_contains_text(
+            &requests[1],
+            "fast command finished before parent turn"
+        ));
+    }
+    test.stop().await
+}
+
+#[tokio::test]
+async fn failure_and_cancellation_are_terminal_background_results() -> Result<()> {
+    for terminal_result in [
+        "background command failed: exit code 17",
+        "background command cancelled by the user",
+    ] {
+        let mut test = WaitingGoal::new().await?;
+        test.start_work("terminal-command");
+        test.finish_first_turn().await?;
+        test.assert_no_new_turn(/*expected_requests*/ 1).await?;
+        test.finish_work("terminal-command", terminal_result);
+        test.wait_for_second_turn().await?;
+        {
+            let requests = test.provider.requests.lock().expect("lock requests");
+            assert!(support::request_contains_text(
+                &requests[1],
+                terminal_result
+            ));
+        }
+        test.stop().await?;
+    }
+    Ok(())
+}
+
+#[tokio::test]
+async fn paused_or_cleared_goal_does_not_restart_on_background_completion() -> Result<()> {
+    for method in ["session/goal/pause", "session/goal/clear"] {
+        let mut test = WaitingGoal::new().await?;
+        test.start_work("late-command");
+        test.finish_first_turn().await?;
+        test.assert_no_new_turn(/*expected_requests*/ 1).await?;
+        let response = test
+            .runtime
+            .handle_incoming(
+                test.connection_id,
+                serde_json::json!({
+                    "id": method,
+                    "method": method,
+                    "params": {
+                        "sessionId": test.session_id,
+                        "expectedGoalId": test.goal.id
+                    }
+                }),
+            )
+            .await
+            .context("goal mutation response")?;
+        assert!(response.get("error").is_none(), "{response}");
+        test.finish_work("late-command", "late output must not revive old goal");
+        test.assert_no_new_turn(/*expected_requests*/ 1).await?;
+    }
+    Ok(())
+}
+
+#[tokio::test]
+async fn queued_user_input_runs_while_goal_waits_for_background_work() -> Result<()> {
+    let mut test = WaitingGoal::new().await?;
+    test.start_work("still-running-command");
+    let response = test
+        .runtime
+        .handle_incoming(
+            test.connection_id,
+            serde_json::json!({
+                "id": "queue-user-input",
+                "method": "session/queue/push",
+                "params": {
+                    "sessionId": test.session_id,
+                    "input": [{"type": "text", "text": "queued user input has priority"}],
+                    "idempotencyKey": "background-wait-user-input"
+                }
+            }),
+        )
+        .await
+        .context("queue response")?;
+    let queued: devo_server::SuccessResponse<
+        devo_protocol::native::rpc_turn::SessionQueuePushResult,
+    > = serde_json::from_value(response)?;
+    assert!(matches!(
+        queued.result,
+        devo_protocol::native::rpc_turn::SessionQueuePushResult::Queued { .. }
+    ));
+    test.finish_first_turn().await?;
+    test.wait_for_second_turn().await?;
+    {
+        let requests = test.provider.requests.lock().expect("lock requests");
+        assert!(support::request_contains_text(
+            &requests[1],
+            "queued user input has priority"
+        ));
+    }
+    test.finish_work(
+        "still-running-command",
+        "background output during user turn",
+    );
+    test.assert_no_new_turn(/*expected_requests*/ 2).await?;
+    test.stop().await
+}
+
+#[tokio::test]
+async fn interrupted_parent_does_not_resume_goal_when_background_work_finishes() -> Result<()> {
+    let mut test = WaitingGoal::new().await?;
+    test.start_work("interrupted-command");
+    let response = test
+        .runtime
+        .handle_incoming(
+            test.connection_id,
+            serde_json::json!({
+                "id": "interrupt-parent",
+                "method": "session/interrupt",
+                "params": {
+                    "scope": { "scope": "session", "sessionId": test.session_id }
+                }
+            }),
+        )
+        .await
+        .context("interrupt response")?;
+    assert!(response.get("error").is_none(), "{response}");
+    support::collect_until_turn_completed(&mut test.notifications).await?;
+    test.finish_work("interrupted-command", "completion after parent interrupt");
+    test.assert_no_new_turn(/*expected_requests*/ 1).await
+}
+
+#[tokio::test]
+async fn replaced_goal_does_not_restore_old_continuation_after_background_completion() -> Result<()>
+{
+    let mut test = WaitingGoal::new().await?;
+    test.start_work("old-goal-command");
+    test.finish_first_turn().await?;
+    test.assert_no_new_turn(/*expected_requests*/ 1).await?;
+    let replacement = support::create_goal(
+        &test.runtime,
+        test.connection_id,
+        test.session_id,
+        "Only pursue the replacement objective",
+        /*token_budget*/ None,
+        GoalIfExists::Replace,
+        "replacement-background-goal",
+    )
+    .await?;
+    test.finish_work("old-goal-command", "old task finished after replacement");
+    test.wait_for_second_turn().await?;
+    {
+        let requests = test.provider.requests.lock().expect("lock requests");
+        assert!(support::request_last_message_contains_text(
+            &requests[1],
+            "Only pursue the replacement objective"
+        ));
+        assert!(!support::request_last_message_contains_text(
+            &requests[1],
+            "Finish the objective after all managed background work settles"
+        ));
+    }
+    assert_eq!(
+        support::read_goal(&test.runtime, test.connection_id, test.session_id)
+            .await?
+            .context("replacement goal")?
+            .id,
+        replacement.id
+    );
+    test.assert_no_new_turn(/*expected_requests*/ 2).await?;
+    test.stop().await
+}
+
+#[tokio::test]
+async fn idle_interrupt_cancels_wait_without_reserving_a_turn() -> Result<()> {
+    let mut test = WaitingGoal::new().await?;
+    test.start_work("idle-interrupted-command");
+    test.finish_first_turn().await?;
+    test.assert_no_new_turn(/*expected_requests*/ 1).await?;
+    // Waiting leaves the session actor available for reads and controls.
+    let goal = support::read_goal(&test.runtime, test.connection_id, test.session_id).await?;
+    assert_eq!(goal.context("waiting goal")?.id, test.goal.id);
+    let response = test
+        .runtime
+        .handle_incoming(
+            test.connection_id,
+            serde_json::json!({
+                "id": "interrupt-idle-wait",
+                "method": "session/interrupt",
+                "params": {"scope": {"scope": "session", "sessionId": test.session_id}}
+            }),
+        )
+        .await
+        .context("idle interrupt response")?;
+    assert_eq!(response["result"]["interrupted"], true);
+    test.finish_work(
+        "idle-interrupted-command",
+        "late output after idle interrupt",
+    );
+    test.assert_no_new_turn(/*expected_requests*/ 1).await
+}
+
+#[tokio::test]
+async fn simultaneous_completions_start_only_one_continuation() -> Result<()> {
+    let mut test = WaitingGoal::new().await?;
+    for index in 0..12 {
+        test.start_work(&format!("parallel-{index}"));
+    }
+    test.finish_first_turn().await?;
+    test.assert_no_new_turn(/*expected_requests*/ 1).await?;
+    let mut tasks = Vec::new();
+    for index in 0..12 {
+        let runtime = Arc::clone(&test.runtime);
+        let session_id = test.session_id;
+        tasks.push(tokio::spawn(async move {
+            runtime.background_work_completed(
+                session_id,
+                format!("parallel-{index}"),
+                format!("result-{index}"),
+            );
+        }));
+    }
+    for task in tasks {
+        task.await?;
+    }
+    test.wait_for_second_turn().await?;
+    test.assert_no_new_turn(/*expected_requests*/ 2).await?;
+    test.stop().await
+}
+
+#[tokio::test]
+async fn interrupt_and_last_completion_cannot_leave_a_late_goal_turn() -> Result<()> {
+    for _ in 0..4 {
+        let mut test = WaitingGoal::new().await?;
+        test.start_work("racing-command");
+        test.finish_first_turn().await?;
+        test.assert_no_new_turn(/*expected_requests*/ 1).await?;
+        let runtime = Arc::clone(&test.runtime);
+        let session = test.session_id;
+        let complete = tokio::spawn(async move {
+            runtime.background_work_completed(
+                session,
+                "racing-command".to_string(),
+                "racing result".to_string(),
+            );
+        });
+        let response = test
+            .runtime
+            .handle_incoming(
+                test.connection_id,
+                serde_json::json!({
+                    "id": "racing-interrupt",
+                    "method": "session/interrupt",
+                    "params": {"scope": {"scope": "session", "sessionId": session}}
+                }),
+            )
+            .await
+            .context("racing interrupt response")?;
+        complete.await?;
+        assert!(response.get("error").is_none(), "{response}");
+        // A turn admitted before the interrupt is allowed, but must have been
+        // interrupted before the control response. No later admission is valid.
+        while test.notifications.try_recv().is_ok() {}
+        let count = test.provider.requests.lock().unwrap().len();
+        test.assert_no_new_turn(count).await?;
+    }
+    Ok(())
+}

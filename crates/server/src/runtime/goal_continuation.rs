@@ -43,6 +43,17 @@ impl ServerRuntime {
             let Some(reservation) = session_handle.turn_reservation_snapshot().await else {
                 return;
             };
+            // Check and arm atomically with completion publication. Waiting does
+            // not reserve a turn, so user input and controls remain responsive.
+            if !self.session_allows_goal_continuation(session_id).await
+                || self.defer_goal_for_background_work(
+                    session_id,
+                    candidate.goal_id,
+                    reservation.latest_turn.as_ref().map(|turn| turn.native.id),
+                )
+            {
+                return;
+            }
             let requested_model = session_model_selection(&reservation.summary);
             let requested_reasoning_effort_selection =
                 reservation.summary.settings.reasoning_effort.clone();
@@ -460,6 +471,7 @@ impl ServerRuntime {
     /// turn itself, so `interrupt_active_goal_continuation_turn` would abort the
     /// host_request mid-flight (`await goal.complete()` shows ✗).
     pub(super) async fn clear_goal_continuation_registration(&self, session_id: SessionId) {
+        self.cancel_background_goal_wait(session_id);
         let turn_id = self
             .active_goal_continuation_turns
             .lock()
@@ -478,6 +490,7 @@ impl ServerRuntime {
         session_id: SessionId,
         reason: &str,
     ) -> bool {
+        self.cancel_background_goal_wait(session_id);
         let Some(turn_id) = self
             .active_goal_continuation_turns
             .lock()

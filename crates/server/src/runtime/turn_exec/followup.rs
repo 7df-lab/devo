@@ -87,6 +87,13 @@ impl ServerRuntime {
         }
         self.activate_queued_turn(session_id, &turn, &turn_config, &queued.display_input)
             .await;
+        if let Some((parent_session_id, _)) = self.child_parent_and_path(session_id).await {
+            self.complete_background_work(
+                parent_session_id,
+                format!("agent:{session_id}:queued:{}", queued.queued_item_id),
+                String::new(),
+            );
+        }
         drop(state_change_guard);
         self.broadcast_notification(
             devo_protocol::native::event::ServerNotification::TurnStarted {
@@ -172,6 +179,13 @@ impl ServerRuntime {
         }
         self.activate_queued_turn(session_id, &turn, &turn_config, &queued.display_input)
             .await;
+        if let Some((parent_session_id, _)) = self.child_parent_and_path(session_id).await {
+            self.complete_background_work(
+                parent_session_id,
+                format!("agent:{session_id}:queued:{}", queued.queued_item_id),
+                String::new(),
+            );
+        }
         drop(state_change_guard);
         self.broadcast_notification(
             devo_protocol::native::event::ServerNotification::TurnStarted {

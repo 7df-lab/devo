@@ -19,6 +19,18 @@ use crate::contracts::ToolCallError;
 #[allow(clippy::double_must_use)]
 #[async_trait]
 pub trait AgentToolCoordinator: Send + Sync {
+    /// Register managed work synchronously before it is detached from its turn.
+    /// Work IDs must be session-scoped and unique for the execution being tracked.
+    /// Implementations must not block on I/O or start a model turn in this callback.
+    fn background_work_started(&self, _session_id: SessionId, _work_id: String) {}
+
+    /// Publish a retained terminal result and settle the matching managed work.
+    /// Call exactly once after success, failure, or cancellation is retained and
+    /// any existing completion notice is enqueued. Implementations must retain
+    /// the result before waking continuation scheduling and ignore stale IDs.
+    fn background_work_completed(&self, _session_id: SessionId, _work_id: String, _result: String) {
+    }
+
     async fn spawn_agent(
         self: Arc<Self>,
         params: SpawnAgentParams,
