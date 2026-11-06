@@ -319,12 +319,12 @@ impl SessionRuntimeContext {
             )?);
         let default_model = model_catalog
             .resolve_for_turn(None)
-            .map(|model| model.slug.clone())
-            .unwrap_or_default();
+            .ok()
+            .map(|model| model.slug.clone());
         let (provider, provider_router, provider_default_model) = if provider_runtime_config_changed
         {
             let provider =
-                load_server_provider(&config, Some(default_model.as_str()), &user_config_dir)
+                load_server_provider(&config, default_model.as_deref(), &user_config_dir)
                     .await
                     .context("load server provider for session workspace")?;
             (
@@ -336,7 +336,9 @@ impl SessionRuntimeContext {
             (
                 Arc::clone(&inherited_context.provider),
                 inherited_context.provider_router(),
-                default_model,
+                // An empty discovery catalog must not erase the model of the
+                // provider we are retaining (including injected providers).
+                default_model.unwrap_or_else(|| inherited_context.default_model.clone()),
             )
         };
         let skill_workspace_root = workspace_root
