@@ -72,47 +72,33 @@ test.skipIf(process.platform !== "win32")("Windows ZIP pack handles zero, one an
   } finally { rmSync(root, { recursive: true, force: true }); }
 });
 
-test.skipIf(process.platform !== "win32")("Windows ZIP codepoint diagnostics", async () => {
-  const root = mkdtempSync(join(tmpdir(), "devo Windows zip codepoints "));
+test.skipIf(process.platform !== "win32")("Windows ZIP default reader preserves UTF8 names", async () => {
+  const root = mkdtempSync(join(tmpdir(), "devo Windows zip utf8 "));
   try {
     const source = join(root, "source");
     mkdirSync(source, { recursive: true });
     writeFileSync(join(source, WINDOWS_LONG_FILE_NAME), "unicode payload");
     const manifest = join(root, "paths.json");
     writeFileSync(manifest, JSON.stringify([WINDOWS_LONG_FILE_NAME]));
-    const zip = join(root, "diagnostic.zip");
+    const zip = join(root, "utf8.zip");
     const powershell = join(process.env.SystemRoot!, "System32/WindowsPowerShell/v1.0/powershell.exe");
     const packed = Bun.spawnSync([
       powershell, "-NoProfile", "-NonInteractive", "-ExecutionPolicy", "Bypass",
       "-File", join(import.meta.dir, "zip-pack.ps1"), "-Root", source, "-Output", zip, "-Manifest", manifest,
     ], { stdout: "pipe", stderr: "pipe" });
     expect(packed.exitCode).toBe(0);
-    const diagnostics = join(root, "diagnostics.txt");
-    const diagnosed = Bun.spawnSync([
+    const listedFile = join(root, "listed.txt");
+    const listed = Bun.spawnSync([
       powershell, "-NoProfile", "-NonInteractive", "-ExecutionPolicy", "Bypass",
-      "-File", join(import.meta.dir, "zip-diagnose.ps1"), "-Archive", zip, "-Manifest", manifest, "-OutputFile", diagnostics,
+      "-File", join(import.meta.dir, "zip-list.ps1"), "-Archive", zip, "-OutputFile", listedFile,
     ], { stdout: "pipe", stderr: "pipe" });
-    expect(diagnosed.exitCode).toBe(0);
-    const text = readFileSync(diagnostics, "utf8");
-    console.log("ZIP_CODEPOINT_DIAGNOSTICS\n" + text);
-    const expected = WINDOWS_LONG_FILE_NAME;
-    const expectedHex = Buffer.from(expected, "utf8").toString("hex").toUpperCase();
-    const python = Bun.which("python") ?? Bun.which("py");
-    let pythonNames: string[] | null = null;
-    if (python) {
-      const listed = Bun.spawnSync([python, "-c", "import json, sys, zipfile; z=zipfile.ZipFile(sys.argv[1]); print(json.dumps([i.filename for i in z.infolist()], ensure_ascii=True))", zip], { stdout: "pipe", stderr: "pipe" });
-      console.log("PYTHON_ZIP_NAMES\n" + listed.stdout.toString());
-      console.log("PYTHON_ZIP_STDERR\n" + listed.stderr.toString());
-      if (listed.exitCode === 0) pythonNames = JSON.parse(listed.stdout.toString());
-    } else {
-      console.log("PYTHON_ZIP_NAMES unavailable");
-    }
-    expect(text).toContain(`MANIFEST_UTF8_HEX=${expectedHex}`);
-    expect(text).toContain(`DEFAULT_NAME=${expected}`);
-    expect(text).toContain(`UTF8_NAME=${expected}`);
-    expect(text).toContain("RAW_FLAGS=0x0800");
-    expect(text).toContain(`RAW_NAME_HEX=${expectedHex}`);
-    if (pythonNames) expect(pythonNames).toContain(expected);
+    expect(listed.exitCode).toBe(0);
+    const bytes = readFileSync(zip);
+    expect(bytes.readUInt32LE(0)).toBe(0x04034b50);
+    expect(bytes.readUInt16LE(6) & 0x0800).toBe(0x0800);
+    // ZipFile.OpenRead uses the default reader; without bit 11 this name would
+    // decode as ANSI mojibake instead of the expected Unicode path.
+    expect(readFileSync(listedFile, "utf8").split(/\r?\n/)).toContain(WINDOWS_LONG_FILE_NAME);
   } finally { rmSync(root, { recursive: true, force: true }); }
 }, 30_000);
 
