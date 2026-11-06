@@ -74,6 +74,12 @@ impl ServerRuntime {
             .token_budget_for_session(state.core.config.effective_context_window_override);
         state.core.collaboration_mode = collaboration_mode;
         state.summary.collaboration_mode = collaboration_mode;
+        self.set_background_goal_active(
+            session_id,
+            turn_goal
+                .as_ref()
+                .is_some_and(|goal| goal.status == devo_protocol::ThreadGoalStatus::Active),
+        );
         if let Some(goal) = turn_goal {
             state.core.set_active_goal(goal);
         } else if !matches!(input_mode, super::super::TurnInputMode::Recovery) {
@@ -460,6 +466,7 @@ impl ServerRuntime {
                     live_goal,
                     last_model_request,
                     harness_digest,
+                    background_work_results: self.take_background_work_results(session_id),
                 },
             ));
             tokio::select! {

@@ -718,6 +718,7 @@ impl ServerRuntime {
                 .remove(&turn_id);
         }
         self.goal_stores.lock().await.remove(&session_id);
+        self.clear_background_work(session_id);
         self.agent_mailboxes.lock().await.remove(&session_id);
         self.agent_output_buffers.lock().await.remove(&session_id);
         self.agent_wait_cursors.lock().await.remove(&session_id);

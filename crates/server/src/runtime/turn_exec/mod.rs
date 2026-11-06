@@ -144,10 +144,6 @@ pub(crate) fn spawn_post_turn_scheduling(
         }
 
         // (3) Post-compact continue — reserved for P4 when compact owns retry.
-        // (3b) Async bash/python completion follow-ups (idle wake).
-        runtime
-            .drain_async_tool_completion_notices(session_id)
-            .await;
         // (4) Queue drain
         {
             let pending = handle
@@ -163,14 +159,16 @@ pub(crate) fn spawn_post_turn_scheduling(
         if runtime.spawn_next_turn_from_queue(session_id).await {
             return;
         }
-        if runtime.child_parent_and_path(session_id).await.is_some()
-            && runtime.child_can_accept_next_turn(session_id).await
-        {
+        if runtime.child_parent_and_path(session_id).await.is_some() {
             let _ = runtime
                 .drain_child_mailbox_into_user_turns(session_id)
                 .await;
             return;
         }
+        // Async completion follow-ups never overtake queued user input.
+        runtime
+            .drain_async_tool_completion_notices(session_id)
+            .await;
         // (5) Goal continuation
         if should_auto_continue_goal {
             runtime.maybe_start_goal_continuation_turn(session_id).await;

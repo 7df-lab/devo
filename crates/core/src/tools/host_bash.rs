@@ -187,6 +187,12 @@ pub fn start(
         }
         handles.insert(handle_id.clone(), Arc::clone(&entry));
     }
+    let coordinator = ctx.agent_coordinator.clone();
+    let owner_session_id = ctx.session_id;
+    let work_id = format!("bash:{handle_id}");
+    if let Some(coordinator) = &coordinator {
+        coordinator.background_work_started(owner_session_id, work_id.clone());
+    }
     let initial = entry.lock().unwrap().snapshot(&handle_id);
     let task_entry = Arc::clone(&entry);
     tokio::spawn(async move {
@@ -258,6 +264,10 @@ pub fn start(
                 Err(err) => state.error = Some(err.to_string()),
             }
             state.finished = Some(Instant::now());
+        }
+        if let Some(coordinator) = coordinator {
+            let result = task_entry.lock().unwrap().snapshot(&handle_id).to_string();
+            coordinator.background_work_completed(owner_session_id, work_id, result);
         }
         // Completed records expire even if the session never makes another request.
         let expiry_cancel = task_entry.lock().unwrap().expiry_cancel.clone();
@@ -460,3 +470,7 @@ mod tests {
         );
     }
 }
+
+#[cfg(all(test, unix))]
+#[path = "host_bash_background_tests.rs"]
+mod background_tests;

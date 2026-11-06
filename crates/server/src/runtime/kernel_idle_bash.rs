@@ -235,6 +235,24 @@ mod tests {
 
     #[tokio::test]
     async fn idle_bash_completion_starts_a_follow_up_turn() -> Result<()> {
+        idle_completion_after_goal_transition(/*goal_status*/ None).await
+    }
+
+    #[tokio::test]
+    async fn terminal_goals_only_suppress_their_own_late_completion_notices() -> Result<()> {
+        for status in [
+            crate::goal::GoalStatus::Completed,
+            crate::goal::GoalStatus::Canceled,
+            crate::goal::GoalStatus::Cleared,
+        ] {
+            idle_completion_after_goal_transition(Some(status)).await?;
+        }
+        Ok(())
+    }
+
+    async fn idle_completion_after_goal_transition(
+        goal_status: Option<crate::goal::GoalStatus>,
+    ) -> Result<()> {
         let open = Arc::new(AtomicBool::new(false));
         let started = Arc::new(AtomicBool::new(false));
         let data_root = TempDir::new()?;
@@ -279,11 +297,56 @@ mod tests {
         let session_key = session_id.to_string();
 
         let handler = for_session(Arc::downgrade(&runtime), session_id);
+        if let Some(status) = goal_status {
+            let mut store = crate::runtime::GoalStore::new();
+            let goal = store.create(devo_protocol::GoalCreateParams {
+                session_id,
+                objective: "old goal".to_string(),
+                token_budget: None,
+                replace_existing: false,
+            })?;
+            runtime
+                .sync_core_session_goal(session_id, Some(&goal))
+                .await;
+            runtime.register_background_work(session_id, "bash:old-goal-handle".to_string());
+            if status == crate::goal::GoalStatus::Cleared {
+                store.clear();
+            } else {
+                store.set_status(status)?;
+            }
+            runtime.goal_stores.lock().await.insert(session_id, store);
+            runtime.cancel_background_goal_wait(session_id);
+            runtime.sync_core_session_goal(session_id, None).await;
+            runtime.complete_background_work(
+                session_id,
+                "bash:old-goal-handle".to_string(),
+                "old result".to_string(),
+            );
+            handler(
+                "late-old-completion".into(),
+                json!({
+                    "type": "bash.completed",
+                    "params": {"handle_id": "old-goal-handle", "exitCode": 0}
+                }),
+            )
+            .await;
+            assert!(
+                !started.load(Ordering::SeqCst),
+                "old goal must not wake from a late notice"
+            );
+            assert!(take_bash_notices(&session_key).is_empty());
+        }
+        runtime.register_background_work(session_id, "bash:new-chat-handle".to_string());
+        runtime.complete_background_work(
+            session_id,
+            "bash:new-chat-handle".to_string(),
+            "new ordinary chat result".to_string(),
+        );
         let reply = handler(
             "bash-completion-1".into(),
             json!({
                 "type": "bash.completed",
-                "params": { "pid": 901, "command": "echo test", "exitCode": 0 },
+                "params": { "handle_id": "new-chat-handle", "command": "echo test", "exitCode": 0 },
             }),
         )
         .await;

@@ -258,6 +258,11 @@ impl ToolHandler for ExecCommandHandler {
                 .await;
             let task_id = task.task_id.clone();
             let background_tasks = Arc::clone(&self.background_tasks);
+            let coordinator = ctx.agent_coordinator.clone();
+            let work_id = format!("exec:{}", task_id.0);
+            if let Some(coordinator) = &coordinator {
+                coordinator.background_work_started(owner_session_id, work_id.clone());
+            }
             tokio::spawn(async move {
                 while proc.is_running() && proc.exit_code().is_none() {
                     tokio::time::sleep(tokio::time::Duration::from_millis(10)).await;
@@ -269,6 +274,17 @@ impl ToolHandler for ExecCommandHandler {
                 background_tasks
                     .complete_command(&task_id, output.exit_code, response)
                     .await;
+                if let Some(coordinator) = coordinator {
+                    // Cancellation may have won the race with process exit. Read
+                    // the retained terminal result instead of reporting success
+                    // from the process monitor after the task was canceled.
+                    let terminal = background_tasks
+                        .await_task(owner_session_id, &task_id, std::time::Duration::ZERO)
+                        .await;
+                    let result = serde_json::to_string(&terminal)
+                        .expect("background task result is serializable");
+                    coordinator.background_work_completed(owner_session_id, work_id, result);
+                }
             });
             return Ok(ToolResult::success(
                 ToolResultContent::Mixed {

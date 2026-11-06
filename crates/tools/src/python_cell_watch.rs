@@ -54,6 +54,8 @@ pub struct PythonCellWatchDecision {
 /// Fired when a backgrounded Python cell reaches `done`.
 #[derive(Debug, Clone)]
 pub struct PythonCellCompletionEvent {
+    /// Unique detached execution identity; cell counters restart with a kernel.
+    pub work_id: String,
     pub session_id: String,
     pub cell_id: String,
     pub status: String,
