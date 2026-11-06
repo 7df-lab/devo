@@ -75,23 +75,29 @@ export async function archiveTreeZip(root: string, paths: string[], output: stri
   }
   const powershell = join(process.env.SystemRoot ?? "C:/Windows", "System32/WindowsPowerShell/v1.0/powershell.exe");
   const helper = join(import.meta.dir, "zip-pack.ps1");
-  const result = Bun.spawnSync([
-    powershell,
-    "-NoProfile",
-    "-NonInteractive",
-    "-ExecutionPolicy",
-    "Bypass",
-    "-File",
-    helper,
-    "-Root",
-    root,
-    "-Output",
-    output,
-    "-PathsJson",
-    JSON.stringify(paths),
-  ], { stdout: "pipe", stderr: "pipe" });
-  if (result.exitCode !== 0) {
-    throw new Error(`Windows ZIP pack failed (${result.exitCode}): ${result.stderr.toString()}`);
+  const manifest = `${output}.paths.json`;
+  writeFileSync(manifest, JSON.stringify(paths));
+  try {
+    const result = Bun.spawnSync([
+      powershell,
+      "-NoProfile",
+      "-NonInteractive",
+      "-ExecutionPolicy",
+      "Bypass",
+      "-File",
+      helper,
+      "-Root",
+      root,
+      "-Output",
+      output,
+      "-Manifest",
+      manifest,
+    ], { stdout: "pipe", stderr: "pipe" });
+    if (result.exitCode !== 0) {
+      throw new Error(`Windows ZIP pack failed (${result.exitCode}): ${result.stderr.toString()}`);
+    }
+  } finally {
+    rmSync(manifest, { force: true });
   }
 }
 

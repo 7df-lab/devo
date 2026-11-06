@@ -1,7 +1,7 @@
 param(
     [Parameter(Mandatory = $true)][string]$Root,
     [Parameter(Mandatory = $true)][string]$Output,
-    [Parameter(Mandatory = $true)][string]$PathsJson
+    [Parameter(Mandatory = $true)][string]$Manifest
 )
 
 $ErrorActionPreference = "Stop"
@@ -9,7 +9,8 @@ Add-Type -AssemblyName System.IO.Compression
 Add-Type -AssemblyName System.IO.Compression.FileSystem
 
 $rootFull = [IO.Path]::GetFullPath($Root)
-$paths = @(ConvertFrom-Json -InputObject $PathsJson)
+$manifestText = [IO.File]::ReadAllText($Manifest, [Text.Encoding]::UTF8)
+$paths = @(ConvertFrom-Json -InputObject $manifestText)
 if ($paths.Count -eq 0) { throw "No pack paths were provided" }
 
 $entries = [System.Collections.Generic.List[object]]::new()
