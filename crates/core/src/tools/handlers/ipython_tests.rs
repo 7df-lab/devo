@@ -40,7 +40,6 @@ fn ctx_with_kernel(kernel: std::sync::Arc<devo_kernel::KernelSession>) -> ToolCo
     }
 }
 
-/// Trace: L2-DES-RLM-001
 /// Verifies: IpythonHandler executes code and returns the kernel details JSON shape.
 #[tokio::test]
 async fn ipython_handler_executes_and_returns_details() {
@@ -81,7 +80,6 @@ async fn ipython_handler_executes_and_returns_details() {
     }
 }
 
-/// Trace: L2-DES-RLM-001
 /// Verifies: namespace survives across two IpythonHandler invocations (cross-turn).
 #[tokio::test]
 async fn ipython_handler_namespace_survives_two_calls() {
@@ -124,7 +122,6 @@ async fn ipython_handler_namespace_survives_two_calls() {
     }
 }
 
-/// Trace: L2-DES-RLM-001
 /// Verifies: ensure_kernel reuses an existing Arc and two executes share namespace.
 #[tokio::test]
 async fn ensure_kernel_reuses_arc_across_two_executes() {
@@ -165,7 +162,6 @@ async fn ensure_kernel_reuses_arc_across_two_executes() {
     );
 }
 
-/// Trace: L2-DES-RLM-001
 /// Verifies: cancel token during a long cell interrupts the kernel and returns Cancelled.
 #[tokio::test]
 async fn ipython_handler_cancel_interrupts_long_cell() {
@@ -227,7 +223,6 @@ impl devo_tools::PythonCellWatch for FixedWatch {
     }
 }
 
-/// Trace: L2-DES-RLM-001
 /// Verifies: first-wait expiry + continue_fg eventually completes the cell in foreground.
 #[tokio::test]
 async fn ipython_wait_budget_continue_fg_completes() {
@@ -279,7 +274,6 @@ async fn ipython_wait_budget_continue_fg_completes() {
     }
 }
 
-/// Trace: L2-DES-RLM-001
 /// Verifies: wait policy cancel interrupts the cell.
 #[tokio::test]
 async fn ipython_wait_budget_cancel_interrupts() {
@@ -322,7 +316,6 @@ async fn ipython_wait_budget_cancel_interrupts() {
     }
 }
 
-/// Trace: L2-DES-RLM-001
 /// Verifies: background parks the cell and returns provisional status.
 #[tokio::test]
 async fn ipython_wait_budget_background_parks() {
@@ -368,7 +361,6 @@ async fn ipython_wait_budget_background_parks() {
     tokio::time::sleep(std::time::Duration::from_millis(2500)).await;
 }
 
-/// Trace: L2-DES-RLM-001
 /// Verifies: exhausted continue renewals force background.
 #[tokio::test]
 async fn ipython_wait_budget_max_renewals_force_background() {
@@ -421,7 +413,6 @@ fn kernel_namespace_paths_are_canonical_under_session_dir() {
     assert_eq!(kernel_namespace_manifest_path(dir), dir.join("kernel.json"));
 }
 
-/// Trace: L2-DES-RLM-001
 /// Verifies: ensure_kernel restores dill from session_dir before bootstrap.
 #[tokio::test]
 async fn ensure_kernel_restores_namespace_from_session_dir() {
@@ -558,217 +549,4 @@ async fn rlm_bootstrap_exposes_generic_mcp_module() {
         .await
         .expect("execute MCP bootstrap check");
     assert_eq!(output.status, "ok", "stderr={}", output.stderr);
-}
-
-#[test]
-fn kernel_fence_grants_global_harness_state_writable() {
-    // The global harness store must be kernel-writable: `rlm.harness`
-    // create/update/delete with `global_=True` writes it directly, and the
-    // kernel's own guidance points models there. The grant must come from the
-    // same helper that builds RLM_GLOBAL_HARNESS_STATE_DIR so env and fence
-    // can never disagree.
-    use crate::tools::handlers::ipython::{global_harness_state_dir, resolve_kernel_fence};
-
-    let fence = resolve_kernel_fence(
-        std::path::Path::new("/workspace"),
-        Some(std::path::Path::new("/artifacts/session")),
-        devo_protocol::CollaborationMode::Build,
-    )
-    .expect("fence spec");
-    assert!(
-        fence
-            .writable_roots
-            .contains(&std::path::PathBuf::from("/workspace"))
-    );
-    assert!(
-        fence
-            .writable_roots
-            .contains(&std::path::PathBuf::from("/artifacts/session"))
-    );
-    assert!(
-        fence.writable_roots.contains(&global_harness_state_dir()),
-        "global harness dir must be writable by the kernel, got {:?}",
-        fence.writable_roots
-    );
-}
-
-#[test]
-fn plan_fence_reads_workspace_but_only_build_fence_writes_it() {
-    use crate::tools::handlers::ipython::resolve_kernel_fence;
-    let workspace = tempfile::tempdir().expect("workspace");
-    let workspace = workspace.path();
-    let plan = resolve_kernel_fence(workspace, None, devo_protocol::CollaborationMode::Plan)
-        .expect("Plan fence");
-    let build = resolve_kernel_fence(workspace, None, devo_protocol::CollaborationMode::Build)
-        .expect("Build fence");
-    assert!(plan.readable_roots.contains(&workspace.to_path_buf()));
-    assert!(!plan.writable_roots.contains(&workspace.to_path_buf()));
-    assert!(build.writable_roots.contains(&workspace.to_path_buf()));
-    assert_eq!(plan.restrict_network, build.restrict_network);
-}
-
-#[cfg(unix)]
-#[tokio::test]
-async fn plan_kernel_fails_closed_when_workspace_is_in_scratch() {
-    if devo_sandbox::SANDBOX_ENFORCEMENT_TEMPORARILY_DISABLED {
-        // No fence is requested while the sandbox is disabled, so the Plan
-        // overlap check never runs. Kept for the post-revert contract.
-        eprintln!("skip: OS sandbox temporarily disabled");
-        return;
-    }
-    let workspace = tempfile::tempdir().expect("workspace under /tmp");
-    let err = match ensure_kernel(
-        &None,
-        workspace.path(),
-        None,
-        devo_protocol::CollaborationMode::Plan,
-    )
-    .await
-    {
-        Ok(_) => panic!("Plan must not use a writable scratch ancestor"),
-        Err(err) => err,
-    };
-    assert!(
-        err.to_string().contains("overlaps workspace"),
-        "unexpected Plan failure: {err}"
-    );
-}
-
-/// Native Python file I/O, not just an inspection of the fence spec.
-/// Linux is supported when Landlock is provisioned. Unavailable sandbox
-/// support must return an error rather than launching a writable Plan kernel.
-#[cfg(target_os = "linux")]
-#[tokio::test]
-async fn plan_kernel_denies_python_workspace_write_but_allows_scratch_and_mode_switch() {
-    if devo_sandbox::SANDBOX_ENFORCEMENT_TEMPORARILY_DISABLED {
-        // Kernels spawn bare while the sandbox is disabled, so the workspace
-        // write cannot be OS-refused. Kept for the post-revert contract.
-        eprintln!("skip: OS sandbox temporarily disabled");
-        return;
-    }
-    let workspace = tempfile::Builder::new()
-        .prefix(".devo-plan-kernel-")
-        .tempdir_in(env!("CARGO_MANIFEST_DIR"))
-        .expect("workspace outside scratch");
-    let scratch = tempfile::tempdir().expect("scratch");
-    let read_path = workspace.path().join("read.txt");
-    let blocked_path = workspace.path().join("blocked.txt");
-    let scratch_path = scratch.path().join("scratch.txt");
-    std::fs::write(&read_path, "allowed read").expect("seed workspace");
-
-    let plan = match ensure_kernel(
-        &None,
-        workspace.path(),
-        None,
-        devo_protocol::CollaborationMode::Plan,
-    )
-    .await
-    {
-        Ok(kernel) => kernel,
-        Err(error) => {
-            assert!(
-                error.to_string().contains("Plan kernel unavailable")
-                    || error.to_string().contains("failed to spawn")
-                    || error.to_string().contains("kernel handshake failed"),
-                "unexpected kernel failure: {error}"
-            );
-            eprintln!("Plan kernel not provisioned; fails closed: {error}");
-            return;
-        }
-    };
-    assert_eq!(plan.fence_state(), devo_kernel::FenceState::Fenced);
-    assert_eq!(
-        plan.workspace_access(),
-        devo_kernel::WorkspaceAccess::ReadOnly
-    );
-    let read_code = format!(
-        "print(open({}).read())",
-        serde_json::to_string(&read_path.display().to_string()).expect("path JSON")
-    );
-    let read = plan
-        .execute(read_code)
-        .await
-        .expect("Python workspace read");
-    assert_eq!(read.status, "ok", "stderr={}", read.stderr);
-    assert!(read.stdout.contains("allowed read"));
-    let write_code = format!(
-        "open({}, 'w').write('bypass')",
-        serde_json::to_string(&blocked_path.display().to_string()).expect("path JSON")
-    );
-    let denied = plan
-        .execute(write_code.clone())
-        .await
-        .expect("Python workspace write");
-    assert_eq!(denied.error_name.as_deref(), Some("PermissionError"));
-    assert!(
-        !blocked_path.exists(),
-        "workspace write bypassed Plan fence"
-    );
-    let scratch_code = format!(
-        "open({}, 'w').write('scratch ok')",
-        serde_json::to_string(&scratch_path.display().to_string()).expect("path JSON")
-    );
-    let scratch_out = plan
-        .execute(scratch_code)
-        .await
-        .expect("Python scratch write");
-    assert_eq!(scratch_out.status, "ok", "stderr={}", scratch_out.stderr);
-    assert_eq!(
-        std::fs::read_to_string(&scratch_path).expect("scratch result"),
-        "scratch ok"
-    );
-
-    let build = ensure_kernel(
-        &Some(std::sync::Arc::clone(&plan)),
-        workspace.path(),
-        None,
-        devo_protocol::CollaborationMode::Build,
-    )
-    .await
-    .expect("switch to Build");
-    assert!(!std::sync::Arc::ptr_eq(&plan, &build));
-    assert_eq!(
-        build.workspace_access(),
-        devo_kernel::WorkspaceAccess::ReadWrite
-    );
-    let allowed = build.execute(write_code).await.expect("Build Python write");
-    assert_eq!(allowed.status, "ok", "stderr={}", allowed.stderr);
-    assert_eq!(
-        std::fs::read_to_string(&blocked_path).expect("Build result"),
-        "bypass"
-    );
-
-    let plan_again = ensure_kernel(
-        &Some(build),
-        workspace.path(),
-        None,
-        devo_protocol::CollaborationMode::Plan,
-    )
-    .await
-    .expect("switch back to Plan");
-    assert_eq!(
-        plan_again.workspace_access(),
-        devo_kernel::WorkspaceAccess::ReadOnly
-    );
-    let denied_again = plan_again
-        .execute(format!(
-            "open({}, 'w')",
-            serde_json::to_string(&blocked_path.display().to_string()).expect("path JSON")
-        ))
-        .await
-        .expect("Plan write again");
-    assert_eq!(denied_again.error_name.as_deref(), Some("PermissionError"));
-    // A prior fenced Plan kernel cannot be reused when the workspace moves
-    // underneath the writable scratch root.
-    let moved = ensure_kernel(
-        &Some(plan_again),
-        scratch.path(),
-        None,
-        devo_protocol::CollaborationMode::Plan,
-    )
-    .await;
-    assert!(
-        matches!(moved, Err(ref error) if error.to_string().contains("overlaps workspace")),
-        "workspace move must fail closed"
-    );
 }

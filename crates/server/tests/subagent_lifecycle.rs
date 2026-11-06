@@ -114,7 +114,6 @@ async fn spawn_agent_generates_unique_child_name() -> Result<()> {
     Ok(())
 }
 
-/// Trace: L2-DES-RLM-001
 /// Verifies: kernel `rlm.spawn` nickname contract — requested names are honored
 /// verbatim (they are the child's address for messaging/observation/delete)
 /// and duplicates among siblings are rejected.

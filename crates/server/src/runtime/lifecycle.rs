@@ -24,7 +24,12 @@ impl ServerRuntime {
             .ok();
         let mut runtime_session = self
             .rollout_store
-            .load_session_from_rollout_with_history(rollout_path, &self.deps, history.as_deref())
+            .load_session_from_rollout_for_session(
+                rollout_path,
+                session_id,
+                &self.deps,
+                history.as_deref(),
+            )
             .await?;
         if runtime_session.summary.session_id() != session_id {
             anyhow::bail!(
@@ -47,7 +52,7 @@ impl ServerRuntime {
         runtime_session: &mut RuntimeSession,
     ) -> anyhow::Result<()> {
         let history = match runtime_session.rollout_path.as_ref() {
-            Some(path) => devo_core::read_canonical_history(path).ok(),
+            Some(path) => devo_core::read_canonical_history_for_session(path, &session_id).ok(),
             None => None,
         };
         self.apply_persisted_session_side_effects_with_history(
@@ -367,11 +372,21 @@ impl ServerRuntime {
                 Some(rollout_path) => {
                     match crate::runtime::session_cache::SessionFileLock::acquire(rollout_path) {
                         Ok(lock) => Some(lock),
-                        Err(contention) => {
+                        Err(crate::runtime::session_file_lock::SessionLockError::Contention {
+                            holder_pid,
+                        }) => {
                             tracing::warn!(
                                 session_id = %session_id,
-                                holder_pid = contention.holder_pid,
+                                holder_pid,
                                 "skipping session locked by another Devo process during bulk restore"
+                            );
+                            continue;
+                        }
+                        Err(error) => {
+                            tracing::warn!(
+                                session_id = %session_id,
+                                %error,
+                                "skipping session whose journal lock could not be acquired during bulk restore"
                             );
                             continue;
                         }

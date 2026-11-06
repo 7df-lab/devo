@@ -94,11 +94,14 @@ pub(crate) struct ResolvedShellRun {
         Option<Result<devo_tools::output_store::SharedOutputCapture, String>>,
     pub(crate) shell: ShellSpec,
     pub(crate) command_to_run: String,
+    /// Trusted workspace rooted in the session, used for sandbox resolution.
+    pub(crate) sandbox_workspace: PathBuf,
     pub(crate) workdir: PathBuf,
     pub(crate) description: String,
     pub(crate) timeout_ms: u64,
     pub(crate) yield_time_ms: u64,
     pub(crate) max_output_tokens: usize,
+    pub(crate) progress_limit_bytes: Option<usize>,
     pub(crate) sandbox_profile: Option<String>,
     pub(crate) sandbox_permission_overlay: Option<devo_sandbox::SandboxPermissionOverlay>,
 }

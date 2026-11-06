@@ -38,7 +38,6 @@ use devo_protocol::native::rpc_session::GoalIfExists;
 
 #[tokio::test]
 async fn goal_token_budget_reached_after_turn_enters_budget_limited() -> Result<()> {
-    // Trace: L2-DES-GOAL-001
     let data_root = TempDir::new()?;
     let provider = Arc::new(UsageProvider {
         requests: std::sync::atomic::AtomicUsize::new(0),
@@ -89,7 +88,6 @@ async fn goal_token_budget_reached_after_turn_enters_budget_limited() -> Result<
 
 #[tokio::test]
 async fn budget_limited_goal_pause_interrupts_pending_wrapup_turn() -> Result<()> {
-    // Trace: L2-DES-GOAL-001
     let data_root = TempDir::new()?;
     let provider = Arc::new(BudgetWrapupPendingProvider {
         requests: std::sync::atomic::AtomicUsize::new(0),
@@ -178,7 +176,6 @@ async fn budget_limited_goal_pause_interrupts_pending_wrapup_turn() -> Result<()
 
 #[tokio::test]
 async fn persisted_paused_goal_replays_without_continuation() -> Result<()> {
-    // Trace: L2-DES-GOAL-001
     let data_root = TempDir::new()?;
     let provider = Arc::new(PendingProvider::default());
     let runtime = build_runtime(data_root.path(), provider.clone())?;
@@ -225,7 +222,6 @@ async fn persisted_paused_goal_replays_without_continuation() -> Result<()> {
 
 #[tokio::test]
 async fn persisted_active_goal_pauses_on_restart_without_continuation() -> Result<()> {
-    // Trace: L2-DES-GOAL-001
     let data_root = TempDir::new()?;
     let provider = Arc::new(CapturingProvider::default());
     let runtime = build_runtime(data_root.path(), provider.clone())?;
@@ -287,7 +283,6 @@ async fn persisted_active_goal_pauses_on_restart_without_continuation() -> Resul
 
 #[tokio::test]
 async fn goal_pause_interrupts_active_hidden_continuation_turn() -> Result<()> {
-    // Trace: L2-DES-GOAL-001
     let data_root = TempDir::new()?;
     let provider = Arc::new(PendingProvider::default());
     let runtime = build_runtime(data_root.path(), provider.clone())?;
@@ -344,7 +339,6 @@ async fn goal_pause_interrupts_active_hidden_continuation_turn() -> Result<()> {
 
 #[tokio::test]
 async fn provider_400_tool_call_adjacency_failure_pauses_goal_without_looping() -> Result<()> {
-    // Trace: L2-DES-GOAL-001
     let data_root = TempDir::new()?;
     let provider = Arc::new(FailingProvider {
         requests: std::sync::atomic::AtomicUsize::new(0),
@@ -379,7 +373,6 @@ async fn provider_400_tool_call_adjacency_failure_pauses_goal_without_looping() 
 
 #[tokio::test]
 async fn goal_set_starts_hidden_continuation_turn() -> Result<()> {
-    // Trace: L2-DES-GOAL-001
     let data_root = TempDir::new()?;
     let provider = Arc::new(CapturingProvider::default());
     let runtime = build_runtime(data_root.path(), provider.clone())?;

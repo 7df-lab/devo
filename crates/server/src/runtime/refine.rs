@@ -544,9 +544,7 @@ impl ServerRuntime {
             };
             let summary = handle.summary().await;
             let is_root = summary.as_ref().is_none_or(|s| s.agent_path.is_none());
-            let session_dir = handle.rollout_path().await.flatten().and_then(|path| {
-                crate::persistence::RolloutStore::rlm_session_dir_for_rollout(&path)
-            });
+            let session_dir = summary.as_ref().and_then(|s| s.session_dir.clone());
             (is_root, session_dir)
         };
         let result =
@@ -643,7 +641,6 @@ mod tests {
     use super::*;
     use pretty_assertions::assert_eq;
 
-    /// Trace: L2-DES-HARNESS-001
     /// Verifies: child sessions cannot schedule refine.run.
     #[test]
     fn children_cannot_schedule() {
@@ -658,7 +655,6 @@ mod tests {
         assert!(!result.scheduled);
     }
 
-    /// Trace: L2-DES-HARNESS-001
     /// Verifies: root schedule last-write-wins pending refine.
     #[test]
     fn root_schedule_is_pending() {
@@ -678,7 +674,6 @@ mod tests {
         assert!(!taken.autonomous);
     }
 
-    /// Trace: L2-DES-HARNESS-001
     /// Verifies: should_auto_refine integration schedules on interval for roots.
     #[test]
     fn auto_interval_schedules_on_root() {
@@ -702,7 +697,6 @@ mod tests {
         assert_eq!(taken.instructions.as_deref(), Some(AUTO_REFINE_INSTRUCTION));
     }
 
-    /// Trace: L2-DES-HARNESS-001
     /// Verifies: children never auto-refine even at interval.
     #[test]
     fn auto_interval_skips_children() {
@@ -718,7 +712,6 @@ mod tests {
         assert!(!peek_pending_refine(&id));
     }
 
-    /// Trace: L2-DES-HARNESS-001
     /// Verifies: boundary apply writes refinements.jsonl (never mid-ipython).
     #[test]
     fn apply_at_boundary_persists_jsonl() {
@@ -739,7 +732,6 @@ mod tests {
         assert!(!peek_pending_refine(&id));
     }
 
-    /// Trace: L2-DES-HARNESS-001
     /// Verifies: Plan Mode holds autonomous pending without applying.
     #[test]
     fn plan_mode_defers_autonomous_apply() {
@@ -778,7 +770,6 @@ mod tests {
         );
     }
 
-    /// Trace: L2-DES-HARNESS-001
     /// Verifies: plan_refine_proposal with instructions yields a memory Create edit.
     #[test]
     fn plan_refine_proposal_with_instructions_emits_memory_create() {
@@ -808,7 +799,6 @@ mod tests {
         assert!(proposal.expected_outcome.contains(&edit.id));
     }
 
-    /// Trace: L2-DES-HARNESS-001
     /// Verifies: empty/missing instructions keep the no-op empty-edits proposal.
     #[test]
     fn plan_refine_proposal_without_instructions_is_noop() {
@@ -832,7 +822,6 @@ mod tests {
         assert!(plan_refine_proposal(&pending_none, &path).edits.is_empty());
     }
 
-    /// Trace: L2-DES-HARNESS-001
     /// Verifies: the auto-interval sentinel is a scheduling marker, not
     /// guidance — the heuristic must not echo it into a durable memory
     /// (bug #48), while the durable trigger keeps the sentinel label.
@@ -910,7 +899,6 @@ mod tests {
         assert_eq!(turns_since_last_refinement(&journal[..4]), 2);
     }
 
-    /// Trace: bug #45 — global refine must target the global store.
     /// Verifies: heuristic planner entries and records follow the requested
     /// scope, and the Devo home resolves to the global harness layout.
     #[test]

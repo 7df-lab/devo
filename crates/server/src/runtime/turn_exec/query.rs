@@ -172,17 +172,14 @@ impl ServerRuntime {
                 session_id.to_string(),
             ))
         });
-        let session_dir = state
-            .rollout_path
-            .as_ref()
-            .and_then(|path| crate::persistence::RolloutStore::rlm_session_dir_for_rollout(path));
+        let session_dir = state.summary.session_dir.clone();
         let harness_digest = session_dir.as_deref().and_then(|dir| {
             // Cold-boundary inject: after skills (prefix), before goal in query.
             // HarnessDigestInjector fails closed on corrupt JSON (empty omit).
-            // Must resolve through `rlm_session_dir_for_rollout` (the same dir
-            // refine applies write to): a root rollout's plain parent is the
-            // shared `sessions/` dir, whose harness state nothing writes, so
-            // persisted memories would never surface in the digest.
+            // Must use the per-session artifact dir: a child sharing the
+            // root journal has `sessions/` as its journal parent, whose harness
+            // state nothing writes, so persisted memories would never surface
+            // in the digest.
             // The digest merges the global harness store (`<home>/harness/`)
             // so memories refined with `global_=True` reach every session.
             let global_dir = devo_util_paths::find_devo_home().ok();
@@ -204,8 +201,9 @@ impl ServerRuntime {
         });
         if let (Some(store), Some(path)) = (&output_store, &state.rollout_path) {
             let path = path.clone();
+            let session_id = state.summary.session_id();
             match tokio::task::spawn_blocking(move || {
-                devo_core::output_replay::read_output_references(&path)
+                devo_core::output_replay::read_output_references_for_session(&path, &session_id)
             })
             .await
             {
@@ -243,69 +241,6 @@ impl ServerRuntime {
             .await
             {
                 Ok((arc, namespace_state)) => {
-                    // Fresh kernel spawn: record the OS-fence outcome in the
-                    // rollout (design doc §5.3) — downgraded-unfenced kernels
-                    // must leave an audit trail, fenced ones keep it complete.
-                    if let Some(rollout_path) = state.rollout_path.as_ref() {
-                        let label = match arc.fence_state() {
-                            devo_kernel::FenceState::Fenced => "fenced",
-                            devo_kernel::FenceState::DowngradedUnfenced => "downgradedUnfenced",
-                            devo_kernel::FenceState::NotRequested => "notRequested",
-                        };
-                        if let Err(err) = self.rollout_store.append_kernel_fence_state(
-                            rollout_path,
-                            session_id,
-                            label,
-                        ) {
-                            tracing::warn!(
-                                %err,
-                                "kernel fence state could not be recorded in rollout"
-                            );
-                        }
-                    }
-                    // Explicit downgrade surfaces as a conversation-visible
-                    // Warning item (design doc §5.3): persisted + broadcast to
-                    // both clients; fenced/not-requested spawns stay silent.
-                    // `[permission] warn_unfenced_kernel = false` ("don't
-                    // remind") suppresses the visible warning — the rollout
-                    // kernelFence audit event is recorded regardless.
-                    let warn_unfenced = runtime_context
-                        .config_store
-                        .lock()
-                        .expect("app config store mutex should not be poisoned")
-                        .effective_config()
-                        .permission
-                        .warn_unfenced_kernel;
-                    if warn_unfenced
-                        && matches!(
-                            arc.fence_state(),
-                            devo_kernel::FenceState::DowngradedUnfenced
-                        )
-                    {
-                        // Remediation is platform-specific: Windows needs the
-                        // sandbox setup completed; unix needs the Landlock/
-                        // seccomp enforcement plan to resolve (kernel support).
-                        let remediation = if cfg!(windows) {
-                            "Run the Windows sandbox setup to enable it"
-                        } else {
-                            "The Landlock/seccomp enforcement plan could not be \
-                             resolved (check kernel Landlock support and the \
-                             sandbox profile configuration)"
-                        };
-                        self.emit_turn_native_item(
-                            session_id,
-                            turn_id,
-                            devo_protocol::native::item::Item::Warning {
-                                code: "rlmKernelUnfenced".to_string(),
-                                message: format!(
-                                    "Python is running with full user permissions because \
-                                     the OS sandbox could not be enabled. {remediation}."
-                                ),
-                                retryable: false,
-                            },
-                        )
-                        .await;
-                    }
                     // Persist the actual restore outcome so the TUI can show the
                     // same state notice live and when the history is reopened.
                     if let Some(namespace_state) = namespace_state {
@@ -372,6 +307,7 @@ impl ServerRuntime {
                 file_read_ledger: Arc::clone(&state.file_read_ledger),
                 sandbox_profile: state.core.config.sandbox_profile.clone(),
                 cancel_token: turn_cancel_token.clone(),
+                kernel_lifetime: Some(kernel.lifetime_token()),
                 mcp_manager: Some(Arc::clone(&runtime_context.mcp_manager)),
                 agent_scope,
                 local_web_search: match &turn_config.web_search {

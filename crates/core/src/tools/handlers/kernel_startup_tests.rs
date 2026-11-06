@@ -1,52 +1,6 @@
 use super::*;
 use pretty_assertions::assert_eq;
 
-#[cfg(windows)]
-#[test]
-fn session_fence_does_not_grant_shared_temp_roots() {
-    let workspace = tempfile::tempdir().expect("workspace");
-    let artifacts = tempfile::tempdir().expect("artifacts");
-    let fence = resolve_kernel_fence(
-        workspace.path(),
-        Some(artifacts.path()),
-        devo_protocol::CollaborationMode::Build,
-    )
-    .expect("fence");
-    assert_eq!(
-        fence.writable_roots,
-        vec![
-            workspace.path().to_path_buf(),
-            artifacts.path().to_path_buf(),
-            global_harness_state_dir(),
-        ]
-    );
-}
-
-#[cfg(unix)]
-#[tokio::test]
-async fn owned_temp_does_not_hide_base_profile_plan_overlap() {
-    if devo_sandbox::SANDBOX_ENFORCEMENT_TEMPORARILY_DISABLED {
-        // No fence is requested while the sandbox is disabled, so the Plan
-        // overlap check never runs. Kept for the post-revert contract.
-        eprintln!("skip: OS sandbox temporarily disabled");
-        return;
-    }
-    let workspace = tempfile::tempdir().expect("workspace under shared scratch");
-    let artifacts = tempfile::tempdir().expect("artifacts");
-    let error = match ensure_kernel_with_restore_state(
-        &None,
-        workspace.path(),
-        Some(artifacts.path()),
-        devo_protocol::CollaborationMode::Plan,
-    )
-    .await
-    {
-        Ok(_) => panic!("Plan must reject the writable scratch ancestor in the Unix base profile"),
-        Err(error) => error,
-    };
-    assert!(error.to_string().contains("overlaps workspace"), "{error}");
-}
-
 #[tokio::test]
 async fn session_kernel_uses_owned_temp_and_reuses_namespace() {
     let workspace = tempfile::tempdir().expect("workspace");
@@ -99,4 +53,67 @@ print(json.dumps({'owned': Path(tempfile.gettempdir()) == expected,
         "42\n"
     );
     kernel.shutdown().await.expect("shutdown");
+}
+
+/// Plan constrains host actions, not native Python running as the user.
+#[tokio::test]
+async fn trusted_plan_kernel_writes_reuses_and_restarts_on_mode_or_workspace_change() {
+    let workspace = tempfile::tempdir().expect("workspace");
+    let artifacts = tempfile::tempdir().expect("artifacts");
+    let mut existing = None;
+    for (mode, root, reuse) in [
+        (
+            devo_protocol::CollaborationMode::Plan,
+            workspace.path(),
+            false,
+        ),
+        (
+            devo_protocol::CollaborationMode::Plan,
+            workspace.path(),
+            true,
+        ),
+        (
+            devo_protocol::CollaborationMode::Build,
+            workspace.path(),
+            false,
+        ),
+        (
+            devo_protocol::CollaborationMode::Plan,
+            workspace.path(),
+            false,
+        ),
+        (
+            devo_protocol::CollaborationMode::Plan,
+            artifacts.path(),
+            false,
+        ),
+    ] {
+        let (kernel, _) =
+            ensure_kernel_with_restore_state(&existing, root, Some(artifacts.path()), mode)
+                .await
+                .expect("trusted kernel");
+        if let Some(previous) = &existing {
+            assert_eq!(Arc::ptr_eq(previous, &kernel), reuse);
+            if !reuse {
+                assert!(previous.execute("print('retired')").await.is_err());
+            }
+        }
+        let output = kernel.execute(
+            "from pathlib import Path\nPath('trusted.txt').write_text('user privileges')\nprint(Path('trusted.txt').read_text())"
+        ).await.expect("native Python write");
+        assert_eq!(
+            (output.status.as_str(), output.stdout.as_str()),
+            ("ok", "user privileges\n")
+        );
+        assert_eq!(
+            std::fs::read_to_string(root.join("trusted.txt")).expect("file"),
+            "user privileges"
+        );
+        existing = Some(kernel);
+    }
+    existing
+        .expect("kernel")
+        .shutdown()
+        .await
+        .expect("shutdown");
 }

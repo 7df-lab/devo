@@ -1,5 +1,4 @@
 /**
- * Trace: L2-DES-APP-010
  * Verifies: Native stream notifications project to InteractiveMode session_event shapes.
  */
 

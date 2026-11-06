@@ -145,7 +145,6 @@ mod tests {
         assert_eq!(projected.item, Item::AssistantMessage { text: "hi".into() });
     }
 
-    /// Trace: L2-DES-APP-009
     /// Verifies: emit-site item-delta helper wires Native delta notifications
     /// carrying `chunk_index` / `base_revision`.
     #[test]
@@ -184,7 +183,6 @@ mod tests {
         assert_eq!(method, "item/plan/delta");
     }
 
-    /// Trace: L2-DES-APP-009
     /// Verifies: turn lifecycle notifications wire as native turn
     /// notifications; terminal states flow through `turn/completed`.
     #[test]
@@ -280,7 +278,6 @@ mod tests {
         );
     }
 
-    /// Trace: L2-DES-APP-009
     /// Verifies: context usage notifications wire as `context/usageUpdated`
     /// carrying the occupancy unchanged.
     #[test]
@@ -302,7 +299,6 @@ mod tests {
         assert_eq!(projected, occupancy);
     }
 
-    /// Trace: L2-DES-APP-009
     /// Verifies: the mid-turn usage meter projects to native
     /// `turn/usage/updated` with per-query totals, the last-query meter, and
     /// the context window (ratified vocabulary).
@@ -367,7 +363,6 @@ mod tests {
         assert_eq!(value["contextWindow"].as_u64(), Some(200_000));
     }
 
-    /// Trace: L2-DES-APP-009
     /// Verifies: provider retry wires as native `model/queryRetrying` with
     /// provider/model/phase carried through.
     #[test]
@@ -407,7 +402,6 @@ mod tests {
         assert_eq!(value["error"]["retryable"].as_bool(), Some(true));
     }
 
-    /// Trace: L2-DES-APP-009
     /// Verifies: plan updates project as a full native `Plan` item on
     /// `item/updated` (replace-by-revision, no plan-delta granularity).
     #[test]

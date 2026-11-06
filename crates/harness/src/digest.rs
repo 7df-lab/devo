@@ -157,7 +157,6 @@ mod tests {
     use chrono::Utc;
     use pretty_assertions::assert_eq;
 
-    /// Trace: L2-DES-HARNESS-001
     /// Verifies: empty harness produces an empty digest (no empty heading spam).
     #[test]
     fn empty_state_digest_is_empty() {
@@ -167,7 +166,6 @@ mod tests {
         );
     }
 
-    /// Trace: L2-DES-HARNESS-001
     /// Verifies: digest includes memory entries and refine.run guidance.
     #[test]
     fn digest_includes_memory_and_refine_hint() {
@@ -197,7 +195,6 @@ mod tests {
         assert!(digest.contains("[harness-digest]"));
     }
 
-    /// Trace: L2-DES-CONTEXT-002, L2-DES-HARNESS-001
     /// Verifies: digest blocks are excluded from summarizer input and reattached.
     #[test]
     fn strip_and_reattach_digest() {

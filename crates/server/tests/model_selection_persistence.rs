@@ -360,7 +360,6 @@ async fn wait_for_turn_completed(
     .context("timed out waiting for turn/completed")?
 }
 
-/// Trace: L2-DES-CONV-002
 /// Verifies: a slug-only model update during a running turn clears the old
 /// binding through MergeTurn so the following turn uses the new model.
 #[tokio::test]
@@ -433,7 +432,6 @@ async fn model_update_during_turn_applies_to_next_turn() -> Result<()> {
     Ok(())
 }
 
-/// Trace: L2-DES-CONV-002
 /// Verifies: a cold session persists a slug-only model update, then resume
 /// and the next turn resolve the new model instead of the stale binding.
 #[tokio::test]
@@ -518,7 +516,6 @@ async fn cold_session_model_update_survives_resume_and_turn() -> Result<()> {
     Ok(())
 }
 
-/// Trace: L2-DES-CONV-002 DD-10
 /// Verifies: the settings snapshot round-trips raw reasoning-effort
 /// selections — including toggle keywords the `ReasoningEffort` enum cannot
 /// express — through metadata/update responses, resume, read, and the cold
@@ -638,7 +635,6 @@ async fn effort_selection_round_trips_through_all_reads(
     Ok(())
 }
 
-/// Trace: L2-DES-CONV-002 DD-10
 /// Verifies: toggle-keyword selections normalize against the selected model
 /// and the canonical value survives every read path after restart.
 #[tokio::test]
@@ -646,14 +642,12 @@ async fn metadata_update_toggle_selection_round_trips_through_all_reads() -> Res
     effort_selection_round_trips_through_all_reads("on", "off").await
 }
 
-/// Trace: L2-DES-CONV-002 DD-10
 /// Verifies: unsupported typed levels clamp and survive the same read paths.
 #[tokio::test]
 async fn metadata_update_levels_selection_round_trips_through_all_reads() -> Result<()> {
     effort_selection_round_trips_through_all_reads("xhigh", "off").await
 }
 
-/// Trace: L2-DES-CONV-002 DD-4
 /// Verifies: patching the same effort twice is a no-op the second time — no
 /// new settings field line, no version bump. The old comparison ran the
 /// persisted value through the `ReasoningEffort` enum, so a stored toggle

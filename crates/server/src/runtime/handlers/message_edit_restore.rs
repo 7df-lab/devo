@@ -505,7 +505,6 @@ mod tests {
     use pretty_assertions::assert_eq;
     use tempfile::TempDir;
 
-    /// Trace: L2-DES-APP-003, L1-REQ-CONV-005
     /// Verifies: safe restore preserves diverged file content and reports a skipped outcome.
     #[tokio::test]
     async fn safe_restore_skips_diverged_added_file() {
@@ -536,7 +535,6 @@ mod tests {
         );
     }
 
-    /// Trace: L2-DES-APP-003, L1-REQ-CONV-005
     /// Verifies: safe restore removes an unchanged file that was added by the superseded turn.
     #[tokio::test]
     async fn safe_restore_removes_unchanged_added_file() {
@@ -564,7 +562,6 @@ mod tests {
         assert!(!path.exists());
     }
 
-    /// Trace: L2-DES-APP-003, L1-REQ-CONV-005
     /// Verifies: safe restore restores an unchanged modified file to its pre-turn content.
     #[tokio::test]
     async fn safe_restore_restores_unchanged_modified_file() {
@@ -596,7 +593,6 @@ mod tests {
         );
     }
 
-    /// Trace: L2-DES-APP-003
     /// Verifies: restore candidate discovery reads structured file metadata from edit tool results.
     #[test]
     fn discovers_structured_file_change_candidates() {
@@ -633,7 +629,6 @@ mod tests {
         );
     }
 
-    /// Trace: L2-DES-APP-003, L1-REQ-CONV-005
     /// Verifies: update metadata with post content plus a per-file diff is restorable.
     #[tokio::test]
     async fn discovers_and_restores_modified_file_from_reverse_diff() {
@@ -679,7 +674,6 @@ mod tests {
         );
     }
 
-    /// Trace: L2-DES-APP-003, L1-REQ-CONV-005
     /// Verifies: move metadata with target content plus a diff can be reversed safely.
     #[tokio::test]
     async fn discovers_and_restores_moved_file_from_reverse_diff() {
@@ -734,7 +728,6 @@ mod tests {
         assert!(!target_path.exists());
     }
 
-    /// Trace: L2-DES-APP-003, L1-REQ-CONV-005
     /// Verifies: safe restore preserves a moved target that diverged after the superseded turn.
     #[tokio::test]
     async fn safe_restore_skips_diverged_moved_file() {

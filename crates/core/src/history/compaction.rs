@@ -692,7 +692,6 @@ mod tests {
         }
     }
 
-    /// Trace: L2-DES-AGENT-002
     /// Verifies: cancel token aborts an in-flight history summarizer.
     #[tokio::test]
     async fn compact_history_returns_canceled_when_token_fires() {

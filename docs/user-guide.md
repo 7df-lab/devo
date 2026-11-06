@@ -1,11 +1,11 @@
 # Devo user guide
 
-> **Temporarily disabled.** OS sandboxing and the permission picker are
-> disabled repo-wide: every process runs with full user permissions and new
-> sessions default to full-access. Revert by flipping
-> `SANDBOX_ENFORCEMENT_TEMPORARILY_DISABLED` (Rust, `crates/sandbox/src/lib.rs`),
-> `PERMISSIONS_COMMAND_ENABLED` (TUI), `PERMISSION_PICKER_ENABLED` (desktop),
-> and the default-preset literals back to their asking defaults.
+> Shell and terminal execution follow the configured sandbox profile; there is
+> no global sandbox-disable switch. Python kernels are trusted user-privileged
+> processes, not OS-isolated environments. See
+> [the execution boundary](trusted-kernel-host-shell.md).
+> Permission-picker UI flags and new-session permission defaults are separate
+> settings; removing the global switch does not change them.
 
 
 [Back to README](../README.md)
@@ -120,6 +120,20 @@ Local catalog files can still be refreshed, and the bundled catalog is always av
 Model requests go to the endpoint you configure. For local model traffic,
 choose a compatible local endpoint.
 
+### Errors during a conversation
+
+A saved API key does not guarantee available credits. If an OpenAI-compatible
+Responses stream reports `error` or `response.failed`, Devo ends that turn as a
+failure and displays the provider's error in the conversation, even when no
+assistant text arrived. Text already received remains visible.
+
+Within these stream events, `insufficient_quota` and `credit_balance_exhausted`
+are quota failures, not login failures. Devo does not automatically retry them
+or invalidate the saved credential. Add credits or choose another configured
+provider, then send a new message. The failed turn remains visible when the
+session is resumed. Non-success HTTP responses retain their existing status-code
+classification; this handling applies to failures inside an established SSE stream.
+
 ## Installation
 
 ### Desktop app
@@ -168,6 +182,12 @@ installing to choose another persistent directory. Keep this cache while the
 installation uses it; the app's `runtime/*.path` files reference it. Re-running
 the installer repairs missing runtimes. Old runtime packs remain available to
 running terminals and older installations; they are not automatically deleted.
+
+If an install is interrupted while downloading a private runtime, a stale
+runtime-cache lock can remain. Devo does not delete stale locks automatically,
+so it cannot remove a lock held by another installer. If the installer times
+out, confirm that no other installer is running, remove the lock directory
+named in the timeout message, then rerun the installer.
 
 Linux terminal archives use names such as `devo-tui-v0.2.0-x86_64-linux-musl.tar.gz`
 and `devo-tui-v0.2.0-aarch64-linux-musl.tar.gz`. Online app/runtime components

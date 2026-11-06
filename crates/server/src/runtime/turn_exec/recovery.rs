@@ -5,7 +5,7 @@ use std::sync::Arc;
 use anyhow::{Context, bail, ensure};
 use devo_core::durable_execution::{
     ExecutionRecord, ExecutionReplay, RecoveryDisposition, RecoveryState, ToolIntentJournal,
-    read_execution_replay,
+    read_execution_replay_for_session,
 };
 use devo_protocol::native::rpc_turn::{
     TurnRecovery, TurnRecoveryReadParams, TurnRecoveryReadResult, TurnResumeParams,
@@ -63,9 +63,10 @@ impl ServerRuntime {
         };
         let turn_id = turn.turn_id();
         let path_for_read = path.clone();
-        let execution =
-            tokio::task::spawn_blocking(move || read_execution_replay(&path_for_read, &turn_id))
-                .await??;
+        let execution = tokio::task::spawn_blocking(move || {
+            read_execution_replay_for_session(&path_for_read, &turn_id, &session_id)
+        })
+        .await??;
         if execution
             .recovery
             .as_ref()
@@ -216,9 +217,10 @@ impl ServerRuntime {
         };
         let journal_path = path.clone();
         let turn_id_for_read = turn_id;
-        let replay =
-            tokio::task::spawn_blocking(move || read_execution_replay(&path, &turn_id_for_read))
-                .await??;
+        let replay = tokio::task::spawn_blocking(move || {
+            read_execution_replay_for_session(&path, &turn_id_for_read, &session_id)
+        })
+        .await??;
         let previous = replay.recovery;
         if previous
             .as_ref()

@@ -169,7 +169,8 @@ impl ServerRuntime {
     ) -> Option<PersistedLivingItem> {
         let handle = self.session(owner_session_id).await?;
         let rollout_path = handle.rollout_path().await??;
-        let history = devo_core::read_canonical_history(&rollout_path).ok()?;
+        let history =
+            devo_core::read_canonical_history_for_session(&rollout_path, &owner_session_id).ok()?;
         let checkpoints = &history.approval_checkpoints;
         let recovered =
             super::super::interaction_items::latest_waiting_approvals(&history.items, checkpoints)
@@ -189,8 +190,11 @@ impl ServerRuntime {
     ) -> Option<TurnApprovalCheckpointRecordedRecord> {
         let handle = self.session(session_id).await?;
         let rollout_path = handle.rollout_path().await??;
-        super::super::approval_checkpoint::latest_approval_checkpoints_for_rollout(&rollout_path)
-            .remove(approval_id)
+        super::super::approval_checkpoint::latest_approval_checkpoints_for_rollout(
+            &rollout_path,
+            &session_id,
+        )
+        .remove(approval_id)
     }
 
     /// Handles an approval decision from a restored or live interactive lane.
@@ -623,7 +627,8 @@ impl ServerRuntime {
             Some(Some(path)) => path,
             _ => return false,
         };
-        let Ok(history) = devo_core::read_canonical_history(&rollout_path) else {
+        let Ok(history) = devo_core::read_canonical_history_for_session(&rollout_path, &session_id)
+        else {
             return false;
         };
         let turn_id = turn_id.to_string();
@@ -668,10 +673,7 @@ impl ServerRuntime {
                 }
             })
         });
-        let session_dir =
-            working.state.rollout_path.as_ref().and_then(|path| {
-                crate::persistence::RolloutStore::rlm_session_dir_for_rollout(path)
-            });
+        let session_dir = working.state.summary.session_dir.clone();
         let kernel = match ensure_kernel_with_restore_state(
             &working.state.kernel,
             &working.state.core.cwd,
@@ -737,6 +739,7 @@ impl ServerRuntime {
                 file_read_ledger: Arc::clone(&working.state.file_read_ledger),
                 sandbox_profile: working.state.core.config.sandbox_profile.clone(),
                 cancel_token: host_cancel_token.clone(),
+                kernel_lifetime: Some(kernel.lifetime_token()),
                 mcp_manager: Some(Arc::clone(&working.state.runtime_context.mcp_manager)),
                 agent_scope,
                 local_web_search: match &turn_config.web_search {

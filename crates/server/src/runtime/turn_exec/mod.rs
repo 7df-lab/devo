@@ -94,10 +94,10 @@ pub(crate) fn spawn_post_turn_scheduling(
             .collaboration_mode()
             .await
             .is_some_and(|m| m == devo_protocol::CollaborationMode::Plan);
-        let session_dir =
-            handle.rollout_path().await.flatten().and_then(|path| {
-                crate::persistence::RolloutStore::rlm_session_dir_for_rollout(&path)
-            });
+        let session_dir = handle
+            .summary()
+            .await
+            .and_then(|summary| summary.session_dir);
         let turn_succeeded = handle
             .resume_snapshot()
             .await
@@ -122,16 +122,17 @@ pub(crate) fn spawn_post_turn_scheduling(
                     .persist_applied_refinement(session_id, &applied)
                     .await;
             }
-            let auto_settings = runtime
-                .native_session_snapshot(session_id)
-                .await
-                .map(|session| {
-                    super::refine::auto_refine_settings_from_session(
-                        session.settings.auto_refine_enabled,
-                        session.settings.auto_refine_turn_interval,
-                    )
-                })
-                .unwrap_or_default();
+            let auto_settings = match runtime.native_session_snapshot(session_id).await {
+                Ok(Some(session)) => super::refine::auto_refine_settings_from_session(
+                    session.settings.auto_refine_enabled,
+                    session.settings.auto_refine_turn_interval,
+                ),
+                Ok(None) => Default::default(),
+                Err(error) => {
+                    tracing::warn!(session_id = %session_id, %error, "snapshot read failed");
+                    Default::default()
+                }
+            };
             let _ = super::refine::maybe_schedule_auto_refine(
                 &native_session_id,
                 &auto_settings,

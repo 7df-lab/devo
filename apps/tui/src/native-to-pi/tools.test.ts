@@ -1,7 +1,3 @@
-/**
- * Trace: tool lifecycle projection (pending → args → start → end).
- */
-
 import { test } from "node:test";
 import assert from "node:assert/strict";
 import {

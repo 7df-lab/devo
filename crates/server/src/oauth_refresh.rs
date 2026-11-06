@@ -277,7 +277,6 @@ mod tests {
         }
     }
 
-    /// Trace: L2-DES-AUTH-001
     /// Verifies: an OAuth access token near expiry is refreshed when possible.
     #[test]
     fn near_expiry_with_refresh_token_refreshes() {
@@ -287,7 +286,6 @@ mod tests {
         );
     }
 
-    /// Trace: L2-DES-AUTH-001
     /// Verifies: an OAuth access token outside the refresh window is reused.
     #[test]
     fn token_outside_refresh_window_is_reused() {
@@ -297,7 +295,6 @@ mod tests {
         );
     }
 
-    /// Trace: L2-DES-AUTH-001
     /// Verifies: an expired OAuth token without refresh material is stale.
     #[test]
     fn expired_token_without_refresh_is_stale() {

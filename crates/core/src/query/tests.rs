@@ -1669,7 +1669,6 @@ async fn query_exposes_only_ipython_and_appends_subagent_warning() {
     );
 }
 
-/// Trace: L2-DES-RESEARCH-001
 /// Verifies: provider-hosted tools emit normal tool events without local execution.
 #[tokio::test]
 async fn provider_hosted_tools_emit_events_without_local_execution() {
@@ -1875,7 +1874,6 @@ async fn provider_hosted_tools_emit_events_without_local_execution() {
     }
 }
 
-/// Trace: L2-DES-RESEARCH-001
 /// Verifies: DSML text that represents a provider-hosted web_search does not end the query loop.
 #[tokio::test]
 async fn provider_hosted_dsml_text_tool_call_continues_query_loop() {
@@ -2373,7 +2371,6 @@ async fn query_request_model_routing() {
     }
 }
 
-/// Trace: L2-DES-CONTEXT-001
 #[tokio::test]
 async fn query_collaboration_mode_prompts_follow_plan_to_build_transition() {
     let fixtures = CapturingFixtures::new("capturing-provider");

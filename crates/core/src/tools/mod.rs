@@ -14,6 +14,7 @@ pub mod handler_kind {
 }
 pub mod handlers;
 mod hook_events;
+pub mod host_bash;
 pub mod invocation {
     pub use devo_tools::invocation::*;
 }

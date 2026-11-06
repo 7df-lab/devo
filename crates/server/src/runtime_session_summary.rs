@@ -15,6 +15,10 @@ pub(crate) struct RuntimeSessionSummary {
     pub(crate) agent_path: Option<String>,
     pub(crate) agent_nickname: Option<String>,
     pub(crate) agent_role: Option<String>,
+    /// Independent artifact/kernel/harness directory for this logical session.
+    /// Never derive this from `rollout_path.parent()` once a child shares the
+    /// root journal: that parent is the shared `sessions/` directory.
+    pub(crate) session_dir: Option<std::path::PathBuf>,
     pub(crate) prompt_token_estimate: usize,
     pub(crate) last_query_usage: Option<devo_protocol::native::usage::TurnUsage>,
     pub(crate) last_query_total_tokens: usize,
@@ -34,6 +38,7 @@ impl RuntimeSessionSummary {
             agent_path: None,
             agent_nickname: None,
             agent_role: None,
+            session_dir: None,
             prompt_token_estimate: 0,
             last_query_usage: None,
             last_query_total_tokens: 0,

@@ -309,7 +309,6 @@ mod tests {
     use super::*;
     use pretty_assertions::assert_eq;
 
-    /// Trace: L2-DES-CONTEXT-004
     #[test]
     fn saved_output_survives_reopening_and_rejects_replacement() {
         let directory = tempfile::tempdir().unwrap();
@@ -332,7 +331,6 @@ mod tests {
         );
     }
 
-    /// Trace: L2-DES-CONTEXT-004
     #[test]
     fn long_line_has_bounded_continuation() {
         let directory = tempfile::tempdir().unwrap();
@@ -355,7 +353,6 @@ mod tests {
             None
         );
     }
-    /// Trace: L2-DES-CONTEXT-004. Polls retain one file and UTF-8 pagination advances.
     #[test]
     fn growing_capture_and_tiny_unicode_pages() {
         let directory = tempfile::tempdir().unwrap();
@@ -385,7 +382,6 @@ mod tests {
         );
     }
 
-    /// Trace: L2-DES-CONTEXT-004. Equal contents do not authorize another file.
     #[test]
     fn identical_replacement_is_rejected_by_identity() {
         let directory = tempfile::tempdir().unwrap();

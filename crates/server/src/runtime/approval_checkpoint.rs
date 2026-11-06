@@ -9,7 +9,7 @@ use devo_core::tools::{
     AdditionalSandboxPermissions, NetworkPermission, SandboxPermissionRequest,
     ToolPermissionRequest,
 };
-use devo_core::{ContentBlock, Message, Role, read_canonical_history};
+use devo_core::{ContentBlock, Message, Role};
 use devo_protocol::CollaborationMode;
 use devo_protocol::native::ids::{SessionId, TurnId};
 use devo_safety::ResourceKind;
@@ -242,8 +242,9 @@ pub(crate) fn permission_request_from_messages(
 
 pub(crate) fn latest_approval_checkpoints_for_rollout(
     path: &Path,
+    session_id: &devo_protocol::native::ids::SessionId,
 ) -> std::collections::HashMap<String, TurnApprovalCheckpointRecordedRecord> {
-    read_canonical_history(path)
+    devo_core::read_canonical_history_for_session(path, session_id)
         .map(|history| history.approval_checkpoints)
         .unwrap_or_default()
 }

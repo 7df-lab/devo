@@ -70,7 +70,24 @@ impl ServerRuntime {
             .invent_session_persistence(&forked_id.clone());
         invented.extras.collaboration_mode = Some(forked_runtime.summary.collaboration_mode);
         invented.extras.permission_preset = forked_runtime.summary.permission_preset();
-        if let Err(error) = self.rollout_store.append_session_meta_at(
+        if let Some(parent) = invented.rollout_path.parent() {
+            std::fs::create_dir_all(parent).map_err(|error| {
+                format!(
+                    "failed to persist forked session metadata: create fork journal dir: {error}"
+                )
+            })?;
+        }
+        let _lease =
+            crate::runtime::session_file_lock::SessionFileLock::acquire(&invented.rollout_path)
+                .map_err(|error| {
+                    format!("failed to persist forked session metadata: lock fork journal: {error}")
+                })?;
+        let forked_session_dir = self.rollout_store.root_session_dir(&forked_id);
+        std::fs::create_dir_all(&forked_session_dir).map_err(|error| {
+            format!("failed to persist forked session metadata: create fork artifact dir: {error}")
+        })?;
+        forked_runtime.summary.session_dir = Some(forked_session_dir);
+        if let Err(error) = self.rollout_store.append_session_meta_create_at(
             &invented.rollout_path,
             &forked_runtime.summary.native,
             Some(invented.extras.clone()),
@@ -114,8 +131,12 @@ impl ServerRuntime {
                 .iter()
                 .filter_map(|item| crate::persisted_native_item::tool_call_id(&item.item))
                 .collect::<HashSet<_>>();
-            let references = devo_core::output_replay::read_output_references(source_path)
-                .map_err(|error| format!("failed to read fork output references: {error}"))?;
+            let source_session_id = source.summary.session_id();
+            let references = devo_core::output_replay::read_output_references_for_session(
+                source_path,
+                &source_session_id,
+            )
+            .map_err(|error| format!("failed to read fork output references: {error}"))?;
             let artifacts = references
                 .into_iter()
                 .filter(|artifact| kept_calls.contains(artifact.call_id.as_str()))

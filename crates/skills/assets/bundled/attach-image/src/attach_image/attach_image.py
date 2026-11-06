@@ -6,8 +6,8 @@ import base64
 import io
 from pathlib import Path
 
-# Keep in sync with ATTACHMENT_DISPLAY_MIME in src/core/kernel/index.ts.
-_ATTACHMENT_DISPLAY_MIME = "application/vnd.devo.attachment+json"
+# Keep in sync with ATTACHMENT_DISPLAY_MIME in crates/kernel/src/session.rs.
+_ATTACHMENT_DISPLAY_MIME = "application/vnd.attachment+json"
 
 # Keep emitted attachments small enough that daemon clients can render and replay
 # image-heavy sessions without compressing megabytes of base64 on every update.

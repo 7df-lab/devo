@@ -1,4 +1,4 @@
-//! Root-session auto-refine interval settings (L2-DES-HARNESS-001 DD-3).
+//! Root-session auto-refine interval settings.
 
 use serde::{Deserialize, Serialize};
 
@@ -49,7 +49,6 @@ mod tests {
     use super::*;
     use pretty_assertions::assert_eq;
 
-    /// Trace: L2-DES-HARNESS-001
     /// Verifies: defaults are enabled with interval 25.
     #[test]
     fn defaults_match_spec() {
@@ -64,7 +63,6 @@ mod tests {
         );
     }
 
-    /// Trace: L2-DES-HARNESS-001
     /// Verifies: goal-continuation turns never trigger auto-refine.
     #[test]
     fn goal_continuation_skipped() {
@@ -76,7 +74,6 @@ mod tests {
         ));
     }
 
-    /// Trace: L2-DES-HARNESS-001
     /// Verifies: children never auto-refine.
     #[test]
     fn children_skipped() {
@@ -88,7 +85,6 @@ mod tests {
         ));
     }
 
-    /// Trace: L2-DES-HARNESS-001
     /// Verifies: interval fires on multiples of N for root user-visible turns.
     #[test]
     fn interval_fires_on_multiple() {

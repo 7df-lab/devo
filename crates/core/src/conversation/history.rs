@@ -13,7 +13,8 @@ use std::collections::{HashMap, HashSet};
 use std::io::{BufRead, Read};
 use std::path::Path;
 
-use devo_protocol::native::ids::ItemId;
+use chrono::{DateTime, Utc};
+use devo_protocol::native::ids::{ItemId, SessionId};
 use devo_protocol::native::item::ItemEnvelope;
 use devo_protocol::native::session::Session;
 use devo_protocol::native::turn::Turn;
@@ -60,6 +61,15 @@ pub enum HistoryReadError {
         line_index: usize,
         error: RolloutLineReadError,
     },
+    /// The requested logical session has a durable hard-delete marker in the
+    /// journal. Shared journals retain the file for the root and siblings, so
+    /// absence of data is not enough to distinguish "deleted" from "not yet
+    /// written"; callers map this to a not-found/resume error.
+    #[error("session {session_id} was deleted at {deleted_at}")]
+    SessionDeleted {
+        session_id: SessionId,
+        deleted_at: DateTime<Utc>,
+    },
 }
 
 fn visit_rollout_file_lines(
@@ -97,6 +107,66 @@ fn visit_rollout_lines(
     Ok(())
 }
 
+/// Parses one physical JSONL row into a rollout line. Blank rows and a
+/// truncated final row are crash tails: they were never acknowledged, so they
+/// are skipped. Any other parse failure is fail-closed.
+fn parse_history_rollout_line(
+    index: usize,
+    raw: &str,
+    is_last: bool,
+) -> Result<Option<RolloutLine>, HistoryReadError> {
+    if raw.trim().is_empty() {
+        return Ok(None);
+    }
+    match parse_rollout_line(raw) {
+        Ok(line) => Ok(Some(line)),
+        Err(RolloutLineReadError::TruncatedTail) if is_last => Ok(None),
+        Err(error) => Err(HistoryReadError::DamagedLine {
+            line_index: index,
+            error,
+        }),
+    }
+}
+
+/// Visits only the lines owned by `session_id`. Tombstones are checked before
+/// the caller's prefilter so a deletion marker is never skipped just because
+/// the caller only wants headers or leaf pointers.
+fn visit_rollout_file_lines_for_session(
+    path: &Path,
+    session_id: &SessionId,
+    prefilter: impl Fn(&str) -> bool,
+    mut visit: impl FnMut(usize, RolloutLine) -> Result<(), HistoryReadError>,
+) -> Result<(), HistoryReadError> {
+    visit_rollout_file_lines(path, |index, raw, is_last| {
+        let tombstone_candidate = raw.contains("\"sessionDeleted\"");
+        if !tombstone_candidate && !prefilter(raw) {
+            return Ok(());
+        }
+        let Some(line) = parse_history_rollout_line(index, raw, is_last)? else {
+            return Ok(());
+        };
+        if let RolloutLine::Internal {
+            session_id: owner,
+            entry: InternalRecord::SessionDeleted { deleted_at, .. },
+            ..
+        } = &line
+            && owner == session_id
+        {
+            return Err(HistoryReadError::SessionDeleted {
+                session_id: *session_id,
+                deleted_at: deleted_at.to_owned(),
+            });
+        }
+        if !prefilter(raw) {
+            return Ok(());
+        }
+        if line.session_id().as_ref() != Some(session_id) {
+            return Ok(());
+        }
+        visit(index, line)
+    })
+}
+
 /// Reads one versioned rollout file into canonical history form. Every line
 /// must use the current format version; no older-file projection is attempted.
 /// A truncated final line is tolerated as a crash tail, matching resume.
@@ -108,26 +178,38 @@ fn visit_rollout_lines(
 pub fn read_canonical_history(path: &Path) -> Result<CanonicalHistory, HistoryReadError> {
     let mut history = CanonicalHistory::default();
     visit_rollout_file_lines(path, |index, raw, is_last| {
-        if raw.trim().is_empty() {
+        let Some(line) = parse_history_rollout_line(index, raw, is_last)? else {
             return Ok(());
-        }
-        let parsed = match parse_rollout_line(raw) {
-            Ok(parsed) => parsed,
-            // A truncated final line is a crash tail: the write never
-            // completed, nothing was acknowledged.
-            Err(RolloutLineReadError::TruncatedTail) if is_last => return Ok(()),
-            Err(error) => {
-                return Err(HistoryReadError::DamagedLine {
-                    line_index: index,
-                    error,
-                });
-            }
         };
-        apply_rollout_line(&mut history, parsed);
+        apply_rollout_line(&mut history, line);
         Ok(())
     })?;
     Ok(history)
 }
+
+/// Reads canonical history for one logical session inside a physical journal.
+///
+/// A shared root journal contains many sessions; this is the production read
+/// for both shared and legacy single-session files. Lines owned by other
+/// sessions are skipped, and the target session's hard-delete tombstone is
+/// reported as [`HistoryReadError::SessionDeleted`].
+pub fn read_canonical_history_for_session(
+    path: &Path,
+    session_id: &SessionId,
+) -> Result<CanonicalHistory, HistoryReadError> {
+    let mut history = CanonicalHistory::default();
+    visit_rollout_file_lines_for_session(
+        path,
+        session_id,
+        |_| true,
+        |_, line| {
+            apply_rollout_line(&mut history, line);
+            Ok(())
+        },
+    )?;
+    Ok(history)
+}
+
 /// Reads only the latest folded session header, skipping the typed parse
 /// of every line that cannot affect it. Callers that need items, turns,
 /// checkpoints, or the leaf pointer must use [`read_canonical_history`];
@@ -147,23 +229,39 @@ pub fn read_rollout_session_meta(path: &Path) -> Result<Option<Box<Session>>, Hi
         {
             return Ok(());
         }
-        let parsed = match parse_rollout_line(raw) {
-            Ok(parsed) => parsed,
-            // A truncated final line is a crash tail: the write never
-            // completed, nothing was acknowledged.
-            Err(RolloutLineReadError::TruncatedTail) if is_last => return Ok(()),
-            Err(error) => {
-                return Err(HistoryReadError::DamagedLine {
-                    line_index: index,
-                    error,
-                });
-            }
+        let Some(line) = parse_history_rollout_line(index, raw, is_last)? else {
+            return Ok(());
         };
-        apply_rollout_line(&mut history, parsed);
+        apply_rollout_line(&mut history, line);
         Ok(())
     })?;
     Ok(history.session)
 }
+
+/// Session-scoped variant of [`read_rollout_session_meta`] for shared
+/// journals. A later child `SessionMeta` can never replace the requested
+/// root's header.
+pub fn read_rollout_session_meta_for_session(
+    path: &Path,
+    session_id: &SessionId,
+) -> Result<Option<Box<Session>>, HistoryReadError> {
+    let mut history = CanonicalHistory::default();
+    visit_rollout_file_lines_for_session(
+        path,
+        session_id,
+        |raw| {
+            raw.contains("\"sessionMeta\"")
+                || raw.contains("\"sessionSettings\"")
+                || raw.contains("\"sessionTitleUpdated\"")
+        },
+        |_, line| {
+            apply_rollout_line(&mut history, line);
+            Ok(())
+        },
+    )?;
+    Ok(history.session)
+}
+
 /// Reads only the effective transcript-tree tip, avoiding the full typed
 /// history parse on actor construction. Callers that need items, turns, or
 /// tree edges must use [`read_canonical_history`]. The `sessionLeaf` tag is
@@ -176,23 +274,34 @@ pub fn read_rollout_session_leaf(path: &Path) -> Result<(Option<ItemId>, u64), H
         if !raw.contains("\"sessionLeaf\"") {
             return Ok(());
         }
-        let parsed = match parse_rollout_line(raw) {
-            Ok(parsed) => parsed,
-            // A truncated final line is a crash tail: the write never
-            // completed, nothing was acknowledged.
-            Err(RolloutLineReadError::TruncatedTail) if is_last => return Ok(()),
-            Err(error) => {
-                return Err(HistoryReadError::DamagedLine {
-                    line_index: index,
-                    error,
-                });
-            }
+        let Some(line) = parse_history_rollout_line(index, raw, is_last)? else {
+            return Ok(());
         };
-        apply_rollout_line(&mut history, parsed);
+        apply_rollout_line(&mut history, line);
         Ok(())
     })?;
     Ok((history.leaf_id, history.leaf_epoch))
 }
+
+/// Session-scoped variant of [`read_rollout_session_leaf`] for shared
+/// journals. A child's later leaf line must not replace the root tip.
+pub fn read_rollout_session_leaf_for_session(
+    path: &Path,
+    session_id: &SessionId,
+) -> Result<(Option<ItemId>, u64), HistoryReadError> {
+    let mut history = CanonicalHistory::default();
+    visit_rollout_file_lines_for_session(
+        path,
+        session_id,
+        |raw| raw.contains("\"sessionLeaf\""),
+        |_, line| {
+            apply_rollout_line(&mut history, line);
+            Ok(())
+        },
+    )?;
+    Ok((history.leaf_id, history.leaf_epoch))
+}
+
 fn apply_rollout_line(history: &mut CanonicalHistory, line: RolloutLine) {
     match line {
         RolloutLine::SessionMeta { session, .. } => history.session = Some(session),
@@ -739,7 +848,6 @@ mod tests {
         assert!(matches!(error, HistoryReadError::DamagedLine { .. }));
     }
 
-    /// Trace: L2-DES-CONV-002
     /// Verifies: field-level settings lines fold into the canonical session
     /// snapshot (last line per field wins) and bump its version (DD-4).
     #[test]
@@ -1079,5 +1187,282 @@ mod tests {
             read_rollout_session_leaf(&path).expect("read leaf with tail"),
             expected
         );
+    }
+    fn session_record_for(
+        id: SessionId,
+        parent: Option<SessionId>,
+        dir: &Path,
+        now: chrono::DateTime<Utc>,
+    ) -> crate::conversation::SessionRecord {
+        crate::conversation::SessionRecord {
+            id,
+            rollout_path: dir.join("rollout.jsonl"),
+            created_at: now,
+            updated_at: now,
+            last_activity_at: Some(now),
+            source: "cli".into(),
+            agent_nickname: parent.map(|_| "child".to_string()),
+            agent_role: parent.map(|_| "default".to_string()),
+            agent_path: parent.map(|_| "root/child".to_string()),
+            model_provider: "test".into(),
+            model: Some("test-model".into()),
+            model_binding_id: None,
+            reasoning_effort_selection: None,
+            cwd: dir.to_path_buf(),
+            additional_directories: Vec::new(),
+            cli_version: "test".into(),
+            title: None,
+            title_state: crate::conversation::SessionTitleState::Unset,
+            sandbox_policy: "workspace-write".into(),
+            approval_mode: "on-request".into(),
+            effective_context_window: None,
+            tokens_used: 0,
+            first_user_message: None,
+            archived_at: None,
+            git_sha: None,
+            git_branch: None,
+            git_origin_url: None,
+            parent_session_id: parent,
+            fork_from_id: None,
+            fork_at_turn_id: None,
+            session_context: None,
+            latest_turn_context: None,
+            collaboration_mode: None,
+            permission_preset: None,
+            schema_version: 2,
+        }
+    }
+
+    fn session_meta_line(
+        record: &crate::conversation::SessionRecord,
+        now: chrono::DateTime<Utc>,
+    ) -> RolloutLine {
+        RolloutLine::SessionMeta {
+            v: ROLLOUT_FORMAT_VERSION,
+            timestamp: now,
+            session: Box::new(native_session_from_record(record).expect("convert session record")),
+            extras: None,
+        }
+    }
+
+    fn native_turn_for(
+        session_id: SessionId,
+        status: devo_protocol::native::turn::TurnStatus,
+        id: TurnId,
+        sequence: u32,
+    ) -> devo_protocol::native::turn::Turn {
+        let mut turn = native_turn(status, id, sequence);
+        turn.session_id = session_id;
+        turn
+    }
+
+    #[test]
+    fn shared_journal_scoped_readers_isolate_sessions() {
+        let dir = tempfile::TempDir::new().expect("temp dir");
+        let path = dir.path().join("rollout.jsonl");
+        let now = fixture_now();
+        let root = SessionId::new();
+        let child = SessionId::new();
+        let root_turn = TurnId::new();
+        let child_turn = TurnId::new();
+        let root_item = assistant_item_envelope(root, root_turn, 1, "root text");
+        let child_item = assistant_item_envelope(child, child_turn, 1, "child text");
+        let root_leaf = ItemId::new();
+        let child_leaf = ItemId::new();
+        let root_edge = ItemId::new();
+        let child_edge = ItemId::new();
+        let root_record = session_record_for(root, None, dir.path(), now);
+        let child_record = session_record_for(child, Some(root), dir.path(), now);
+        let leaf_line = |session_id, epoch, leaf_id| RolloutLine::Internal {
+            v: ROLLOUT_FORMAT_VERSION,
+            timestamp: now,
+            session_id,
+            turn_id: None,
+            seq: 0,
+            entry: InternalRecord::SessionLeaf { epoch, leaf_id },
+        };
+        let edge_line = |session_id, child_id| RolloutLine::Internal {
+            v: ROLLOUT_FORMAT_VERSION,
+            timestamp: now,
+            session_id,
+            turn_id: None,
+            seq: 0,
+            entry: InternalRecord::TreeEdge {
+                child_id,
+                parent_id: None,
+            },
+        };
+        write_lines(
+            &path,
+            &[
+                session_meta_line(&root_record, now),
+                session_meta_line(&child_record, now),
+                RolloutLine::Turn {
+                    v: ROLLOUT_FORMAT_VERSION,
+                    timestamp: now,
+                    turn: native_turn_for(
+                        root,
+                        devo_protocol::native::turn::TurnStatus::Completed,
+                        root_turn,
+                        1,
+                    ),
+                    extras: None,
+                },
+                RolloutLine::Turn {
+                    v: ROLLOUT_FORMAT_VERSION,
+                    timestamp: now,
+                    turn: native_turn_for(
+                        child,
+                        devo_protocol::native::turn::TurnStatus::Completed,
+                        child_turn,
+                        1,
+                    ),
+                    extras: None,
+                },
+                RolloutLine::Item {
+                    v: ROLLOUT_FORMAT_VERSION,
+                    timestamp: now,
+                    item: root_item.clone(),
+                },
+                RolloutLine::Item {
+                    v: ROLLOUT_FORMAT_VERSION,
+                    timestamp: now,
+                    item: child_item.clone(),
+                },
+                RolloutLine::SessionTitleUpdated {
+                    v: ROLLOUT_FORMAT_VERSION,
+                    timestamp: now,
+                    session_id: root,
+                    title: "root title".into(),
+                    previous_title: None,
+                },
+                RolloutLine::SessionTitleUpdated {
+                    v: ROLLOUT_FORMAT_VERSION,
+                    timestamp: now,
+                    session_id: child,
+                    title: "child title".into(),
+                    previous_title: None,
+                },
+                settings_line(
+                    now,
+                    root,
+                    SessionSettingsField::Model,
+                    serde_json::json!("root-model"),
+                    1,
+                ),
+                settings_line(
+                    now,
+                    child,
+                    SessionSettingsField::Model,
+                    serde_json::json!("child-model"),
+                    1,
+                ),
+                leaf_line(root, 1, Some(root_leaf)),
+                leaf_line(child, 9, Some(child_leaf)),
+                edge_line(root, root_edge),
+                edge_line(child, child_edge),
+            ],
+        );
+
+        let root_history = read_canonical_history_for_session(&path, &root).expect("root history");
+        assert_eq!(root_history.session.as_ref().map(|s| s.id), Some(root));
+        assert_eq!(
+            root_history.session.as_ref().and_then(|s| s.title.clone()),
+            Some("root title".into())
+        );
+        assert_eq!(root_history.turns.len(), 1);
+        assert_eq!(root_history.turns[0].id, root_turn);
+        assert_eq!(root_history.items.len(), 1);
+        assert_eq!(root_history.items[0].session_id, root);
+        assert_eq!(
+            (root_history.leaf_id, root_history.leaf_epoch),
+            (Some(root_leaf), 1)
+        );
+        assert_eq!(root_history.tree_edges.get(&root_edge), Some(&None));
+        assert!(!root_history.tree_edges.contains_key(&child_edge));
+
+        let child_history =
+            read_canonical_history_for_session(&path, &child).expect("child history");
+        assert_eq!(child_history.session.as_ref().map(|s| s.id), Some(child));
+        assert_eq!(child_history.turns.len(), 1);
+        assert_eq!(child_history.turns[0].id, child_turn);
+        assert_eq!(child_history.items.len(), 1);
+        assert_eq!(child_history.items[0].session_id, child);
+        assert_eq!(
+            (child_history.leaf_id, child_history.leaf_epoch),
+            (Some(child_leaf), 9)
+        );
+        assert_eq!(child_history.tree_edges.get(&child_edge), Some(&None));
+        assert!(!child_history.tree_edges.contains_key(&root_edge));
+
+        assert_eq!(
+            read_rollout_session_meta_for_session(&path, &root)
+                .expect("root meta")
+                .map(|s| s.id),
+            Some(root)
+        );
+        assert_eq!(
+            read_rollout_session_meta_for_session(&path, &child)
+                .expect("child meta")
+                .map(|s| s.id),
+            Some(child)
+        );
+        assert_eq!(
+            read_rollout_session_leaf_for_session(&path, &root).expect("root leaf"),
+            (Some(root_leaf), 1)
+        );
+        assert_eq!(
+            read_rollout_session_leaf_for_session(&path, &child).expect("child leaf"),
+            (Some(child_leaf), 9)
+        );
+    }
+
+    #[test]
+    fn scoped_reader_reports_session_deleted_tombstone() {
+        let dir = tempfile::TempDir::new().expect("temp dir");
+        let path = dir.path().join("rollout.jsonl");
+        let now = fixture_now();
+        let root = SessionId::new();
+        let child = SessionId::new();
+        let root_record = session_record_for(root, None, dir.path(), now);
+        let child_record = session_record_for(child, Some(root), dir.path(), now);
+        let mut lines = vec![
+            session_meta_line(&root_record, now),
+            session_meta_line(&child_record, now),
+        ];
+        lines.push(RolloutLine::Internal {
+            v: ROLLOUT_FORMAT_VERSION,
+            timestamp: now,
+            session_id: child,
+            turn_id: None,
+            seq: 0,
+            entry: InternalRecord::SessionDeleted {
+                schema_version: 1,
+                deleted_at: now,
+            },
+        });
+        write_lines(&path, &lines);
+
+        let error = read_canonical_history_for_session(&path, &child)
+            .expect_err("deleted child must not read");
+        assert!(matches!(
+            error,
+            HistoryReadError::SessionDeleted { session_id, deleted_at }
+                if session_id == child && deleted_at == now
+        ));
+        assert!(
+            read_canonical_history_for_session(&path, &root).is_ok(),
+            "sibling tombstone must not affect the root"
+        );
+        assert!(matches!(
+            read_rollout_session_meta_for_session(&path, &child),
+            Err(HistoryReadError::SessionDeleted { .. })
+        ));
+        assert!(matches!(
+            read_rollout_session_leaf_for_session(&path, &child),
+            Err(HistoryReadError::SessionDeleted { .. })
+        ));
+        // Unscoped whole-file scans skip the tombstone rather than failing.
+        assert!(read_canonical_history(&path).is_ok());
     }
 }

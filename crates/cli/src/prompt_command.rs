@@ -156,6 +156,11 @@ pub(crate) async fn run_prompt(
                 &runtime,
             ))))
             .await;
+        kernel
+            .set_idle_bash_completion_handler(Some(crate::prompt_host::idle_host_request_handler(
+                session_state.id.to_string(),
+            )))
+            .await;
     }
     let provider = Arc::new(RoutedPromptProvider::new(
         Arc::clone(&resolved_provider.provider_router),
@@ -176,6 +181,7 @@ pub(crate) async fn run_prompt(
     )
     .await;
 
+    devo_core::tools::host_bash::cancel_session(session_state.id.as_str());
     if let Some(kernel) = &kernel
         && let Err(err) = kernel.shutdown().await
     {

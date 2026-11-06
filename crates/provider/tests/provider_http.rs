@@ -23,7 +23,6 @@ use tokio::io::AsyncReadExt;
 use tokio::io::AsyncWriteExt;
 use tokio::net::TcpListener;
 
-/// Trace: L2-DES-APP-005, L2-DES-MODEL-001
 /// Verifies: OpenAI Chat Completions requests include custom provider headers and custom values override built-in headers.
 #[tokio::test]
 async fn openai_chat_completions_applies_custom_headers_after_builtin_headers() {
@@ -56,7 +55,6 @@ async fn openai_chat_completions_applies_custom_headers_after_builtin_headers() 
     assert_eq!(header_value(&request, "x-devo"), Some("yes"));
 }
 
-/// Trace: L2-DES-APP-005, L2-DES-MODEL-001
 /// Verifies: OpenAI Responses requests include custom provider headers and custom values override built-in headers.
 #[tokio::test]
 async fn openai_responses_applies_custom_headers_after_builtin_headers() {
@@ -89,7 +87,6 @@ async fn openai_responses_applies_custom_headers_after_builtin_headers() {
     assert_eq!(header_value(&request, "x-devo"), Some("yes"));
 }
 
-/// Trace: L2-DES-APP-005, L2-DES-MODEL-001
 /// Verifies: Anthropic Messages requests include custom provider headers and custom values override built-in headers.
 #[tokio::test]
 async fn anthropic_messages_applies_custom_headers_after_builtin_headers() {
@@ -160,7 +157,6 @@ async fn anthropic_messages_groups_split_tool_results_before_send() {
     assert_eq!(body["messages"][2]["role"], "assistant");
 }
 
-/// Trace: L2-DES-APP-005, L2-DES-MODEL-001
 /// Verifies: provider proxy configuration routes OpenAI Chat Completions requests through the configured proxy.
 #[tokio::test]
 async fn provider_proxy_routes_openai_chat_completions_request() {

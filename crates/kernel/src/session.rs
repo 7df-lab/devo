@@ -2,6 +2,8 @@
 
 #[cfg(test)]
 mod inflight_wait_tests;
+#[cfg(test)]
+mod lifetime_tests;
 mod session_event_pump;
 
 use std::path::{Path, PathBuf};
@@ -19,15 +21,66 @@ use uuid::Uuid;
 
 use crate::protocol::{KernelEvent, KernelRequest, PROTOCOL_VERSION, ReadyEvent, ReplError};
 
-/// Async host callback for kernel `host_request` events.
+/// Async callback that answers a `host_request` sent by the Python kernel.
 ///
-/// Arguments are `(request_id, data)`. Implementations must not call
-/// [`KernelSession::execute`] on the same session (execute gate is held).
-/// Host replies use a separate stdin lock so they never wait on the execute
-/// FIFO (deadlock rule: one request in flight, replies strictly ordered).
+/// `host_request` is the kernel-to-host direction of the protocol. The kernel
+/// is an ordinary Python process; approval policy, credentials, provider
+/// access, host-owned filesystem writes, and subagent session lifecycle and
+/// message routing stay in Rust. Kernel helpers such as `rlm.spawn`,
+/// `rlm.list_subagents`, `rlm.delete_subagent`, and `agent_message.send` are
+/// thin wrappers around this RPC; the host creates and owns the child
+/// sessions. When Python code needs one of those capabilities it sends a
+/// `host_request` and awaits the matching `host_reply`, instead of holding
+/// privileged state or reimplementing host policy inside the kernel.
+///
+/// Common actions are `bash` (run through the approval pipeline),
+/// `web.search` / `web.fetch`, `mcp.refresh` / `mcp.list_tools`, `fs.write`,
+/// `plan.update`, `question`, and the `rlm.*` subagent calls.
+///
+/// Flow:
+/// 1. Python calls `rlm.repl.host_request(data)`.
+/// 2. The kernel writes `{"event":"host_request","id":"h1","cell_id":"c1",...}`.
+/// 3. The session pump routes it here.
+/// 4. This handler returns a JSON value.
+/// 5. The session writes `{"type":"host_reply","id":"h1","data":...}` to stdin,
+///    and the awaiting Python call resumes.
+///
+/// Arguments are `(request_id, data)`; `data` is the raw request object whose
+/// `type` (or `action`) field names the operation. The handler is captured for
+/// the live execute request and matched by the REPL `cell_id`, so a late
+/// request from a finished cell cannot reuse a later turn's capabilities; idle
+/// requests are denied except the narrow `bash.completed` / `bash.consumed`
+/// route. Implementations must not call [`KernelSession::execute`] on the same
+/// session (the execute gate is held). Replies use a separate stdin lock so
+/// they never wait behind the execute FIFO that is itself waiting for this
+/// reply (deadlock rule).
 pub type HostRequestHandler = Arc<dyn Fn(String, Value) -> BoxFuture<'static, Value> + Send + Sync>;
 
 /// Default deny handler when no host table is installed.
+///
+/// It is also the fallback for idle `host_request`s that are not the narrow
+/// `bash.completed` / `bash.consumed` route, and for a late request whose
+/// `cell_id` no longer matches the active execute request. The handler never
+/// performs the requested action; it returns an error envelope naming the
+/// action, which the session writes back as the matching `host_reply`.
+///
+/// Request data:
+///
+/// ```json
+/// {"type":"bash","params":{"command":"ls"}}
+/// ```
+///
+/// Reply data (the handler's return value):
+///
+/// ```json
+/// {"status":"error","error":"host_request action not implemented: bash"}
+/// ```
+///
+/// Wire frame produced by [`KernelSession`]:
+///
+/// ```json
+/// {"type":"host_reply","id":"h1","data":{"status":"error","error":"host_request action not implemented: bash"}}
+/// ```
 pub fn deny_host_handler() -> HostRequestHandler {
     Arc::new(|_id, data| {
         Box::pin(async move {
@@ -45,6 +98,23 @@ pub fn deny_host_handler() -> HostRequestHandler {
 }
 
 /// Extract `(action, params)` from a REPL `host_request` data object.
+///
+/// `action` prefers the `action` key and falls back to `type`; a request with
+/// neither yields an empty string. When `params` is present it is returned as
+/// is; otherwise the remaining object (without `action` / `type`) becomes the
+/// params.
+///
+/// ```json
+/// {"type":"bash","params":{"command":"ls"}}
+/// ```
+///
+/// yields `("bash", {"command":"ls"})`, while
+///
+/// ```json
+/// {"action":"compact.status","x":1}
+/// ```
+///
+/// yields `("compact.status", {"x":1})`.
 pub fn parse_host_request_data(data: &Value) -> (String, Value) {
     let action = data
         .get("action")
@@ -71,31 +141,36 @@ pub enum ExecutionSurface {
     Rlm,
 }
 
-/// Host-requested workspace access for mode-aware kernel reuse. The OS fence
-/// still enforces this access; this tag does not grant or restrict permissions.
+/// Host-requested workspace access for mode-aware kernel reuse.
+/// This tag does not grant or restrict permissions in the trusted kernel.
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 pub enum WorkspaceAccess {
+    /// Plan mode: the host requests read-only workspace access.
     ReadOnly,
+    /// Build mode: the host requests read-write workspace access.
     ReadWrite,
 }
 
 /// Configuration for spawning a kernel session.
 #[derive(Debug, Clone)]
 pub struct KernelSessionConfig {
+    /// Interpreter used to run `python -m rlm.repl`.
     pub python: PathBuf,
+    /// Working directory of the kernel process and its default workspace root.
     pub cwd: PathBuf,
     /// Directories prepended to `PYTHONPATH` (vendored kernel runtime `src`).
     pub python_path_entries: Vec<PathBuf>,
     /// Extra environment variables for the kernel process (harness paths, depth, …).
     pub extra_env: Vec<(String, String)>,
-    /// OS fence request (design doc §5). `None` = unfenced by design; a fence
-    /// that cannot be raised downgrades explicitly, never silently (§5.3).
-    pub fence: Option<KernelFenceSpec>,
     /// Records the access requested by the host for subsequent kernel reuse.
     pub workspace_access: WorkspaceAccess,
 }
 
 impl Default for KernelSessionConfig {
+    /// Use the packaged runtime when present, otherwise a PATH-resolved
+    /// interpreter. The working directory is the process cwd. Packaged
+    /// sessions get the bundled site dir on `PYTHONPATH` and
+    /// `PYTHONNOUSERSITE=1`.
     fn default() -> Self {
         let bundle = devo_util_paths::runtime::RuntimeBundle::current();
         Self {
@@ -114,21 +189,27 @@ impl Default for KernelSessionConfig {
             extra_env: bundle.map_or_else(Vec::new, |_| {
                 vec![("PYTHONNOUSERSITE".to_string(), "1".to_string())]
             }),
-            fence: None,
             workspace_access: WorkspaceAccess::ReadWrite,
         }
     }
 }
 
+/// Why [`KernelSession::spawn`] or [`KernelSession::spawn_command`] failed.
 #[derive(Debug, thiserror::Error)]
 pub enum SpawnError {
+    /// Protocol setup or the handshake failed after the child started.
     #[error(transparent)]
     Repl(#[from] ReplError),
+    /// The custom command passed to [`KernelSession::spawn_command`] failed to
+    /// start.
     #[error("failed to spawn kernel: {0}")]
     Spawn(#[source] std::io::Error),
+    /// The configured Python interpreter could not be executed.
     #[error("failed to spawn kernel interpreter `{python}`: {source}")]
     SpawnInterpreter {
+        /// Interpreter path from [`KernelSessionConfig::python`].
         python: PathBuf,
+        /// OS error from the failed spawn.
         #[source]
         source: std::io::Error,
     },
@@ -146,9 +227,9 @@ pub struct CellOutput {
     pub traceback: Vec<String>,
     /// Populated by `list_names` (and any `done` that carries `names`).
     pub names: Option<Vec<String>>,
-    /// Diffs from `application/vnd.devo.diff+json` display events.
+    /// Diffs from `application/vnd.diff+json` display events.
     pub diffs: Vec<CellDiffDisplay>,
-    /// Media attachments from `application/vnd.devo.attachment+json`
+    /// Media attachments from `application/vnd.attachment+json`
     /// (e.g. attach-image skill).
     pub attachments: Vec<CellAttachment>,
 }
@@ -172,19 +253,24 @@ pub struct CellAttachment {
 }
 
 /// MIME used by the edit skill when displaying a file diff from Python.
-pub const DIFF_DISPLAY_MIME: &str = "application/vnd.devo.diff+json";
+pub const DIFF_DISPLAY_MIME: &str = "application/vnd.diff+json";
 
 /// MIME used by the attach-image skill when loading an image into context.
-pub const ATTACHMENT_DISPLAY_MIME: &str = "application/vnd.devo.attachment+json";
+pub const ATTACHMENT_DISPLAY_MIME: &str = "application/vnd.attachment+json";
 
 /// Hard ceiling on a single attachment's base64 payload (defensive; skill caps lower).
 pub const MAX_ATTACHMENT_DATA_CHARS: usize = 10_000_000;
 
 /// Parse a diff display payload from a kernel `display` event's `data`.
+///
+/// Accepts the diff MIME payload with snake_case or camelCase field names.
+/// `start_line` is optional; unrelated MIME payloads return `None`.
+///
+/// ```json
+/// {"application/vnd.diff+json":{"path":"src/a.py","old_str":"x = 1\n","new_str":"x = 2\n","start_line":3}}
+/// ```
 pub fn parse_diff_display(data: &Value) -> Option<CellDiffDisplay> {
-    let payload = data
-        .get(DIFF_DISPLAY_MIME)
-        .or_else(|| data.get("application/vnd.devo.diff+json"))?;
+    let payload = data.get(DIFF_DISPLAY_MIME)?;
     let path = payload.get("path")?.as_str()?.to_string();
     let old_str = payload
         .get("old_str")
@@ -211,11 +297,15 @@ pub fn parse_diff_display(data: &Value) -> Option<CellDiffDisplay> {
 
 /// Parse an attachment display payload from a kernel `display` event's `data`.
 ///
-/// Oversized or malformed payloads are dropped (returns `None`).
+/// Only `image/*` payloads with non-empty base64 data are accepted; oversized
+/// or malformed payloads are dropped (returns `None`). Both `mime_type` and
+/// `mimeType` are accepted.
+///
+/// ```json
+/// {"application/vnd.attachment+json":{"mime_type":"image/png","data":"<base64>","path":"a.png"}}
+/// ```
 pub fn parse_attachment_display(data: &Value) -> Option<CellAttachment> {
-    let payload = data
-        .get(ATTACHMENT_DISPLAY_MIME)
-        .or_else(|| data.get("application/vnd.devo.attachment+json"))?;
+    let payload = data.get(ATTACHMENT_DISPLAY_MIME)?;
     let mime_type = payload
         .get("mime_type")
         .or_else(|| payload.get("mimeType"))?
@@ -250,8 +340,16 @@ struct EventPumpState {
     events: Mutex<mpsc::Receiver<Result<KernelEvent, ReplError>>>,
     active_request: Arc<Mutex<Option<session_event_pump::ActiveRequestContext>>>,
     idle_bash_handler: Arc<Mutex<Option<HostRequestHandler>>>,
+    lifetime: tokio_util::sync::CancellationToken,
 }
 
+/// Start the single stdout reader for this session.
+///
+/// The pump owns the only reader of the kernel's stdout, forwards every event
+/// to the collection channel, and handles `host_request` frames itself (a
+/// request must be answered, not collected as cell output). It lives for the
+/// lifetime of the child, so it can still deliver `bash.completed` after a
+/// cell's `done` through the idle handler.
 fn start_event_pump(
     stdout: BufReader<ChildStdout>,
     stdin: Arc<Mutex<ChildStdin>>,
@@ -259,17 +357,20 @@ fn start_event_pump(
     let (event_tx, event_rx) = mpsc::channel(session_event_pump::EVENT_CHANNEL_CAPACITY);
     let active_request = Arc::new(Mutex::new(None));
     let idle_bash_handler = Arc::new(Mutex::new(None));
+    let lifetime = tokio_util::sync::CancellationToken::new();
     session_event_pump::spawn(
         stdout,
         stdin,
         Arc::clone(&active_request),
         Arc::clone(&idle_bash_handler),
         event_tx,
+        lifetime.clone(),
     );
     EventPumpState {
         events: Mutex::new(event_rx),
         active_request,
         idle_bash_handler,
+        lifetime,
     }
 }
 /// Shared collector state for a cell started via [`KernelSession::begin_execute`].
@@ -301,6 +402,7 @@ pub struct InFlightCell {
 }
 
 impl InFlightCell {
+    /// Protocol id for this cell (`c1`, `s1`, ...), echoed by its events.
     pub fn cell_id(&self) -> &str {
         &self.cell_id
     }
@@ -375,6 +477,10 @@ impl InFlightCell {
         });
     }
 
+    /// Read the collector's terminal state without waiting.
+    ///
+    /// Returns `Ok(Some(output))` after `done`, `Ok(None)` while the collector
+    /// is still running, and an error if collection failed.
     async fn try_take_done(&self) -> Result<Option<CellOutput>, ReplError> {
         let state = self.state.lock().await;
         match &state.terminal {
@@ -387,6 +493,7 @@ impl InFlightCell {
 
 /// One durable CPython REPL for a session.
 pub struct KernelSession {
+    lifetime: tokio_util::sync::CancellationToken,
     child: Mutex<Child>,
     io: KernelIo,
     shutdown_gate: Mutex<()>,
@@ -399,21 +506,8 @@ pub struct KernelSession {
     active_request: Arc<Mutex<Option<session_event_pump::ActiveRequestContext>>>,
     /// Only `bash.completed` may use this handler after a cell's `done` event.
     idle_bash_handler: Arc<Mutex<Option<HostRequestHandler>>>,
-    /// Fence outcome for this kernel (P0): callers read it to emit rollout
-    /// fence events and UI downgrade warnings (design doc §5.3).
-    fence_state: crate::fence::FenceState,
     workspace_access: WorkspaceAccess,
     workspace_root: PathBuf,
-    /// Unix credential delivery channel (§9): grants over SCM_RIGHTS. The
-    /// peer descriptor is inherited by the kernel process; its number rides
-    /// the `DEVO_GRANT_FD` env var.
-    #[cfg(unix)]
-    grant_channel: Option<crate::credential_unix::GrantChannel>,
-    /// Per-session credential authority (P2, Windows fenced kernels only):
-    /// grants deliver ACEs for the SID carried in the kernel's restricted
-    /// token — the kernel is never restarted (§9).
-    #[cfg(windows)]
-    fence_credentials: Option<devo_windows_sandbox::SessionCredentialAuthority>,
 }
 
 /// Environment variable name segments that mark a variable as a credential.
@@ -434,6 +528,14 @@ const CREDENTIAL_ENV_SEGMENTS: &[&str] = &[
     "AUTH",
 ];
 
+/// Whether an inherited environment entry looks like a credential and must be
+/// removed from the kernel.
+///
+/// Matches credential-shaped names (`*_KEY`, `*_TOKEN`, `*_SECRET`,
+/// `*_PASSWORD`, ..., `PGPASSWORD`, `MYSQL_PWD`) and `*_URL` / `*_URI` /
+/// `*_DSN` values whose userinfo or query parameters carry credentials. The
+/// check deliberately errs toward removal: dropping an ordinary variable is
+/// harmless, leaking a secret into model-controlled Python is not.
 pub(crate) fn is_credential_env_var(name: &str, value: &str) -> bool {
     let name = name.to_ascii_uppercase();
     if matches!(name.as_str(), "PGPASSWORD" | "MYSQL_PWD")
@@ -482,6 +584,8 @@ mod credential_env_tests {
     use super::{KernelSessionConfig, is_credential_env_var, kernel_env_overrides};
     use pretty_assertions::assert_eq;
 
+    /// Verifies: credential-shaped variable names are detected
+    /// case-insensitively, including `PGPASSWORD` and `MYSQL_PWD`.
     #[test]
     fn matches_credential_shaped_names() {
         for name in [
@@ -503,6 +607,8 @@ mod credential_env_tests {
         }
     }
 
+    /// Verifies: URL/URI/DSN values carrying userinfo or credential-named
+    /// query parameters are detected.
     #[test]
     fn matches_credential_bearing_uris() {
         for (name, value) in [
@@ -520,6 +626,7 @@ mod credential_env_tests {
         }
     }
 
+    /// Verifies: ordinary names and non-secret URLs/URIs are not filtered.
     #[test]
     fn keeps_non_credential_names_and_uris() {
         for (name, value) in [
@@ -538,6 +645,8 @@ mod credential_env_tests {
         }
     }
 
+    /// Verifies: credential-shaped `extra_env` entries are dropped before they
+    /// reach the kernel.
     #[test]
     fn extra_env_cannot_reintroduce_credentials() {
         let config = KernelSessionConfig {
@@ -557,25 +666,6 @@ mod credential_env_tests {
             ]
         );
     }
-}
-
-/// OS fence request for the kernel process (design doc §5.1/§5.2). `None`
-/// spawns the kernel unfenced by design; a fence that cannot be raised is an
-/// explicit downgrade, never a silent one (§5.3).
-#[derive(Debug, Clone)]
-pub struct KernelFenceSpec {
-    /// Read-only roots beyond the `rlm-kernel` base profile (system/interpreter
-    /// trees) — the fence has **no default read**, so reads outside
-    /// base ∪ these roots ∪ `writable_roots` are OS-refused and route through
-    /// the rlm front door (approval pipeline). The Windows legacy sandbox
-    /// backend refuses restricted-read profiles.
-    pub readable_roots: Vec<PathBuf>,
-    /// Read-write roots (Build workspace first; Plan omits the workspace).
-    pub writable_roots: Vec<PathBuf>,
-    /// Paths the kernel must not read (deny roots).
-    pub deny_read: Vec<PathBuf>,
-    /// Whether the kernel's network must be restricted (default true for RLM).
-    pub restrict_network: bool,
 }
 
 impl KernelSession {
@@ -600,52 +690,6 @@ impl KernelSession {
             .env("PYTHONUTF8", "1")
             .env("PYTHONIOENCODING", "utf-8")
             .env("PYTHONUNBUFFERED", "1");
-
-        // OS fence (P0): on Windows with a provisioned sandbox this replaces
-        // OS fence (design doc §5): Windows wraps with the restricted-token
-        // launcher; Unix reuses the platform sandbox wrapper (bwrap/Seatbelt)
-        // that shell sandboxing uses, carrying the fence roots as overlay.
-        // Every unimplementable fence is an explicit downgrade, never silent.
-        #[cfg(unix)]
-        let mut fence_outcome = crate::fence::fence_or_bare(&config, cmd);
-        #[cfg(windows)]
-        let fence_outcome =
-            crate::fence::wrap_or_bare(&config, cmd, devo_util_paths::find_devo_home());
-        #[cfg(windows)]
-        tracing::warn!(
-            program = ?fence_outcome.command.as_std().get_program(),
-            state = ?fence_outcome.state,
-            "FENCE-SPAWN-PROGRAM"
-        );
-        // Unix: duplicate the channel's peer fd (no CLOEXEC) for the child;
-        // its number rides DEVO_GRANT_FD and the descriptor survives exec.
-        #[cfg(unix)]
-        let mut config = config;
-        #[cfg(unix)]
-        if let Some(channel) = fence_outcome.grant_channel.as_ref() {
-            let peer = channel.peer_fd();
-            if let Ok(dup) = crate::credential_unix::dup_no_cloexec(peer) {
-                config
-                    .extra_env
-                    .push(("DEVO_GRANT_FD".to_string(), dup.to_string()));
-            }
-        }
-        #[cfg(any(windows, unix))]
-        let mut cmd = fence_outcome.command;
-        #[cfg(any(windows, unix))]
-        let fence_state = fence_outcome.state;
-        #[cfg(windows)]
-        let fence_credentials = fence_outcome.credentials;
-        // Unix pipe mode: apply the parent-resolved Landlock/seccomp plan in
-        // the child after fork (same pattern as the shell sandbox path).
-        #[cfg(unix)]
-        if let Some(plan) = fence_outcome.child_plan {
-            unsafe {
-                cmd.pre_exec(move || {
-                    devo_util_process::sandbox::apply_resolved_in_child(Some(&plan))
-                });
-            }
-        }
 
         // Never inherit credentials into the model-controlled kernel, even
         // when they are hidden in connection URI values. Env names are
@@ -707,8 +751,10 @@ impl KernelSession {
             events,
             active_request,
             idle_bash_handler,
+            lifetime,
         } = start_event_pump(stdout, Arc::clone(&stdin));
         Ok(Arc::new(Self {
+            lifetime,
             child: Mutex::new(child),
             io: KernelIo { stdin, events },
             shutdown_gate: Mutex::new(()),
@@ -718,13 +764,8 @@ impl KernelSession {
             host_handler: Mutex::new(None),
             active_request,
             idle_bash_handler,
-            fence_state,
             workspace_access: config.workspace_access,
             workspace_root,
-            #[cfg(unix)]
-            grant_channel: fence_outcome.grant_channel.take(),
-            #[cfg(windows)]
-            fence_credentials,
         }))
     }
 
@@ -762,8 +803,10 @@ impl KernelSession {
             events,
             active_request,
             idle_bash_handler,
+            lifetime,
         } = start_event_pump(stdout, Arc::clone(&stdin));
         Ok(Arc::new(Self {
+            lifetime,
             child: Mutex::new(child),
             io: KernelIo { stdin, events },
             shutdown_gate: Mutex::new(()),
@@ -773,28 +816,26 @@ impl KernelSession {
             host_handler: Mutex::new(host_handler),
             active_request,
             idle_bash_handler,
-            fence_state: crate::fence::FenceState::NotRequested,
             workspace_access: WorkspaceAccess::ReadWrite,
             workspace_root: std::env::current_dir().unwrap_or_else(|_| PathBuf::from(".")),
-            #[cfg(unix)]
-            grant_channel: None,
-            #[cfg(windows)]
-            fence_credentials: None,
         }))
     }
 
+    /// Cancellation for work owned by this kernel, independent of any turn.
+    ///
+    /// Canceled when shutdown/termination begins, the event stream closes, or
+    /// this session is dropped. Canceling the returned child token does not
+    /// cancel the kernel itself.
+    pub fn lifetime_token(&self) -> tokio_util::sync::CancellationToken {
+        self.lifetime.child_token()
+    }
+
+    /// Handshake details recorded at spawn: protocol version and Python version.
     pub fn ready(&self) -> &ReadyEvent {
         &self.ready
     }
 
-    /// Fence outcome recorded at spawn (P0): `Fenced`, `DowngradedUnfenced`
-    /// (loud downgrade — callers must surface it), or `NotRequested`.
-    pub fn fence_state(&self) -> crate::fence::FenceState {
-        self.fence_state
-    }
-
-    /// Access mode requested at spawn. A mode change must spawn a new kernel:
-    /// OS process restrictions cannot be changed after the process starts.
+    /// Access mode requested by the host at spawn for reuse decisions.
     pub fn workspace_access(&self) -> WorkspaceAccess {
         self.workspace_access
     }
@@ -802,22 +843,6 @@ impl KernelSession {
     /// Resolved workspace location when this kernel process started.
     pub fn workspace_root(&self) -> &Path {
         &self.workspace_root
-    }
-
-    /// Per-session credential authority for a fenced kernel (P2, Windows):
-    /// callers wire approval callbacks to `grant_write_root`/`revoke_*` so
-    /// permission changes are credential deliveries, never restarts (§9).
-    #[cfg(windows)]
-    pub fn fence_credentials(&self) -> Option<&devo_windows_sandbox::SessionCredentialAuthority> {
-        self.fence_credentials.as_ref()
-    }
-
-    /// Unix credential delivery channel (§9): approvals call `grant`/`revoke`
-    /// on it; the kernel facade turns received descriptors into native
-    /// dirfd-backed rlm.read/rlm.write. `None` for unfenced kernels.
-    #[cfg(unix)]
-    pub fn grant_channel(&self) -> Option<&crate::credential_unix::GrantChannel> {
-        self.grant_channel.as_ref()
     }
 
     /// Install or clear the host_request callback (typically once per turn).
@@ -831,6 +856,9 @@ impl KernelSession {
         *self.idle_bash_handler.lock().await = handler;
     }
 
+    /// Bind the live request id to the handler allowed to answer its
+    /// `host_request`s. The pump only uses this handler while the request's
+    /// `cell_id` matches; later or detached requests fall back to idle/deny.
     async fn set_active_request(&self, id: String, host_handler: Option<HostRequestHandler>) {
         *self.active_request.lock().await =
             Some(session_event_pump::ActiveRequestContext { id, host_handler });
@@ -971,6 +999,7 @@ impl KernelSession {
     /// teardown forever. If the REPL does not exit in time, the kernel child is
     /// terminated; normal shutdown lets Python kill its owned Bash process groups.
     pub async fn shutdown(&self) -> Result<(), ReplError> {
+        self.lifetime.cancel();
         let _shutdown_guard = self.shutdown_gate.lock().await;
         {
             let mut child = self.child.lock().await;
@@ -1033,6 +1062,7 @@ impl KernelSession {
     /// Immediately stop and reap the kernel child when its session is permanently deleted.
     /// This discards the REPL namespace and does not wait for running Python code.
     pub async fn terminate(&self) {
+        self.lifetime.cancel();
         let mut child = self.child.lock().await;
         if child.try_wait().ok().flatten().is_none() {
             let _ = child.start_kill();
@@ -1041,6 +1071,17 @@ impl KernelSession {
     }
 }
 
+impl Drop for KernelSession {
+    fn drop(&mut self) {
+        self.lifetime.cancel();
+    }
+}
+
+/// Serialize one request as a single JSON line and flush it to kernel stdin.
+///
+/// The caller holds the stdin lock. Host replies take the same lock without
+/// holding the execute gate, so they are never blocked behind the cell that is
+/// waiting for them.
 async fn write_request(stdin: &mut ChildStdin, req: &KernelRequest) -> Result<(), ReplError> {
     let mut line = serde_json::to_string(req)?;
     line.push('\n');
@@ -1049,6 +1090,10 @@ async fn write_request(stdin: &mut ChildStdin, req: &KernelRequest) -> Result<()
     Ok(())
 }
 
+/// Read one newline-delimited JSON event from the kernel's stdout.
+///
+/// EOF becomes [`ReplError::Closed`] and an empty line is a protocol error;
+/// malformed JSON surfaces as [`ReplError::Json`].
 async fn read_line_event(stdout: &mut BufReader<ChildStdout>) -> Result<KernelEvent, ReplError> {
     let mut buf = String::new();
     let n = stdout.read_line(&mut buf).await?;
@@ -1093,6 +1138,11 @@ pub(crate) fn kernel_env_overrides(config: &KernelSessionConfig) -> Vec<(String,
     overrides
 }
 
+/// Read events until the `ready` handshake and return the parsed handshake.
+///
+/// Startup diagnostics may arrive as `stderr` events first; they are kept and
+/// attached to [`ReplError::Handshake`] if the handshake fails. Any other event
+/// before `ready` is a handshake error.
 async fn read_ready(stdout: &mut BufReader<ChildStdout>) -> Result<ReadyEvent, ReplError> {
     let mut startup_stderr = String::new();
     loop {
@@ -1120,6 +1170,10 @@ async fn read_ready(stdout: &mut BufReader<ChildStdout>) -> Result<ReadyEvent, R
     }
 }
 
+/// Collect one id'd request until its `done` event and return the result.
+///
+/// The caller holds the execute gate. `host_request` frames are consumed by
+/// the session pump, not here.
 async fn collect_until_done(session: &KernelSession, id: &str) -> Result<CellOutput, ReplError> {
     let state = Arc::new(Mutex::new(InflightCollectorState {
         output: CellOutput::default(),
@@ -1129,6 +1183,11 @@ async fn collect_until_done(session: &KernelSession, id: &str) -> Result<CellOut
     Ok(state.lock().await.output.clone())
 }
 
+/// Demultiplex events for `id` into shared collector state until `done`.
+///
+/// Only events carrying `id` are attributed; untagged stdout/stderr/error and
+/// display frames are kept as session-global output. Events for other cells and
+/// `host_request` frames are ignored (the pump already answered the latter).
 async fn collect_into_shared(
     session: &KernelSession,
     id: &str,
@@ -1244,6 +1303,8 @@ mod tests {
     use super::*;
     use pretty_assertions::assert_eq;
 
+    /// Build a config for a live kernel when the runtime source can be found;
+    /// tests skip when it returns `None`.
     fn live_config() -> Option<KernelSessionConfig> {
         let runtime = std::env::var_os("DEVO_RLM_RUNTIME_SRC")
             .map(PathBuf::from)
@@ -1261,12 +1322,10 @@ mod tests {
             cwd: std::env::temp_dir(),
             python_path_entries: vec![runtime],
             extra_env: Vec::new(),
-            fence: None,
             workspace_access: WorkspaceAccess::ReadWrite,
         })
     }
 
-    /// Trace: L2-DES-RLM-001
     /// Verifies: handshake accepts protocol 3 from a live CPython REPL.
     #[tokio::test]
     async fn live_handshake_protocol_v3() {
@@ -1286,6 +1345,8 @@ mod tests {
         drop(session);
     }
 
+    /// Verifies: `terminate` stops and reaps a kernel blocked in a running
+    /// cell without waiting for that cell to finish.
     #[tokio::test]
     async fn terminating_a_deleted_kernel_stops_a_running_python_cell() {
         let Some(mut config) = live_config() else {
@@ -1325,6 +1386,8 @@ mod tests {
         );
     }
 
+    /// Verifies: credential-shaped extras and inherited variables never reach
+    /// the kernel environment, while ordinary URLs still do.
     #[tokio::test]
     async fn live_kernel_does_not_receive_explicit_credentials() {
         let Some(mut config) = live_config() else {
@@ -1363,6 +1426,8 @@ print([os.getenv('PGPASSWORD'), os.getenv('DEVO_TEST_DATABASE_URL'), os.getenv('
         );
     }
 
+    /// Verifies: graceful shutdown lets Python kill its background Bash
+    /// process group instead of leaving an orphan.
     #[cfg(unix)]
     #[tokio::test]
     async fn graceful_shutdown_kills_background_bash_process_group() {
@@ -1378,7 +1443,9 @@ print([os.getenv('PGPASSWORD'), os.getenv('DEVO_TEST_DATABASE_URL'), os.getenv('
             }
         };
         let output = session
-            .execute("from rlm.bash import bash\nhandle = bash('sleep 60')\nprint(handle.pid)")
+            .execute(
+                "from rlm.local_bash import bash\nhandle = bash('sleep 60')\nprint(handle.pid)",
+            )
             .await
             .expect("start background Bash process");
         let pid = output
@@ -1399,6 +1466,8 @@ print([os.getenv('PGPASSWORD'), os.getenv('DEVO_TEST_DATABASE_URL'), os.getenv('
         .expect("kernel shutdown should kill the Bash process group");
     }
 
+    /// Probe whether a process group still exists (`kill(-pid, 0)`); EPERM
+    /// counts as alive because the group exists under another identity.
     #[cfg(unix)]
     fn unix_process_group_exists(pid: i32) -> bool {
         // bash.py starts each handle in a fresh session, so the process PID is
@@ -1409,140 +1478,6 @@ print([os.getenv('PGPASSWORD'), os.getenv('DEVO_TEST_DATABASE_URL'), os.getenv('
         result == 0 || std::io::Error::last_os_error().raw_os_error() != Some(libc::ESRCH)
     }
 
-    /// Trace: design doc rlm-permissions.md §5-§9 (Windows provisioned path)
-    /// Verifies: with the sandbox provisioned, the kernel spawns inside the
-    /// restricted-token fence; writes inside the workspace succeed, writes
-    /// outside are refused by the OS, and state survives hitting the wall.
-    #[cfg(windows)]
-    #[tokio::test]
-    async fn live_fenced_kernel_enforces_os_boundary_windows() {
-        // The fence wrapper re-execs `current_exe()` with the sandbox sentinel
-        // argv; only the real `devo.exe` early-dispatch understands it, so the
-        // in-cargo-test binary cannot self-host the wrapper. Verify via the
-        // product binary (TUI e2e) instead.
-        let exe = std::env::current_exe().unwrap_or_default();
-        let exe_name = exe
-            .file_name()
-            .map(|n| n.to_string_lossy().into_owned())
-            .unwrap_or_default();
-        // The wrapper re-execs current_exe() with the sandbox sentinel argv;
-        // only the product binary's early dispatch understands it. The cargo
-        // test harness (`devo_kernel-<hash>.exe`) cannot self-host it — this
-        // path is verified on the product binary (TUI e2e: fenced spawn,
-        // OS-refused out-of-fence writes, PID-stable credential delivery).
-        if exe_name != "devo.exe" && exe_name != "devo" {
-            eprintln!("skip: fence wrapper needs the devo.exe host binary, not {exe_name}");
-            return;
-        }
-        let Some(mut config) = live_config() else {
-            eprintln!("skip: kernel runtime not found");
-            return;
-        };
-        let workspace = tempfile::tempdir().expect("workspace");
-        config.cwd = workspace.path().to_path_buf();
-        config.fence = Some(KernelFenceSpec {
-            readable_roots: Vec::new(), // empty = full-disk read (workspace semantic)
-            writable_roots: vec![workspace.path().to_path_buf()],
-            deny_read: Vec::new(),
-            restrict_network: true,
-        });
-        let session = match KernelSession::spawn(config).await {
-            Ok(s) => s,
-            Err(e) => {
-                panic!("fenced kernel spawn failed (provisioned?): {e}");
-            }
-        };
-        assert_eq!(session.fence_state(), crate::fence::FenceState::Fenced);
-
-        let inside = workspace.path().join("inside.txt");
-        let ok = session
-            .execute(format!("open({inside:?}, 'w').write('ok')"))
-            .await
-            .expect("inside write");
-        assert_eq!(ok.status, "ok", "stderr={}", ok.stderr);
-        let marker = session.execute("fenced_state = 42").await.expect("state");
-        assert_eq!(marker.status, "ok", "stderr={}", marker.stderr);
-
-        // Outside the fence: the restricted token refuses the write.
-        let outside = session
-            .execute("open(r'C:/Windows/devo-fence-probe-x7', 'w')")
-            .await
-            .expect("outside write cell");
-        assert_ne!(
-            outside.status, "ok",
-            "write outside the fence must fail; stdout={:?} stderr={:?}",
-            outside.stdout, outside.stderr
-        );
-
-        let state = session
-            .execute("print(fenced_state)")
-            .await
-            .expect("state after wall");
-        assert_eq!(state.status, "ok", "stderr={}", state.stderr);
-        assert!(state.stdout.contains("42"), "stdout={:?}", state.stdout);
-    }
-
-    /// Trace: L2-DES-RLM-001 / design doc rlm-permissions.md §5-§9
-    /// Verifies: on Unix the fenced kernel enforces the OS boundary — writes
-    /// inside the granted workspace succeed, writes outside are refused by
-    /// the OS (not by a filter), and the kernel keeps its state afterwards.
-    #[cfg(unix)]
-    #[tokio::test]
-    async fn live_fenced_kernel_enforces_os_boundary() {
-        let Some(mut config) = live_config() else {
-            eprintln!("skip: kernel runtime not found");
-            return;
-        };
-        let workspace = tempfile::tempdir().expect("workspace");
-        config.cwd = workspace.path().to_path_buf();
-        config.fence = Some(KernelFenceSpec {
-            // No extra read roots: reads resolve to the `rlm-kernel` base
-            // (system/interpreter trees) + `writable_roots` only.
-            readable_roots: Vec::new(),
-            writable_roots: vec![workspace.path().to_path_buf()],
-            deny_read: Vec::new(),
-            restrict_network: true,
-        });
-        let session = match KernelSession::spawn(config).await {
-            Ok(s) => s,
-            Err(e) => {
-                panic!("fenced kernel spawn failed (bwrap available?): {e}");
-            }
-        };
-        assert_eq!(session.fence_state(), crate::fence::FenceState::Fenced);
-
-        // Inside the fence: write + read back works, and state persists.
-        let inside = workspace.path().join("inside.txt");
-        let ok = session
-            .execute(format!("open({inside:?}, 'w').write('ok')"))
-            .await
-            .expect("inside write");
-        assert_eq!(ok.status, "ok", "stderr={}", ok.stderr);
-        let marker = session.execute("fenced_state = 42").await.expect("state");
-        assert_eq!(marker.status, "ok", "stderr={}", marker.stderr);
-
-        // Outside the fence: the OS itself refuses the write.
-        let outside = session
-            .execute("open('/usr/local/devo-fence-probe-x7', 'w')")
-            .await
-            .expect("outside write cell");
-        assert_ne!(
-            outside.status, "ok",
-            "write outside the fence must fail; stdout={:?} stderr={:?}",
-            outside.stdout, outside.stderr
-        );
-
-        // After hitting the wall the kernel is the same living process with
-        // its state intact (never restarted, §9).
-        let state = session
-            .execute("print(fenced_state)")
-            .await
-            .expect("state after wall");
-        assert_eq!(state.status, "ok", "stderr={}", state.stderr);
-        assert!(state.stdout.contains("42"), "stdout={:?}", state.stdout);
-    }
-
-    /// Trace: L2-DES-RLM-001
     /// Verifies: namespace survives across two execute calls (cross-turn).
     #[tokio::test]
     async fn live_namespace_survives_two_executes() {
@@ -1569,7 +1504,6 @@ print([os.getenv('PGPASSWORD'), os.getenv('DEVO_TEST_DATABASE_URL'), os.getenv('
         );
     }
 
-    /// Trace: L2-DES-RLM-001
     /// Verifies: interrupt request is accepted without tearing down the session.
     #[tokio::test]
     async fn live_interrupt_keeps_session_alive() {
@@ -1597,7 +1531,6 @@ print([os.getenv('PGPASSWORD'), os.getenv('DEVO_TEST_DATABASE_URL'), os.getenv('
         );
     }
 
-    /// Trace: L2-DES-RLM-001
     /// Verifies: Windows spawn uses `python` on PATH (RestrictedToken wrap is later).
     #[cfg(windows)]
     #[tokio::test]
@@ -1622,7 +1555,6 @@ print([os.getenv('PGPASSWORD'), os.getenv('DEVO_TEST_DATABASE_URL'), os.getenv('
         assert_eq!(session.ready().protocol, PROTOCOL_VERSION);
     }
 
-    /// Trace: L2-DES-RLM-001
     /// Verifies: Unix spawn handshake succeeds when runtime is present.
     #[cfg(unix)]
     #[tokio::test]
@@ -1641,7 +1573,6 @@ print([os.getenv('PGPASSWORD'), os.getenv('DEVO_TEST_DATABASE_URL'), os.getenv('
         assert_eq!(session.ready().protocol, PROTOCOL_VERSION);
     }
 
-    /// Trace: L2-DES-RLM-001
     /// Verifies: snapshot then restore round-trips a binding when runtime is present.
     #[tokio::test]
     async fn live_snapshot_restore_roundtrip() {
@@ -1688,7 +1619,6 @@ print([os.getenv('PGPASSWORD'), os.getenv('DEVO_TEST_DATABASE_URL'), os.getenv('
         );
     }
 
-    /// Trace: L2-DES-RLM-001
     /// Verifies: host_request during execute gets a host_reply (fake REPL).
     #[tokio::test]
     async fn host_request_receives_reply_via_fake_repl() {
@@ -1758,7 +1688,6 @@ for line in sys.stdin:
         );
     }
 
-    /// Trace: L2-DES-RLM-001
     /// Verifies: parse_host_request_data reads action + params.
     #[test]
     fn parse_host_request_action_and_params() {
@@ -1770,6 +1699,7 @@ for line in sys.stdin:
         assert_eq!(params, serde_json::json!({"x": 1}));
     }
 
+    /// Verifies: the diff MIME payload is parsed into all fields.
     #[test]
     fn parse_diff_display_reads_mime_payload() {
         let data = serde_json::json!({
@@ -1787,12 +1717,14 @@ for line in sys.stdin:
         assert_eq!(diff.start_line, Some(3));
     }
 
+    /// Verifies: unrelated and bash-activity display data produce no diff or
+    /// attachment.
     #[test]
     fn parse_diff_display_ignores_unrelated_display() {
         let data = serde_json::json!({ "text/plain": "hello" });
         assert!(parse_diff_display(&data).is_none());
         let bash_activity = serde_json::json!({
-            "application/vnd.devo.bash-activity+json": {
+            "application/vnd.bash-activity+json": {
                 "active": true,
                 "pid": 123,
             }
@@ -1801,10 +1733,11 @@ for line in sys.stdin:
         assert!(parse_attachment_display(&bash_activity).is_none());
     }
 
+    /// Verifies: the attachment MIME payload is parsed, including its path.
     #[test]
     fn parse_attachment_display_reads_mime_payload() {
         let data = serde_json::json!({
-            "application/vnd.devo.attachment+json": {
+            "application/vnd.attachment+json": {
                 "mime_type": "image/png",
                 "data": "YWJj",
                 "path": "C:/tmp/a.png"
@@ -1821,10 +1754,12 @@ for line in sys.stdin:
         );
     }
 
+    /// Verifies: non-image MIME types and oversized base64 payloads are
+    /// dropped.
     #[test]
     fn parse_attachment_display_rejects_non_image_and_oversized() {
         let non_image = serde_json::json!({
-            "application/vnd.devo.attachment+json": {
+            "application/vnd.attachment+json": {
                 "mime_type": "application/pdf",
                 "data": "YWJj"
             }
@@ -1832,7 +1767,7 @@ for line in sys.stdin:
         assert!(parse_attachment_display(&non_image).is_none());
 
         let oversized = serde_json::json!({
-            "application/vnd.devo.attachment+json": {
+            "application/vnd.attachment+json": {
                 "mime_type": "image/png",
                 "data": "x".repeat(MAX_ATTACHMENT_DATA_CHARS + 1)
             }
@@ -1840,7 +1775,6 @@ for line in sys.stdin:
         assert!(parse_attachment_display(&oversized).is_none());
     }
 
-    /// Trace: L2-DES-RLM-001
     /// Verifies: begin_execute can time out without interrupting; wait_until_done finishes later.
     #[tokio::test]
     async fn begin_execute_budgeted_wait_times_out_then_completes() {

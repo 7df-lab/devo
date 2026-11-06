@@ -401,7 +401,6 @@ mod tests {
 
     use super::*;
 
-    /// Trace: multimodal LocalImage persistence
     /// Verifies: UserMessage/SteerInput projection includes LocalImage parts
     /// from TextItem.local_image_paths.
     #[test]

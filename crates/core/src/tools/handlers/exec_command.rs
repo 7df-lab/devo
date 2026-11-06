@@ -12,6 +12,7 @@ use crate::contracts::ToolResult;
 use crate::contracts::ToolResultContent;
 use crate::invocation::ToolContent;
 use crate::json_schema::JsonSchema;
+use crate::shell_exec::{requested_workdir, resolve_shell_dirs};
 use crate::tool_handler::ToolHandler;
 use crate::tool_spec::ToolCapabilityTag;
 use crate::tool_spec::ToolExecutionMode;
@@ -132,31 +133,27 @@ impl ToolHandler for ExecCommandHandler {
             }
         };
 
-        let cwd = input["workdir"]
-            .as_str()
-            .map(|path| {
-                let path = std::path::PathBuf::from(path);
-                if path.is_absolute() {
-                    path
-                } else {
-                    ctx.workspace_root.join(path)
-                }
-            })
-            .unwrap_or_else(|| ctx.workspace_root.clone());
-
-        if !cwd.exists() {
-            return Ok(ToolResult::error(
-                ToolResultContent::Text(format!(
-                    "working directory does not exist: {}",
-                    cwd.display()
-                )),
-                "Invalid workdir",
-                ToolCallError::ExecutionFailed(format!(
-                    "working directory does not exist: {}",
-                    cwd.display()
-                )),
-            ));
-        }
+        let requested = match requested_workdir(&input) {
+            Ok(requested) => requested,
+            Err(message) => {
+                return Ok(ToolResult::error(
+                    ToolResultContent::Text(message.clone()),
+                    "Invalid workdir",
+                    ToolCallError::InvalidInput(message),
+                ));
+            }
+        };
+        let dirs = match resolve_shell_dirs(&ctx.workspace_root, requested) {
+            Ok(dirs) => dirs,
+            Err(message) => {
+                return Ok(ToolResult::error(
+                    ToolResultContent::Text(message.clone()),
+                    "Invalid workdir",
+                    ToolCallError::ExecutionFailed(message),
+                ));
+            }
+        };
+        let cwd = dirs.cwd;
 
         if is_raw_apply_patch_body(&args.cmd) {
             return Ok(ToolResult::error(
@@ -234,6 +231,7 @@ impl ToolHandler for ExecCommandHandler {
                 sandbox_overlay: crate::tools::sandbox_overlay_for_spawn(
                     ctx.sandbox_permission_overlay.as_ref(),
                 ),
+                sandbox_workspace: Some(dirs.workspace),
             },
         )
         .await;

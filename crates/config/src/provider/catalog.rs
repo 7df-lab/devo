@@ -1119,7 +1119,6 @@ mod tests {
         );
     }
 
-    /// Trace: L2-DES-MODEL-002, L2-DES-MODEL-003
     /// Verifies: provider model_overrides merge before custom models and preserve rich fields.
     #[test]
     fn provider_scoped_model_overrides_merge_before_custom_models() {

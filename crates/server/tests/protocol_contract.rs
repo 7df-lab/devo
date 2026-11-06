@@ -257,7 +257,6 @@ fn session_compaction_notifications_serialize_expected_methods() {
     );
 }
 
-/// Trace: L2-DES-APP-009
 /// Verifies: compaction lifecycle notifications wire as canonical
 /// context/compactionStarted and context/compactionCompleted.
 #[test]
@@ -288,7 +287,6 @@ fn compaction_lifecycle_events_project_to_native_notifications() {
     assert_eq!(value["itemId"].as_str(), Some(item_id.to_string().as_str()));
 }
 
-/// Trace: L2-DES-APP-008, L2-DES-CONV-002
 /// Verifies: the canonical session/metadata/update contract shape (patch
 /// payload with SessionSettings + expectedVersion) round-trips on the wire.
 #[test]
@@ -332,7 +330,6 @@ fn native_session_metadata_update_params_roundtrip() {
     assert_eq!(minimal.effective_context_window, None);
 }
 
-/// Trace: L2-DES-CONV-002, L2-DES-APP-008
 /// Verifies: the settings patch is partial (only present fields change) and
 /// `expectedVersion: 0` is the documented no-precondition escape.
 #[test]
@@ -354,7 +351,6 @@ fn native_session_settings_patch_is_partial() {
     );
 }
 
-/// Trace: L2-DES-APP-008
 /// Verifies: the canonical task domain wire shapes (task/start kind-tagged
 /// params, task verb params) serialize as specified by DD-7.
 #[test]
@@ -392,7 +388,6 @@ fn native_task_start_params_kind_tagged_wire_shape() {
     assert!(matches!(agent, TaskStartParams::Agent { .. }));
 }
 
-/// Trace: L2-DES-APP-008
 /// Verifies: the canonical goal domain wire shapes (goal/set with ifExists,
 /// goal transition params) round-trip.
 #[test]
@@ -427,7 +422,6 @@ fn native_goal_params_wire_shapes() {
     );
 }
 
-/// Trace: L2-DES-APP-010
 /// Verifies: first-party Native turn lifecycle uses identity `turn/started`
 /// wire (session/event projector deleted).
 #[test]
@@ -461,7 +455,6 @@ fn native_turn_started_identity_wire() {
     assert!(params.get("turn").is_some());
 }
 
-/// Trace: L2-DES-AUTH-001
 /// Verifies: provider/authStale notification serializes with camelCase providerId.
 #[test]
 fn provider_auth_stale_notification_wire() {

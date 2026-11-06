@@ -62,8 +62,11 @@ runtime keeps serving. Closing stdin is equivalent to `shutdown`.
   `host_reply` request carrying the same id. `cell_id` is present only while
   the request belongs to a live cell. The host matches it to that cell's
   capability; a late detached request cannot reuse a later turn's handler.
-  Idle requests are denied except the host's narrow `bash.completed` and
-  PID-scoped `bash.consumed` routes. Older frames without `cell_id` remain
+  Idle requests are denied except Bash completion/consumption notices and
+  session-scoped `bash.poll` / `bash.kill` / `bash.forget` controls. Host-owned
+  Bash uses opaque handle IDs; explicit legacy local Bash uses PID notices.
+  The cell owner stays live until its scheduled Bash starts are admitted.
+  Older frames without `cell_id` remain
   parseable but cannot use per-cell capabilities.
 - `{"event":"error","id":str|null,"ename":str,"evalue":str,"traceback":[str,...]}`
 - `{"event":"done","id":str,"status":"ok"|"error"}` — exactly one per id'd
@@ -175,5 +178,7 @@ top-level names under the same filter the snapshot applies.
 
 ## Shutdown
 
-`shutdown` (or stdin EOF) kills live `rlm.bash` child process groups, replies
-`done` (when the request carried an id), stops the loop, and exits 0.
+`shutdown` (or stdin EOF) fails pending host requests and kills any explicit
+`rlm.local_bash` child process groups, replies `done` (when the request carried
+an id), stops the loop, and exits 0. Product `rlm.bash` commands are owned and
+cleaned up by the host, not by Python process-group signaling.

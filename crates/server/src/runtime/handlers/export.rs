@@ -28,19 +28,27 @@ impl ServerRuntime {
                 }
             };
         let session_id = params.session_id;
-        let rollout_path = self
+        let indexed_path = self
             .deps
             .db
             .get_session_index(&session_id)
             .ok()
             .flatten()
-            .and_then(|index| index.rollout_path)
-            .or_else(|| {
-                self.rollout_store
-                    .find_rollout_by_session_id(&session_id)
-                    .ok()
-                    .flatten()
-            });
+            .and_then(|index| index.rollout_path);
+        let rollout_path = match self.rollout_store.resolve_session_journal(
+            &session_id,
+            indexed_path.as_deref(),
+            crate::persistence::JournalVisibility::Live,
+        ) {
+            Ok(path) => path,
+            Err(error) => {
+                return self.error_response(
+                    request_id,
+                    ProtocolErrorCode::InternalError,
+                    format!("failed to resolve session journal: {error}"),
+                );
+            }
+        };
         let Some(rollout_path) = rollout_path else {
             return self.error_response(
                 request_id,
@@ -97,12 +105,22 @@ impl ServerRuntime {
                 format!("failed to create export parent: {error}"),
             );
         }
+        let scoped_jsonl = match read_session_scoped_jsonl(&rollout_path, &session_id) {
+            Ok(jsonl) => jsonl,
+            Err(error) => {
+                return self.error_response(
+                    request_id,
+                    ProtocolErrorCode::InternalError,
+                    format!("failed to read session export: {error}"),
+                );
+            }
+        };
         let result = match params.format {
             devo_protocol::native::rpc_schedule::SessionExportFormat::Jsonl => {
-                std::fs::copy(&rollout_path, &out_path).map(|_| ())
+                std::fs::write(&out_path, scoped_jsonl)
             }
             devo_protocol::native::rpc_schedule::SessionExportFormat::Html => {
-                export_rollout_as_html(&rollout_path, &out_path, session_id.as_str())
+                export_rollout_as_html(&scoped_jsonl, &out_path, session_id.as_str())
             }
         };
         if let Err(error) = result {
@@ -201,21 +219,27 @@ impl ServerRuntime {
                 );
             }
         };
-        let dest = match self
+        let indexed_path = self
             .deps
             .db
             .get_session_index(&session_id)
             .ok()
             .flatten()
-            .and_then(|index| index.rollout_path)
-            .or_else(|| {
-                self.rollout_store
-                    .find_rollout_by_session_id(&session_id)
-                    .ok()
-                    .flatten()
-            }) {
-            Some(path) => path,
-            None => {
+            .and_then(|index| index.rollout_path);
+        let dest = match self.rollout_store.resolve_session_journal(
+            &session_id,
+            indexed_path.as_deref(),
+            crate::persistence::JournalVisibility::Live,
+        ) {
+            Ok(Some(path)) => path,
+            Err(error) => {
+                return self.error_response(
+                    request_id,
+                    ProtocolErrorCode::InternalError,
+                    format!("failed to resolve imported session journal: {error}"),
+                );
+            }
+            Ok(None) => {
                 return self.error_response(
                     request_id,
                     ProtocolErrorCode::InternalError,
@@ -228,7 +252,20 @@ impl ServerRuntime {
         self.runtime_arc()
             .evict_parent_session_cascade(session_id)
             .await;
-        if let Err(error) = append_import_jsonl(&import_jsonl, &dest, session_id.as_str()) {
+        let _lease = match crate::runtime::session_file_lock::SessionFileLock::acquire(&dest) {
+            Ok(lease) => lease,
+            Err(error) => {
+                return self.error_response(
+                    request_id,
+                    ProtocolErrorCode::SessionLocked,
+                    format!("cannot lock import destination: {error}"),
+                );
+            }
+        };
+        let import_result = self.rollout_store.with_journal_state(&dest, || {
+            append_import_jsonl(&import_jsonl, &dest, session_id.as_str())
+        });
+        if let Err(error) = import_result {
             return self.error_response(
                 request_id,
                 ProtocolErrorCode::InternalError,
@@ -287,12 +324,27 @@ fn normalize_lexically(path: &Path) -> PathBuf {
     out
 }
 
-fn export_rollout_as_html(
+fn read_session_scoped_jsonl(
     rollout_path: &Path,
-    out_path: &Path,
-    session_id: &str,
-) -> std::io::Result<()> {
+    session_id: &devo_protocol::native::ids::SessionId,
+) -> anyhow::Result<String> {
     let raw = std::fs::read_to_string(rollout_path)?;
+    let mut scoped = String::new();
+    for (index, line) in raw.lines().enumerate() {
+        if line.trim().is_empty() {
+            continue;
+        }
+        let parsed = devo_core::parse_rollout_line(line)
+            .with_context(|| format!("parse export line {}", index + 1))?;
+        if parsed.session_id() == Some(*session_id) {
+            scoped.push_str(line);
+            scoped.push('\n');
+        }
+    }
+    Ok(scoped)
+}
+
+fn export_rollout_as_html(raw: &str, out_path: &Path, session_id: &str) -> std::io::Result<()> {
     let mut body = String::new();
     for line in raw.lines() {
         if line.trim().is_empty() {
@@ -342,6 +394,14 @@ fn validate_import_jsonl(source_raw: &str) -> anyhow::Result<()> {
 
 fn append_import_jsonl(source_raw: &str, dest: &Path, dest_session_id: &str) -> anyhow::Result<()> {
     validate_import_jsonl(source_raw)?;
+    let session_meta_count = source_raw
+        .lines()
+        .filter(|line| is_session_meta_line(line.trim()))
+        .count();
+    anyhow::ensure!(
+        session_meta_count <= 1,
+        "session/import source contains multiple sessions; export a single session first"
+    );
     let old_session_id = source_raw.lines().find_map(extract_session_meta_id);
     let mut dest_file = std::fs::OpenOptions::new()
         .create(true)

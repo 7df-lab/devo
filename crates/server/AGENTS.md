@@ -44,7 +44,10 @@ The server runtime uses **one session actor per session**. Durable session state
 
 - **Rollout JSONL** is the canonical conversation history (agent layout):
   - Roots/forks: `~/.devo/sessions/<session_id>.jsonl`
-  - Subagents: `~/.devo/session-artifacts/<root_id>/sub-xxxxxxxx/<child_id>.jsonl` (nested `sub-…` dirs for deeper children)
+  - New descendants share the true root journal `~/.devo/sessions/<root_id>.jsonl`; they do not create child `.jsonl` files.
+  - Legacy independent child journals `~/.devo/session-artifacts/<root_id>/sub-xxxxxxxx/<child_id>.jsonl` remain readable and keep their own existing writes; no migration or automatic deletion.
+  - New child artifact/kernel/harness directories are deterministic: `~/.devo/session-artifacts/<root_id>/agents/<child_id>/`.
+  - `session/list` `transcriptSizeBytes` is the whole journal size for a root and `None` for a child sharing the root journal; it never reports the tree size as a child transcript size.
 - **SQLite** (`devo.db` `sessions` table) stores a lightweight index (`rollout_path`, `parent_session_id`, title, cwd, timestamps) used by `session/list` and resume decisions.
 - **In-memory session actors** are loaded on demand via `get_or_load_parent_session`; root sessions are LRU-evicted (capacity 16) when unpinned.
 - **`session/list`** returns durable user-visible sessions only (non-ephemeral, no `agent_path`; includes forks with `parent_session_id`); subagent rows are indexed but hidden from list.

@@ -119,3 +119,86 @@ async fn concurrent_deletion_aborts_turns_that_ignore_cooperative_cancellation()
     assert!(expected_turns.is_empty());
     assert!(notifications.try_recv().is_err());
 }
+
+#[tokio::test]
+async fn lifecycle_admission_guards_are_drop_safe_and_mutually_exclusive() {
+    let directory = tempfile::tempdir().unwrap();
+    let runtime = TestRuntime::new(Arc::new(NoopProvider::default())).runtime(directory.path());
+    let root_id = SessionId::new();
+
+    let operation = runtime
+        .begin_lifecycle_operation_for_root(root_id)
+        .expect("spawn/resume reservation");
+    assert!(
+        runtime.begin_delete_admission_for_root(root_id).is_err(),
+        "delete must not start while spawn/resume reservation is active"
+    );
+    drop(operation);
+
+    let delete = runtime
+        .begin_delete_admission_for_root(root_id)
+        .expect("delete admission after reservation drop");
+    assert!(
+        runtime.begin_lifecycle_operation_for_root(root_id).is_err(),
+        "spawn/resume must not start while delete marker is active"
+    );
+    drop(delete);
+
+    runtime
+        .begin_lifecycle_operation_for_root(root_id)
+        .expect("aborted/dropped delete must release admission");
+}
+
+#[tokio::test]
+async fn lifecycle_root_cycle_fails_without_delete_mutation() {
+    use crate::db::SessionIndexRow;
+    use std::path::PathBuf;
+
+    let directory = tempfile::tempdir().unwrap();
+    let runtime = TestRuntime::new(Arc::new(NoopProvider::default())).runtime(directory.path());
+    let first = SessionId::new();
+    let second = SessionId::new();
+    let now = chrono::Utc::now();
+    let row = |id: SessionId, parent: SessionId| SessionIndexRow {
+        session_id: id,
+        cwd: PathBuf::from(directory.path()),
+        additional_directories: Vec::new(),
+        created_at: now,
+        updated_at: now,
+        last_activity_at: now,
+        title: Some("cycle".into()),
+        title_state: devo_core::SessionTitleState::Unset,
+        parent_session_id: Some(parent),
+        fork_from_id: None,
+        fork_at_turn_id: None,
+        agent_path: Some("subagent".into()),
+        ephemeral: false,
+        model: Some("test-model".into()),
+        reasoning_effort_selection: None,
+    };
+    runtime
+        .deps
+        .db
+        .upsert_session(row(first, second), None)
+        .expect("first row");
+    runtime
+        .deps
+        .db
+        .upsert_session(row(second, first), None)
+        .expect("second row");
+
+    let error = runtime
+        .resolve_lifecycle_root(first, None)
+        .await
+        .expect_err("cycle must fail");
+    assert!(
+        matches!(error, super::LifecycleRootError::Cycle { .. }),
+        "unexpected error: {error}"
+    );
+    let result = runtime.delete_session_tree(first).await;
+    assert!(result.is_err(), "cycle delete must fail closed");
+    assert!(
+        runtime.deps.db.get_session_index(&first).unwrap().is_some(),
+        "failed delete must not mutate DB rows"
+    );
+}

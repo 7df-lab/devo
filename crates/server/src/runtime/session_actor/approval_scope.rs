@@ -2,13 +2,6 @@ use std::path::{Component, Path, PathBuf};
 
 use devo_protocol::ApprovalScopeValue;
 
-/// Access class for credential delivery (design doc §9): Windows maps it to
-/// the delivered ACE mask; the POSIX dirfd channel distinguishes the same two.
-#[derive(Debug, Clone, Copy, PartialEq, Eq)]
-pub(crate) enum CredentialAccess {
-    Read,
-    Write,
-}
 use devo_safety::RuntimePermissionProfile;
 
 use crate::execution::ApprovalGrantCache;
@@ -175,37 +168,6 @@ pub(crate) fn path_prefix_grant_root(path: &Path) -> PathBuf {
     }
 }
 
-/// Credential-delivery decision (design doc §8/§9, P2): which root and access
-/// class, if any, a granted scope should deliver to the fenced kernel's
-/// session SID as an ACE.
-///
-/// Only PathPrefix approvals deliver — the user explicitly chose a directory
-/// scope. Session-scope exact-file approvals deliberately do not (a directory
-/// ACE would widen beyond what was approved; they stay mediated, with the
-/// grant cache making repeat calls frictionless). Non-file resources deliver
-/// nothing (no ACE shape exists for them).
-pub(crate) fn credential_delivery_root(
-    scope: &ApprovalScopeValue,
-    pending: &PendingApproval,
-) -> Option<(PathBuf, CredentialAccess)> {
-    if !matches!(
-        scope,
-        ApprovalScopeValue::PathPrefix | ApprovalScopeValue::PathPrefixPersist
-    ) {
-        return None;
-    }
-    let access = match pending.resource.as_ref() {
-        Some(devo_safety::ResourceKind::FileWrite) => CredentialAccess::Write,
-        Some(devo_safety::ResourceKind::FileRead) => CredentialAccess::Read,
-        Some(_) | None => return None,
-    };
-    pending
-        .path
-        .as_deref()
-        .map(path_prefix_grant_root)
-        .map(|root| (root, access))
-}
-
 /// Temporary Windows limitation: elevated sandbox tokens need both the
 /// sandbox account's normal access pass and the per-session restricting SID
 /// pass. A single SID ACE cannot deliver a native directory capability.
@@ -242,7 +204,6 @@ mod tests {
 
     use super::apply_approval_scope_to_state;
     use super::apply_path_scope_to_permission_profile;
-    use super::credential_delivery_root;
     use super::normalize_permission_path;
     use super::path_prefix_grant_root;
     use super::windows_path_prefix_unsupported;
@@ -776,41 +737,6 @@ mod tests {
 
         assert_eq!(profile.readable_roots, before_readable);
         assert_eq!(profile.writable_roots, before_writable);
-    }
-
-    #[test]
-    fn path_prefix_write_delivers_credential_root_session_scope_does_not() {
-        // P2 delivery decision (design doc §8/§9): an explicit PathPrefix
-        // approval delivers a directory ACE (write or read mask); Session
-        // exact-file and once stay on the mediated path.
-        let dir = abs_path(&["workspace", "src"]);
-        let file = dir.join("main.rs");
-
-        let prefix_write = file_pending_approval("write", ResourceKind::FileWrite, file.clone());
-        assert_eq!(
-            credential_delivery_root(&ApprovalScopeValue::PathPrefix, &prefix_write),
-            Some((dir.clone(), super::CredentialAccess::Write))
-        );
-
-        let prefix_read = file_pending_approval("read", ResourceKind::FileRead, file.clone());
-        assert_eq!(
-            credential_delivery_root(&ApprovalScopeValue::PathPrefix, &prefix_read),
-            Some((dir.clone(), super::CredentialAccess::Read)),
-            "PathPrefix read approvals deliver a read-mask ACE"
-        );
-
-        let session_write = file_pending_approval("write", ResourceKind::FileWrite, file.clone());
-        assert_eq!(
-            credential_delivery_root(&ApprovalScopeValue::Session, &session_write),
-            None,
-            "session exact-file approval must not deliver a widened directory ACE"
-        );
-
-        let once_write = file_pending_approval("write", ResourceKind::FileWrite, file);
-        assert_eq!(
-            credential_delivery_root(&ApprovalScopeValue::Once, &once_write),
-            None
-        );
     }
 
     #[test]

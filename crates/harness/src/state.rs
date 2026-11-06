@@ -166,7 +166,6 @@ mod tests {
     use super::*;
     use pretty_assertions::assert_eq;
 
-    /// Trace: L2-DES-HARNESS-001
     /// Verifies: corrupt harness JSON fails closed (no silent empty wipe).
     #[test]
     fn corrupt_json_fails_closed() {
@@ -177,7 +176,6 @@ mod tests {
         assert!(matches!(err, HarnessStateError::Corrupt(_)));
     }
 
-    /// Trace: L2-DES-HARNESS-001
     /// Verifies: round-trip save/load preserves entries.
     #[test]
     fn save_load_round_trip() {

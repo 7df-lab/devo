@@ -349,6 +349,27 @@ pub fn read_execution_replay(
     path: &std::path::Path,
     turn_id: &devo_protocol::native::ids::TurnId,
 ) -> anyhow::Result<ExecutionReplay> {
+    read_execution_replay_scoped(path, turn_id, /*session_id*/ None)
+}
+
+/// Loads acknowledged facts for one turn owned by one logical session.
+///
+/// Shared journals contain several sessions; a sibling's `CompactionSnapshot`
+/// must not invalidate this session's checkpoint, and only this session's
+/// execution lines may be applied.
+pub fn read_execution_replay_for_session(
+    path: &std::path::Path,
+    turn_id: &devo_protocol::native::ids::TurnId,
+    session_id: &devo_protocol::native::ids::SessionId,
+) -> anyhow::Result<ExecutionReplay> {
+    read_execution_replay_scoped(path, turn_id, Some(*session_id))
+}
+
+fn read_execution_replay_scoped(
+    path: &std::path::Path,
+    turn_id: &devo_protocol::native::ids::TurnId,
+    session_id: Option<devo_protocol::native::ids::SessionId>,
+) -> anyhow::Result<ExecutionReplay> {
     use crate::{InternalRecord, RolloutLine, RolloutLineReadError, parse_rollout_line};
     use std::io::BufRead;
     let last_prompt_checkpoint_line = last_prompt_checkpoint_line(path, turn_id)?;
@@ -379,11 +400,21 @@ pub fn read_execution_replay(
         match parse_rollout_line(&line) {
             Ok(line) => match line {
                 RolloutLine::Internal {
+                    session_id: owner_session,
                     turn_id: Some(owner),
                     entry: InternalRecord::Execution { record },
                     ..
-                } if owner.as_str() == turn_id.as_str() => replay.apply(&record)?,
-                RolloutLine::CompactionSnapshot { .. } => replay.has_checkpoint = false,
+                } if owner.as_str() == turn_id.as_str()
+                    && session_id.is_none_or(|expected| owner_session == expected) =>
+                {
+                    replay.apply(&record)?
+                }
+                RolloutLine::CompactionSnapshot {
+                    session_id: owner_session,
+                    ..
+                } if session_id.is_none_or(|expected| owner_session == expected) => {
+                    replay.has_checkpoint = false;
+                }
                 _ => {}
             },
             Err(RolloutLineReadError::TruncatedTail) => {
@@ -607,7 +638,6 @@ mod tests {
         assert_eq!(replay, replay_of(&records));
     }
 
-    /// Trace: L2-DES-CONTEXT-004
     #[test]
     fn replay_is_idempotent_and_rejects_conflicting_arguments() {
         let call = ResponseItem::ToolCall {
@@ -854,5 +884,56 @@ mod tests {
         assert_eq!(replay.items, vec![call_item("a"), call_item("b")]);
         assert_eq!(replay.counters, Some(counters(10)));
         assert!(replay.has_checkpoint);
+    }
+    #[test]
+    fn sibling_compaction_does_not_invalidate_parent_execution_checkpoint() {
+        use crate::conversation::rollout::{InternalRecord, RolloutLine};
+        use devo_protocol::native::ids::{ItemId, SessionId, TurnId};
+
+        let dir = tempfile::tempdir().expect("tempdir");
+        let path = dir.path().join("journal.jsonl");
+        let parent = SessionId::new();
+        let child = SessionId::new();
+        let turn = TurnId::new();
+        let records = [
+            RolloutLine::Internal {
+                v: 2,
+                timestamp: chrono::Utc::now(),
+                session_id: parent,
+                turn_id: Some(turn),
+                seq: 0,
+                entry: InternalRecord::Execution {
+                    record: ExecutionRecord::PromptCheckpoint {
+                        items: vec![call_item("a")],
+                        counters: None,
+                    },
+                },
+            },
+            RolloutLine::CompactionSnapshot {
+                v: 2,
+                timestamp: chrono::Utc::now(),
+                session_id: child,
+                turn_id: TurnId::new(),
+                summary_item_id: ItemId::new(),
+                preserved_item_ids: Vec::new(),
+                context_occupancy: None,
+            },
+        ];
+        let mut text = String::new();
+        for record in &records {
+            text.push_str(&serde_json::to_string(record).expect("serialize"));
+            text.push('\n');
+        }
+        std::fs::write(&path, text).expect("write journal");
+
+        let replay = read_execution_replay_for_session(&path, &turn, &parent)
+            .expect("parent execution replay");
+        assert!(replay.has_checkpoint);
+        assert_eq!(replay.items, vec![call_item("a")]);
+
+        // The unscoped reader keeps the old whole-file behavior: the child's
+        // compaction invalidates the checkpoint when no owner is supplied.
+        let unscoped = read_execution_replay(&path, &turn).expect("unscoped replay");
+        assert!(!unscoped.has_checkpoint);
     }
 }

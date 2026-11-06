@@ -25,31 +25,14 @@ done
 - devo-added integration files (no upstream counterpart): `launch.rs`,
   `windows_impl.rs`, `request_adapter.rs`, `path_util.rs`, `string_util.rs`,
   `capture_stub.rs`, `otel_stub.rs`, `protocol/`, `unified_exec/`, `conpty/`,
-  `pty/`, `elevated/`, and `credential_delivery.rs`.
-- `credential_delivery.rs` is the one devo-owned *security* module (goal rule
-  5): codex's per-exec model never delivers credentials to a long-lived
-  process. Per-session capability SID + inheritable allow-ACE grant/revoke
-  (write and read masks) + crash-recovery journal (`credential_journal.json`) +
-  orphan sweep. Upstream cannot host it by design.
+  `pty/`, and `elevated/`.
 
-## Credential-delivery plumbing (devo-owned hunks in upstream files, P2)
+## Kernel credential delivery removed
 
-All of these exist only to carry the per-session credential SID to the
-sandboxed long-lived kernel; codex has no equivalent need:
-
-- `wrapper.rs`: `--session-credential-sid` flag (builder param, wrapper-request
-  field, parse arm).
-- `token.rs`: `create_readonly_token_with_caps_user_and_additional_restrictions_from`
-  and `create_workspace_write_token_with_caps_and_additional_restrictions_from`
-  (identity markers; deliberately excluded from the default DACL) +
-  `additional_restricting_tests`.
-- `WindowsSandboxSessionRequest` / `WindowsSandboxRequest`: `session_credential_sid`
-  field, threaded through `unified_exec/mod.rs` → `backends/legacy.rs` →
-  `spawn_prep.rs` (`prepare_legacy_session_security` param).
-- `launch.rs`: `prepare_direct_argv_launch` + `prepare_windows_sandbox_launch_for_argv`
-  (direct-argv launcher for non-shell callers).
-- Callers pass `None` everywhere except the RLM kernel fence path
-  (`crates/kernel/src/fence.rs`).
+The Python kernel is trusted orchestration. Host-side shell execution retains
+ordinary Windows sandbox restrictions. The kernel-only credential authority,
+credential journal, session SID wrapper flag, and token-injection APIs have
+been removed; there is no longer a long-lived sandboxed kernel identity.
 
 ## Ports applied 2026-09-19 (from upstream v0.150.1)
 

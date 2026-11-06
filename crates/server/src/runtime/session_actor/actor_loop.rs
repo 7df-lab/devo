@@ -9,7 +9,7 @@ use devo_protocol::native::turn::TurnStatus;
 use tokio::sync::mpsc;
 
 use super::approval_scope::{
-    apply_approval_scope_to_state, apply_path_scope_to_permission_profile, credential_delivery_root,
+    apply_approval_scope_to_state, apply_path_scope_to_permission_profile,
 };
 use super::commands::{ApprovalCheckpointSnapshot, SessionCommand};
 use super::snapshots::{
@@ -290,62 +290,6 @@ pub(super) async fn run_session_actor(
                     &scope,
                     &pending,
                 );
-                // P2 (design doc §8/§9): a PathPrefix write approval is not
-                // just a cache/profile entry — deliver it as a credential to
-                // the fenced kernel so native I/O works from now on, with no
-                // kernel restart. Scope selection lives in
-                // `credential_delivery_root` (tested); Session-scope
-                // exact-file approvals deliberately stay mediated.
-                // Windows: session-SID ACE. Unix: dirfd over SCM_RIGHTS.
-                if let Some((root, access)) = credential_delivery_root(&scope, &pending)
-                    && let Some(kernel) = state.kernel.as_ref()
-                {
-                    #[cfg(windows)]
-                    if let Some(authority) = kernel.fence_credentials() {
-                        let delivered = match access {
-                            super::approval_scope::CredentialAccess::Write => {
-                                authority.grant_write_root(&root)
-                            }
-                            super::approval_scope::CredentialAccess::Read => {
-                                authority.grant_read_root(&root)
-                            }
-                        };
-                        match delivered {
-                            Ok(_) => tracing::info!(
-                                root = %root.display(),
-                                "session credential delivered: ACE for the fenced kernel \
-                                 (no restart)"
-                            ),
-                            Err(err) => tracing::warn!(
-                                %err,
-                                root = %root.display(),
-                                "session credential ACE delivery failed; \
-                                 the mediated fallback remains active"
-                            ),
-                        }
-                    }
-                    #[cfg(unix)]
-                    if let Some(channel) = kernel.grant_channel() {
-                        let access_str = match access {
-                            super::approval_scope::CredentialAccess::Write => "write",
-                            super::approval_scope::CredentialAccess::Read => "read",
-                        };
-                        match channel.grant(&root, access_str) {
-                            Ok(_) => tracing::info!(
-                                root = %root.display(),
-                                access = access_str,
-                                "session credential delivered: dirfd for the fenced kernel \
-                                 (no restart)"
-                            ),
-                            Err(err) => tracing::warn!(
-                                %err,
-                                root = %root.display(),
-                                "session credential dirfd delivery failed; \
-                                 the mediated fallback remains active"
-                            ),
-                        }
-                    }
-                }
             }
             SessionCommand::UpdateSummary { summary } => {
                 state.summary = summary;
@@ -730,20 +674,6 @@ pub(super) async fn run_session_actor(
                 let _ = reply.send(result);
             }
             SessionCommand::Shutdown { reply } => {
-                // Withdraw the session's delivered credentials (design doc
-                // §9): normal session end revokes every ACE this session was
-                // granted; crashed sessions are covered by the journal sweep.
-                #[cfg(windows)]
-                if let Some(kernel) = state.kernel.as_ref()
-                    && let Some(authority) = kernel.fence_credentials()
-                    && let Err(err) = authority.revoke_all()
-                {
-                    tracing::warn!(
-                        %err,
-                        "session credential revocation on shutdown failed; \
-                         the startup journal sweep will retry"
-                    );
-                }
                 let kernel = state.kernel.take();
                 let _ = reply.send(kernel);
                 break;

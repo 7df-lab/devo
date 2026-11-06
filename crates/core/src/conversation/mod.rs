@@ -15,8 +15,9 @@ pub use event_projection::{
     sessions_stream_id, source_fact_id,
 };
 pub use history::{
-    CanonicalHistory, HistoryReadError, read_canonical_history, read_rollout_session_leaf,
-    read_rollout_session_meta,
+    CanonicalHistory, HistoryReadError, read_canonical_history, read_canonical_history_for_session,
+    read_rollout_session_leaf, read_rollout_session_leaf_for_session, read_rollout_session_meta,
+    read_rollout_session_meta_for_session,
 };
 pub use native_from_turn_item::native_item_from_turn_item;
 pub use native_replay::{

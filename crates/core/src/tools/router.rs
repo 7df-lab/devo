@@ -19,6 +19,7 @@ use tracing::warn;
 
 use crate::invocation::ToolContent;
 use crate::registry::ToolRegistry;
+use crate::shell_exec::{requested_workdir, resolve_shell_dirs};
 use crate::tool_spec::ToolCapabilityTag;
 use crate::tools::deferred_loading::is_subagent_agent_coordination_tool;
 use devo_tools::AgentToolCoordinator;
@@ -97,6 +98,12 @@ pub struct ToolRuntime {
     gate: RwLock<()>,
     context: ToolRuntimeContext,
     execution_options: ToolExecutionOptions,
+}
+
+#[derive(Clone, Copy)]
+enum ExecutionTarget {
+    Inline,
+    HostBash,
 }
 
 impl ToolRuntime {
@@ -254,10 +261,43 @@ impl ToolRuntime {
         self.context.agent_scope
     }
 
+    /// Authorize a host shell through the normal tool pipeline before returning a handle.
+    pub async fn start_host_bash(
+        &self,
+        request_id: String,
+        input: serde_json::Value,
+    ) -> ToolCallResult {
+        self.execute_single_target(
+            &ToolCall {
+                id: request_id,
+                name: "bash".to_string(),
+                input,
+            },
+            &None,
+            ExecutionTarget::HostBash,
+        )
+        .await
+    }
+
+    /// Inspect or cancel shell handles scoped to this runtime's session.
+    pub fn control_host_bash(&self, action: &str, params: &serde_json::Value) -> serde_json::Value {
+        super::host_bash::control(self.context.session_id.as_str(), action, params)
+    }
+
     pub(crate) async fn execute_single(
         &self,
         call: &ToolCall,
         on_progress: &Option<ProgressCallbackArc>,
+    ) -> ToolCallResult {
+        self.execute_single_target(call, on_progress, ExecutionTarget::Inline)
+            .await
+    }
+
+    async fn execute_single_target(
+        &self,
+        call: &ToolCall,
+        on_progress: &Option<ProgressCallbackArc>,
+        target: ExecutionTarget,
     ) -> ToolCallResult {
         let tool_name = canonical_tool_name(&self.registry, &call.name);
         if self.context.agent_scope == ToolAgentScope::Subagent
@@ -325,20 +365,12 @@ impl ToolRuntime {
             }
         }
 
-        // Sandbox temporarily disabled (SANDBOX_ENFORCEMENT_TEMPORARILY_DISABLED):
-        // spawn every tool process with full user permissions regardless of the
-        // session's configured, persisted, or live-updated profile. Restore the
-        // plain match below to re-enable enforcement.
-        let mut sandbox_profile = if devo_sandbox::SANDBOX_ENFORCEMENT_TEMPORARILY_DISABLED {
-            None
-        } else {
-            match &self.context.sandbox_profile_live {
-                Some(live) => live
-                    .lock()
-                    .expect("sandbox profile live mutex poisoned")
-                    .clone(),
-                None => self.context.sandbox_profile.clone(),
-            }
+        let mut sandbox_profile = match &self.context.sandbox_profile_live {
+            Some(live) => live
+                .lock()
+                .expect("sandbox profile live mutex poisoned")
+                .clone(),
+            None => self.context.sandbox_profile.clone(),
         };
         let mut already_bypassed_sandbox = sandbox_profile_is_inactive(sandbox_profile.as_deref());
         // `already_approved`: only user/session/auto-review approvals unlock
@@ -465,7 +497,28 @@ impl ToolRuntime {
                 }
                 Err(crate::contracts::ToolCallError::Cancelled)
             }
-            result = tool.handle(build_ctx(sandbox_profile.clone()), input.clone(), progress_sender) => result,
+            result = async {
+                match target {
+                    ExecutionTarget::Inline => tool.handle(build_ctx(sandbox_profile.clone()), input.clone(), progress_sender).await,
+                    ExecutionTarget::HostBash => {
+                        let retry = if !already_bypassed_sandbox && already_approved
+                            && sandbox_permission_overlay.is_none()
+                            && devo_sandbox::unsandboxed_execution_allowed(sandbox_profile.as_deref(), &self.context.cwd)
+                        {
+                            super::host_bash::SandboxRetry::ApprovedDenial
+                        } else {
+                            super::host_bash::SandboxRetry::Never
+                        };
+                        let kernel_lifetime = self.context.kernel.as_ref().map(|kernel| kernel.lifetime_token());
+                        let reply = super::host_bash::start(build_ctx(sandbox_profile.clone()), input.clone(), retry, kernel_lifetime);
+                        if reply["status"] == "error" {
+                            Err(crate::contracts::ToolCallError::ExecutionFailed(reply["error"].as_str().unwrap_or("host bash start failed").to_string()))
+                        } else {
+                            Ok(crate::contracts::ToolResult::success(crate::contracts::ToolResultContent::Json(reply["result"].clone()), "host bash started"))
+                        }
+                    }
+                }
+            } => result,
         };
 
         // UnlessTrusted-style failure upgrade (tool orchestrator):
@@ -626,27 +679,38 @@ impl ToolRuntime {
             return Ok(None);
         }
 
-        let path = path_for_tool_input(tool_name, &call.input, &self.context.cwd);
+        // Shell approvals, command matching, and the child spawn must name the
+        // same canonical directory. Resolve relative workdirs against the
+        // session workspace, never the process cwd.
+        let approval_cwd = if matches!(tool_name, "bash" | "shell_command" | "exec_command") {
+            let requested = requested_workdir(&call.input)
+                .map_err(|error| format!("invalid workdir: {error}"))?;
+            resolve_shell_dirs(&self.context.cwd, requested)
+                .map_err(|error| format!("invalid workdir: {error}"))?
+                .cwd
+        } else {
+            self.context.cwd.clone()
+        };
+
+        let path = path_for_tool_input(tool_name, &call.input, &approval_cwd);
         let host = host_for_tool_input(tool_name, &call.input);
         let target = target_for_tool_input(tool_name, &call.input);
         let command_prefix = command_prefix_for_tool_input(tool_name, &call.input);
         let command_argv =
             command_str_for_tool_input(tool_name, &call.input).and_then(safe_shell_argv);
         let command_pattern = command_str_for_tool_input(tool_name, &call.input)
-            .and_then(|command| generalize_command_pattern(command, &self.context.cwd));
+            .and_then(|command| generalize_command_pattern(command, &approval_cwd));
+        let action_summary =
+            crate::tool_summary::tool_summary(tool_name, &call.input, &approval_cwd);
         Ok(Some(ToolPermissionRequest {
             tool_call_id: call.id.clone(),
             tool_name: tool_name.to_string(),
             input: call.input.clone(),
-            cwd: self.context.cwd.clone(),
+            cwd: approval_cwd,
             session_id: self.context.session_id,
             turn_id: self.context.turn_id,
             resource,
-            action_summary: crate::tool_summary::tool_summary(
-                tool_name,
-                &call.input,
-                &self.context.cwd,
-            ),
+            action_summary,
             justification: justification_for_tool_input(&call.input),
             path,
             host,

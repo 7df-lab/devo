@@ -282,7 +282,6 @@ mod tests {
     use super::*;
     use pretty_assertions::assert_eq;
 
-    /// Trace: L2-DES-GOAL-001
     /// Verifies: kernel `goal.create` refuses to displace a pending goal
     /// (active/paused/blocked/limited) — the SKILL contract — and replaces a
     /// terminal goal.
@@ -416,7 +415,6 @@ mod tests {
 
     #[test]
     fn set_status_can_update_terminal_goal() {
-        // Trace: L2-DES-GOAL-001
         let mut store = GoalStore::new();
         let params = GoalCreateParams {
             session_id: SessionId::new(),

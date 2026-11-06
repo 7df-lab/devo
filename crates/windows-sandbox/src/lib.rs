@@ -62,9 +62,6 @@ pub struct WindowsSandboxRequest {
     pub writable_roots: Vec<PathBuf>,
     pub deny_read: Vec<PathBuf>,
     pub restrict_network: bool,
-    /// Per-session credential SID (design doc §9, P2); `None` for plain
-    /// per-command sandboxing. See `credential_delivery`.
-    pub session_credential_sid: Option<String>,
     /// Extra env the sandboxed child must receive. The wrapper builds the
     /// child's environment from its argv env-json snapshot, so callers cannot
     /// rely on setting `Command::env` after wrapping.
@@ -97,8 +94,8 @@ pub fn prepare_windows_sandbox_launch(
 
 /// One-shot provisioning entry (`devo sandbox-setup`): request the elevated
 /// setup for workspace-write permissions around `cwd`. The UAC consent prompt
-/// appears; after it completes, `sandbox_setup_is_complete` flips true and the
-/// RLM kernel fence can be raised (design doc §5.3).
+/// appears; after it completes, `sandbox_setup_is_complete` flips true and
+/// host-side sandboxed commands can use the provisioned account.
 #[cfg(windows)]
 pub fn request_default_sandbox_setup(devo_home: &Path, cwd: &Path) -> anyhow::Result<()> {
     let profile = PermissionProfile::workspace_write();
@@ -119,29 +116,6 @@ pub fn request_default_sandbox_setup(devo_home: &Path, cwd: &Path) -> anyhow::Re
         },
         setup::SetupRootOverrides::default(),
     )
-}
-
-/// Direct-argv sandbox launch for non-shell callers (e.g. the RLM kernel host
-/// execs `python -m rlm.repl`). Shell-shaped fields of `req` are ignored;
-/// `inner_command` is the exact argv executed inside the sandbox.
-#[cfg(windows)]
-pub fn prepare_windows_sandbox_launch_for_argv(
-    req: &WindowsSandboxRequest,
-    inner_command: Vec<String>,
-) -> anyhow::Result<WindowsSandboxLaunch> {
-    launch::prepare_direct_argv_launch(req, inner_command)
-}
-
-/// Direct-argv launch with a caller-filtered inherited environment. Unlike
-/// `Command::env_remove`, this filters the snapshot serialized into the
-/// wrapper's command-line arguments BEFORE the wrapper process starts.
-#[cfg(windows)]
-pub fn prepare_windows_sandbox_launch_for_argv_with_env(
-    req: &WindowsSandboxRequest,
-    inner_command: Vec<String>,
-    inherited_env: Vec<(String, String)>,
-) -> anyhow::Result<WindowsSandboxLaunch> {
-    launch::prepare_direct_argv_launch_with_env(req, inner_command, inherited_env)
 }
 
 /// CLI early-dispatch hook: if argv requests the Windows sandbox wrapper, run it
@@ -192,8 +166,6 @@ mod cap;
 mod capture_stub;
 #[cfg(windows)]
 mod conpty;
-#[cfg(windows)]
-mod credential_delivery;
 #[cfg(windows)]
 mod deny_read_acl;
 mod deny_read_resolver;
@@ -306,10 +278,6 @@ pub use cap::workspace_write_root_overlaps_path;
 pub use conpty::ConptyInstance;
 #[cfg(windows)]
 pub use conpty::spawn_conpty_process_as_user;
-#[cfg(windows)]
-pub use credential_delivery::SessionCredentialAuthority;
-#[cfg(windows)]
-pub use credential_delivery::sweep_orphaned_sessions;
 #[cfg(windows)]
 pub use deny_read_acl::apply_deny_read_acls;
 #[cfg(windows)]
@@ -450,8 +418,6 @@ pub use token::create_readonly_token_with_caps_and_user_from;
 #[cfg(windows)]
 pub use token::create_readonly_token_with_caps_from;
 #[cfg(windows)]
-pub use token::create_readonly_token_with_caps_user_and_additional_restrictions_from;
-#[cfg(windows)]
 pub use token::create_workspace_write_token_with_caps_and_user_from;
 #[cfg(windows)]
 pub use token::create_workspace_write_token_with_caps_from;
@@ -513,7 +479,6 @@ mod tests {
             writable_roots: vec![],
             deny_read: vec![],
             restrict_network: false,
-            session_credential_sid: None,
             env_extra: vec![],
         })
         .expect("prepare");

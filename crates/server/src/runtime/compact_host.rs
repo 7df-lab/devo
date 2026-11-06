@@ -192,7 +192,6 @@ mod tests {
         SessionId::from_string(format!("ses_{}", Uuid::new_v4()))
     }
 
-    /// Trace: L2-DES-CONTEXT-002, L1-REQ-RLM-001
     /// Verifies: compact.status shape exposes tokens, context_window, percent, scheduled.
     #[test]
     fn status_shape_from_occupancy() {
@@ -217,7 +216,6 @@ mod tests {
         assert_eq!(wire["scheduled"], false);
     }
 
-    /// Trace: L2-DES-CONTEXT-002
     /// Verifies: after compaction before next usage, tokens/percent are null.
     #[test]
     fn status_nulls_when_usage_unknown() {
@@ -232,7 +230,6 @@ mod tests {
         assert!(wire["percent"].is_null());
     }
 
-    /// Trace: L2-DES-CONTEXT-002, L1-REQ-RLM-001
     /// Verifies: compact.run sets pending only while a turn is active.
     #[test]
     fn schedule_requires_active_turn_and_sets_flag() {
@@ -252,7 +249,6 @@ mod tests {
         assert!(!peek_pending_compact(&id));
     }
 
-    /// Trace: L2-DES-CONTEXT-002
     /// Verifies: last-write-wins pending + abort clear.
     #[test]
     fn schedule_last_write_wins_and_clear() {

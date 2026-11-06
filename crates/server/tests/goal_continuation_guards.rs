@@ -38,7 +38,6 @@ use support::wait_for_notification;
 
 #[tokio::test]
 async fn goal_set_does_not_start_continuation_in_plan_mode() -> Result<()> {
-    // Trace: L2-DES-GOAL-001
     let data_root = TempDir::new()?;
     let provider = Arc::new(CapturingProvider::default());
     let runtime = build_runtime(data_root.path(), provider.clone())?;

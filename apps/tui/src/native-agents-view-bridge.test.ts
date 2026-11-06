@@ -1,5 +1,4 @@
 /**
- * Trace: L2-DES-RLM-001
  * Verifies: Native session/list Page.data + agent/list fan-out maps to nested
  * Agents View SessionSummary rows (parent pointers, activity, defaults).
  */

@@ -862,6 +862,7 @@ impl SessionHandle {
     }
 
     async fn shutdown_actor(&self) -> Option<Arc<devo_kernel::KernelSession>> {
+        devo_core::tools::host_bash::cancel_session(self.session_id.as_str());
         let (reply_tx, reply_rx) = oneshot::channel();
         if self
             .send(SessionCommand::Shutdown { reply: reply_tx })

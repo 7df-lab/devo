@@ -201,7 +201,6 @@ mod tests {
     use crate::native::usage::SessionUsage;
     use crate::native::usage::UsageTotals;
 
-    /// Trace: L2-DES-APP-008
     /// Verifies: ACP session info is projected from canonical Native Session.
     #[test]
     fn session_info_uses_acp_field_names_and_preserves_native_session() {

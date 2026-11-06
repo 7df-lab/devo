@@ -224,7 +224,8 @@ impl SessionActorState {
             leaf_epoch: 0,
         };
         if let Some(path) = state.rollout_path.as_ref()
-            && let Ok((leaf_id, leaf_epoch)) = devo_core::read_rollout_session_leaf(path)
+            && let Ok((leaf_id, leaf_epoch)) =
+                devo_core::read_rollout_session_leaf_for_session(path, &state.summary.session_id())
         {
             state.transcript_leaf_id = leaf_id;
             state.leaf_epoch = leaf_epoch;

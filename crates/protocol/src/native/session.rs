@@ -85,9 +85,11 @@ pub struct Session {
     // ── Derived caches (server-maintained, client read-only) ──
     pub preview: String,
     pub last_activity_at: DateTime<Utc>,
-    /// Current on-disk size of the durable JSONL transcript. This is a
-    /// list-view cache: servers may omit it from non-list responses or when
-    /// the session has no readable rollout file.
+    /// Current on-disk size of the owning physical journal, when known.
+    /// Root sessions report the shared journal size; a child sharing that
+    /// journal reports `None` so the tree size is never presented as the
+    /// child's transcript size. This is a list-view cache: servers may omit
+    /// it from non-list responses or when no readable rollout exists.
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub transcript_size_bytes: Option<u64>,
     /// Approximate user+assistant item count for list / Agents View trays.

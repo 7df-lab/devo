@@ -357,7 +357,6 @@ mod tests {
         }
     }
 
-    /// Trace: L2-DES-MCP-001
     /// Verifies: mcp/tools does not start a disabled server and does start idle enabled ones.
     #[test]
     fn mcp_tools_refresh_skips_disabled_and_filled_ready_servers() {

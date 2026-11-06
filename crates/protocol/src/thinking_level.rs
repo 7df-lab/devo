@@ -278,7 +278,6 @@ mod tests {
     use crate::ReasoningLevelChoice;
     use crate::levels_with_leading_off;
 
-    /// Trace: L2-DES-MODEL-003
     /// Verifies: unsupported reasoning yields only Off.
     #[test]
     fn get_supported_thinking_levels_unsupported() {
@@ -292,7 +291,6 @@ mod tests {
         );
     }
 
-    /// Trace: L2-DES-MODEL-003
     /// Verifies: toggle-derived map exposes off + high (wire on).
     #[test]
     fn get_supported_thinking_levels_toggle_derived() {
@@ -306,7 +304,6 @@ mod tests {
         );
     }
 
-    /// Trace: L2-DES-MODEL-003
     /// Verifies: levels with max include max; none effort maps to UI off.
     #[test]
     fn get_supported_thinking_levels_with_max_and_none_to_off() {
@@ -336,7 +333,6 @@ mod tests {
         );
     }
 
-    /// Trace: L2-DES-MODEL-003
     /// Verifies: Off choice uses off wire value; xhigh requires explicit key.
     #[test]
     fn derive_levels_with_off_and_xhigh() {
@@ -357,7 +353,6 @@ mod tests {
         );
     }
 
-    /// Trace: L2-DES-MODEL-003
     /// Verifies: clamp walks toward nearest supported neighbor.
     #[test]
     fn clamp_thinking_level_snaps_to_supported() {

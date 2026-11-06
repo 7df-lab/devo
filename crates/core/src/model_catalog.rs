@@ -591,7 +591,6 @@ mod tests {
         );
     }
 
-    /// Trace: L2-DES-MODEL-002, L2-DES-MODEL-003
     /// Verifies: authored thinking fields survive catalog load and model/list metadata projection.
     #[test]
     fn custom_catalog_preserves_authored_thinking_fields() {
@@ -631,7 +630,6 @@ mod tests {
         assert_eq!(info.thinking_level_map, Some(thinking_level_map));
     }
 
-    /// Trace: L2-DES-MODEL-002
     /// Verifies: sparse user overlays still resolve pure builtin model defaults.
     #[test]
     fn effective_provider_catalog_resolves_builtin_model_under_sparse_overlay() {
@@ -673,7 +671,6 @@ mod tests {
         );
     }
 
-    /// Trace: L2-DES-MODEL-003
     /// Verifies: DeepSeek builtin `reasoning_capability.levels` drive chips and
     /// the authored map stays verbatim upstream (pi-ai import): the API's real
     /// `max` level is aliased at the UI's `xhigh` slot (`xhigh` → wire `max`),
@@ -715,7 +712,6 @@ mod tests {
         );
     }
 
-    /// Trace: L2-DES-AUTH-001, L2-DES-MODEL-002
     /// Verifies: builtin catalog mirrors pi-ai static providers plus Devo-local templates.
     #[test]
     fn builtin_provider_catalog_contains_current_cloud_and_local_models() {

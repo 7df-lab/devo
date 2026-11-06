@@ -7,6 +7,7 @@ use std::sync::Arc;
 use base64::Engine;
 use base64::engine::general_purpose::STANDARD;
 use devo_core::tools::AgentToolCoordinator;
+use devo_core::tools::unified_exec::process::SandboxExecutionOptions;
 use devo_core::tools::unified_exec::process::TerminalSize;
 use devo_core::tools::unified_exec::process::UnifiedExecProcess;
 use devo_core::tools::unified_exec::store::ProcessStore;
@@ -89,6 +90,18 @@ struct CommandExecKey {
 struct CommandExecSession {
     store_process_id: i32,
     command: String,
+}
+
+/// Execution directory and sandbox inputs resolved for one command/exec spawn.
+#[derive(Debug, Clone, PartialEq, Eq)]
+struct CommandExecContext {
+    /// Directory the client's terminal process starts in. A client may choose
+    /// this independently of the session workspace.
+    cwd: PathBuf,
+    /// Trusted session workspace used to resolve sandbox config and profile
+    /// roots. `None` for intentional sessionless execution.
+    sandbox_workspace: Option<PathBuf>,
+    sandbox_profile: Option<String>,
 }
 
 type CommandExecRuntimeResult<T> = Result<T, (ProtocolErrorCode, String)>;
@@ -238,8 +251,7 @@ impl CommandExecManager {
         runtime: Arc<ServerRuntime>,
         connection_id: u64,
         params: CommandExecParams,
-        cwd: PathBuf,
-        sandbox_profile: Option<String>,
+        context: CommandExecContext,
     ) -> CommandExecRuntimeResult<CommandExecResult> {
         if params.process_id.trim().is_empty() {
             return Err((
@@ -289,12 +301,18 @@ impl CommandExecManager {
             ));
         }
 
+        let CommandExecContext {
+            cwd,
+            sandbox_workspace,
+            sandbox_profile,
+        } = context;
         let spawn_result = spawn_command_exec_process(
             store_process_id,
             params.program,
             cwd,
             params.size,
             sandbox_profile,
+            sandbox_workspace,
         )
         .await;
         let (process, output_rx) = match spawn_result {
@@ -975,16 +993,13 @@ impl ServerRuntime {
         request_id: serde_json::Value,
         params: CommandExecParams,
     ) -> serde_json::Value {
-        let cwd = match self
-            .command_exec_cwd(params.session_id, params.cwd.clone())
+        let context = match self
+            .command_exec_context(params.session_id, params.cwd.clone())
             .await
         {
-            Ok(cwd) => cwd,
+            Ok(context) => context,
             Err((code, message)) => return self.error_response(request_id, code, message),
         };
-        let sandbox_profile = self
-            .command_exec_sandbox_profile(params.session_id, &cwd)
-            .await;
         let command_exec_event_types = HashSet::from([
             "command/exec/outputDelta".to_string(),
             "command/exec/exited".to_string(),
@@ -1004,38 +1019,12 @@ impl ServerRuntime {
         }
         match self
             .command_exec_manager
-            .start(
-                Arc::clone(self),
-                connection_id,
-                params,
-                cwd,
-                sandbox_profile,
-            )
+            .start(Arc::clone(self), connection_id, params, context)
             .await
         {
             Ok(result) => success_response(request_id, result),
             Err((code, message)) => self.error_response(request_id, code, message),
         }
-    }
-
-    /// The session's sandbox profile for a command/exec spawn, or `None` for
-    /// sessionless execs and sessions without a profile. Resolved through the
-    /// session actor so PTY spawns enforce the same profile as tool-run shells.
-    /// Temporarily overridden: the sandbox is disabled repo-wide, so terminals
-    /// spawn bare even when the session carries a profile.
-    async fn command_exec_sandbox_profile(
-        &self,
-        session_id: Option<SessionId>,
-        cwd: &std::path::Path,
-    ) -> Option<String> {
-        if devo_sandbox::SANDBOX_ENFORCEMENT_TEMPORARILY_DISABLED {
-            return None;
-        }
-        let session = self.sessions.lock().await.get(&session_id?).cloned()?;
-        session
-            .shell_exec_context(cwd.to_path_buf())
-            .await
-            .and_then(|context| context.sandbox_profile)
     }
 
     pub(crate) async fn handle_command_exec_write(
@@ -1112,19 +1101,33 @@ impl ServerRuntime {
         }
     }
 
-    async fn command_exec_cwd(
+    /// Resolve the execution cwd and sandbox inputs for one command/exec spawn.
+    ///
+    /// An explicit session must exist even when the client supplies `cwd`;
+    /// otherwise an unknown session id could silently run without that
+    /// session's sandbox profile. Intentional sessionless requests (no
+    /// `session_id`) keep their own contract and require an explicit cwd.
+    ///
+    /// The client may choose an execution cwd that differs from the session
+    /// workspace. Sandbox config and profile roots are always resolved from
+    /// the trusted session workspace, never from the client cwd.
+    async fn command_exec_context(
         &self,
         session_id: Option<SessionId>,
-        cwd: Option<PathBuf>,
-    ) -> CommandExecRuntimeResult<PathBuf> {
-        if let Some(cwd) = cwd {
-            return Ok(cwd);
-        }
+        requested_cwd: Option<PathBuf>,
+    ) -> CommandExecRuntimeResult<CommandExecContext> {
         let Some(session_id) = session_id else {
-            return Err((
-                ProtocolErrorCode::InvalidParams,
-                "command/exec cwd is required when session_id is omitted".to_string(),
-            ));
+            let Some(cwd) = requested_cwd else {
+                return Err((
+                    ProtocolErrorCode::InvalidParams,
+                    "command/exec cwd is required when session_id is omitted".to_string(),
+                ));
+            };
+            return Ok(CommandExecContext {
+                cwd,
+                sandbox_workspace: None,
+                sandbox_profile: None,
+            });
         };
         let session = self
             .sessions
@@ -1144,7 +1147,16 @@ impl ServerRuntime {
                 "failed to read session summary".to_string(),
             ));
         };
-        Ok(summary.cwd.clone())
+        let trusted_workspace = summary.cwd.clone();
+        let sandbox_profile = session
+            .shell_exec_context(trusted_workspace.clone())
+            .await
+            .and_then(|context| context.sandbox_profile);
+        Ok(CommandExecContext {
+            cwd: requested_cwd.unwrap_or_else(|| trusted_workspace.clone()),
+            sandbox_workspace: Some(trusted_workspace),
+            sandbox_profile,
+        })
     }
 
     /// Persist a completed user `!` shell task into the session rollout so
@@ -1219,31 +1231,42 @@ async fn spawn_command_exec_process(
     cwd: PathBuf,
     size: Option<CommandExecTerminalSize>,
     sandbox_profile: Option<String>,
+    sandbox_workspace: Option<PathBuf>,
 ) -> Result<(UnifiedExecProcess, broadcast::Receiver<Vec<u8>>), String> {
     match program {
         CommandExecProgram::OneShot { command } => {
             if command.trim().is_empty() {
                 return Err("command/exec one-shot command must not be empty".to_string());
             }
-            UnifiedExecProcess::spawn_with_sandbox(
+            UnifiedExecProcess::spawn_with_sandbox_overlay(
                 store_process_id,
                 &command,
                 &cwd,
                 /*shell*/ None,
                 /*login*/ true,
                 /*tty*/ true,
-                sandbox_profile,
+                SandboxExecutionOptions {
+                    output_capture: None,
+                    sandbox_profile,
+                    sandbox_overlay: None,
+                    sandbox_workspace,
+                },
             )
             .await
         }
         CommandExecProgram::InteractiveShell => {
-            UnifiedExecProcess::spawn_interactive_shell(
+            UnifiedExecProcess::spawn_interactive_shell_with_overlay(
                 store_process_id,
                 &cwd,
                 /*shell*/ None,
                 /*login*/ true,
                 size.map(protocol_terminal_size),
-                sandbox_profile,
+                SandboxExecutionOptions {
+                    output_capture: None,
+                    sandbox_profile,
+                    sandbox_overlay: None,
+                    sandbox_workspace,
+                },
             )
             .await
         }

@@ -102,12 +102,18 @@ impl ServerRuntime {
             _ => (Some(target.id), None),
         };
 
-        let Some(rollout_path) = self.resolve_rollout_path(&params.session_id).await else {
-            return self.error_response(
-                request_id,
-                ProtocolErrorCode::SessionNotFound,
-                "session does not exist",
-            );
+        let rollout_path = match self.resolve_rollout_path(&params.session_id).await {
+            Ok(Some(path)) => path,
+            Ok(None) => {
+                return self.error_response(
+                    request_id,
+                    ProtocolErrorCode::SessionNotFound,
+                    "session does not exist",
+                );
+            }
+            Err(error) => {
+                return self.error_response(request_id, ProtocolErrorCode::InternalError, error);
+            }
         };
 
         let epoch = history.leaf_epoch.saturating_add(1);

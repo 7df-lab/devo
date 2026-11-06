@@ -649,8 +649,9 @@ impl ServerRuntime {
         let rollout_path = self
             .resolve_rollout_path(&session_id)
             .await
+            .map_err(anyhow::Error::msg)?
             .ok_or_else(|| anyhow::anyhow!("session has no rollout path"))?;
-        let history = devo_core::read_canonical_history(&rollout_path)?;
+        let history = devo_core::read_canonical_history_for_session(&rollout_path, &session_id)?;
         Ok(history.items.iter().any(|envelope| {
             matches!(
                 &envelope.item,

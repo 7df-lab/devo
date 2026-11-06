@@ -72,7 +72,6 @@ impl ModelProviderSDK for GoalTitleProvider {
     }
 }
 
-/// Trace: L2-DES-SERVER-title-generation
 /// Verifies: goal/set applies a heuristic title immediately, then optional LLM polish.
 #[tokio::test]
 async fn goal_set_objective_generates_session_title_for_new_session() -> Result<()> {

@@ -112,7 +112,6 @@ mod tests {
 
     use super::*;
 
-    /// Trace: L2-DES-CLIENT-002
     /// Verifies: canonical search snapshots round-trip with camelCase fields.
     #[test]
     fn search_snapshot_roundtrips() {

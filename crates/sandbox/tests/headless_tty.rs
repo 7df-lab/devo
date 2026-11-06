@@ -7,7 +7,7 @@ use std::process::Command;
 use pretty_assertions::assert_eq;
 
 #[test]
-fn kernel_sandbox_starts_without_controlling_terminal() {
+fn shell_sandbox_starts_without_controlling_terminal() {
     let support = nono::Sandbox::support_info();
     if !support.is_supported {
         eprintln!("skipping: Landlock unavailable: {}", support.details);
@@ -19,7 +19,7 @@ fn kernel_sandbox_starts_without_controlling_terminal() {
                 "--ignored",
                 "--exact",
                 "--nocapture",
-                "headless_kernel_child",
+                "headless_shell_child",
             ])
             .pre_exec(|| {
                 if libc::setsid() == -1 {
@@ -39,26 +39,20 @@ fn kernel_sandbox_starts_without_controlling_terminal() {
 }
 
 #[test]
-#[ignore = "invoked in a detached process by kernel_sandbox_starts_without_controlling_terminal"]
-fn headless_kernel_child() {
+#[ignore = "invoked in a detached process by shell_sandbox_starts_without_controlling_terminal"]
+fn headless_shell_child() {
     assert_eq!(
         std::fs::File::open("/dev/tty")
             .expect_err("probe must have no controlling terminal")
             .raw_os_error(),
         Some(libc::ENXIO),
     );
-    let plan = devo_sandbox::resolve_enforcement_plan(Some("rlm-kernel"), &std::env::temp_dir())
-        .expect("resolve kernel fence")
+    let plan = devo_sandbox::resolve_enforcement_plan(Some("workspace"), &std::env::temp_dir())
+        .expect("resolve shell sandbox")
         .expect("active fence");
     devo_sandbox::apply_resolved_enforcement_in_child(Some(&plan))
         .expect("apply fence without a terminal");
     assert!(std::fs::read("/proc/meminfo").is_ok());
-    assert_eq!(
-        std::fs::read("/proc/self/environ")
-            .expect_err("process credentials must stay fenced")
-            .kind(),
-        std::io::ErrorKind::PermissionDenied,
-    );
     let scratch = std::env::temp_dir().join(format!("devo-headless-{}", std::process::id()));
     std::fs::write(&scratch, b"fenced scratch").expect("scratch write remains allowed");
     assert_eq!(

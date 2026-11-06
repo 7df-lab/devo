@@ -6,7 +6,6 @@ import sys
 import types
 from dataclasses import dataclass
 from pathlib import Path
-import os
 from typing import Any
 
 from .bash import BashHandle, BashResult, bash
@@ -163,16 +162,6 @@ async def request_user_input(questions: list[dict[str, Any]]) -> dict[str, Any]:
     return await host_request("question", {"questions": questions})
 
 
-# Credential grants (design doc §9): start the fd receiver when the host
-# passed a delivery channel (fenced kernels only).
-try:
-    from . import grants as _grants_mod
-
-    _grants_mod.start_from_env()
-except Exception:  # noqa: BLE001 - grants are best-effort native I/O
-    _grants_mod = None
-
-
 def emit(data: dict[str, Any]) -> None:
     """Ship one display event (dict of MIME type -> JSON payload) to the host."""
     from . import repl
@@ -183,10 +172,9 @@ def emit(data: dict[str, Any]) -> None:
 async def read(path, *, encoding="utf-8") -> str:
     """Front-door file read (design doc rlm-permissions.md §6.1).
 
-    Try a direct ``open()`` first: inside the OS fence this always succeeds.
-    Only when the OS refuses (``OSError`` — including ``ENOENT`` for paths
-    hidden by a Linux mount fence, not just ``EACCES``) does this ask the host
-    to read the file through the approval pipeline. The kernel process is
+    Try a direct ``open()`` with the user's OS privileges first. On
+    ``OSError``, ask the host to read through the approval pipeline.
+    The kernel process is
     never restarted. A host denial surfaces as ``PermissionError`` with the
     host's self-explanatory message.
     """
@@ -194,17 +182,6 @@ async def read(path, *, encoding="utf-8") -> str:
         with open(path, encoding=encoding) as f:
             return f.read()
     except OSError as direct_error:
-        # Delivered credential (§9): a granted dirfd makes this a native
-        # kernel-side read — no host round-trip, no restart.
-        if _grants_mod is not None:
-            grant = _grants_mod.grant_fd_for(os.fspath(path))
-            if grant is not None:
-                fd, _access, rel = grant
-                try:
-                    with os.fdopen(os.open(rel, os.O_RDONLY, dir_fd=fd), encoding=encoding) as f:
-                        return f.read()
-                except OSError:
-                    pass  # fall through to the mediated front door
         try:
             reply = await host_request(
                 "fs.read", {"path": str(path), "errno": direct_error.errno}
@@ -218,9 +195,7 @@ async def read(path, *, encoding="utf-8") -> str:
 
 
 async def read_once(path, *, encoding="utf-8") -> str:
-    """Ephemeral single-read credential (design doc §6.1/§9): ask once, the
-    host approves once, the bytes come back bound to the caller's context.
-    Nothing outlives the reply — no ACE, no dirfd, no cache, no restart."""
+    """Read directly, or request a one-time host-mediated read on OS failure."""
     try:
         with open(path, encoding=encoding) as f:
             return f.read()
@@ -239,8 +214,7 @@ async def read_once(path, *, encoding="utf-8") -> str:
 
 
 async def write_once(path, content) -> None:
-    """Ephemeral single-write (§6.1/§9): one approval, host executes with the
-    kernel's context honored, nothing persists (no cache, no ACE)."""
+    """Write directly, or request a one-time host-mediated write on OS failure."""
     if not isinstance(content, str):
         raise TypeError(f"content must be str, got {type(content).__name__}")
     try:
@@ -265,7 +239,7 @@ async def write_once(path, content) -> None:
 async def write(path, content) -> None:
     """Front-door file write (design doc rlm-permissions.md §6.1).
 
-    Same contract as :func:`read`: direct write inside the fence, host-mediated
+    Same contract as :func:`read`: direct write with user privileges, host-mediated
     write (approval pipeline) when the OS refuses. ``content`` must be ``str``.
     """
     if not isinstance(content, str):
@@ -275,20 +249,6 @@ async def write(path, content) -> None:
             f.write(content)
         return
     except OSError as direct_error:
-        if _grants_mod is not None:
-            grant = _grants_mod.grant_fd_for(os.fspath(path))
-            if grant is not None:
-                fd, access, rel = grant
-                if access == "write":
-                    try:
-                        fd_open = os.open(
-                            rel, os.O_WRONLY | os.O_CREAT | os.O_TRUNC, 0o644, dir_fd=fd
-                        )
-                        with os.fdopen(fd_open, "w", encoding="utf-8", newline="") as f:
-                            f.write(content)
-                        return
-                    except OSError:
-                        pass  # fall through to the mediated front door
         try:
             # `filePath` matches the mediated write tool contract; the bridge's
             # approval-path extraction also accepts `path`/`file_path`.

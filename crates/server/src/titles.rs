@@ -216,7 +216,6 @@ mod tests {
         );
     }
 
-    /// Trace: L2-DES-SERVER-title-generation
     /// Verifies: heuristic titles truncate and prefer the first line.
     #[test]
     fn heuristic_title_truncates_and_prefers_first_line() {

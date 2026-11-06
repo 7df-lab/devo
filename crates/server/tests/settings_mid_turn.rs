@@ -278,7 +278,6 @@ async fn initialize_connection(
     Ok((connection_id, notifications_rx))
 }
 
-/// Trace: L2-DES-CONV-002
 /// Verifies: tightening the permission preset mid-turn changes the next
 /// tool-call authorization outcome — auto-run under fullAccess, interactive
 /// approval required after switching to default (Phase 3 behavior level).
@@ -452,7 +451,6 @@ async fn mid_turn_tighten_to_default_triggers_approval_for_ipython_permission_re
     Ok(())
 }
 
-/// Trace: L2-DES-CONV-002
 /// Verifies: switching model and reasoning selection mid-turn makes the next
 /// model request use the model-aware normalized selection.
 #[tokio::test]

@@ -141,7 +141,6 @@ mod tests {
         }
     }
 
-    /// Trace: L2-DES-HARNESS-001
     /// Verifies: apply rejects drift when the on-disk entry changed during planning.
     #[test]
     fn apply_rejects_drift() {
@@ -183,7 +182,6 @@ mod tests {
         assert!(matches!(err, ApplyError::Drift { .. }));
     }
 
-    /// Trace: L2-DES-HARNESS-001
     /// Verifies: create apply persists the new entry.
     #[test]
     fn apply_create_persists() {

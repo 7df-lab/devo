@@ -11,6 +11,7 @@ mod execution;
 pub mod goal;
 mod goal_durable;
 mod heartbeat_command;
+mod journal_path;
 mod json_extract;
 mod oauth_refresh;
 mod persisted_native_item;

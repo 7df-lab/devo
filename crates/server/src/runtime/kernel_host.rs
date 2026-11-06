@@ -265,8 +265,12 @@ pub async fn dispatch_host_request_with_bridge(bridge: &HostBridge, data: Value)
             };
             runtime.host_goal_complete(session_id).await
         }
-        "bash" | "bash.start" => {
-            crate::runtime::kernel_host_bridge::handle_bash(bridge, &params).await
+        "bash" => crate::runtime::kernel_host_bridge::handle_bash(bridge, &params).await,
+        "bash.start" => {
+            crate::runtime::kernel_host_bridge::handle_bash_start(bridge, &params).await
+        }
+        "bash.poll" | "bash.kill" | "bash.forget" => {
+            devo_core::tools::host_bash::control(session_id, &action, &params)
         }
         "bash.completed" => {
             push_bash_notice(
@@ -289,10 +293,14 @@ pub async fn dispatch_host_request_with_bridge(bridge: &HostBridge, data: Value)
             ok_result(json!({ "accepted": true }))
         }
         "bash.consumed" => {
-            let Some(pid) = params.get("pid").and_then(Value::as_i64) else {
-                return error_reply("bash.consumed requires a pid");
+            let Some(identity) = params
+                .get("handle_id")
+                .filter(|value| value.is_string())
+                .or_else(|| params.get("pid").filter(|value| value.is_i64()))
+            else {
+                return error_reply("bash.consumed requires a handle_id or pid");
             };
-            consume_bash_notice(session_id, pid);
+            consume_bash_notice(session_id, identity);
             ok_result(json!({ "accepted": true }))
         }
         "write" => crate::runtime::kernel_host_bridge::handle_write(bridge, &params).await,
@@ -389,7 +397,7 @@ pub(crate) fn take_bash_notices(session_id: &str) -> Vec<Value> {
         .unwrap_or_default()
 }
 
-pub(crate) fn consume_bash_notice(session_id: &str, pid: i64) -> bool {
+pub(crate) fn consume_bash_notice(session_id: &str, identity: &Value) -> bool {
     let mut notices = BASH_NOTICES.lock().unwrap_or_else(|e| e.into_inner());
     let Some(queue) = notices.get_mut(session_id) else {
         return false;
@@ -399,9 +407,8 @@ pub(crate) fn consume_bash_notice(session_id: &str, pid: i64) -> bool {
         notice.get("kind").and_then(Value::as_str) != Some("async_bash_completion")
             || notice
                 .get("params")
-                .and_then(|params| params.get("pid"))
-                .and_then(Value::as_i64)
-                != Some(pid)
+                .and_then(|params| params.get("handle_id").or_else(|| params.get("pid")))
+                != Some(identity)
     });
     let removed = queue.len() != original_len;
     if queue.is_empty() {
@@ -455,7 +462,6 @@ mod tests {
     use devo_core::tools::PermissionChecker;
     use devo_protocol::CollaborationMode;
 
-    /// Trace: L2-DES-RLM-001
     /// Verifies: rlm.create_session is denied.
     #[tokio::test]
     async fn denies_create_session() {
@@ -488,7 +494,6 @@ mod tests {
         );
     }
 
-    /// Trace: L2-DES-CONTEXT-002, L2-DES-RLM-001
     /// Verifies: compact.status returns shape with percent field (null ok).
     #[tokio::test]
     async fn compact_status_shape_includes_percent() {
@@ -507,7 +512,6 @@ mod tests {
         assert!(result["percent"].is_null(), "{reply}");
     }
 
-    /// Trace: L2-DES-CONTEXT-002, L1-REQ-RLM-001
     /// Verifies: compact.status reads real occupancy through the runtime — a
     /// fresh session (no measured usage yet) still reports the model's
     /// context window. The pre-fix handler hardcoded `None` occupancy +
@@ -585,6 +589,7 @@ mod tests {
             file_read_ledger: Arc::new(FileReadLedger::new()),
             sandbox_profile: None,
             cancel_token: tokio_util::sync::CancellationToken::new(),
+            kernel_lifetime: None,
             mcp_manager: None,
             agent_scope: ToolAgentScope::Parent,
             local_web_search: None,
@@ -611,7 +616,6 @@ mod tests {
         assert_eq!(result["scheduled"], false);
     }
 
-    /// Trace: L2-DES-RLM-001
     /// Verifies: refine.status / refine.run use `{status, result}` envelope.
     #[tokio::test]
     async fn refine_host_reply_uses_result_envelope() {
@@ -634,7 +638,6 @@ mod tests {
         assert!(run["result"].get("note").is_some(), "{run}");
     }
 
-    /// Trace: L2-DES-RLM-001
     /// Verifies: rlm.run/list_subagents/delete_subagents reach their real
     /// handlers — no spawn stub. Without a runtime the reply must be an
     /// explicit error (never the old stub's fake pending handle), and prompt
@@ -697,7 +700,6 @@ mod tests {
         assert!(models["result"]["models"].as_array().is_some());
     }
 
-    /// Trace: L2-DES-RLM-001
     /// Verifies: bash.completed enqueues an in-memory notice.
     #[tokio::test]
     async fn bash_completed_enqueues_notice() {
@@ -766,7 +768,6 @@ mod tests {
         );
     }
 
-    /// Trace: L2-DES-RLM-001
     /// Verifies: agent_message.send queues a wake notice for family projection.
     #[tokio::test]
     async fn agent_message_send_enqueues_notice() {
@@ -786,7 +787,6 @@ mod tests {
         assert_eq!(notices[0]["kind"], "agent_message");
     }
 
-    /// Trace: L2-DES-RLM-001, L2-DES-SAFETY-001
     /// Verifies: web.search fails closed when local provider is not configured.
     #[tokio::test]
     async fn web_search_requires_local_config() {
@@ -809,24 +809,27 @@ mod tests {
         );
     }
 
-    /// Trace: L2-DES-RLM-001, L2-DES-SAFETY-001
-    /// Verifies: Plan mode denies bash even with always_allow permission.
+    /// Verifies: Plan mode bash follows the configured policy and reaches normal execution.
     #[tokio::test]
-    async fn bash_denied_in_plan_mode_with_always_allow() {
+    async fn plan_mode_bash_follows_normal_policy() {
         let mut bridge = HostBridge::for_tests(format!("ses_{}", Uuid::new_v4()));
         bridge.collaboration_mode = CollaborationMode::Plan;
+        bridge.sandbox_profile = Some("off".to_string());
         bridge.permission = PermissionChecker::always_allow();
         let reply = dispatch_host_request_with_bridge(
             &bridge,
             json!({
                 "type": "bash",
-                "params": { "command": "echo should-not-run" }
+                "params": { "command": "echo PLAN_DISPATCH_OK" }
             }),
         )
         .await;
-        assert_eq!(reply["status"], "error");
+        assert_eq!(reply["status"], json!("ok"), "{reply}");
         assert!(
-            reply["error"].as_str().unwrap_or("").contains("Plan"),
+            reply["stdout"]
+                .as_str()
+                .unwrap_or_default()
+                .contains("PLAN_DISPATCH_OK"),
             "{reply}"
         );
     }

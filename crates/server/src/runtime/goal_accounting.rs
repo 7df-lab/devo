@@ -127,7 +127,6 @@ mod tests {
 
     #[test]
     fn goal_token_delta_counts_non_cached_input_and_output() {
-        // Trace: L2-DES-GOAL-001
         let usage = devo_protocol::native::usage::TurnUsage {
             query: devo_protocol::native::usage::UsageTotals {
                 total_tokens: 150,
@@ -145,7 +144,6 @@ mod tests {
 
     #[test]
     fn apply_goal_usage_delta_leaves_budget_limit_for_wrap_up_turn() {
-        // Trace: L2-DES-GOAL-001
         let mut goal = goal_with_budget(100);
         goal.usage.tokens_used = 75;
 

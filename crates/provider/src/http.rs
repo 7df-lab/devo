@@ -457,7 +457,6 @@ mod tests {
         assert_eq!(build_count.load(Ordering::SeqCst), 1);
     }
 
-    /// Trace: L2-DES-APP-005
     /// Verifies: provider custom headers parse from a JSON object string.
     #[test]
     fn custom_headers_parse_json_object_string() {
@@ -491,7 +490,6 @@ mod tests {
         );
     }
 
-    /// Trace: L2-DES-APP-005
     /// Verifies: invalid provider custom header value errors do not print the value.
     #[test]
     fn custom_header_value_errors_do_not_print_value() {

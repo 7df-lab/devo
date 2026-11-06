@@ -731,7 +731,6 @@ mod tests {
 
     #[test]
     fn failed_turn_after_goal_update_suppresses_continuation() {
-        // Trace: L2-DES-GOAL-001
         let goal_updated_at = Utc::now();
         let latest_turn = turn(
             TurnStatus::Failed,
@@ -746,7 +745,6 @@ mod tests {
 
     #[test]
     fn failed_turn_before_goal_update_allows_manual_resume() {
-        // Trace: L2-DES-GOAL-001
         let latest_turn_completed_at = Utc::now();
         let goal_updated_at = latest_turn_completed_at + chrono::Duration::seconds(1);
         let latest_turn = turn(TurnStatus::Failed, latest_turn_completed_at);
@@ -759,7 +757,6 @@ mod tests {
 
     #[test]
     fn completed_turn_does_not_suppress_continuation() {
-        // Trace: L2-DES-GOAL-001
         let goal_updated_at = Utc::now();
         let latest_turn = turn(
             TurnStatus::Completed,
@@ -774,7 +771,6 @@ mod tests {
 
     #[test]
     fn classifies_tool_call_adjacency_failure() {
-        // Trace: L2-DES-GOAL-001
         let message = "Invalid status code: 400 Bad Request; response body: assistant message with 'tool_calls' must be followed by tool messages responding to each 'tool_call_id'";
 
         assert_eq!(
@@ -786,7 +782,6 @@ mod tests {
 
     #[test]
     fn classifies_provider_parameter_failure() {
-        // Trace: L2-DES-GOAL-001
         assert_eq!(
             classify_goal_failure(Some("400 BAD REQUEST invalid_request_error")),
             GoalFailureClass::ProviderParameter
@@ -795,7 +790,6 @@ mod tests {
 
     #[test]
     fn classifies_authentication_and_permission_failures() {
-        // Trace: L2-DES-GOAL-001
         assert_eq!(
             classify_goal_failure(Some("401 unauthorized invalid api key")),
             GoalFailureClass::Authentication

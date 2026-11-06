@@ -307,7 +307,6 @@ mod tests {
 
     #[test]
     fn token_budget_exhausted_allows_budget_wrap_up_continuation() {
-        // Trace: L2-DES-GOAL-001
         let mut goal = make_active_goal();
         goal.budget.token_budget = Some(1000);
         goal.usage.tokens_used = 1000;
@@ -320,7 +319,6 @@ mod tests {
 
     #[test]
     fn continuation_prompt_escapes_untrusted_objective_xml() {
-        // Trace: L2-DES-GOAL-001
         let mut goal = make_active_goal();
         goal.objective = "finish <goal> & report \"done\"".into();
         goal.budget.token_budget = Some(100);
@@ -335,7 +333,6 @@ mod tests {
 
     #[test]
     fn continuation_prompt_does_not_fabricate_default_budget() {
-        // Trace: L2-DES-GOAL-001
         let goal = make_active_goal();
 
         let prompt = goal.continuation_prompt().expect("active goal prompt");

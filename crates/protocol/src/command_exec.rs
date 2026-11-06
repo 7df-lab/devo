@@ -133,7 +133,6 @@ mod tests {
         assert_eq!(restored, payload);
     }
 
-    /// Trace: L2-DES-APP-003
     /// Verifies: missing session_id on command/exec params deserializes to None.
     #[test]
     fn command_exec_params_missing_session_defaults_to_none() {
@@ -163,7 +162,6 @@ mod tests {
         );
     }
 
-    /// Trace: L2-DES-APP-003
     /// Verifies: sessionless command/exec output and exit notifications round-trip.
     #[test]
     fn command_exec_sessionless_notifications_roundtrip() {

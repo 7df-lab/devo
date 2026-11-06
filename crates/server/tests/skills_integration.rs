@@ -1160,7 +1160,6 @@ async fn auto_review_approval_executes_mutating_tool_without_user_prompt() -> Re
     Ok(())
 }
 
-/// Trace: L2-DES-SAFETY-002
 #[tokio::test]
 async fn auto_review_executes_or_falls_back_by_risk() -> Result<()> {
     struct Case {

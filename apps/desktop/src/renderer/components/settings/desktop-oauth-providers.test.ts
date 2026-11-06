@@ -6,7 +6,6 @@ import {
 
 describe("resolveProviderAuthMethods", () => {
 	/**
-	 * Trace: L2-DES-AUTH-001
 	 * Verifies: Desktop exposes the four supported provider OAuth logins.
 	 */
 	test("provides the native OAuth providers", () => {
@@ -32,7 +31,6 @@ describe("resolveProviderAuthMethods", () => {
 	})
 
 	/**
-	 * Trace: L2-DES-AUTH-001
 	 * Verifies: Settings Connect routes OAuth builtins to the OAuth dialog.
 	 */
 	test("settingsConnectDialogKind routes OAuth vs API-key templates", () => {

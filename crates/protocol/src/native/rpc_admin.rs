@@ -734,7 +734,6 @@ mod tests {
         );
     }
 
-    /// Trace: L2-DES-MODEL-003
     /// Verifies: model/list dual-writes legacy capability and derived thinking fields.
     #[test]
     fn model_info_dual_writes_legacy_and_derived_thinking_fields() {
@@ -761,7 +760,6 @@ mod tests {
         );
     }
 
-    /// Trace: L2-DES-AUTH-001
     /// Verifies: credential/set oauth params are write-only camelCase without echoing secrets in CredentialInfo.
     #[test]
     fn credential_set_oauth_params_and_masked_info_wire() {

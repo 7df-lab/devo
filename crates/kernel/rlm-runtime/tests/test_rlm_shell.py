@@ -13,11 +13,11 @@ class ShellApprovalTests(unittest.IsolatedAsyncioTestCase):
             for helper in [rlm.shell, rlm.rlm.shell]:
                 self.assertEqual(await helper(
                     "echo probe", sandbox_permissions="require_escalated",
-                    justification="May I run the probe?", timeout_ms=1000,
+                    justification="May I run the probe?", timeout_ms=1000, workdir="child",
                 ), {"status": "ok", "stdout": "probe"})
         self.assertEqual(calls, [("bash", {
             "command": "echo probe", "sandbox_permissions": "require_escalated",
-            "justification": "May I run the probe?", "timeout_ms": 1000,
+            "justification": "May I run the probe?", "timeout_ms": 1000, "workdir": "child",
         })] * 2)
 
     async def test_narrow_grant_and_prefix_are_preserved(self):

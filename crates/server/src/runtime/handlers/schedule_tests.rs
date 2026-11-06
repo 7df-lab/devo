@@ -124,7 +124,7 @@ async fn scheduled_message_count(
             })
             .count();
     }
-    if let Some(rollout_path) = runtime.resolve_rollout_path(&session_id).await {
+    if let Ok(Some(rollout_path)) = runtime.resolve_rollout_path(&session_id).await {
         let history = devo_core::read_canonical_history(&rollout_path)?;
         count += history
             .items

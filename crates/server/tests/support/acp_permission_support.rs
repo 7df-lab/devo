@@ -340,10 +340,7 @@ async fn wait_for_prompt_completion(
                 assert_eq!(response.result.stop_reason, AcpStopReason::EndTurn);
                 saw_prompt_response = true;
             }
-            if saw_prompt_response
-                && (expect_success && saw_in_progress && saw_terminal
-                    || !expect_success && saw_terminal)
-            {
+            if saw_prompt_response && saw_terminal && (!expect_success || saw_in_progress) {
                 return Ok(());
             }
         }

@@ -35,7 +35,6 @@ mod tests {
 
     #[test]
     fn places_diff_before_current_user_request() {
-        // Trace: L2-DES-GOAL-001
         let mut messages = vec![
             Message::user("first"),
             Message::assistant_text("reply"),
@@ -54,7 +53,6 @@ mod tests {
 
     #[test]
     fn appends_after_completed_turn_instead_of_rewriting_old_request() {
-        // Trace: L2-DES-GOAL-001
         let mut messages = vec![Message::user("first"), Message::assistant_text("reply")];
 
         insert_context_diff_message(&mut messages, context_diff());
@@ -68,7 +66,6 @@ mod tests {
 
     #[test]
     fn does_not_split_assistant_tool_call_from_tool_result() {
-        // Trace: L2-DES-GOAL-001
         let mut messages = vec![
             Message {
                 role: Role::Assistant,

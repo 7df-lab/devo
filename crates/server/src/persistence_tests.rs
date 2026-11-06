@@ -515,7 +515,288 @@ fn replay_prunes_superseded_turn_from_rollout_projection() {
 }
 
 #[test]
-fn root_and_child_rollout_paths_match_agent_layout() {
+fn strict_reader_snapshot_ignores_concurrent_partial_append() {
+    use std::io::Write;
+    use tempfile::TempDir;
+
+    let dir = TempDir::new().expect("temp dir");
+    let path = dir.path().join("snapshot.jsonl");
+    std::fs::write(
+        &path,
+        "{\"v\":2,\"kind\":\"sessionTitleUpdated\",\"timestamp\":\"2026-01-01T00:00:00Z\",\"sessionId\":\"ses_snapshot\",\"title\":\"t\",\"previousTitle\":null}\n",
+    )
+    .expect("seed");
+    let file = std::fs::File::open(&path).expect("open");
+    let snapshot_len = file.metadata().expect("metadata").len();
+    let mut appender = std::fs::OpenOptions::new()
+        .append(true)
+        .open(&path)
+        .expect("append");
+    appender
+        .write_all(b"{\"v\":2,\"kind\":\"item\",\"timestamp\":\"2026")
+        .expect("partial append");
+    appender.flush().expect("flush");
+
+    let mut seen = 0usize;
+    let saw_tail = super::visit_open_rollout_lines_snapshot(
+        &path,
+        file,
+        snapshot_len,
+        "test read",
+        &mut |_line| {
+            seen += 1;
+            Ok(())
+        },
+    )
+    .expect("snapshot read");
+    assert!(!saw_tail, "append beyond snapshot must not be read");
+    assert_eq!(seen, 1);
+}
+
+#[test]
+fn hydrate_refreshes_stamp_after_crash_tail_repair() {
+    use tempfile::TempDir;
+
+    let dir = TempDir::new().expect("temp dir");
+    let store = super::RolloutStore::new(dir.path().to_path_buf(), None);
+    let record = sample_record(&store, dir.path().to_path_buf(), None);
+    store.append_session_meta(&record).expect("append meta");
+    write_raw_lines(
+        &record.rollout_path,
+        &[r#"{"v":2,"kind":"item","timestamp":"2026"#.to_string()],
+    );
+
+    let state = super::hydrate_write_state(&record.rollout_path).expect("hydrate");
+    assert_eq!(
+        state.observed,
+        super::journal_stamp(&record.rollout_path),
+        "stamp must be refreshed after crash-tail repair"
+    );
+    let repaired_len = std::fs::metadata(&record.rollout_path).unwrap().len();
+    assert!(repaired_len > 0);
+
+    store
+        .append_turn(&record, test_turn_record(record.id, TurnId::new()))
+        .expect("append after repair");
+    let raw = raw_rollout_lines(&record.rollout_path);
+    assert_eq!(raw.len(), 2, "meta + turn, no retained partial tail");
+    for line in raw {
+        parse_rollout_line(&line).expect("repaired line parses");
+    }
+}
+
+#[test]
+fn failed_write_after_crash_tail_repair_truncates_to_repaired_length() {
+    use std::io::Write;
+    use tempfile::TempDir;
+
+    let dir = TempDir::new().expect("temp dir");
+    let store = super::RolloutStore::new(dir.path().to_path_buf(), None);
+    let record = sample_record(&store, dir.path().to_path_buf(), None);
+    store.append_session_meta(&record).expect("append meta");
+    write_raw_lines(
+        &record.rollout_path,
+        &[r#"{"v":2,"kind":"item","timestamp":"2026"#.to_string()],
+    );
+    let path = record.rollout_path.clone();
+    let error = store
+        .append_rollout_lines_with(
+            &path,
+            record.id,
+            super::JournalWriteMode::ExistingOnly,
+            |_state| {
+                let mut file = std::fs::OpenOptions::new()
+                    .append(true)
+                    .open(&path)
+                    .expect("open partial append");
+                file.write_all(&vec![b'x'; 1024])
+                    .expect("write oversized partial row");
+                anyhow::bail!("forced write failure")
+            },
+        )
+        .expect_err("forced failure");
+    assert!(error.to_string().contains("forced"));
+    // The closure wrote past the repaired tail; rollback must truncate it.
+    let raw = raw_rollout_lines(&path);
+    assert_eq!(raw.len(), 1, "only the repaired SessionMeta remains");
+    parse_rollout_line(&raw[0]).expect("repaired line parses");
+}
+
+#[test]
+fn durable_root_and_child_tombstones_prevent_reindex_resurrection() {
+    use devo_protocol::native::session::SessionParent;
+    use tempfile::TempDir;
+
+    let dir = TempDir::new().expect("temp dir");
+    let store = super::RolloutStore::new(dir.path().to_path_buf(), None);
+    let root = sample_record(&store, dir.path().to_path_buf(), None);
+    store.append_session_meta(&root).expect("root meta");
+    let mut child_native = devo_core::native_session_from_record(&root).expect("native root");
+    let child_id = SessionId::new();
+    child_native.id = child_id;
+    child_native.parent = Some(SessionParent::Agent {
+        session_id: root.id,
+        role: Some("default".into()),
+    });
+    child_native.title = Some("child".into());
+    store
+        .append_session_meta_at(&root.rollout_path, &child_native, None)
+        .expect("child meta");
+
+    let deleted_at = chrono::Utc::now();
+    store
+        .append_session_deleted_at(&root.rollout_path, root.id, deleted_at)
+        .expect("root tombstone");
+    store
+        .append_session_deleted_at(&root.rollout_path, child_id, deleted_at)
+        .expect("child tombstone");
+    // Simulate restart/index before physical unlink: tombstones alone must
+    // suppress both sessions.
+    let db = crate::db::Database::open(dir.path().join("devo.db")).expect("db");
+    store.index_rollout_metadata(&db).expect("index");
+    assert!(
+        db.get_session_index(&root.id)
+            .expect("root index")
+            .is_none()
+    );
+    assert!(
+        db.get_session_index(&child_id)
+            .expect("child index")
+            .is_none()
+    );
+    assert!(db.list_sessions().expect("list").is_empty());
+    assert!(root.rollout_path.exists(), "fixture keeps the journal file");
+}
+
+#[test]
+fn same_length_recreate_changes_journal_stamp() {
+    use tempfile::TempDir;
+
+    let dir = TempDir::new().expect("temp dir");
+    let path = dir.path().join("sessions").join("stamp.jsonl");
+    std::fs::create_dir_all(path.parent().unwrap()).unwrap();
+    std::fs::write(&path, b"same-length-content").unwrap();
+    let before = super::journal_stamp(&path);
+    std::fs::remove_file(&path).unwrap();
+    std::fs::write(&path, b"same-length-content").unwrap();
+    let after = super::journal_stamp(&path);
+    #[cfg(any(unix, windows))]
+    assert_ne!(
+        before, after,
+        "platform identity must distinguish a same-length recreate"
+    );
+    #[cfg(not(any(unix, windows)))]
+    assert_eq!(before.len, after.len);
+}
+
+#[test]
+fn append_acquires_cross_process_lease_centrally() {
+    use fs2::FileExt;
+    use std::io::Write;
+    use tempfile::TempDir;
+
+    let dir = TempDir::new().expect("temp dir");
+    let store = super::RolloutStore::new(dir.path().to_path_buf(), None);
+    let record = sample_record(&store, dir.path().to_path_buf(), None);
+    store.append_session_meta(&record).expect("append meta");
+    let canonical =
+        crate::journal_path::canonical_journal_key(&record.rollout_path).expect("canonical");
+    let lock_path = canonical.with_file_name(format!(
+        "{}.lock",
+        canonical.file_name().unwrap().to_string_lossy()
+    ));
+    let mut lock_file = std::fs::OpenOptions::new()
+        .create(true)
+        .read(true)
+        .write(true)
+        .truncate(false)
+        .open(&lock_path)
+        .expect("open lock");
+    lock_file.try_lock_exclusive().expect("hold lease");
+    lock_file.write_all(b"held").expect("write holder");
+
+    let error = store
+        .append_turn(&record, test_turn_record(record.id, TurnId::new()))
+        .expect_err("append must honor the process lease");
+    assert!(
+        error.to_string().contains("lock") || error.to_string().contains("lease"),
+        "unexpected error: {error:#}"
+    );
+    FileExt::unlock(&lock_file).expect("unlock");
+    drop(lock_file);
+    store
+        .append_turn(&record, test_turn_record(record.id, TurnId::new()))
+        .expect("append after lease release");
+}
+
+#[test]
+fn unlinked_root_journal_is_closed_and_never_recreated() {
+    use tempfile::TempDir;
+
+    let dir = TempDir::new().expect("temp dir");
+    let store = super::RolloutStore::new(dir.path().to_path_buf(), None);
+    let record = sample_record(&store, dir.path().to_path_buf(), None);
+    store.append_session_meta(&record).expect("append meta");
+    let native = devo_core::native_session_from_record(&record).expect("native session");
+
+    assert!(
+        store
+            .delete_session_journal(&record.id, Some(&record.rollout_path), None, true)
+            .expect("delete root journal")
+    );
+    assert!(!record.rollout_path.exists());
+
+    // Explicit create path must still refuse a closed journal.
+    assert!(
+        store
+            .append_session_meta_create_at(&record.rollout_path, &native, None)
+            .is_err(),
+        "closed root must reject recreation"
+    );
+    assert!(
+        !record.rollout_path.exists(),
+        "append must not recreate root"
+    );
+
+    let another_store = super::RolloutStore::new(dir.path().to_path_buf(), None);
+    assert!(
+        another_store.journal_is_closed(&record.rollout_path),
+        "closed state must be visible to a distinct store while the first store lives"
+    );
+}
+
+#[test]
+fn distinct_stores_share_one_canonical_journal_engine() {
+    use tempfile::TempDir;
+
+    let dir = TempDir::new().expect("temp dir");
+    let store_a = super::RolloutStore::new(dir.path().to_path_buf(), None);
+    let store_b = super::RolloutStore::new(dir.path().to_path_buf(), None);
+    let journal = dir.path().join("sessions").join("ses_shared.jsonl");
+    std::fs::create_dir_all(journal.parent().unwrap()).unwrap();
+    std::fs::write(&journal, "").unwrap();
+
+    let shared_a = store_a.shared_journal(&journal).expect("journal a");
+    let shared_b = store_b.shared_journal(&journal).expect("journal b");
+    assert!(
+        std::sync::Arc::ptr_eq(&shared_a, &shared_b),
+        "distinct stores must share one journal mutex/state"
+    );
+
+    #[cfg(unix)]
+    {
+        let alias = dir.path().join("sessions").join("alias.jsonl");
+        std::os::unix::fs::symlink(&journal, &alias).expect("symlink alias");
+        let shared_alias = store_a.shared_journal(&alias).expect("alias journal");
+        assert!(
+            std::sync::Arc::ptr_eq(&shared_a, &shared_alias),
+            "symlink alias must resolve to the same journal engine"
+        );
+    }
+}
+
+#[test]
+fn root_and_child_artifact_paths_and_legacy_journal_scan() {
     use pretty_assertions::assert_eq;
     use tempfile::TempDir;
 
@@ -530,77 +811,54 @@ fn root_and_child_rollout_paths_match_agent_layout() {
         root_path,
         dir.path().join("sessions").join(format!("{root_id}.jsonl"))
     );
-
-    let child_path = store
-        .allocate_child_rollout_path(Some(&root_path), &root_id, &child_id)
-        .expect("child path");
-    let child_rel = child_path
-        .strip_prefix(dir.path())
-        .expect("child under data root");
-    let child_parts: Vec<_> = child_rel
-        .iter()
-        .map(|s| s.to_string_lossy().into_owned())
-        .collect();
-    assert_eq!(child_parts[0], "session-artifacts");
-    assert_eq!(child_parts[1], root_id.to_string());
-    assert!(
-        child_parts[2].starts_with("sub-") && child_parts[2].len() == 12,
-        "expected sub-xxxxxxxx, got {}",
-        child_parts[2]
-    );
-    assert_eq!(child_parts[3], format!("{child_id}.jsonl"));
-
-    // Local harness / RLM_SESSION_DIR must be per-session artifacts, not sessions/.
-    assert_eq!(
-        super::RolloutStore::rlm_session_dir_for_rollout(&root_path),
-        Some(
-            dir.path()
-                .join("session-artifacts")
-                .join(root_id.to_string())
-        )
-    );
-    assert_eq!(
-        super::RolloutStore::rlm_session_dir_for_rollout(&child_path),
-        child_path.parent().map(|p| p.to_path_buf())
-    );
-
-    let grandchild_path = store
-        .allocate_child_rollout_path(Some(&child_path), &child_id, &grandchild_id)
-        .expect("grandchild path");
-    let grand_rel = grandchild_path
-        .strip_prefix(dir.path())
-        .expect("grandchild under data root");
-    let grand_parts: Vec<_> = grand_rel
-        .iter()
-        .map(|s| s.to_string_lossy().into_owned())
-        .collect();
-    assert_eq!(grand_parts[0], "session-artifacts");
-    assert_eq!(grand_parts[1], root_id.to_string());
-    assert_eq!(grand_parts[2], child_parts[2]);
-    assert!(
-        grand_parts[3].starts_with("sub-") && grand_parts[3].len() == 12,
-        "expected nested sub-xxxxxxxx, got {}",
-        grand_parts[3]
-    );
-    assert_eq!(grand_parts[4], format!("{grandchild_id}.jsonl"));
-
-    // Index scans both trees.
     std::fs::create_dir_all(root_path.parent().unwrap()).unwrap();
-    std::fs::write(&root_path, "{}\n").unwrap();
-    std::fs::write(&child_path, "{}\n").unwrap();
-    // Harness sidecar state under the artifact dir is not a rollout; the boot
-    // index/reconcile scans must not pick it up (they would warn "missing
-    // SessionMeta line" on every server start).
-    let harness_dir = dir
+    let root_dir = dir
         .path()
         .join("session-artifacts")
-        .join(root_id.to_string())
-        .join("harness");
+        .join(root_id.to_string());
+    assert_eq!(store.root_session_dir(&root_id), root_dir);
+    assert_eq!(
+        store.session_dir_for(&root_path, &root_id),
+        Some(root_dir.clone())
+    );
+
+    let child_dir = root_dir.join("agents").join(child_id.to_string());
+    let grandchild_dir = root_dir.join("agents").join(grandchild_id.to_string());
+    assert_eq!(store.child_session_dir(&root_id, &child_id), child_dir);
+    assert_eq!(
+        store.child_session_dir(&root_id, &grandchild_id),
+        grandchild_dir
+    );
+    // Both children share the root journal; their session dirs stay distinct.
+    assert_eq!(
+        store.session_dir_for(&root_path, &child_id),
+        Some(child_dir.clone())
+    );
+    assert_eq!(
+        store.session_dir_for(&root_path, &grandchild_id),
+        Some(grandchild_dir)
+    );
+
+    // Historical independent child journal fixture: recognized by stem==id,
+    // artifact dir remains its parent. No production helper creates this layout.
+    std::fs::create_dir_all(&child_dir).unwrap();
+    let legacy_parent = root_dir.join("sub-aaaaaaaa");
+    std::fs::create_dir_all(&legacy_parent).unwrap();
+    let legacy_child_journal = legacy_parent.join(format!("{child_id}.jsonl"));
+    assert_eq!(
+        store.session_dir_for(&legacy_child_journal, &child_id),
+        Some(std::fs::canonicalize(&legacy_parent).expect("canonical legacy dir"))
+    );
+
+    // Index scans both layouts and skips harness sidecar JSONL.
+    std::fs::write(&root_path, "{}\n").unwrap();
+    std::fs::write(&legacy_child_journal, "{}\n").unwrap();
+    let harness_dir = root_dir.join("harness");
     std::fs::create_dir_all(&harness_dir).unwrap();
     std::fs::write(harness_dir.join("refinements.jsonl"), "{}\n").unwrap();
     let paths = store.rollout_paths().expect("list");
     assert!(paths.contains(&root_path));
-    assert!(paths.contains(&child_path));
+    assert!(paths.contains(&legacy_child_journal));
     assert!(!paths.iter().any(|p| p.ends_with("refinements.jsonl")));
 }
 
@@ -1829,7 +2087,6 @@ async fn hydration_tolerates_truncated_final_line() {
         .expect("append after crash tail must remain loadable");
 }
 
-/// Trace: prompt-payload audit (R27, bug #43)
 /// Verifies: a session restored from its rollout re-advertises the skills
 /// currently on disk. The persisted `session_context` snapshot used to win
 /// wholesale, so an existing session kept advertising the skills text
@@ -1911,16 +2168,19 @@ async fn versioned_reader_fails_closed_on_mid_file_damage_but_tolerates_crash_ta
     rollout_store
         .append_session_meta(&record)
         .expect("append session meta");
-    // Damaged middle line, then a valid line after it.
+    // Damaged middle line, then a valid line after it. The append path must
+    // refuse to write onto a journal it cannot fully read, so both lines are
+    // injected raw to exercise the reader's fail-closed behavior.
+    let metadata = test_turn_record(record.id, TurnId::new());
+    let valid_turn_line = serde_json::to_string(
+        &devo_core::turn_line_from_record(&metadata, chrono::Utc::now())
+            .expect("build valid turn line"),
+    )
+    .expect("serialize valid turn line");
     write_raw_lines(
         &record.rollout_path,
-        &[r#"{"v":2,"kind":"nope"}"#.to_string()],
+        &[r#"{"v":2,"kind":"nope"}"#.to_string(), valid_turn_line],
     );
-    let metadata = test_turn_record(record.id, TurnId::new());
-    let turn = metadata;
-    rollout_store
-        .append_turn(&record, turn)
-        .expect("append turn");
 
     let error = rollout_store
         .load_session_from_rollout(&record.rollout_path, &deps)
@@ -1948,7 +2208,6 @@ async fn versioned_reader_fails_closed_on_mid_file_damage_but_tolerates_crash_ta
     assert_eq!(recovered.summary.session_id(), tail_record.id);
 }
 
-/// Trace: L2-DES-RLM-001
 /// Verifies that rollouts without a format version refuse resume.
 #[tokio::test]
 async fn unversioned_rollout_refuses_resume() {
@@ -2060,8 +2319,10 @@ fn append_projects_events_into_event_log() {
     let seqs: Vec<u64> = rows.iter().map(|row| row.seq).collect();
     assert_eq!(seqs, vec![1, 2, 3]);
     // Three physical rows written; watermark is the last line index.
+    let canonical_journal =
+        crate::journal_path::canonical_journal_key(&record.rollout_path).expect("canonical");
     assert_eq!(
-        db.projection_watermark(&record.rollout_path)
+        db.projection_watermark(&canonical_journal)
             .expect("watermark"),
         Some(2)
     );
@@ -2127,7 +2388,6 @@ fn settings_line(
     })
 }
 
-/// Trace: L2-DES-CONV-002
 /// Verifies: a field-level settings line wins over the whole-record
 /// SessionMeta value during replay (DD-4).
 #[test]
@@ -2158,7 +2418,6 @@ fn session_settings_field_line_wins_over_session_meta_preset() {
     );
 }
 
-/// Trace: L2-DES-CONV-002
 /// Verifies: a PermissionPreset line clears the explicit SandboxProfile
 /// override accumulated so far (approved patch-interaction rule).
 #[test]
@@ -2184,7 +2443,6 @@ fn session_settings_preset_line_clears_explicit_sandbox_override() {
     assert_eq!(replay.sandbox_profile_override(), None);
 }
 
-/// Trace: L2-DES-CONV-002
 /// Verifies: an explicit SandboxProfile line written after the preset line
 /// survives replay as the effective override.
 #[test]
@@ -2213,7 +2471,6 @@ fn session_settings_explicit_sandbox_survives_when_written_after_preset() {
     );
 }
 
-/// Trace: L2-DES-CONV-002
 /// Verifies: model-family field lines override the corresponding record
 /// fields during replay.
 #[test]
@@ -2251,7 +2508,6 @@ fn session_settings_model_fields_override_record() {
     );
 }
 
-/// Trace: L2-DES-CONV-002
 /// Verifies: a settings line written through RolloutStore lands on disk as
 /// a v2 Internal SessionSettings record and compatibility-maps back to the
 /// same retained replay line.

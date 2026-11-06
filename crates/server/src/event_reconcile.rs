@@ -73,6 +73,9 @@ struct FileOutcome {
 }
 
 fn reconcile_file(rollout_path: &Path, db: &Database) -> Result<FileOutcome> {
+    let canonical_journal = crate::journal_path::canonical_journal_key(rollout_path)
+        .with_context(|| format!("resolve canonical journal {}", rollout_path.display()))?;
+    let rollout_path = canonical_journal.as_path();
     let watermark = db.projection_watermark(rollout_path)?;
     let file = std::fs::File::open(rollout_path)
         .with_context(|| format!("open rollout file {}", rollout_path.display()))?;
@@ -247,14 +250,19 @@ mod tests {
         let (store, path) = write_session_file(dir.path());
         let db = Database::open(dir.path().join("devo.db")).expect("open db");
 
+        let canonical =
+            crate::journal_path::canonical_journal_key(&path).expect("canonical journal");
         // Crash after projecting only the first row (session meta at index 0).
-        db.set_projection_watermark(&path, 0)
+        db.set_projection_watermark(&canonical, 0)
             .expect("set watermark");
         let stats = reconcile_event_log(&store, &db).expect("reconcile");
         // Lines 1 (turn) and 2 (item) backfill; session/created does not.
         assert_eq!(stats.rows_inserted, 2);
         assert_eq!(db.event_log_len().expect("count"), 2);
-        assert_eq!(db.projection_watermark(&path).expect("watermark"), Some(2));
+        assert_eq!(
+            db.projection_watermark(&canonical).expect("watermark"),
+            Some(2)
+        );
     }
 
     #[test]
@@ -275,7 +283,12 @@ mod tests {
         assert_eq!(stats.files_damaged, 1);
         // All intact rows before the damage were still backfilled.
         assert_eq!(stats.rows_inserted, 4);
-        assert_eq!(db.projection_watermark(&path).expect("watermark"), Some(2));
+        let canonical =
+            crate::journal_path::canonical_journal_key(&path).expect("canonical journal");
+        assert_eq!(
+            db.projection_watermark(&canonical).expect("watermark"),
+            Some(2)
+        );
     }
 
     #[test]

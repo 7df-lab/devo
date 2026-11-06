@@ -11,7 +11,7 @@ from typing import Any, Literal
 from rlm import host_request
 
 ReceiverRole = Literal["parent", "sibling", "child"]
-_MESSAGE_DISPLAY_MIME = "application/vnd.devo.agent-message+json"
+_MESSAGE_DISPLAY_MIME = "application/vnd.agent-message+json"
 
 
 async def send(

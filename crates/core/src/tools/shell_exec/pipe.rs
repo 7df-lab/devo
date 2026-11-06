@@ -31,11 +31,13 @@ pub(crate) async fn run_with_pipes(
         output_capture,
         shell,
         command_to_run,
+        sandbox_workspace,
         workdir,
         description,
         timeout_ms,
         yield_time_ms,
         max_output_tokens,
+        progress_limit_bytes,
         sandbox_profile,
         sandbox_permission_overlay,
     } = run;
@@ -45,6 +47,7 @@ pub(crate) async fn run_with_pipes(
     let plan = match SandboxLaunchPlan::prepare_pipe(
         sandbox_profile.as_deref(),
         sandbox_permission_overlay.as_ref(),
+        &sandbox_workspace,
         &workdir,
         &shell,
         &command_to_run,
@@ -91,10 +94,15 @@ pub(crate) async fn run_with_pipes(
     let stdout_task = spawn_stream_reader(
         child.0.stdout().take(),
         progress.clone(),
+        progress_limit_bytes,
         output_capture.clone(),
     );
-    let stderr_task =
-        spawn_stream_reader(child.0.stderr().take(), progress, output_capture.clone());
+    let stderr_task = spawn_stream_reader(
+        child.0.stderr().take(),
+        progress,
+        progress_limit_bytes,
+        output_capture.clone(),
+    );
 
     enum WaitOutcome {
         Exited(std::process::ExitStatus),
@@ -109,7 +117,8 @@ pub(crate) async fn run_with_pipes(
             Err(error) => WaitOutcome::WaitError(error),
         },
         _ = cancel_token.cancelled() => WaitOutcome::Cancelled,
-        _ = tokio::time::sleep(Duration::from_millis(timeout_ms)) => WaitOutcome::TimedOut,
+        _ = async { tokio::time::sleep(Duration::from_millis(timeout_ms)).await },
+            if timeout_ms != super::NO_TIMEOUT_MS => WaitOutcome::TimedOut,
     };
     // Measure at the moment the outcome was decided, before teardown waits
     // (kill-and-wait) inflate the span the model is told about.
@@ -121,7 +130,6 @@ pub(crate) async fn run_with_pipes(
         }
         WaitOutcome::Exited(_) | WaitOutcome::WaitError(_) => {}
     }
-
     let stdout = String::from_utf8_lossy(&stdout_task.await.unwrap_or_default()).into_owned();
     let stderr = String::from_utf8_lossy(&stderr_task.await.unwrap_or_default()).into_owned();
     let mut result_text = truncate_output(&merge_streams(&stdout, &stderr), max_output_tokens);
@@ -197,6 +205,7 @@ pub(crate) async fn run_with_pipes(
 fn spawn_stream_reader<R>(
     pipe: Option<R>,
     progress: Option<ToolProgressSender>,
+    progress_limit_bytes: Option<usize>,
     output_capture: Option<Result<devo_tools::output_store::SharedOutputCapture, String>>,
 ) -> tokio::task::JoinHandle<Vec<u8>>
 where
@@ -212,7 +221,9 @@ where
             match pipe.read(&mut chunk).await {
                 Ok(0) => break,
                 Ok(n) => {
-                    if let Some(ref sender) = progress {
+                    if let Some(ref sender) = progress
+                        && progress_limit_bytes.is_none_or(|limit| buffer.len() < limit)
+                    {
                         let _ = sender.send(String::from_utf8_lossy(&chunk[..n]).into_owned());
                     }
                     if let Some(Ok(capture)) = &output_capture {
@@ -231,8 +242,56 @@ where
     })
 }
 
+/// Terminate a cancelled/timed-out command and reap its direct child.
+///
+/// The caller owns the only `Child::wait` consumer for this process. On Unix,
+/// the leader is intentionally kept unreaped while `waitid(WNOWAIT)` observes
+/// its exit, so the pid/pgid is reserved before the final group signal. If the
+/// observation fails or the leader was already reaped, the final signal is
+/// skipped: a reaped numeric pgid may have been reused.
+///
+/// The `spawn_blocking` waitid helper is signal-free. If this future is
+/// dropped, the helper may finish unobserved; `PipeChild::Drop` still performs
+/// only the initial group kill while a live child id exists.
 async fn kill_and_wait(child: &mut super::pipe_child::PipeChild) {
+    #[cfg(unix)]
+    let process_group_id = child.process_id();
     child.terminate_tree();
+    #[cfg(unix)]
+    if let Some(process_group_id) = process_group_id {
+        let observed = tokio::task::spawn_blocking(move || {
+            devo_util_process::process_group::wait_exit_without_reaping(process_group_id)
+        })
+        .await;
+        match observed {
+            Ok(Ok(true)) => {
+                // The leader is an unreaped zombie: its pid/pgid is still
+                // reserved, so this final group signal cannot target a reused
+                // numeric pgid. It covers descendants forked before exit.
+                child.terminate_tree();
+            }
+            Ok(Ok(false)) => {
+                tracing::warn!(
+                    pid = process_group_id,
+                    "child exit was already reaped before the final sandbox group signal; skipping"
+                );
+            }
+            Ok(Err(error)) => {
+                tracing::warn!(
+                    pid = process_group_id,
+                    %error,
+                    "could not reserve child exit for the final sandbox group signal; skipping"
+                );
+            }
+            Err(error) => {
+                tracing::warn!(
+                    pid = process_group_id,
+                    %error,
+                    "waitid task failed before the final sandbox group signal; skipping"
+                );
+            }
+        }
+    }
     let _ = child.0.wait().await;
 }
 

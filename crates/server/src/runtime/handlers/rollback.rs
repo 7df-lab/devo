@@ -125,7 +125,7 @@ impl ServerRuntime {
                 let rollout_store = self.rollout_store.clone();
                 let path = path.clone();
                 let checkpoints = tokio::task::spawn_blocking(move || {
-                    rollout_store.workspace_checkpoints_at(&path)
+                    rollout_store.workspace_checkpoints_at(&path, &session_id)
                 })
                 .await;
                 match checkpoints {
@@ -664,9 +664,10 @@ impl ServerRuntime {
         // exactly like session/tree/navigate does.
         if let Some(rollout_path) = rollout_path.as_ref() {
             let retained_tip = rebuilt.persisted_turn_items.last().map(|item| item.item_id);
-            let epoch = devo_core::read_canonical_history(rollout_path)
-                .map(|history| history.leaf_epoch.saturating_add(1))
-                .unwrap_or(1);
+            let epoch =
+                devo_core::read_canonical_history_for_session(rollout_path, &plan.session_id)
+                    .map(|history| history.leaf_epoch.saturating_add(1))
+                    .unwrap_or(1);
             if let Err(error) = self.rollout_store.append_session_leaf_at(
                 rollout_path,
                 plan.session_id,
