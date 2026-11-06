@@ -2,7 +2,7 @@
 
 use std::collections::BTreeMap;
 use std::fs;
-use std::io::{Read, Write};
+use std::io::Read;
 use std::path::{Path, PathBuf};
 
 use chrono::{DateTime, Utc};
@@ -114,10 +114,13 @@ impl HarnessState {
     }
 
     pub fn load(path: &Path) -> Result<Self, HarnessStateError> {
-        if !path.exists() {
-            return Ok(Self::default());
-        }
-        let mut file = fs::File::open(path)?;
+        let mut file = match fs::File::open(path) {
+            Ok(file) => file,
+            Err(error) if error.kind() == std::io::ErrorKind::NotFound => {
+                return Ok(Self::default());
+            }
+            Err(error) => return Err(error.into()),
+        };
         let mut buf = String::new();
         file.read_to_string(&mut buf)?;
         let value: serde_json::Value = serde_json::from_str(&buf)
@@ -129,22 +132,17 @@ impl HarnessState {
         }
         let state: Self = serde_json::from_value(value)
             .map_err(|e| HarnessStateError::Corrupt(format!("schema parse failed: {e}")))?;
+        if state.schema != SCHEMA_VERSION {
+            return Err(HarnessStateError::Corrupt(format!(
+                "unsupported schema version {}",
+                state.schema
+            )));
+        }
         Ok(state)
     }
 
     pub fn save_atomic(&self, path: &Path) -> Result<(), HarnessStateError> {
-        if let Some(parent) = path.parent() {
-            fs::create_dir_all(parent)?;
-        }
-        let tmp = path.with_extension("json.tmp");
-        let data = serde_json::to_vec_pretty(self)?;
-        {
-            let mut f = fs::File::create(&tmp)?;
-            f.write_all(&data)?;
-            f.sync_all()?;
-        }
-        fs::rename(&tmp, path)?;
-        Ok(())
+        crate::store::save_snapshot(self, path)
     }
 
     pub fn file_path(session_dir: &Path) -> PathBuf {
@@ -204,5 +202,20 @@ mod tests {
         state.save_atomic(&path).unwrap();
         let loaded = HarnessState::load(&path).unwrap();
         assert_eq!(loaded.entries["memory"]["m1"].content, "hello");
+    }
+
+    #[test]
+    fn unsupported_schema_fails_closed() {
+        let dir = tempfile::tempdir().unwrap();
+        let path = dir.path().join("harness_state.json");
+        let state = HarnessState {
+            schema: SCHEMA_VERSION + 1,
+            ..HarnessState::default()
+        };
+        state.save_atomic(&path).unwrap();
+        assert!(matches!(
+            HarnessState::load(&path),
+            Err(HarnessStateError::Corrupt(_))
+        ));
     }
 }

@@ -711,6 +711,26 @@ impl SessionRuntimeContext {
             })
     }
 
+    /// Refresh discovery and prompt inputs together at the next turn boundary.
+    /// This does not mutate the actor from a host callback or rewrite history.
+    pub(crate) fn refresh_skill_context(
+        &self,
+        state: &mut SessionState,
+    ) -> Result<Vec<devo_core::PythonSkill>, SkillError> {
+        let mut catalog = self
+            .skill_catalog
+            .lock()
+            .expect("skill catalog mutex should not be poisoned");
+        catalog.discover(Some(&state.cwd), true)?;
+        let skills = catalog.python_skills(Some(&state.cwd))?;
+        state.config.available_skills_instructions = catalog
+            .available_skills_instructions(Some(&state.cwd), None)?
+            .filter(|text| !text.trim().is_empty())
+            .map(|text| format!("<available_skills>\n{}\n</available_skills>", text.trim()));
+        state.config.installed_python_skills.clear();
+        Ok(skills)
+    }
+
     pub(crate) fn set_skill_enabled(
         &self,
         path: PathBuf,

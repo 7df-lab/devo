@@ -101,12 +101,28 @@ pub(crate) async fn run_prompt(
         })?;
     }
 
+    use devo_core::SkillCatalog;
+    let mut skill_catalog = devo_core::FileSystemSkillCatalog::with_devo_home(
+        app_config.skills.clone(),
+        home_dir.clone(),
+        cwd.clone(),
+        app_config.project_root_markers.clone(),
+    );
+    let python_skills = skill_catalog.python_skills(Some(&cwd))?;
+    session_state.config.available_skills_instructions =
+        skill_catalog.available_skills_instructions(Some(&cwd), None)?;
     let tool_plan = ToolPlanConfig::from_app_config(&app_config);
     let kernel = if app_config.tools.execution_surface == devo_core::ToolExecutionSurface::Rlm {
-        Some(
-            handlers::ensure_kernel(&None, &cwd, None, devo_protocol::CollaborationMode::Build)
-                .await?,
+        let (kernel, _, imports) = handlers::ensure_kernel_with_skills(
+            &None,
+            &cwd,
+            None,
+            devo_protocol::CollaborationMode::Build,
+            &python_skills,
         )
+        .await?;
+        session_state.config.installed_python_skills = imports;
+        Some(kernel)
     } else {
         None
     };

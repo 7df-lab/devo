@@ -60,9 +60,8 @@ export async function bundleRuntime(target: string, output: string, rg: string, 
       "-r", join(repo, "scripts/runtime/requirements.lock")]);
     copyFileSync(join(repo, "scripts/runtime/sitecustomize.py"), join(site, "sitecustomize.py"));
     cpSync(join(repo, "crates/kernel/rlm-runtime/src/rlm"), join(site, "rlm"), { recursive: true, filter: (path) => basename(path) !== "__pycache__" });
-    for (const name of ["agent_observe", "compact", "goal", "refine"]) {
-      cpSync(join(repo, "crates/core/rlm_skills", name), join(site, name), { recursive: true, filter: (path) => basename(path) !== "__pycache__" });
-    }
+    // Skills are embedded in the backend and installed through its catalog.
+    // Keep python-site for runtime dependencies, not a second skill import path.
     copyFileSync(join(repo, "scripts/runtime/requirements.lock"), join(output, "runtime/requirements.lock"));
     buildTui(repo, join(output, "tui"), work, platform, arch);
     for (const name of backendNames) {

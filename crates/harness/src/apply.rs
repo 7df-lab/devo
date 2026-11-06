@@ -63,57 +63,57 @@ pub fn apply_proposal_re_read(
     path: &Path,
     proposal: &RefineProposal,
 ) -> Result<HarnessState, ApplyError> {
-    let mut state = HarnessState::load(path)?;
-    for edit in &proposal.edits {
-        if edit.id == "base_system_prompt" {
-            return Err(ApplyError::ImmutableBasePrompt);
-        }
-        let bucket = state
-            .entries
-            .entry(kind_key(edit.kind).to_string())
-            .or_default();
-        let current = bucket.get(&edit.id);
-        if let Some(baseline) = &edit.before {
-            match current {
-                Some(cur) if cur == baseline => {}
-                _ => {
-                    return Err(ApplyError::Drift {
+    crate::store::transact_harness(path, |state| {
+        for edit in &proposal.edits {
+            if edit.id == "base_system_prompt" {
+                return Err(ApplyError::ImmutableBasePrompt);
+            }
+            let bucket = state
+                .entries
+                .entry(kind_key(edit.kind).to_string())
+                .or_default();
+            let current = bucket.get(&edit.id);
+            if let Some(baseline) = &edit.before {
+                match current {
+                    Some(cur) if cur == baseline => {}
+                    _ => {
+                        return Err(ApplyError::Drift {
+                            id: edit.id.clone(),
+                        });
+                    }
+                }
+            } else if current.is_some() && matches!(edit.op, RefineEditOp::Create) {
+                return Err(ApplyError::Drift {
+                    id: edit.id.clone(),
+                });
+            }
+            match edit.op {
+                RefineEditOp::Create | RefineEditOp::Update => {
+                    let after = edit.after.clone().ok_or_else(|| ApplyError::MissingAfter {
                         id: edit.id.clone(),
-                    });
+                    })?;
+                    bucket.insert(edit.id.clone(), after);
+                }
+                RefineEditOp::Delete => {
+                    bucket.remove(&edit.id);
                 }
             }
-        } else if current.is_some() && matches!(edit.op, RefineEditOp::Create) {
-            return Err(ApplyError::Drift {
-                id: edit.id.clone(),
-            });
         }
-        match edit.op {
-            RefineEditOp::Create | RefineEditOp::Update => {
-                let after = edit.after.clone().ok_or_else(|| ApplyError::MissingAfter {
-                    id: edit.id.clone(),
-                })?;
-                bucket.insert(edit.id.clone(), after);
-            }
-            RefineEditOp::Delete => {
-                bucket.remove(&edit.id);
-            }
-        }
-    }
-    let now = Utc::now();
-    state.refinements.push(crate::state::RefinementEvent {
-        id: proposal.id.clone(),
-        trigger: proposal.trigger.clone(),
-        changes: proposal
-            .edits
-            .iter()
-            .map(|e| format!("{:?} {:?}:{}", e.op, e.kind, e.id))
-            .collect(),
-        evidence: proposal.evidence.clone(),
-        outcome: proposal.expected_outcome.clone(),
-        created_at: now,
-    });
-    state.save_atomic(path)?;
-    Ok(state)
+        let now = Utc::now();
+        state.refinements.push(crate::state::RefinementEvent {
+            id: proposal.id.clone(),
+            trigger: proposal.trigger.clone(),
+            changes: proposal
+                .edits
+                .iter()
+                .map(|e| format!("{:?} {:?}:{}", e.op, e.kind, e.id))
+                .collect(),
+            evidence: proposal.evidence.clone(),
+            outcome: proposal.expected_outcome.clone(),
+            created_at: now,
+        });
+        Ok(state.clone())
+    })
 }
 
 #[cfg(test)]

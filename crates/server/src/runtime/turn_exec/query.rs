@@ -1,6 +1,6 @@
 use std::sync::Arc;
 
-use devo_core::tools::handlers::{KernelNamespaceRestoreState, ensure_kernel_with_restore_state};
+use devo_core::tools::handlers::{KernelNamespaceRestoreState, ensure_kernel_with_skills};
 use devo_core::tools::{
     AgentToolCoordinator, ClientFilesystem, ToolAgentScope, ToolCall, ToolExecutionOptions,
     ToolPlanConfig, ToolRuntime, ToolRuntimeContext,
@@ -232,21 +232,31 @@ impl ServerRuntime {
             .effective_config()
             .tools
             .execution_surface;
+        let python_skills = runtime_context
+            .refresh_skill_context(&mut state.core)
+            .unwrap_or_else(|error| {
+                tracing::warn!(%error, "skill catalog unavailable; omitting skill bindings");
+                state.core.config.available_skills_instructions = None;
+                state.core.config.installed_python_skills.clear();
+                Vec::new()
+            });
         let kernel = if agent_tool_policy == devo_protocol::AgentToolPolicy::DenyAll {
             None
         } else if execution_surface == devo_core::ToolExecutionSurface::Discrete {
             tracing::info!("tool execution surface forced Discrete; skipping RLM kernel");
             None
         } else {
-            match ensure_kernel_with_restore_state(
+            match ensure_kernel_with_skills(
                 &state.kernel,
                 &state.core.cwd,
                 session_dir.as_deref(),
                 collaboration_mode,
+                &python_skills,
             )
             .await
             {
-                Ok((arc, namespace_state)) => {
+                Ok((arc, namespace_state, imports)) => {
+                    state.core.config.installed_python_skills = imports;
                     // Persist the actual restore outcome so the TUI can show the
                     // same state notice live and when the history is reopened.
                     if let Some(namespace_state) = namespace_state {

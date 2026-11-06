@@ -14,7 +14,6 @@ use crate::model::SkillScope;
 use crate::model::canonicalize_for_identity;
 use crate::system::install_system_skills;
 use crate::system::system_cache_root_dir;
-use crate::system::uninstall_system_skills;
 
 const MAX_CACHED_CWDS: usize = 64;
 
@@ -61,12 +60,10 @@ pub struct SkillsManager {
 
 impl SkillsManager {
     pub fn new(devo_home: PathBuf, config: SkillsRuntimeConfig) -> Self {
-        if config.bundled_enabled {
-            if let Err(error) = install_system_skills(&devo_home) {
-                tracing::warn!(error = %error, "failed to install system skills");
-            }
-        } else {
-            uninstall_system_skills(&devo_home);
+        if config.bundled_enabled
+            && let Err(error) = install_system_skills(&devo_home)
+        {
+            tracing::warn!(error = %error, "failed to install system skills");
         }
         Self {
             devo_home,
@@ -93,12 +90,12 @@ impl SkillsManager {
     }
 
     pub fn set_config(&self, config: SkillsRuntimeConfig) {
-        if config.bundled_enabled {
-            if let Err(error) = install_system_skills(&self.devo_home) {
-                tracing::warn!(error = %error, "failed to install system skills");
-            }
-        } else {
-            uninstall_system_skills(&self.devo_home);
+        // Enablement selects roots; it must not delete a shared cache while
+        // another session still uses a package or its lazy imports.
+        if config.bundled_enabled
+            && let Err(error) = install_system_skills(&self.devo_home)
+        {
+            tracing::warn!(error = %error, "failed to install system skills");
         }
         {
             let mut guard = self

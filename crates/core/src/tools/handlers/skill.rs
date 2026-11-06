@@ -1,8 +1,10 @@
 use std::fmt::Write as _;
-use std::path::{Path, PathBuf};
+use std::path::Path;
 
+use crate::{
+    AppConfigLoader, FileSystemAppConfigLoader, FileSystemSkillCatalog, SkillCatalog, SkillSelector,
+};
 use async_trait::async_trait;
-use tokio::fs;
 
 use crate::contracts::{
     ToolCallError, ToolContext, ToolProgressSender, ToolResult, ToolResultContent,
@@ -64,14 +66,33 @@ impl ToolHandler for SkillHandler {
     ) -> Result<ToolResult, ToolCallError> {
         let name = input["name"].as_str().unwrap_or("");
 
-        let found = find_skill(&ctx.workspace_root, name)
-            .ok_or_else(|| ToolCallError::ExecutionFailed(format!("Skill \"{name}\" not found")))?;
-
-        let content = fs::read_to_string(&found)
-            .await
-            .map_err(|e| ToolCallError::ExecutionFailed(format!("Failed to read skill: {e}")))?;
-
-        let dir = found.parent().unwrap_or(Path::new("")).to_path_buf();
+        let home = devo_util_paths::find_devo_home()
+            .map_err(|error| ToolCallError::ExecutionFailed(error.to_string()))?;
+        let config = FileSystemAppConfigLoader::new(home.clone())
+            .load(Some(&ctx.workspace_root))
+            .map_err(|error| ToolCallError::ExecutionFailed(error.to_string()))?;
+        let mut catalog = FileSystemSkillCatalog::with_devo_home(
+            config.skills,
+            home,
+            ctx.workspace_root.clone(),
+            config.project_root_markers,
+        );
+        let resolved = catalog
+            .load(
+                &SkillSelector {
+                    name: name.to_string(),
+                    path: None,
+                },
+                Some(&ctx.workspace_root),
+            )
+            .map_err(|error| ToolCallError::ExecutionFailed(error.to_string()))?;
+        let content = resolved.content;
+        let dir = resolved
+            .record
+            .path
+            .parent()
+            .unwrap_or(Path::new(""))
+            .to_path_buf();
         let file_list = sample_file_list(&dir);
 
         Ok(ToolResult::success(
@@ -82,25 +103,6 @@ impl ToolHandler for SkillHandler {
             "Skill loaded",
         ))
     }
-}
-
-fn find_skill(root: &Path, name: &str) -> Option<PathBuf> {
-    let mut stack = vec![root.to_path_buf()];
-    while let Some(dir) = stack.pop() {
-        if let Ok(read) = std::fs::read_dir(&dir) {
-            for entry in read.flatten() {
-                let path = entry.path();
-                if path.is_dir() {
-                    stack.push(path);
-                } else if path.file_name().and_then(|x| x.to_str()) == Some("SKILL.md")
-                    && path.parent()?.file_name().and_then(|x| x.to_str()) == Some(name)
-                {
-                    return Some(path);
-                }
-            }
-        }
-    }
-    None
 }
 
 fn sample_file_list(dir: &Path) -> String {

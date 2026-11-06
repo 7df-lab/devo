@@ -59,8 +59,10 @@ export function smokeBundle(bundle: string): void {
     if (js.exitCode !== 0) throw new Error(`Private Node smoke failed: ${js.stderr.toString()}`);
     console.log(js.stdout.toString().trim());
     const snapshot = join(work, "namespace.dill");
+    // This starts the runtime alone, without the host's enabled-skill catalog.
+    // Bundled skill installation and imports are tested through the host path.
     const requests = [
-      { type: "execute", id: "execute", code: "import socket\ndef deny(*args, **kwargs):\n    raise RuntimeError('Network disabled in bundle QA')\nsocket.socket.connect = deny\nimport asyncio, mcp, tyro, dill, rlm.mcp, refine, compact, goal, agent_observe\nawait asyncio.sleep(0.01)\nbundle_answer = 40 + 2\nprint('PRIVATE_KERNEL_OK')" },
+      { type: "execute", id: "execute", code: "import socket\ndef deny(*args, **kwargs):\n    raise RuntimeError('Network disabled in bundle QA')\nsocket.socket.connect = deny\nimport asyncio, mcp, tyro, dill, rlm.mcp\nawait asyncio.sleep(0.01)\nbundle_answer = 40 + 2\nprint('PRIVATE_KERNEL_OK')" },
       { type: "snapshot", id: "snapshot", path: snapshot, manifest_path: snapshot + ".json" },
       { type: "execute", id: "change", code: "bundle_answer = 0" },
       { type: "restore", id: "restore", path: snapshot },

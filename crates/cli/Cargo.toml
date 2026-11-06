@@ -11,6 +11,7 @@ path = "src/main.rs"
 
 [dependencies]
 devo-core = { workspace = true }
+devo-harness = { workspace = true }
 devo-kernel = { workspace = true }
 devo-mcp = { workspace = true }
 devo-protocol = { workspace = true }
@@ -38,4 +39,5 @@ tracing-subscriber = { workspace = true }
 tokio-console = ["devo-arg0/tokio-console"]
 
 [dev-dependencies]
+tempfile = { workspace = true }
 pretty_assertions = "1"

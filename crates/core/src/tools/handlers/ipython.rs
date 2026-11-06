@@ -23,7 +23,7 @@ mod startup;
 use startup::persist_kernel_namespace_snapshot;
 pub use startup::{
     KernelNamespaceRestoreState, ensure_kernel, ensure_kernel_with_restore_state,
-    kernel_namespace_manifest_path, kernel_namespace_snapshot_path,
+    ensure_kernel_with_skills, kernel_namespace_manifest_path, kernel_namespace_snapshot_path,
 };
 
 pub struct IpythonHandler {

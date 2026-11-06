@@ -480,8 +480,6 @@ async fn ensure_kernel_restores_namespace_from_session_dir() {
 
 #[tokio::test]
 async fn rlm_bootstrap_imports_core_python_skill_modules() {
-    use crate::rlm_prompts::RLM_BOOTSTRAP_SKILL_IMPORTS;
-
     let kernel = match ensure_kernel(
         &None,
         &std::env::temp_dir(),
@@ -497,11 +495,6 @@ async fn rlm_bootstrap_imports_core_python_skill_modules() {
         }
     };
     let expected = ["compact", "refine", "goal", "agent_observe"];
-    assert!(
-        expected
-            .iter()
-            .all(|name| RLM_BOOTSTRAP_SKILL_IMPORTS.contains(name))
-    );
     let expected_json = serde_json::to_string(&expected).expect("skill names serialize");
     let code = format!(
         concat!(

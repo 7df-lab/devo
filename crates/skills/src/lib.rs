@@ -10,6 +10,7 @@ pub mod mention_counts;
 pub mod model;
 pub mod package;
 pub mod parser;
+pub mod python;
 pub mod render;
 pub mod system;
 
@@ -42,6 +43,7 @@ pub use package::{
     SkillName, SkillPackage, SkillPackageId, SkillResourceKind, SkillResourceRef, SkillSourceKind,
 };
 pub use parser::parse_skill_md;
+pub use python::PythonSkill;
 pub use render::AvailableSkills;
 pub use render::SkillMetadataBudget;
 pub use render::SkillRenderReport;

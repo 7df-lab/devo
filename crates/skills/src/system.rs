@@ -10,7 +10,7 @@ use std::path::PathBuf;
 use include_dir::Dir;
 use thiserror::Error;
 
-const SYSTEM_SKILLS_DIR: Dir<'_> = include_dir::include_dir!("$DEVO_SKILLS_SAMPLES_DIR");
+const SYSTEM_SKILLS_DIR: Dir<'_> = include_dir::include_dir!("$DEVO_SKILLS_BUNDLED_DIR");
 const SYSTEM_SKILLS_DIR_NAME: &str = ".system";
 const SKILLS_DIR_NAME: &str = "skills";
 const SYSTEM_SKILLS_MARKER_FILENAME: &str = ".devo-system-skills.marker";
@@ -147,12 +147,15 @@ impl SystemSkillsError {
 
 #[cfg(test)]
 mod tests {
+    use std::collections::BTreeMap;
     use std::fs;
+    use std::path::{Path, PathBuf};
 
     use pretty_assertions::assert_eq;
     use tempfile::{NamedTempFile, TempDir};
 
     use super::SYSTEM_SKILLS_DIR;
+    use super::SYSTEM_SKILLS_MARKER_FILENAME;
     use super::collect_fingerprint_items;
     use super::install_system_skills;
     use super::read_marker;
@@ -180,19 +183,47 @@ mod tests {
     }
 
     #[test]
-    fn bundled_goal_skill_installs() {
+    fn bundled_assets_install_with_canonical_paths_and_contents() {
         let devo_home = TempDir::new().expect("devo home");
+        let canonical_root = Path::new(env!("CARGO_MANIFEST_DIR")).join("assets/bundled");
+        assert_eq!(
+            fs::canonicalize(env!("DEVO_SKILLS_BUNDLED_DIR")).expect("embedded source directory"),
+            fs::canonicalize(&canonical_root).expect("canonical source directory")
+        );
 
         install_system_skills(devo_home.path()).expect("install system skills");
 
-        let skill_root = system_cache_root_dir(devo_home.path()).join("goal");
-        assert!(skill_root.join("SKILL.md").is_file());
-        assert!(
-            system_cache_root_dir(devo_home.path())
-                .join("agent-message")
-                .join("SKILL.md")
-                .is_file()
-        );
+        let installed_root = system_cache_root_dir(devo_home.path());
+        let mut installed = files_under(&installed_root);
+        installed.remove(Path::new(SYSTEM_SKILLS_MARKER_FILENAME));
+        assert_eq!(installed, files_under(&canonical_root));
+
+        // A matching installation marker must leave the full package intact.
+        install_system_skills(devo_home.path()).expect("repeat system skill install");
+        let mut reinstalled = files_under(&installed_root);
+        reinstalled.remove(Path::new(SYSTEM_SKILLS_MARKER_FILENAME));
+        assert_eq!(reinstalled, installed);
+    }
+
+    fn files_under(root: &Path) -> BTreeMap<PathBuf, Vec<u8>> {
+        let mut files = BTreeMap::new();
+        let mut pending = vec![root.to_path_buf()];
+        while let Some(dir) = pending.pop() {
+            for entry in fs::read_dir(dir).expect("read asset directory") {
+                let path = entry.expect("asset entry").path();
+                if path.is_dir() {
+                    pending.push(path);
+                } else {
+                    files.insert(
+                        path.strip_prefix(root)
+                            .expect("relative asset")
+                            .to_path_buf(),
+                        fs::read(path).expect("read asset"),
+                    );
+                }
+            }
+        }
+        files
     }
 
     #[test]

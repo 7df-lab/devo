@@ -1487,6 +1487,7 @@ fn replay_restores_context_snapshots_from_turn_records() {
     let turn_id = TurnId::new();
     let now = Utc.with_ymd_and_hms(2026, 4, 27, 8, 0, 0).unwrap();
     let session_context = SessionContext {
+        installed_python_skills: Vec::new(),
         base_instructions: "base".into(),
         available_skills: None,
         workspace_instructions: Some("workspace".into()),
@@ -1601,6 +1602,7 @@ fn apply_session_meta(
 
 fn sample_session_context(base_instructions: &str) -> SessionContext {
     SessionContext {
+        installed_python_skills: Vec::new(),
         base_instructions: base_instructions.into(),
         available_skills: None,
         workspace_instructions: Some("workspace".into()),

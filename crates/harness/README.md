@@ -137,6 +137,8 @@ Session-local entries win on an id collision because they are more specific.
 | Module | Role |
 |---|---|
 | `src/state.rs` | Schema types, default state, load, atomic save, local/global merge. |
+| `src/store.rs` | Cross-process transactions, initialization, private atomic replacement. |
+| `src/commands.rs` | Validated host CRUD and refinement-event operations. |
 | `src/digest.rs` | Format a state into prompt text; strip and reattach digest blocks. |
 | `src/inject.rs` | `HarnessDigestInjector` for the server's prompt assembly. |
 | `src/apply.rs` | Refine proposals, edits, drift checks, and atomic apply. |
@@ -220,7 +222,7 @@ model calls refine.run()
   -> server schedules a pending refinement
   -> turn boundary: planner builds a RefineProposal
   -> apply_proposal_re_read re-reads the target state
-  -> drift check, apply, save_atomic
+  -> locked drift check, apply, atomic commit
   -> append_refinement writes refinements.jsonl
   -> next turn's digest includes the new state
 ```
@@ -247,48 +249,57 @@ actual schedule.
 
 ## Relationship to the Python kernel
 
-The Python module `rlm.harness` in `crates/kernel/rlm-runtime` is a separate
-implementation of the same JSON schema. It is not generated from this crate and
-does not link to Rust. The two sides meet on disk.
+The Python module `rlm.harness` in `crates/kernel/rlm-runtime` is a convenience
+facade over `harness.*` host requests. Rust owns persistent state and resolves
+local/global paths from the session and Devo home. Python does not select
+persistence paths or write the state file.
 
-- The RLM kernel exposes `rlm.harness` to cells and skills for direct CRUD.
-- The Rust host reads the same file to build the prompt digest.
-- The host applies refinements and writes the audit log.
-- The kernel uses the same `schema: 1` shape and the same local/global paths.
+```python
+await rlm.harness.load()  # refresh existing state explicitly
+entry = await rlm.harness.create_memory(title="Lesson", content="...")
+rlm.harness.overview()    # synchronous view of the last loaded/committed snapshot
+```
 
-The host passes the paths to the kernel through environment variables set in
-`crates/core/src/tools/handlers/ipython/startup.rs`:
+- `create_*`, `update_*`, `delete_*`, generic CRUD, and `record_refinement` are
+  awaited. Each successful mutation refreshes the Python view.
+- `get`, `list`, `snapshot`, and `overview` inspect the cached view. Use
+  `await load()` to see changes from another turn or process.
+- The host checks read/write permissions and blocks mutations in Plan mode.
+- Ephemeral sessions have an empty local read view and reject persistent local
+  writes; explicit `global_=True` operations still go through host permissions.
+- Explicit `HarnessState(in_memory=True)` remains available for standalone
+  volatile use with the same awaited mutation API. It is never a fallback for
+  a failed host operation.
+- Direct persistent `save()`, `file_path`, and `state_dir` overrides raise
+  migration errors. Existing schema-1 state files require no conversion.
 
-| Variable | Meaning |
-|---|---|
-| `RLM_SESSION_DIR` | Session artifact root. |
-| `RLM_HARNESS_STATE_DIR` | Local harness directory. |
-| `RLM_GLOBAL_HARNESS_STATE_DIR` | Global harness directory under Devo home. |
-| `DEVO_CODING_AGENT_DIR` | Devo config directory, including `auth.json`. |
+This ownership boundary is not a claim that Python itself is a sandbox. The
+kernel process's filesystem and execution restrictions remain separate.
 
 ### Concurrent writers
 
-The host and the kernel may write the same state file from different processes.
-There is no cross-process lock; the protocol is optimistic.
+Host CRUD, initialization, and refinement share a cross-process advisory lock
+on a stable `harness_state.json.lock` sidecar. The lock covers the complete
+read-modify-write transaction, including refinement drift checks. Permission
+prompts and model planning happen before the lock is acquired.
 
-- The kernel keeps a long-lived `HarnessState` and checks the file mtime before
-  each local mutation. If another process changed the file, it reloads first.
-- The host's `apply_proposal_re_read` re-reads immediately before applying and
-  rejects per-entry drift.
-- Both sides use atomic replacement, so readers see either the old file or the
-  new file, never a torn one.
+- Distinct concurrent edits are preserved rather than overwriting a stale
+  Python snapshot. Refinement still rejects per-entry drift from its baseline.
+- Writes use unique same-directory temporary files and atomic replacement.
+  New state files are private; replacements preserve existing permissions.
+- Reads see either the old state or the committed state, never a partial file.
+- Invalid JSON, unreadable files, and unsupported schema versions fail closed.
+  Python propagates the host error without rewriting an empty file.
+- The lock coordinates cooperating Rust writers, not arbitrary external file
+  editors. Do not remove the sidecar while a host may be running.
 
-The two sides treat corruption differently on purpose:
-
-- Rust's `HarnessState::load` rejects corrupt JSON. The digest injector either
-  propagates that error or omits the digest; it never invents content.
-- Python's loader treats an unreadable or corrupt file as empty so a bad file
-  cannot kill the RLM kernel. The next kernel save rewrites a clean file.
-
-If you change a field, update both implementations and bump `SCHEMA_VERSION`.
+Rust callers performing read-modify-write operations must use
+`transact_harness` / `mutate_harness` / `apply_proposal_re_read`.
+`save_atomic` is a low-level snapshot operation for setup and tests, not an
+alternative transaction protocol.
 
 See [`crates/kernel/rlm-runtime/README.md`](../kernel/rlm-runtime/README.md)
-for the Python side.
+for the Python API and migration examples.
 
 ## Relationship to `devo-server`
 
@@ -298,6 +309,8 @@ for the Python side.
   turn start.
 - `crates/server/src/runtime/refine.rs` schedules, plans, and applies
   refinements.
+- `crates/server/src/runtime/kernel_host_bridge/harness.rs` authorizes Python
+  harness requests and executes store operations off the async executor.
 - `crates/server/src/runtime/refine_planner.rs` builds the LLM proposal and
   falls back to the heuristic planner.
 - `crates/core/src/history/harness_digest_strip.rs` uses matching digest
@@ -309,8 +322,8 @@ and apply rules testable without a running server.
 
 ## Design rules
 
-- **Schema is shared, not owned by one language.** Rust and Python mirror the
-  same JSON shape.
+- **Rust owns persistence.** Python mirrors record types and sends operations;
+  it never commits an independent disk snapshot.
 - **Local is more specific than global.** On an id collision, the session entry
   wins in the merged digest.
 - **Refinement is optimistic and drift-checked.** A proposal never overwrites
@@ -353,7 +366,7 @@ a Python interpreter.
 | 6 | `src/auto.rs` | Root auto-refine settings. |
 | 7 | `crates/server/src/runtime/refine.rs` | The host scheduling and apply pipeline. |
 | 8 | `crates/server/src/runtime/refine_planner.rs` | LLM and heuristic planning. |
-| 9 | `crates/kernel/rlm-runtime/src/rlm/harness.py` | The Python CRUD view of the same files. |
+| 9 | `crates/kernel/rlm-runtime/src/rlm/harness.py` | The host-backed Python facade and cached view. |
 
 Related documents:
 
