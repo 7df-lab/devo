@@ -158,12 +158,14 @@ test("real installers reuse runtimes across upgrades, repair damage, reject corr
       const repeatIndex = await buildPacks(source, repeat);
       expect(readFileSync(repeatIndex, "utf8")).toEqual(readFileSync(index, "utf8"));
       const powershell = join(process.env.SystemRoot!, "System32/WindowsPowerShell/v1.0/powershell.exe");
+      const listedFile = join(root, "zip-list.txt");
       const listed = Bun.spawnSync([
         powershell, "-NoProfile", "-NonInteractive", "-ExecutionPolicy", "Bypass",
         "-File", join(import.meta.dir, "zip-list.ps1"), "-Archive", join(repeat, first[0][2]),
+        "-OutputFile", listedFile,
       ], { stdout: "pipe", stderr: "pipe" });
       expect(listed.exitCode).toBe(0);
-      expect(listed.stdout.toString().split(/\r?\n/)).toContain(WINDOWS_LONG_APP_FILE);
+      expect(readFileSync(listedFile, "utf8").split(/\r?\n/)).toContain(WINDOWS_LONG_APP_FILE);
     }
     writeFileSync(join(source, "runtime/manifest.json"), JSON.stringify({ schema: 1, version: "0.2.1", target }));
     await buildPacks(source, assets);

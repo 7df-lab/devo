@@ -1,14 +1,15 @@
 param(
-    [Parameter(Mandatory = $true)][string]$Archive
+    [Parameter(Mandatory = $true)][string]$Archive,
+    [Parameter(Mandatory = $true)][string]$OutputFile
 )
 
 $ErrorActionPreference = "Stop"
-[Console]::OutputEncoding = [System.Text.UTF8Encoding]::new($false)
-$OutputEncoding = [Console]::OutputEncoding
 Add-Type -AssemblyName System.IO.Compression.FileSystem
 $zip = [IO.Compression.ZipFile]::OpenRead($Archive)
 try {
-    foreach ($entry in $zip.Entries) { $entry.FullName }
+    $names = [System.Collections.Generic.List[string]]::new()
+    foreach ($entry in $zip.Entries) { $names.Add($entry.FullName) }
+    [IO.File]::WriteAllLines($OutputFile, $names, [System.Text.UTF8Encoding]::new($false))
 } finally {
     $zip.Dispose()
 }
