@@ -401,6 +401,7 @@ fn try_windows_sandbox_launch(
 
 #[cfg(test)]
 mod tests {
+    #[cfg(unix)]
     use super::*;
 
     #[cfg(unix)]
