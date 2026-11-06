@@ -245,29 +245,44 @@ test("real installers reuse runtimes across upgrades, repair damage, reject corr
     if (process.platform !== "win32") {
       // A stale lock must fail closed: no automatic deletion. A controlled
       // `sleep` on PATH makes the 300-attempt wait deterministic without a
-      // production timeout knob.
-      const staleCache = join(root, "stale lock cache");
-      mkdirSync(staleCache);
-      const staleLock = join(staleCache, `${first[1][1]}.lock`);
-      mkdirSync(staleLock);
-      writeFileSync(join(staleLock, "pid"), "999999\n");
+      // production timeout knob. Exercise the legacy mkdir directory and the
+      // current lock file; neither may be reclaimed automatically.
       const fakeSleepDir = join(root, "fake sleep bin");
       mkdirSync(fakeSleepDir);
       writeFileSync(join(fakeSleepDir, "sleep"), "#!/bin/sh\nexit 0\n", { mode: 0o755 });
-      const blocked = await installOnline(root, join(root, "stale lock install"), staleCache, origin, target, "v0.2.0", "functions", {
-        PATH: `${fakeSleepDir}:${process.env.PATH ?? ""}`,
-      });
-      expect({
-        failed: blocked.exit !== 0,
-        lockPreserved: existsSync(staleLock),
-        pidPreserved: readFileSync(join(staleLock, "pid"), "utf8"),
-        manualCleanupMessage: blocked.stderr.includes("remove the stale lock directory manually"),
-      }).toEqual({ failed: true, lockPreserved: true, pidPreserved: "999999\n", manualCleanupMessage: true });
-      rmSync(staleLock, { recursive: true, force: true });
-      const retry = await installOnline(root, join(root, "stale lock retry install"), staleCache, origin, target);
-      if (retry.exit !== 0) throw new Error(`${retry.stdout}\n${retry.stderr}`);
-      expect(existsSync(staleLock)).toBe(false);
-      requests.length = 0;
+      for (const legacyDirectory of [true, false]) {
+        const label = legacyDirectory ? "legacy directory" : "file";
+        const staleCache = join(root, `stale lock ${label} cache`);
+        mkdirSync(staleCache);
+        const staleLock = join(staleCache, `${first[1][1]}.lock`);
+        if (legacyDirectory) {
+          mkdirSync(staleLock);
+          writeFileSync(join(staleLock, "pid"), "999999\n");
+        } else {
+          writeFileSync(staleLock, "999999\n");
+        }
+        const blocked = await installOnline(root, join(root, `stale lock ${label} install`), staleCache, origin, target, "v0.2.0", "functions", {
+          PATH: `${fakeSleepDir}:${process.env.PATH ?? ""}`,
+        });
+        expect({
+          failed: blocked.exit !== 0,
+          lockPreserved: existsSync(staleLock),
+          pidPreserved: readFileSync(legacyDirectory ? join(staleLock, "pid") : staleLock, "utf8"),
+          manualCleanupMessage: blocked.stderr.includes("remove the stale lock manually"),
+        }).toEqual({ failed: true, lockPreserved: true, pidPreserved: "999999\n", manualCleanupMessage: true });
+        rmSync(staleLock, { recursive: true, force: true });
+        const retry = await installOnline(root, join(root, `stale lock ${label} retry install`), staleCache, origin, target);
+        if (retry.exit !== 0) throw new Error(`${retry.stdout}\n${retry.stderr}`);
+        expect(existsSync(staleLock)).toBe(false);
+        requests.length = 0;
+      }
+      // Old-version installers use mkdir for the same lock pathname. A new
+      // file lock must make that legacy acquisition fail closed too.
+      const legacyProbe = join(root, "legacy mkdir probe.lock");
+      writeFileSync(legacyProbe, "999999\n");
+      const legacyMkdir = Bun.spawnSync(["/bin/mkdir", legacyProbe]);
+      expect(legacyMkdir.exitCode).not.toBe(0);
+      rmSync(legacyProbe, { force: true });
     }
 
     requestLog.length = 0;
