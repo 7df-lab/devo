@@ -16,6 +16,9 @@ use devo_protocol::native::wire_projector::{item_started_state, typed_item_envel
 
 use super::*;
 
+#[cfg(test)]
+mod tests;
+
 /// Build a Native user-message item for first-party emit (no legacy payload bag).
 ///
 /// Images are listed before text so the TUI projects
@@ -69,10 +72,6 @@ fn next_fallback_item_seq() -> u64 {
     NEXT.fetch_add(1, Ordering::Relaxed)
 }
 
-fn legacy_session_for_lookup(session_id: &NativeSessionId) -> Option<NativeSessionId> {
-    Some(*session_id)
-}
-
 impl ServerRuntime {
     /// Persist session summary to SQLite if the session is durable.
     /// The rollout file is the authoritative store, so failures here are
@@ -121,10 +120,7 @@ impl ServerRuntime {
     }
 
     async fn remember_item_started_at(&self, session_id: &NativeSessionId, item_id: NativeItemId) {
-        let Some(legacy) = legacy_session_for_lookup(session_id) else {
-            return;
-        };
-        let Some(stream) = self.active_stream_state(legacy).await else {
+        let Some(stream) = self.active_stream_state(*session_id).await else {
             return;
         };
         let mut stream = stream.lock().await;
@@ -138,8 +134,7 @@ impl ServerRuntime {
         session_id: &NativeSessionId,
         item_id: &NativeItemId,
     ) -> Option<chrono::DateTime<chrono::Utc>> {
-        let legacy = legacy_session_for_lookup(session_id)?;
-        let stream = self.active_stream_state(legacy).await?;
+        let stream = self.active_stream_state(*session_id).await?;
         let mut stream = stream.lock().await;
         stream
             .turn_inline
@@ -246,16 +241,8 @@ impl ServerRuntime {
         use crate::persisted_native_item::PersistedNativeItem;
         use crate::persisted_native_item::history_entry_from_native_item;
 
-        let Some(legacy_session_id) = legacy_session_for_lookup(&session_id) else {
-            tracing::warn!(
-                session_id = %session_id,
-                "persist_item skipped: Native session id is not bridgeable to legacy lookup key"
-            );
-            return;
-        };
-
         let history_entry = history_entry_from_native_item(&native_item);
-        if let Some(stream) = self.active_stream_state(legacy_session_id).await {
+        if let Some(stream) = self.active_stream_state(session_id).await {
             // Mutate inline state under the lock, then release before any
             // blocking rollout I/O so the event stream cannot pin the async
             // mutex across synchronous disk writes.
@@ -306,13 +293,13 @@ impl ServerRuntime {
                         item_id,
                         parent_id,
                     ) {
-                        tracing::warn!(session_id = %legacy_session_id, error = %error, "failed to persist tree edge");
+                        tracing::warn!(session_id = %session_id, error = %error, "failed to persist tree edge");
                     }
                     if let Err(error) = self
                         .rollout_store
                         .append_canonical_item_at(&rollout_path, envelope)
                     {
-                        tracing::warn!(session_id = %legacy_session_id, error = %error, "failed to persist item line");
+                        tracing::warn!(session_id = %session_id, error = %error, "failed to persist item line");
                     }
                     if let Err(error) = self.rollout_store.append_session_leaf_at(
                         &rollout_path,
@@ -320,7 +307,7 @@ impl ServerRuntime {
                         Some(item_id),
                         leaf_epoch,
                     ) {
-                        tracing::warn!(session_id = %legacy_session_id, error = %error, "failed to persist session leaf");
+                        tracing::warn!(session_id = %session_id, error = %error, "failed to persist session leaf");
                     }
                 }
                 return;
@@ -329,20 +316,19 @@ impl ServerRuntime {
             // actor is not polling its mailbox until the stream finishes, so we
             // must not fall through to blocking actor commands.
             tracing::warn!(
-                session_id = %legacy_session_id,
+                session_id = %session_id,
                 turn_id = %turn_id,
                 "persist_item skipped: active turn stream has no inline state"
             );
             return;
         }
-        let Some(session_handle) = self.session(legacy_session_id).await else {
+        let Some(session_handle) = self.session(session_id).await else {
             return;
         };
         if let Some(history_entry) = history_entry {
             session_handle.append_history_item(history_entry).await;
         }
-        let legacy_turn_id = turn_id;
-        let Some(prep) = session_handle.prepare_persist_item(legacy_turn_id).await else {
+        let Some(prep) = session_handle.prepare_persist_item(turn_id).await else {
             return;
         };
         session_handle
@@ -369,25 +355,25 @@ impl ServerRuntime {
             envelope.parent_id = parent_id;
             if let Err(error) = self.rollout_store.append_tree_edge_at(
                 &rollout_path,
-                legacy_session_id,
+                session_id,
                 item_id,
                 parent_id,
             ) {
-                tracing::warn!(session_id = %legacy_session_id, error = %error, "failed to persist tree edge");
+                tracing::warn!(session_id = %session_id, error = %error, "failed to persist tree edge");
             }
             if let Err(error) = self
                 .rollout_store
                 .append_canonical_item_at(&rollout_path, envelope)
             {
-                tracing::warn!(session_id = %legacy_session_id, error = %error, "failed to persist item line");
+                tracing::warn!(session_id = %session_id, error = %error, "failed to persist item line");
             }
             if let Err(error) = self.rollout_store.append_session_leaf_at(
                 &rollout_path,
-                legacy_session_id,
+                session_id,
                 Some(item_id),
                 leaf_epoch,
             ) {
-                tracing::warn!(session_id = %legacy_session_id, error = %error, "failed to persist session leaf");
+                tracing::warn!(session_id = %session_id, error = %error, "failed to persist session leaf");
             }
             session_handle
                 .set_transcript_leaf(
@@ -401,10 +387,7 @@ impl ServerRuntime {
     }
 
     pub(super) async fn allocate_item_sequence(&self, session_id: &NativeSessionId) -> u64 {
-        let Some(legacy_session_id) = legacy_session_for_lookup(session_id) else {
-            return next_fallback_item_seq();
-        };
-        if let Some(stream) = self.active_stream_state(legacy_session_id).await {
+        if let Some(stream) = self.active_stream_state(*session_id).await {
             let mut stream = stream.lock().await;
             if let Some(inline) = stream.turn_inline.as_mut() {
                 return inline.allocate_item_seq();
@@ -413,7 +396,7 @@ impl ServerRuntime {
             // mailbox while its turn event stream is registered.
             return next_fallback_item_seq();
         }
-        if let Some(handle) = self.session(legacy_session_id).await
+        if let Some(handle) = self.session(*session_id).await
             && let Some(item_seq) = handle.allocate_item_seq().await
         {
             return item_seq;

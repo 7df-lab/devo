@@ -145,3 +145,70 @@ async fn remote_models_remain_read_only_after_restart_and_settings_edits() -> Re
     );
     Ok(())
 }
+
+#[tokio::test]
+async fn explicit_remote_model_edits_persist_as_sparse_user_overrides() -> Result<()> {
+    let home = tempfile::tempdir()?;
+    let runtime = TestRuntime::noop().runtime(home.path());
+    let saved = runtime
+        .handle_native_provider_upsert(
+            json!(1),
+            json!({"provider": {
+                "id": "edited-remote", "name": "Edited remote", "enabled": true,
+                "baseUrl": "http://127.0.0.1:1/v1", "wireApis": ["openai_chat_completions"],
+                "models": {
+                    "selected": {"origin": "remote", "name": "Catalog name", "contextWindow": 128000,
+                        "cost": {"input": 42}, "baseUrl": "http://127.0.0.1:2/v1", "requestModel": "wire-id"},
+                    "unselected": {"origin": "remote", "name": "Not saved"}
+                },
+                "modelOverrides": {"selected": {"name": "My name", "contextWindow": 64000}}
+            }}),
+        )
+        .await;
+    assert!(saved.get("error").is_none(), "save failed: {saved}");
+    drop(runtime);
+    let persisted = devo_core::read_provider_catalog_config(
+        &home
+            .path()
+            .join(devo_core::CUSTOM_PROVIDER_CONFIG_FILE_NAME),
+    )?;
+    let persisted = serde_json::to_value(&persisted.providers["edited-remote"])?;
+    assert_eq!(
+        persisted["models"],
+        json!({"selected": {
+            "origin": "remote", "wire_api": "openai_chat_completions",
+            "base_url": "http://127.0.0.1:2/v1", "request_model": "wire-id"
+        }})
+    );
+    assert_eq!(
+        persisted["model_overrides"],
+        json!({"selected": {
+            "name": "My name", "context_window": 64000
+        }})
+    );
+    let restarted = TestRuntime::noop().runtime(home.path());
+    let edit = restarted
+        .handle_native_provider_upsert(
+            json!(2),
+            json!({"provider": {
+                "id": "edited-remote", "name": "Edited remote", "enabled": true,
+                "baseUrl": "http://127.0.0.1:1/v1", "wireApis": ["openai_chat_completions"],
+                "modelOverrides": {"selected": {"contextWindow": 32000}}
+            }}),
+        )
+        .await;
+    assert!(edit.get("error").is_none(), "edit failed: {edit}");
+    let persisted = devo_core::read_provider_catalog_config(
+        &home
+            .path()
+            .join(devo_core::CUSTOM_PROVIDER_CONFIG_FILE_NAME),
+    )?;
+    let persisted = serde_json::to_value(&persisted.providers["edited-remote"])?;
+    assert_eq!(
+        persisted["model_overrides"],
+        json!({"selected": {
+            "name": "My name", "context_window": 32000
+        }})
+    );
+    Ok(())
+}

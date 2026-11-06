@@ -25,7 +25,7 @@ mock.module("@devo/ui/components/dialog", () => ({
 }))
 mock.module("./provider-icon", () => ({ ProviderIcon: () => null }))
 mock.module("./model-edit-dialog", () => ({ ModelEditDialog: () => null }))
-const discoveredModels = { fresh: { name: "Fresh model", wireApi: "openai_responses" as const, baseUrl: "https://gateway.example/v1", requestModel: "upstream" } }
+const discoveredModels = { fresh: { name: "Fresh model", wireApi: "openai_responses" as const, baseUrl: "https://gateway.example/v1", requestModel: "upstream", cost: { input: 2, output: 3 }, capabilities: { vision: true }, contextWindow: 100000 } }
 const discover = mock(async (_params: unknown) => ({ providerId: "openai-codex", models: discoveredModels }))
 const upsert = mock(async (_params: unknown) => ({}))
 const modelRemove = mock(async (_params: unknown) => {})
@@ -160,7 +160,7 @@ describe("connected provider details", () => {
 		await click("Save")
 		expect(upsert.mock.calls).toEqual([[{ provider: {
 			...provider,
-			models: { fresh: { ...discoveredModels.fresh, origin: "user" } },
+			models: { fresh: { origin: "user", baseUrl: "https://gateway.example/v1", wireApi: "openai_responses", requestModel: "upstream" } },
 		} }]])
 		expect(changed.mock.calls.length).toBe(1)
 	})

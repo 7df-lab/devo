@@ -14,6 +14,7 @@ import { invalidateProviderDependentQueries } from "../../../lib/invalidate-prov
 import { compareConnectedFirst } from "../../../lib/providers"
 import { ConnectProviderDialog } from "../../settings/connect-provider-dialog"
 import { ConnectionDetailDialog } from "../../settings/connection-detail-dialog"
+import { DesktopOAuthActions } from "../../settings/desktop-oauth-actions"
 import { isDesktopOAuthProvider } from "../../settings/desktop-oauth-providers"
 import { ProviderIcon } from "../../settings/provider-icon"
 import { TemplateConnectDialog } from "../../settings/template-connect-dialog"
@@ -101,6 +102,7 @@ export function ProviderSetupStep({
 					Choose from the live catalog or search for a model you want to use.
 				</p>
 			</div>
+			<DesktopOAuthActions onConnected={changed} />
 			<div className="space-y-3">
 				<div className="flex items-center gap-2">
 					<Input

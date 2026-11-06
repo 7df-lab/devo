@@ -158,6 +158,7 @@ impl PythonCellCompletionHook for ServerPythonCellCompletionHook {
             serde_json::json!({
                 "kind": "async_python_completion",
                 "params": {
+                    "workId": event.work_id,
                     "cellId": event.cell_id,
                     "status": event.status,
                     "stdoutTail": event.stdout_tail,

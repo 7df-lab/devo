@@ -16,6 +16,15 @@ impl ServerRuntime {
         turn: RuntimeTurn,
         connection_id: Option<u64>,
     ) -> CancellationToken {
+        if let Some((parent_session_id, _)) = self.child_parent_and_path(session_id).await {
+            self.register_background_work(
+                parent_session_id,
+                format!("agent:{session_id}:{}", turn.native.id),
+            );
+        }
+        // A newly admitted user/queued turn establishes a fresh continuation
+        // boundary. Old post-turn schedulers must not undo an idle interrupt.
+        self.enable_background_goal_wait(session_id);
         let cancel_token = CancellationToken::new();
         self.active_turns
             .insert_cancel_token(session_id, cancel_token.clone())

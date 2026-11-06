@@ -661,6 +661,10 @@ pub struct CredentialListResult {
 #[serde(rename_all = "camelCase")]
 pub struct CredentialSetParams {
     pub provider: String,
+    /// Explicit OAuth connect action: initialize missing transport from its auth
+    /// adapter. Credential synchronization and token refresh must leave this false.
+    #[serde(default, skip_serializing_if = "std::ops::Not::not")]
+    pub configure_connection: bool,
     /// API key secret (write-only). For oauth, prefer `access` instead.
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub secret: Option<String>,
@@ -765,6 +769,7 @@ mod tests {
     fn credential_set_oauth_params_and_masked_info_wire() {
         let params = CredentialSetParams {
             provider: "openai-codex".to_string(),
+            configure_connection: true,
             secret: None,
             id: Some("openai-codex_oauth".to_string()),
             kind: Some("oauth".to_string()),
@@ -776,6 +781,18 @@ mod tests {
         };
         let params_json = serde_json::to_value(&params).expect("serialize credential/set");
         assert_eq!(params_json["kind"], "oauth");
+        assert_eq!(params_json["configureConnection"], true);
+        let sync: CredentialSetParams = serde_json::from_value(
+            serde_json::json!({"provider": "openai-codex", "kind": "oauth"}),
+        )
+        .unwrap();
+        assert!(!sync.configure_connection);
+        assert!(
+            serde_json::to_value(sync)
+                .unwrap()
+                .get("configureConnection")
+                .is_none()
+        );
         assert_eq!(params_json["access"], "secret-access-token");
         assert_eq!(params_json["expiresAt"], 1_700_000_000);
         assert_eq!(

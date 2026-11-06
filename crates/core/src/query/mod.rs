@@ -374,6 +374,7 @@ fn is_injected_context_message(message: &RequestMessage) -> bool {
             RequestContent::Text { text } => {
                 let trimmed = text.trim_start();
                 trimmed.starts_with("<environment_context>")
+                    || trimmed.starts_with("<background_work_results>")
                     || trimmed.starts_with("<available_skills>")
                     || trimmed.starts_with("<language_preference>")
                     || trimmed.starts_with("<context_changes>")
@@ -729,6 +730,9 @@ pub async fn query(
             .filter(|d| !d.is_empty())
         {
             insert_harness_digest_message(&mut messages, digest);
+        }
+        if let Some(results) = options.background_work_results.as_deref() {
+            insert_goal_context_message(&mut messages, results);
         }
         if let Some(goal_context) = session.goal_context_prompt() {
             insert_goal_context_message(&mut messages, &goal_context);

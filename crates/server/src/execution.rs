@@ -597,6 +597,7 @@ model_binding = "main"
 [providers.openrouter]
 enabled = true
 name = "OpenRouter"
+base_url = "https://openrouter.ai/api/v1"
 wire_apis = ["openai_chat_completions"]
 
 [model_bindings.main]

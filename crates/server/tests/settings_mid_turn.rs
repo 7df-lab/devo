@@ -466,7 +466,32 @@ async fn mid_turn_model_switch_reaches_next_model_request() -> Result<()> {
         stream_started: Arc::clone(&started),
         release_stream: Arc::clone(&release),
     });
-    let runtime = build_runtime(temp_dir.path(), provider.clone());
+    // The normalization contract uses an explicit fixture, not a bundled or
+    // mutable remote model definition.
+    let catalog_config = serde_json::from_value(json!({
+        "model": "openai/start-model", "provider": {"openai": {
+            "base_url": "http://127.0.0.1:1/v1", "wire_api": "openai_responses",
+            "models": {
+                "start-model": {},
+                "levels-fixture": {
+                    "reasoning_capability": {"levels": ["off", "minimal", "low", "medium", "high", "xhigh"]},
+                    "reasoning_implementation": "request_parameter"
+                }
+            }
+        }}
+    }))?;
+    devo_core::write_provider_catalog_config(
+        &temp_dir.path().join("providers.json"),
+        &catalog_config,
+    )?;
+    let runtime = TestRuntime::new(provider.clone())
+        .disabled_skills()
+        .default_model("openai/start-model")
+        .catalog(Arc::new(
+            devo_core::PresetModelCatalog::load_from_provider_config(&catalog_config)?,
+        ))
+        .db_file("test_settings_mid_turn.db")
+        .runtime(temp_dir.path());
     let (connection_id, _notifications_rx) = initialize_connection(&runtime).await?;
 
     let session_response = runtime
@@ -565,7 +590,7 @@ async fn mid_turn_model_switch_reaches_next_model_request() -> Result<()> {
 
     // Switch model and exercise the migration vocabulary while the first
     // iteration is blocked. The final `on` maps to the first non-off level
-    // (`minimal` for gpt-5.5's minimal/low/medium/high/xhigh ladder).
+    // (`minimal` for levels-fixture's minimal/low/medium/high/xhigh ladder).
     for (request_id, raw, expected) in [
         (6, "off", "off"),
         (7, "high", "high"),
@@ -581,7 +606,7 @@ async fn mid_turn_model_switch_reaches_next_model_request() -> Result<()> {
                     "params": {
                         "sessionId": session_id.to_string(),
                         "expectedVersion": 0,
-                        "model": { "provider": "openai", "model": "gpt-5.5" },
+                        "model": { "provider": "openai", "model": "levels-fixture" },
                         "settings": { "reasoningEffort": raw }
                     }
                 }),
@@ -593,7 +618,7 @@ async fn mid_turn_model_switch_reaches_next_model_request() -> Result<()> {
                 format!("model and reasoning switch response: {switch_response}")
             })?;
         assert!(switch_result.applied_to_active_turn);
-        assert_eq!(switch_result.session.model.model, "openai/gpt-5.5");
+        assert_eq!(switch_result.session.model.model, "openai/levels-fixture");
         assert_eq!(
             switch_result.session.settings.reasoning_effort.as_deref(),
             Some(expected)
@@ -627,7 +652,7 @@ async fn mid_turn_model_switch_reaches_next_model_request() -> Result<()> {
         .context("second model request should arrive")?;
     assert_eq!(
         second_request,
-        Some(("gpt-5.5".to_string(), Some("enabled".to_string()))),
+        Some(("levels-fixture".to_string(), Some("enabled".to_string()))),
         "the next model request must use the switched model (wire slug, \
          provider routing is orthogonal)"
     );

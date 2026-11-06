@@ -7,6 +7,30 @@ use devo_core::{AuthCredentialConfig, UpsertOauthCredential, upsert_user_auth_oa
 use reqwest::Client;
 use serde::Deserialize;
 
+/// Retain protocol headers required by the OAuth adapter independently of catalog
+/// metadata. Explicit user headers win, including differently cased names.
+pub(crate) fn apply_oauth_adapter_headers(
+    provider_id: &str,
+    auth_kind: Option<devo_core::AuthCredentialKind>,
+    headers: &mut std::collections::BTreeMap<String, String>,
+) {
+    if provider_id != "openai-codex" || auth_kind != Some(devo_core::AuthCredentialKind::Oauth) {
+        return;
+    }
+    for (name, value) in [
+        ("OpenAI-Beta", "responses=experimental"),
+        ("originator", "pi"),
+        ("User-Agent", "pi (linux x64)"),
+    ] {
+        if !headers
+            .keys()
+            .any(|existing| existing.eq_ignore_ascii_case(name))
+        {
+            headers.insert(name.to_string(), value.to_string());
+        }
+    }
+}
+
 /// Refresh slightly before expiry so a token cannot expire during a request.
 const REFRESH_WINDOW_SECONDS: i64 = 60;
 /// ChatGPT/Codex OAuth token endpoint.
@@ -302,5 +326,44 @@ mod tests {
             refresh_decision(&oauth(Some(999), None), 1_000),
             RefreshDecision::ExpiredWithoutRefresh
         );
+    }
+    #[test]
+    fn codex_oauth_headers_are_adapter_owned_and_preserve_user_overrides() {
+        let mut headers = std::collections::BTreeMap::new();
+        apply_oauth_adapter_headers(
+            "openai-codex",
+            Some(AuthCredentialKind::Oauth),
+            &mut headers,
+        );
+        assert_eq!(
+            headers,
+            std::collections::BTreeMap::from([
+                (
+                    "OpenAI-Beta".to_string(),
+                    "responses=experimental".to_string()
+                ),
+                ("originator".to_string(), "pi".to_string()),
+                ("User-Agent".to_string(), "pi (linux x64)".to_string()),
+            ])
+        );
+        let expected = std::collections::BTreeMap::from([
+            ("openai-beta".to_string(), "user-beta".to_string()),
+            ("Originator".to_string(), "user-client".to_string()),
+            ("user-agent".to_string(), "user-agent-value".to_string()),
+        ]);
+        let mut overridden = expected.clone();
+        apply_oauth_adapter_headers(
+            "openai-codex",
+            Some(AuthCredentialKind::Oauth),
+            &mut overridden,
+        );
+        assert_eq!(overridden, expected);
+        let mut api_key_headers = std::collections::BTreeMap::new();
+        apply_oauth_adapter_headers(
+            "openai-codex",
+            Some(AuthCredentialKind::ApiKey),
+            &mut api_key_headers,
+        );
+        assert!(api_key_headers.is_empty());
     }
 }

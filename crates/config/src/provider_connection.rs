@@ -147,7 +147,8 @@ impl AppConfigStore {
     }
 
     /// Saves a connection selected from a live directory baseline. Remote models
-    /// retain only explicit transport settings; existing user metadata is preserved.
+    /// retain only explicit transport settings; authored metadata edits belong in
+    /// `model_overrides` and are merged with existing user settings.
     /// The baseline is not persisted and is never required for offline requests.
     pub fn upsert_provider_connection_with_baseline(
         &mut self,
@@ -439,14 +440,16 @@ fn apply_provider_info(
     if provider.compat.is_some() {
         entry.compat = provider.compat.clone();
     }
-    entry.model_overrides.extend(
-        provider
+    for (model_id, model_info) in &provider.model_overrides {
+        let mut patch = provider_model_config_from_info(model_info.clone());
+        // A settings patch cannot change model ownership or removability.
+        patch.origin = None;
+        entry
             .model_overrides
-            .clone()
-            .into_iter()
-            .map(|(model_id, model)| (model_id, provider_model_config_from_info(model)))
-            .collect::<BTreeMap<_, _>>(),
-    );
+            .entry(model_id.clone())
+            .or_default()
+            .apply_overlay(patch);
+    }
     entry.wire_api = provider.wire_apis.first().copied();
     entry.enabled = Some(provider.enabled);
 }

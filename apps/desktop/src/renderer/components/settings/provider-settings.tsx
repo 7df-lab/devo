@@ -32,6 +32,7 @@ import { SettingsSection } from "./settings-section"
 import { settingsBannerClass, settingsPageClass } from "./settings-surface"
 import { TemplateConnectDialog } from "./template-connect-dialog"
 import { ConnectProviderDialog } from "./connect-provider-dialog"
+import { DesktopOAuthActions } from "./desktop-oauth-actions"
 import { isDesktopOAuthProvider } from "./desktop-oauth-providers"
 import { CustomProviderDialog } from "./custom-provider-dialog"
 import { ConnectionDetailDialog } from "./connection-detail-dialog"
@@ -106,13 +107,20 @@ export function ProviderSettings() {
 	}, [handleSaved])
 
 	if (loading) {
-		return <ProviderSettingsLoading />
+		return (
+			<div className={settingsPageClass}>
+				<ProviderSettingsPageHeader onAddCustom={() => setCustomDialogOpen(true)} />
+				<DesktopOAuthActions onConnected={handleConnected} />
+				<ProviderSettingsLoading />
+			</div>
+		)
 	}
 
 	if (error) {
 		return (
 			<div className={settingsPageClass}>
 				<ProviderSettingsPageHeader onAddCustom={() => setCustomDialogOpen(true)} />
+				<DesktopOAuthActions onConnected={handleConnected} />
 				<div className={settingsBannerClass}>
 					<AlertCircleIcon className="size-4 shrink-0" aria-hidden="true" />
 					<span>Failed to load providers: {error}</span>
@@ -128,6 +136,7 @@ export function ProviderSettings() {
 	return (
 		<div className={settingsPageClass}>
 			<ProviderSettingsPageHeader onAddCustom={() => setCustomDialogOpen(true)} />
+			<DesktopOAuthActions onConnected={handleConnected} />
 
 			{/* Connected providers */}
 			<SettingsSection title="Connected">
@@ -367,8 +376,7 @@ function TemplateProviderRow({
 
 function ProviderSettingsLoading() {
 	return (
-		<div className={settingsPageClass}>
-			<ProviderSettingsPageHeader onAddCustom={() => {}} />
+		<>
 			<SettingsSection title="Connected">
 				{[0, 1].map((index) => (
 					<div key={index} className="flex items-center gap-3 px-4 py-3">
@@ -393,6 +401,6 @@ function ProviderSettingsLoading() {
 					</div>
 				))}
 			</SettingsSection>
-		</div>
+		</>
 	)
 }

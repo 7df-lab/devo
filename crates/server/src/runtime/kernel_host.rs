@@ -527,11 +527,25 @@ mod tests {
         let data_root = tempfile::TempDir::new().expect("temp dir");
         let cwd = data_root.path().join("workspace");
         std::fs::create_dir_all(&cwd).expect("workspace dir");
+        let config: devo_core::ProviderConfigFile = serde_json::from_value(json!({
+            "model": "fixture/model",
+            "provider": { "fixture": {
+                "base_url": "http://127.0.0.1:1/v1",
+                "wire_api": "openai_chat_completions",
+                "models": { "model": { "context_window": 128000 } }
+            } }
+        }))
+        .expect("explicit model fixture");
+        devo_core::write_provider_catalog_config(
+            &data_root.path().join(devo_core::PROVIDER_CONFIG_FILE_NAME),
+            &config,
+        )
+        .expect("save model fixture");
         let runtime = TestRuntime::new(Arc::new(
             NoopProvider::text().named("noop-compact-status-provider"),
         ))
         .catalog(Arc::new(
-            PresetModelCatalog::load().expect("preset model catalog"),
+            PresetModelCatalog::load_from_provider_config(&config).expect("saved model catalog"),
         ))
         .db_file("compact_status_wiring.db")
         .runtime(data_root.path());

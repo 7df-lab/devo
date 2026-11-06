@@ -232,6 +232,15 @@ async fn provider_api_key(
     };
     let credential_id =
         crate::provider_config::resolve_provider_credential_id(&provider.id, &config, &auth);
+    let auth_kind = credential_id
+        .as_deref()
+        .and_then(|id| auth.credentials.get(id))
+        .map(|credential| credential.kind);
+    crate::oauth_refresh::apply_oauth_adapter_headers(
+        &provider.id,
+        auth_kind,
+        &mut provider.headers,
+    );
     if provider.id == "openai-codex"
         && let Some(account_id) = credential_id
             .as_deref()
@@ -682,9 +691,17 @@ mod tests {
             ),
             (
                 Some("qa-access".to_string()),
-                [("chatgpt-account-id".to_string(), "qa-account".to_string())]
-                    .into_iter()
-                    .collect()
+                [
+                    ("chatgpt-account-id".to_string(), "qa-account".to_string()),
+                    (
+                        "OpenAI-Beta".to_string(),
+                        "responses=experimental".to_string()
+                    ),
+                    ("originator".to_string(), "pi".to_string()),
+                    ("User-Agent".to_string(), "pi (linux x64)".to_string()),
+                ]
+                .into_iter()
+                .collect()
             )
         );
     }

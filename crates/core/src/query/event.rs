@@ -156,6 +156,9 @@ pub struct QueryOptions {
     /// Continual Harness digest (after skills, before goal). Empty/None skips.
     /// Host loads via `devo_harness::HarnessDigestInjector` at turn start.
     pub harness_digest: Option<String>,
+    /// Retained terminal output from managed work, injected before goal context.
+    /// This is tool data, not user input or a durable conversation message.
+    pub background_work_results: Option<String>,
 }
 
 /// Live per-session settings shared with a running turn. The server writes

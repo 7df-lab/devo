@@ -106,7 +106,7 @@ pub struct ProviderConfigEntry {
     /// Optional provider-hosted web fetch behavior.
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub web_fetch: Option<WebFetchConfig>,
-    /// Sparse patches applied to inherited models before `models`.
+    /// Explicit user patches applied after this layer's `models`.
     #[serde(default, skip_serializing_if = "BTreeMap::is_empty")]
     pub model_overrides: BTreeMap<String, ProviderModelConfig>,
     /// Models keyed by the model id sent to the provider.
@@ -438,6 +438,15 @@ impl ProviderConfigFile {
         };
 
         for (provider_id, provider) in &self.providers {
+            let mut provider = provider.clone();
+            for (model_id, patch) in provider.model_overrides.clone() {
+                provider
+                    .models
+                    .entry(model_id)
+                    .or_default()
+                    .apply_overlay(patch);
+            }
+
             let wire_api = provider
                 .wire_api
                 .unwrap_or(ProviderWireApi::OpenAIChatCompletions);
@@ -488,7 +497,7 @@ impl ProviderConfigFile {
                 );
                 section
                     .model_overrides
-                    .insert(model_ref, model.to_model_override(model_wire_api));
+                    .insert(model_ref, model.to_model_override());
             }
         }
 
@@ -801,7 +810,7 @@ impl ProviderModelConfig {
         replace_some!(default_variant);
     }
 
-    fn to_model_override(&self, provider_wire_api: ProviderWireApi) -> ModelOverrideConfig {
+    fn to_model_override(&self) -> ModelOverrideConfig {
         ModelOverrideConfig {
             display_name: self.name.clone(),
             context_window: self.context_window,
@@ -810,7 +819,8 @@ impl ProviderModelConfig {
             temperature: self.temperature,
             top_p: self.top_p,
             top_k: self.top_k,
-            provider: Some(self.wire_api.unwrap_or(provider_wire_api)),
+            // Inherited provider defaults are not authored model overrides.
+            provider: self.wire_api,
             reasoning_capability: self.reasoning_capability.clone(),
             reasoning: self.reasoning,
             thinking_level_map: self.thinking_level_map.clone(),
@@ -877,6 +887,9 @@ fn merge_provider_entry(base: &mut ProviderConfigEntry, overlay: ProviderConfigE
     }
     replace_some!(web_search);
     replace_some!(web_fetch);
+    for (model_id, overlay_model) in overlay.models {
+        merge_model_entry(base.models.entry(model_id).or_default(), overlay_model);
+    }
     for (model_id, model_override) in overlay.model_overrides {
         merge_model_entry(
             base.models.entry(model_id.clone()).or_default(),
@@ -886,9 +899,6 @@ fn merge_provider_entry(base: &mut ProviderConfigEntry, overlay: ProviderConfigE
             base.model_overrides.entry(model_id).or_default(),
             model_override,
         );
-    }
-    for (model_id, overlay_model) in overlay.models {
-        merge_model_entry(base.models.entry(model_id).or_default(), overlay_model);
     }
 }
 

@@ -196,24 +196,39 @@ impl ToolHandler for IpythonHandler {
                             let session_id = ctx.session_id.to_string();
                             let session_dir = ctx.session_dir.clone();
                             let kernel_for_snap = Arc::clone(kernel);
+                            let coordinator = ctx.agent_coordinator.clone();
+                            let owner_session_id = ctx.session_id;
+                            let work_id = format!("python:{}:{cell_id}", uuid::Uuid::new_v4());
+                            if let Some(coordinator) = &coordinator {
+                                coordinator
+                                    .background_work_started(owner_session_id, work_id.clone());
+                            }
                             inflight.park(move |completed_id, result| {
                                 let status_ok = matches!(&result, Ok(out) if out.status == "ok");
+                                let (status, stdout, stderr, error) = match &result {
+                                    Ok(out) => (
+                                        out.status.clone(),
+                                        output_tail(&out.stdout, PYTHON_CELL_OUTPUT_TAIL_CHARS),
+                                        output_tail(&out.stderr, PYTHON_CELL_OUTPUT_TAIL_CHARS),
+                                        out.error_value.clone(),
+                                    ),
+                                    Err(err) => (
+                                        "error".into(),
+                                        String::new(),
+                                        String::new(),
+                                        Some(err.to_string()),
+                                    ),
+                                };
+                                let terminal = json!({
+                                    "cellId": completed_id,
+                                    "status": status,
+                                    "stdoutTail": stdout,
+                                    "stderrTail": stderr,
+                                    "error": error.as_deref().map(|error| output_tail(error, PYTHON_CELL_OUTPUT_TAIL_CHARS)),
+                                }).to_string();
                                 if let Some(hook) = completion {
-                                    let (status, stdout, stderr, error) = match &result {
-                                        Ok(out) => (
-                                            out.status.clone(),
-                                            output_tail(&out.stdout, PYTHON_CELL_OUTPUT_TAIL_CHARS),
-                                            output_tail(&out.stderr, PYTHON_CELL_OUTPUT_TAIL_CHARS),
-                                            out.error_value.clone(),
-                                        ),
-                                        Err(err) => (
-                                            "error".into(),
-                                            String::new(),
-                                            String::new(),
-                                            Some(err.to_string()),
-                                        ),
-                                    };
                                     hook.completed(PythonCellCompletionEvent {
+                                        work_id: work_id.clone(),
                                         session_id,
                                         cell_id: completed_id,
                                         status,
@@ -221,6 +236,9 @@ impl ToolHandler for IpythonHandler {
                                         stderr_tail: stderr,
                                         error,
                                     });
+                                }
+                                if let Some(coordinator) = coordinator {
+                                    coordinator.background_work_completed(owner_session_id, work_id, terminal);
                                 }
                                 if status_ok {
                                     let dir = session_dir;

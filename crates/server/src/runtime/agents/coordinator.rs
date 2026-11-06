@@ -256,6 +256,14 @@ impl ServerRuntime {
 
 #[async_trait::async_trait]
 impl AgentToolCoordinator for ServerRuntime {
+    fn background_work_started(&self, session_id: SessionId, work_id: String) {
+        self.register_background_work(session_id, work_id);
+    }
+
+    fn background_work_completed(&self, session_id: SessionId, work_id: String, result: String) {
+        self.complete_background_work(session_id, work_id, result);
+    }
+
     async fn spawn_agent(
         self: Arc<Self>,
         params: devo_protocol::SpawnAgentParams,

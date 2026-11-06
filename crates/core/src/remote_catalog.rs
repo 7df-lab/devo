@@ -328,8 +328,10 @@ pub fn convert_models_dev_api(api: &Value) -> Result<(ProviderConfigFile, usize,
 }
 
 fn model_from_models_dev(remote: &Value) -> ProviderModelConfig {
-    let mut model = ProviderModelConfig::default();
-    model.origin = Some(devo_protocol::ProviderModelOrigin::Remote);
+    let mut model = ProviderModelConfig {
+        origin: Some(devo_protocol::ProviderModelOrigin::Remote),
+        ..ProviderModelConfig::default()
+    };
 
     if let Some(name) = remote.get("name").and_then(Value::as_str) {
         model.name = Some(name.to_string());

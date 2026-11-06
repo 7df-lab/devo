@@ -103,7 +103,12 @@ export function ConnectionDetailDialog({
 			const client = getBaseClient()
 			if (!client) throw new Error("Not connected to server")
 			await client.provider.upsert({
-				provider: { ...provider, models: { [modelId]: { ...model, origin: "user" } } },
+				provider: { ...provider, models: { [modelId]: {
+					origin: "user",
+					baseUrl: model.baseUrl,
+					wireApi: model.wireApi,
+					requestModel: model.requestModel,
+				} } },
 			})
 			onChanged()
 		} catch (error) {

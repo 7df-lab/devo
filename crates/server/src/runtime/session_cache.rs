@@ -290,7 +290,9 @@ impl ServerRuntime {
     }
 
     pub(crate) async fn is_parent_session_pinned(&self, session_id: SessionId) -> bool {
-        if self.active_turns.has_session(session_id).await {
+        if self.has_pending_background_work(session_id)
+            || self.active_turns.has_session(session_id).await
+        {
             return true;
         }
         let connections = self.connections.lock().await;
@@ -320,12 +322,14 @@ impl ServerRuntime {
                 handle.shutdown().await;
             }
             self.goal_stores.lock().await.remove(&child_session_id);
+            self.clear_background_work(child_session_id);
         }
 
         if let Some(handle) = self.remove_session_actor(parent_session_id).await {
             handle.shutdown().await;
         }
         self.goal_stores.lock().await.remove(&parent_session_id);
+        self.clear_background_work(parent_session_id);
         self.session_lru.lock().await.remove(&parent_session_id);
         self.agent_registries
             .lock()

@@ -25,6 +25,7 @@ const logins: Array<Deferred<{ access: string }>> = []
 const writes: Array<{
 	provider: string
 	access: string
+	configureConnection?: boolean
 	gate: Deferred<void>
 }> = []
 let stored: Record<string, string> = {}
@@ -90,12 +91,12 @@ mock.module("./provider-oauth", () => ({
 mock.module("./devo-manager", () => ({
 	requestNative: (
 		method: string,
-		params: { provider: string; access: string },
+		params: { provider: string; access: string; configureConnection?: boolean },
 	) => {
 		if (method !== "credential/set")
 			throw new Error(`Unexpected RPC: ${method}`)
 		const gate = deferred<void>()
-		writes.push({ provider: params.provider, access: params.access, gate })
+		writes.push({ provider: params.provider, access: params.access, configureConnection: params.configureConnection, gate })
 		return gate.promise.then(() => {
 			stored[params.provider] = params.access
 		})
@@ -220,6 +221,17 @@ describe("Desktop window recreation", () => {
 })
 
 describe("Desktop OAuth credential cancellation", () => {
+	test("explicit OAuth login configures a connection only after credentials arrive", async () => {
+		const pending = login(1, "openai-codex")
+		expect(writes).toHaveLength(0)
+		logins[0].resolve({ access: "new" })
+		await flush()
+		expect(writes.map(({ provider, configureConnection }) => ({ provider, configureConnection })))
+			.toEqual([{ provider: "openai-codex", configureConnection: true }])
+		writes[0].gate.resolve()
+		await pending
+	})
+
 	test("a late OAuth response after cancel cannot start credential/set", async () => {
 		const pending = login(1)
 		expect(cancel(1)).toBe(true)

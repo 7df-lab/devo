@@ -1,4 +1,3 @@
-use std::marker::PhantomData;
 use std::path::PathBuf;
 
 use async_trait::async_trait;
@@ -9,37 +8,8 @@ use devo_protocol::approx_tokens_from_byte_count;
 use devo_protocol::{ContentBlock, Message, Model, Role};
 
 // ---------------------------------------------------------------------------
-// Contextual user fragment traits and registration
+// Contextual user fragment traits
 // ---------------------------------------------------------------------------
-
-/// Type-erased registration for a contextual user fragment.
-///
-/// Implementations are used by context filtering code to recognize injected
-/// fragments without constructing the concrete context payload.
-#[allow(dead_code)]
-pub(crate) trait FragmentRegistration: Sync {
-    fn matches_text(&self, text: &str) -> bool;
-}
-
-#[allow(dead_code)]
-pub(crate) struct FragmentRegistrationProxy<T> {
-    _marker: PhantomData<fn() -> T>,
-}
-
-#[allow(dead_code)]
-impl<T> FragmentRegistrationProxy<T> {
-    pub(crate) const fn new() -> Self {
-        Self {
-            _marker: PhantomData,
-        }
-    }
-}
-
-impl<T: ContextualUserFragment> FragmentRegistration for FragmentRegistrationProxy<T> {
-    fn matches_text(&self, text: &str) -> bool {
-        T::matches_text(text)
-    }
-}
 
 /// Context payload that is injected as a message fragment.
 ///

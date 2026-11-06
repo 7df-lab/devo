@@ -447,14 +447,14 @@
         "agentCapabilities": {
           "default": {
             "loadSession": false,
-            "promptCapabilities": {
-              "image": false,
-              "audio": false,
-              "embeddedContext": false
-            },
             "mcpCapabilities": {
               "http": false,
               "sse": false
+            },
+            "promptCapabilities": {
+              "audio": false,
+              "embeddedContext": false,
+              "image": false
             },
             "sessionCapabilities": {}
           },
@@ -517,9 +517,9 @@
             },
             "promptCapabilities": {
               "default": {
-                "image": false,
                 "audio": false,
-                "embeddedContext": false
+                "embeddedContext": false,
+                "image": false
               },
               "allOf": [
                 {
@@ -40146,6 +40146,10 @@
             "string",
             "null"
           ]
+        },
+        "configureConnection": {
+          "description": "Explicit OAuth connect action: initialize missing transport from its auth adapter. Credential synchronization and token refresh must leave this false.",
+          "type": "boolean"
         },
         "enterpriseUrl": {
           "type": [

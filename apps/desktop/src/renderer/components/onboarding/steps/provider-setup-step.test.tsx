@@ -139,8 +139,8 @@ async function render() {
 		),
 	)
 }
-async function click(text: string) {
-	const button = [...mount.querySelectorAll("button")].find((button) =>
+async function click(text: string, selector = "button") {
+	const button = [...mount.querySelectorAll<HTMLButtonElement>(selector)].find((button) =>
 		button.textContent?.includes(text),
 	)
 	if (!button) throw new Error(`Missing button ${text}`)
@@ -217,7 +217,7 @@ test("onboarding reuses API and OAuth dialogs and catalog refetches preserve OAu
 	await render()
 	expect(oauthProps.provider).toBe(original)
 	await act(async () => oauthProps.onClose())
-	await click("ChatGPT")
+	await click("ChatGPT", '[aria-label="Provider catalog"] button')
 	expect(mount.textContent).toContain("Manage ChatGPT")
 })
 

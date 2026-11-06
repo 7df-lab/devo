@@ -323,6 +323,10 @@ impl ServerRuntime {
             .await
             .entry(parent_session_id)
             .or_default();
+        self.register_background_work(
+            parent_session_id,
+            format!("agent:{child_session_id}:startup"),
+        );
         self.register_child_agent(
             parent_session_id,
             child_session_id,
@@ -409,6 +413,12 @@ impl ServerRuntime {
                 .await
             {
                 Ok(_) => {
+                    // The turn-specific reservation is registered before execution.
+                    start_runtime.complete_background_work(
+                        start_parent_session_id,
+                        format!("agent:{start_child_session_id}:startup"),
+                        String::new(),
+                    );
                     if start_runtime
                         .agent_close_requested(start_parent_session_id, start_child_session_id)
                         .await
@@ -588,6 +598,14 @@ impl ServerRuntime {
         session_id: SessionId,
     ) {
         let sid = session_id.to_string();
+        if let Some(handle) = self.session(session_id).await
+            && handle
+                .pending_queue_snapshot()
+                .await
+                .is_some_and(|queue| queue.pending_count > 0)
+        {
+            return;
+        }
         let notices = crate::runtime::kernel_host::take_bash_notices(&sid);
         if notices.is_empty() {
             return;
@@ -596,6 +614,11 @@ impl ServerRuntime {
         let mut completion_notices = Vec::new();
         let mut deferred = Vec::new();
         for notice in notices {
+            // Rust callbacks publish terminal output before settling the goal
+            // barrier; matching legacy notices must not start another turn.
+            if self.background_notice_is_tracked(session_id, &notice) {
+                continue;
+            }
             match notice.get("kind").and_then(|k| k.as_str()) {
                 Some("async_python_completion") | Some("async_bash_completion") => {
                     completion_notices.push(notice);
@@ -656,6 +679,15 @@ impl ServerRuntime {
             ToolCallError::InvalidInput(format!("session not found: {session_id}"))
         })?;
         let _state_change_guard = session_handle.lock_state_change().await;
+        if let Some((parent_session_id, _)) = self.child_parent_and_path(session_id).await
+            && self
+                .agent_close_requested(parent_session_id, session_id)
+                .await
+        {
+            return Err(ToolCallError::InvalidInput(
+                "child agent is closed".to_string(),
+            ));
+        }
         if let Some(rollout_path) = session_handle.rollout_path().await.flatten()
             && self.rollout_store.journal_is_closed(&rollout_path)
         {
@@ -720,6 +752,12 @@ impl ServerRuntime {
                 queued_metadata,
                 Utc::now(),
             );
+            if let Some((parent_session_id, _)) = self.child_parent_and_path(session_id).await {
+                self.register_background_work(
+                    parent_session_id,
+                    format!("agent:{session_id}:queued:{}", item.id),
+                );
+            }
             session_handle
                 .enqueue_pending_turn_input(item.clone())
                 .await;
@@ -874,8 +912,23 @@ impl ServerRuntime {
         content: String,
     ) -> Result<AgentRoute, ToolCallError> {
         let route = self.resolve_agent_route(from_session_id, target).await?;
+        let handle = self.session(route.to_session_id).await.ok_or_else(|| {
+            ToolCallError::InvalidInput("child session no longer exists".to_string())
+        })?;
+        let _guard = handle.lock_state_change().await;
+        if self
+            .agent_close_requested(from_session_id, route.to_session_id)
+            .await
+        {
+            return Err(ToolCallError::InvalidInput(
+                "child agent is closed".to_string(),
+            ));
+        }
+        let message_id = uuid::Uuid::new_v4().to_string();
+        let work_id = format!("agent:{}:mail:{message_id}", route.to_session_id);
+        self.register_background_work(from_session_id, work_id.clone());
         let message = devo_protocol::AgentMailboxMessage {
-            message_id: String::new(),
+            message_id,
             from_session_id,
             to_session_id: route.to_session_id,
             from_agent_path: route.from_agent_path.clone(),
@@ -884,39 +937,21 @@ impl ServerRuntime {
             sequence: 0,
             created_at: Utc::now(),
         };
-        self.mailbox(route.to_session_id)
-            .await
-            .send(message)
-            .await
-            .map_err(|error| ToolCallError::InternalError(error.to_string()))?;
+        if let Err(error) = self.mailbox(route.to_session_id).await.send(message).await {
+            self.complete_background_work(from_session_id, work_id, error.to_string());
+            return Err(ToolCallError::InternalError(error.to_string()));
+        }
         Ok(route.clone())
     }
 
-    pub(in crate::runtime) async fn child_can_accept_next_turn(
-        &self,
-        session_id: SessionId,
-    ) -> bool {
-        let Some(reservation) = self.session_turn_reservation_snapshot(session_id).await else {
-            return false;
-        };
-        !reservation.max_turns.is_some_and(|max_turns| {
-            max_turns == 0
-                || reservation
-                    .active_turn
-                    .as_ref()
-                    .is_some_and(|turn| turn.native.sequence >= max_turns)
-                || reservation
-                    .latest_turn
-                    .as_ref()
-                    .is_some_and(|turn| turn.native.sequence >= max_turns)
-        })
-    }
     pub(in crate::runtime) async fn drain_child_mailbox_into_user_turns(
         self: &Arc<Self>,
         child_session_id: SessionId,
     ) -> Result<(), ToolCallError> {
         let messages = self.mailbox(child_session_id).await.drain().await;
+        let mut first_error = None;
         for message in messages {
+            let work_id = format!("agent:{child_session_id}:mail:{}", message.message_id);
             let parent_turn_id = self
                 .active_turn_id_for_session(message.from_session_id)
                 .await;
@@ -932,23 +967,39 @@ impl ServerRuntime {
                 )
                 .await;
             }
-            self.start_runtime_turn(
-                child_session_id,
-                message.content.clone(),
-                message.content,
-                Some(subagent_usage_owner_pending_metadata(
-                    message.from_session_id,
-                    parent_turn_id,
-                )),
-            )
-            .await?;
+            let result = self
+                .start_runtime_turn(
+                    child_session_id,
+                    message.content.clone(),
+                    message.content,
+                    Some(subagent_usage_owner_pending_metadata(
+                        message.from_session_id,
+                        parent_turn_id,
+                    )),
+                )
+                .await;
+            // The admitted turn (or queued input) is registered before releasing
+            // its mailbox ticket, leaving no parent-continuation gap.
+            let failure = result
+                .as_ref()
+                .err()
+                .map(ToString::to_string)
+                .unwrap_or_default();
+            self.complete_background_work(message.from_session_id, work_id, failure);
+            if let Err(error) = result {
+                first_error.get_or_insert(error);
+                continue;
+            }
             if let Some((parent_session_id, _)) = self.child_parent_and_path(child_session_id).await
             {
                 self.set_agent_status(parent_session_id, child_session_id, SubagentStatus::Running)
                     .await;
             }
         }
-        Ok(())
+        match first_error {
+            Some(error) => Err(error),
+            None => Ok(()),
+        }
     }
 
     pub(in crate::runtime) async fn resolve_child_agent(
@@ -1144,9 +1195,6 @@ impl ServerRuntime {
         turn_id: devo_protocol::native::ids::TurnId,
         status: SubagentStatus,
     ) -> Option<String> {
-        if status != SubagentStatus::Failed {
-            return None;
-        }
         let session_handle = self.sessions.lock().await.get(&child_session_id).cloned()?;
         let snapshot = session_handle.spawn_snapshot().await?;
         subagent_terminal_status_detail_from_stable_items(&snapshot.stable_items, turn_id, status)
@@ -1233,6 +1281,21 @@ impl ServerRuntime {
             }
             _ => self.session_agent_path(child_session_id).await,
         };
+        let completion = match status {
+            SubagentStatus::Spawning | SubagentStatus::Running => None,
+            SubagentStatus::WaitingForInput
+            | SubagentStatus::Completed
+            | SubagentStatus::Failed
+            | SubagentStatus::Interrupted
+            | SubagentStatus::Canceled
+            | SubagentStatus::Closed => {
+                let status = status.as_str();
+                let detail = text.as_deref().unwrap_or_default();
+                Some(format!(
+                    "[system] Child agent {agent_path} ({child_session_id}) {status}.\n{detail}"
+                ))
+            }
+        };
         self.output_buffer(parent_session_id)
             .await
             .push(devo_protocol::AgentOutputEvent {
@@ -1246,6 +1309,14 @@ impl ServerRuntime {
                 created_at: Utc::now(),
             })
             .await;
+        if let Some(completion) = completion {
+            // A late completion from a previous turn must not release a reused child.
+            self.complete_background_work(
+                parent_session_id,
+                format!("agent:{child_session_id}:{turn_id}"),
+                completion,
+            );
+        }
     }
 
     async fn agent_close_requested(
@@ -1270,6 +1341,22 @@ impl ServerRuntime {
                 .unwrap_or_default()
         };
         for child_session_id in child_session_ids {
+            let was_spawning = {
+                let mut registries = self.agent_registries.lock().await;
+                registries
+                    .get_mut(&parent_session_id)
+                    .and_then(|registry| registry.agents.get_mut(&child_session_id))
+                    .is_some_and(|metadata| {
+                        if metadata.status == SubagentStatus::Spawning {
+                            // Prevent the startup task from launching after its hook returns.
+                            metadata.close_requested = true;
+                            true
+                        } else {
+                            false
+                        }
+                    })
+            };
+            let turn_id = self.active_turns.active_turn_id(child_session_id).await;
             let _ = self.interrupt_child_runtime_work(child_session_id).await;
             self.set_agent_status(
                 parent_session_id,
@@ -1277,6 +1364,33 @@ impl ServerRuntime {
                 SubagentStatus::Interrupted,
             )
             .await;
+            if let Some(turn_id) = turn_id
+                && self.recent_terminal_turn_status(turn_id).await.is_none()
+            {
+                self.record_subagent_status_event(
+                    parent_session_id,
+                    child_session_id,
+                    SubagentStatus::Interrupted,
+                    turn_id,
+                )
+                .await;
+            }
+            if was_spawning {
+                if turn_id.is_none() {
+                    self.record_subagent_status_event(
+                        parent_session_id,
+                        child_session_id,
+                        SubagentStatus::Interrupted,
+                        TurnId::new(),
+                    )
+                    .await;
+                }
+                self.complete_background_work(
+                    parent_session_id,
+                    format!("agent:{child_session_id}:startup"),
+                    format!("[system] Child agent {child_session_id} startup interrupted."),
+                );
+            }
         }
     }
 
@@ -1317,7 +1431,9 @@ impl ServerRuntime {
         // which independently resolves and records the terminal "closed" status
         // once it sees `close_requested`. Track whether a turn was actually in
         // flight so we don't also send a duplicate closed notification below.
-        let had_active_turn = self.active_turns.has_session(child_session_id).await;
+        self.discard_child_queued_work(parent_session_id, child_session_id)
+            .await;
+        let active_turn_id = self.active_turns.active_turn_id(child_session_id).await;
         let interrupted_turn = self.interrupt_child_runtime_work(child_session_id).await;
         if already_terminal && interrupted_turn.is_none() {
             let status = self
@@ -1338,7 +1454,18 @@ impl ServerRuntime {
             .await;
             self.handle_subagent_turn_completed(child_session_id, &turn)
                 .await;
-        } else if !had_active_turn {
+        } else if let Some(turn_id) = active_turn_id {
+            // Hard-abort recovery may have no actor-owned turn left to return.
+            if self.recent_terminal_turn_status(turn_id).await.is_none() {
+                self.record_subagent_status_event(
+                    parent_session_id,
+                    child_session_id,
+                    SubagentStatus::Closed,
+                    turn_id,
+                )
+                .await;
+            }
+        } else {
             self.send_closed_notification(parent_session_id, child_session_id)
                 .await;
         }
@@ -1365,6 +1492,11 @@ impl ServerRuntime {
             TurnId::new(),
         )
         .await;
+        self.complete_background_work(
+            parent_session_id,
+            format!("agent:{child_session_id}:startup"),
+            format!("[system] Child agent {child_session_id} closed before startup completed."),
+        );
         self.run_subagent_stop_hook(child_session_id).await;
     }
 
@@ -1862,7 +1994,7 @@ fn subagent_terminal_status_detail_from_stable_items(
     turn_id: devo_protocol::native::ids::TurnId,
     status: SubagentStatus,
 ) -> Option<String> {
-    if status != SubagentStatus::Failed {
+    if matches!(status, SubagentStatus::Spawning | SubagentStatus::Running) {
         return None;
     }
     stable_items.iter().rev().find_map(|item| {

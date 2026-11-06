@@ -14,6 +14,7 @@ use crate::ProtocolErrorCode;
 use crate::SuccessResponse;
 
 use super::ServerRuntime;
+use super::credential_binding::{bind_provider_credential_id, oauth_transport_defaults};
 
 fn mask_secret(secret: &str) -> String {
     let trimmed = secret.trim();
@@ -24,58 +25,6 @@ fn mask_secret(secret: &str) -> String {
         return "*".repeat(trimmed.len().max(4));
     }
     format!("****{}", &trimmed[trimmed.len().saturating_sub(4)..])
-}
-
-/// Ensures the provider entry points at the newly written credential.
-///
-/// The entry is patched in whichever catalog file it actually lives in —
-/// `providers.json` or `custom-providers.json`. Writing a fresh stub into
-/// `providers.json` when the full Connection lives in the custom file would
-/// later be "migrated" over it by the former custom-provider migration and
-/// clobber `base_url`/`wire_api`/`models`, leaving the provider unusable.
-fn bind_provider_credential_id(
-    user_dir: &std::path::Path,
-    provider_id: &str,
-    credential_id: &str,
-) -> Result<(), String> {
-    let config_file = user_dir.join(PROVIDER_CONFIG_FILE_NAME);
-    let custom_file = user_dir.join(devo_core::CUSTOM_PROVIDER_CONFIG_FILE_NAME);
-    let mut config =
-        devo_core::read_provider_catalog_config(&config_file).map_err(|error| error.to_string())?;
-
-    if let Some(entry) = config.providers.get_mut(provider_id) {
-        entry.credential = Some(credential_id.to_string());
-        if entry.enabled.is_none() {
-            entry.enabled = Some(true);
-        }
-        return devo_core::write_provider_catalog_config(&config_file, &config)
-            .map_err(|error| error.to_string());
-    }
-
-    let mut custom =
-        devo_core::read_provider_catalog_config(&custom_file).map_err(|error| error.to_string())?;
-    if let Some(entry) = custom.providers.get_mut(provider_id) {
-        entry.credential = Some(credential_id.to_string());
-        if entry.enabled.is_none() {
-            entry.enabled = Some(true);
-        }
-        return devo_core::write_provider_catalog_config(&custom_file, &custom)
-            .map_err(|error| error.to_string());
-    }
-
-    // Binding credentials is not permission to adopt a remote endpoint. A new
-    // credential-only connection stays uncallable until explicitly configured.
-    config.providers.insert(
-        provider_id.to_string(),
-        devo_core::ProviderConfigEntry {
-            name: Some(provider_id.to_string()),
-            credential: Some(credential_id.to_string()),
-            enabled: Some(true),
-            ..Default::default()
-        },
-    );
-    devo_core::write_provider_catalog_config(&config_file, &config)
-        .map_err(|error| error.to_string())
 }
 
 impl ServerRuntime {
@@ -307,6 +256,27 @@ impl ServerRuntime {
             .unwrap_or("api_key")
             .trim()
             .to_ascii_lowercase();
+        let transport = if params.configure_connection {
+            if kind != "oauth" {
+                return self.error_response(
+                    request_id,
+                    ProtocolErrorCode::InvalidParams,
+                    "configureConnection is only valid for OAuth credentials",
+                );
+            }
+            match oauth_transport_defaults(provider) {
+                Some(transport) => Some(transport),
+                None => {
+                    return self.error_response(
+                        request_id,
+                        ProtocolErrorCode::InvalidParams,
+                        format!("provider {provider} has no retained OAuth transport adapter"),
+                    );
+                }
+            }
+        } else {
+            None
+        };
         // Use the same config home as the process store and session contexts.
         // This also keeps isolated runtimes from writing credentials to the
         // machine-wide user config directory.
@@ -355,7 +325,9 @@ impl ServerRuntime {
                     format!("failed to persist oauth credential: {error}"),
                 );
             }
-            if let Err(error) = bind_provider_credential_id(&user_dir, provider, &credential_id) {
+            if let Err(error) =
+                bind_provider_credential_id(&user_dir, provider, &credential_id, transport)
+            {
                 return self.error_response(
                     request_id,
                     ProtocolErrorCode::InternalError,
@@ -393,7 +365,9 @@ impl ServerRuntime {
                     format!("failed to persist api key credential: {error}"),
                 );
             }
-            if let Err(error) = bind_provider_credential_id(&user_dir, provider, &credential_id) {
+            if let Err(error) =
+                bind_provider_credential_id(&user_dir, provider, &credential_id, transport)
+            {
                 return self.error_response(
                     request_id,
                     ProtocolErrorCode::InternalError,
@@ -524,8 +498,10 @@ impl ServerRuntime {
                 .expect("app config store mutex should not be poisoned");
             let existing = store.effective_config().provider_catalog_config();
             let mut provider = params.provider;
+            let authored_overrides = &provider.model_overrides;
             provider.models.retain(|model_id, model| {
                 model.origin != Some(devo_protocol::ProviderModelOrigin::Remote)
+                    || authored_overrides.contains_key(model_id)
                     || params.default_model.as_deref().is_some_and(|selected| {
                         selected == model_id || selected == format!("{provider_id}/{model_id}")
                     })
@@ -1145,7 +1121,8 @@ mod tests {
         )
         .expect("write custom provider catalog");
 
-        bind_provider_credential_id(dir.path(), "ccproxy", "ccproxy").expect("bind");
+        bind_provider_credential_id(dir.path(), "ccproxy", "ccproxy", /*transport*/ None)
+            .expect("bind");
 
         let connection = devo_core::read_provider_catalog_config(
             &dir.path().join(devo_core::PROVIDER_CONFIG_FILE_NAME),
@@ -1175,7 +1152,13 @@ mod tests {
     #[test]
     fn binding_credentials_requires_explicit_connection_transport() {
         let dir = tempfile::tempdir().expect("tempdir");
-        bind_provider_credential_id(dir.path(), "anthropic", "anthropic").expect("bind credential");
+        bind_provider_credential_id(
+            dir.path(),
+            "anthropic",
+            "anthropic",
+            /*transport*/ None,
+        )
+        .expect("bind credential");
         let user = devo_core::read_provider_catalog_config(
             &dir.path().join(devo_core::PROVIDER_CONFIG_FILE_NAME),
         )
@@ -1244,7 +1227,8 @@ mod tests {
         )
         .expect("write custom provider catalog");
 
-        bind_provider_credential_id(dir.path(), "fresh", "fresh").expect("bind");
+        bind_provider_credential_id(dir.path(), "fresh", "fresh", /*transport*/ None)
+            .expect("bind");
 
         let connection = devo_core::read_provider_catalog_config(
             &dir.path().join(devo_core::PROVIDER_CONFIG_FILE_NAME),

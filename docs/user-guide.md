@@ -13,6 +13,29 @@
 Detailed runtime, installation, and configuration guidance. For the short
 introduction and quick start, see the README.
 
+## Goals and managed background work
+
+An active goal continues after a turn ends naturally. If that session still owns
+managed background commands, a parked Python cell, or child-agent work, Devo
+waits for their terminal events instead of starting repeated goal turns. The
+session stays idle and accepts user input and controls while it waits.
+
+Terminal output is retained before the wait is released and included as tool
+context in the next model request. All outstanding work must settle; failure,
+and cancellation release their own dependency so the parent can decide what to
+do. A child waiting on an interactive approval/input request remains pending
+until its turn resumes or ends. Queued user input takes priority over automatic
+completion follow-ups and goal continuation. Pause, clear, replacement, and
+session interruption invalidate the old automatic wake.
+
+Only work managed by Devo is covered. Arbitrary detached OS processes and
+client-owned terminals are not goal dependencies. The wait is runtime-only:
+server restart does not restore or wait for old processes. Existing goal
+recovery/resume rules still apply, and stale completion callbacks are ignored
+after session teardown. Result context retains at most 32 completions with an
+8,000-character tail per completion; full output remains in the existing task or
+kernel result store where supported.
+
 ## IPython: a persistent workspace for recursive agents
 
 In Devo's Recursive Agent mode, the model-facing `ipython` tool runs a
@@ -100,8 +123,11 @@ Failed updates preserve the last successful directory within the same server
 process and all user-configured models; they never switch your active model.
 
 Provider **Discover** is an explicit, read-only request, including for Codex.
-Results are temporary suggestions. Save individual discovered models to add them
-to your configuration; opening a model picker does not discover or save models.
+Results are temporary suggestions. Saving a discovered model pins only its ID and
+route, not fetched prices or capabilities. Editing a catalog model saves only the
+fields you change; untouched metadata continues to follow the live directory.
+Opening a model picker does not discover or save models. Subscription sign-in
+remains available even when the public directory is empty.
 
 To change refresh behavior, add to `~/.devo/config.toml`
 (Windows: `%USERPROFILE%\.devo\config.toml`):

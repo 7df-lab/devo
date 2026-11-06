@@ -405,6 +405,7 @@ async fn build_provider_route(
             .and_then(|credential| credential.account_id.clone())
     });
     let mut headers = provider.headers.clone().unwrap_or_default();
+    crate::oauth_refresh::apply_oauth_adapter_headers(provider_id, auth_kind, &mut headers);
     if provider_id == "openai-codex"
         && let Some(account_id) = account_id.filter(|value| !value.is_empty())
     {

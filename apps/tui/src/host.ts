@@ -40,9 +40,6 @@ export function applyDevoAgentDirEnv(home = resolveDevoHome()): string {
   if (!process.env.DEVO_CODING_AGENT_DIR) {
     process.env.DEVO_CODING_AGENT_DIR = home;
   }
-  if (!process.env.DEVO_CODING_AGENT_DIR) {
-    process.env.DEVO_CODING_AGENT_DIR = home;
-  }
   if (!process.env.DEVO_HOME) {
     process.env.DEVO_HOME = home;
   }
@@ -144,6 +141,12 @@ function createInteractiveMode(
     brandSplash: {
       logo: DEVO_COMPACT_ORBIT_LOGO,
       title: DEVO_SPLASH_TITLE,
+    },
+    onProviderAuthenticated: async (provider, authType, kind) => {
+      if (authType !== "oauth" || kind !== "provider" || provider.startsWith("mcp:")) return;
+      const credential = uiServices.modelRegistry.authStorage.get(provider);
+      if (!credential || credential.type !== "oauth") throw new Error(`Missing OAuth credential for ${provider}`);
+      await connection.completeExplicitOAuthLogin(provider, credential);
     },
     excludedLoginProviderIds: ["prime-inference"],
     excludedBuiltinCommands: DEVO_EXCLUDED_BUILTIN_COMMANDS,
