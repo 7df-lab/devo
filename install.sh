@@ -549,23 +549,26 @@ cached_runtime() (
     destination="$cache/$digest"
     lock="$cache/$digest.lock"
     attempts=0
-    while ! mkdir "$lock" 2>/dev/null; do
+    # `mkdir` is not a portable lock here: uutils coreutils (Ubuntu 26.04)
+    # reports a concurrent EEXIST as success, which lets two installers share
+    # the lock. Noclobber creation is atomic and fails closed on existing
+    # regular lock files and legacy mkdir lock directories; special files
+    # differ.
+    while ! ( set -C; printf '%s\n' "$$" > "$lock" ) 2>/dev/null; do
         attempts=$((attempts + 1))
-        [ "$attempts" -lt 300 ] || die "Timed out waiting for runtime cache lock. If no installer is running, remove the stale lock directory manually: $lock"
+        [ "$attempts" -lt 300 ] || die "Timed out waiting for runtime cache lock. If no installer is running, remove the stale lock manually: $lock"
         sleep 1
     done
     stage=""
     cleanup_runtime_lock() {
         # A crash leaves the lock for explicit user cleanup. Only the process
         # that wrote this pid token may release its own lock.
-        if [ -f "$lock/pid" ] && [ "$(cat "$lock/pid" 2>/dev/null || true)" = "$$" ]; then
-            rm -f "$lock/pid"
-            rmdir "$lock"
+        if [ -f "$lock" ] && [ "$(cat "$lock" 2>/dev/null || true)" = "$$" ]; then
+            rm -f "$lock"
         fi
     }
     trap 'if [ -n "$stage" ]; then rm -rf "$stage"; fi; cleanup_runtime_lock' EXIT
     trap 'exit 1' INT TERM
-    printf '%s\n' "$$" > "$lock/pid"
     case "$kind" in node) executable="bin/node" ;; python) executable="bin/python3" ;; esac
     binary="$destination/runtime/$kind/$executable"
     if [ -f "$destination/.complete" ] && [ "$(cat "$destination/.complete")" = "$digest" ] && [ -x "$binary" ] && [ -f "$destination/.binary.sha256" ]; then

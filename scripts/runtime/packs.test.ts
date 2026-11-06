@@ -1,14 +1,19 @@
 import { expect, test } from "bun:test";
-import { existsSync, mkdirSync, mkdtempSync, readFileSync, readdirSync, renameSync, rmSync, symlinkSync, utimesSync, writeFileSync } from "node:fs";
+import { createHash } from "node:crypto";
+import { existsSync, mkdirSync, mkdtempSync, readFileSync, readdirSync, renameSync, rmSync, statSync, symlinkSync, utimesSync, writeFileSync } from "node:fs";
 import { tmpdir } from "node:os";
 import { basename, dirname, join } from "node:path";
-import { archiveTree, buildPacks } from "./packs";
+import { archiveTree, archiveTreeZip, buildPacks } from "./packs";
 import { installOnline, writeChecksums } from "./installer-fixture";
 import { WINDOWS_SANDBOX_HELPERS } from "./backend";
 
 const target = `${process.arch === "arm64" ? "aarch64" : "x86_64"}-${process.platform === "win32" ? "pc-windows-msvc" : process.platform === "darwin" ? "apple-darwin" : "unknown-linux-musl"}`;
 
 const assetTarget = target.replace("-unknown-linux-", "-linux-");
+const WINDOWS_LONG_FILE_NAME = `${"long path ".repeat(10)}unicode-路径.txt`;
+const WINDOWS_LONG_APP_FILE = `runtime/python-site/${WINDOWS_LONG_FILE_NAME}`;
+const WINDOWS_HIDDEN_APP_FILE = "runtime/python-site/.hidden-unicode-payload";
+const WINDOWS_EMPTY_APP_DIR = "runtime/python-site/empty-app-dir";
 
 function fixture(root: string) {
   const source = join(root, "source");
@@ -19,9 +24,83 @@ function fixture(root: string) {
     mkdirSync(dirname(join(source, file)), { recursive: true });
     writeFileSync(join(source, file), "original " + file, { mode: 0o755 });
   }
+  if (windows) {
+    writeFileSync(join(source, WINDOWS_LONG_APP_FILE), "unicode payload");
+    writeFileSync(join(source, WINDOWS_HIDDEN_APP_FILE), "hidden payload");
+    mkdirSync(join(source, WINDOWS_EMPTY_APP_DIR));
+  }
   writeFileSync(join(source, "runtime/manifest.json"), JSON.stringify({ schema: 1, version: "0.2.0", target }));
   return source;
 }
+
+test.skipIf(process.platform === "win32")("Windows ZIP packs require a Windows build host", async () => {
+  const root = mkdtempSync(join(tmpdir(), "devo Windows pack host "));
+  try {
+    const source = fixture(root);
+    writeFileSync(join(source, "runtime/manifest.json"), JSON.stringify({ schema: 1, version: "0.2.0", target: "x86_64-pc-windows-msvc" }));
+    await expect(buildPacks(source, join(root, "assets"))).rejects.toThrow("Windows build host");
+  } finally { rmSync(root, { recursive: true, force: true }); }
+});
+
+test.skipIf(process.platform !== "win32")("Windows ZIP rejects reparse points", async () => {
+  const root = mkdtempSync(join(tmpdir(), "devo Windows reparse "));
+  try {
+    const source = fixture(root);
+    try {
+      symlinkSync(join(source, "runtime", "python"), join(source, "runtime", "python", "linked"), "junction");
+    } catch (error) {
+      const code = (error as NodeJS.ErrnoException).code;
+      if (code === "EPERM" || code === "EACCES" || code === "ENOTSUP") {
+        console.warn(`Skipping Windows reparse test: junction creation unavailable (${code})`);
+        return;
+      }
+      throw error;
+    }
+    await expect(archiveTreeZip(source, ["runtime/python"], join(root, "out.zip"))).rejects.toThrow("reparse point");
+  } finally { rmSync(root, { recursive: true, force: true }); }
+});
+
+test.skipIf(process.platform !== "win32")("Windows ZIP pack handles zero, one and multiple paths", async () => {
+  const root = mkdtempSync(join(tmpdir(), "devo Windows zip path counts "));
+  try {
+    const source = fixture(root);
+    await expect(archiveTreeZip(source, [], join(root, "zero.zip"))).rejects.toThrow("No pack paths");
+    await archiveTreeZip(source, ["runtime/python"], join(root, "one.zip"));
+    expect(existsSync(join(root, "one.zip"))).toBe(true);
+    await archiveTreeZip(source, ["runtime/python", "runtime/node"], join(root, "many.zip"));
+    expect(existsSync(join(root, "many.zip"))).toBe(true);
+  } finally { rmSync(root, { recursive: true, force: true }); }
+});
+
+test.skipIf(process.platform !== "win32")("Windows ZIP default reader preserves UTF8 names", async () => {
+  const root = mkdtempSync(join(tmpdir(), "devo Windows zip utf8 "));
+  try {
+    const source = join(root, "source");
+    mkdirSync(source, { recursive: true });
+    writeFileSync(join(source, WINDOWS_LONG_FILE_NAME), "unicode payload");
+    const manifest = join(root, "paths.json");
+    writeFileSync(manifest, JSON.stringify([WINDOWS_LONG_FILE_NAME]));
+    const zip = join(root, "utf8.zip");
+    const powershell = join(process.env.SystemRoot!, "System32/WindowsPowerShell/v1.0/powershell.exe");
+    const packed = Bun.spawnSync([
+      powershell, "-NoProfile", "-NonInteractive", "-ExecutionPolicy", "Bypass",
+      "-File", join(import.meta.dir, "zip-pack.ps1"), "-Root", source, "-Output", zip, "-Manifest", manifest,
+    ], { stdout: "pipe", stderr: "pipe" });
+    expect(packed.exitCode).toBe(0);
+    const listedFile = join(root, "listed.txt");
+    const listed = Bun.spawnSync([
+      powershell, "-NoProfile", "-NonInteractive", "-ExecutionPolicy", "Bypass",
+      "-File", join(import.meta.dir, "zip-list.ps1"), "-Archive", zip, "-OutputFile", listedFile,
+    ], { stdout: "pipe", stderr: "pipe" });
+    expect(listed.exitCode).toBe(0);
+    const bytes = readFileSync(zip);
+    expect(bytes.readUInt32LE(0)).toBe(0x04034b50);
+    expect(bytes.readUInt16LE(6) & 0x0800).toBe(0x0800);
+    // ZipFile.OpenRead uses the default reader; without bit 11 this name would
+    // decode as ANSI mojibake instead of the expected Unicode path.
+    expect(readFileSync(listedFile, "utf8").split(/\r?\n/)).toContain(WINDOWS_LONG_FILE_NAME);
+  } finally { rmSync(root, { recursive: true, force: true }); }
+}, 30_000);
 
 test("Linux public pack names omit the vendor while retaining canonical manifest targets", async () => {
   const root = mkdtempSync(join(tmpdir(), "devo Linux asset names "));
@@ -42,7 +121,7 @@ test("Linux public pack names omit the vendor while retaining canonical manifest
   } finally { rmSync(root, { recursive: true, force: true }); }
 });
 
-test("runtime tar archives are reproducible and preserve long Unicode paths, executable modes and symlinks", async () => {
+test.skipIf(process.platform === "win32")("runtime tar archives are reproducible and preserve long Unicode paths, executable modes and symlinks", async () => {
   const root = mkdtempSync(join(tmpdir(), "devo tar QA "));
   try {
     const source = fixture(root);
@@ -58,8 +137,26 @@ test("runtime tar archives are reproducible and preserve long Unicode paths, exe
     const extracted = join(root, "extracted");
     mkdirSync(extracted);
     const tar = process.platform === "win32" ? join(process.env.SystemRoot!, "System32/tar.exe") : "tar";
+    // DIAGNOSTIC: gather Windows native tar evidence without hiding exit/stderr.
+    const version = Bun.spawnSync([tar, "--version"], { stdout: "pipe", stderr: "pipe" });
+    console.log("DIAG tar --version", { exit: version.exitCode, stdout: version.stdout.toString(), stderr: version.stderr.toString() });
+    const listed = Bun.spawnSync([tar, "-tzf", first], { stdout: "pipe", stderr: "pipe" });
+    console.log("DIAG tar -tzf", { exit: listed.exitCode, stdout: listed.stdout.toString(), stderr: listed.stderr.toString() });
     const result = Bun.spawnSync([tar, "-xzf", first, "-C", extracted], { stdout: "pipe", stderr: "pipe" });
-    expect({ exit: result.exitCode, stderr: result.stderr.toString(), longPath: readFileSync(join(extracted, long), "utf8") }).toEqual({ exit: 0, stderr: "", longPath: "unicode payload" });
+    let extractedEntries: unknown;
+    try {
+      extractedEntries = readdirSync(extracted, { recursive: true });
+    } catch (error) {
+      extractedEntries = String(error);
+    }
+    let longPath: string | null = null;
+    try {
+      longPath = readFileSync(join(extracted, long), "utf8");
+    } catch (error) {
+      console.log("DIAG longPath error", String(error));
+    }
+    console.log("DIAG tar extract", { exit: result.exitCode, stderr: result.stderr.toString(), extractedEntries });
+    expect({ exit: result.exitCode, stderr: result.stderr.toString(), longPath }).toEqual({ exit: 0, stderr: "", longPath: "unicode payload" });
     if (process.platform !== "win32") expect(readFileSync(join(extracted, "runtime/python/python-link"), "utf8")).toBe("original runtime/python/bin/python3");
   } finally { rmSync(root, { recursive: true, force: true }); }
 });
@@ -68,12 +165,14 @@ test("real installers reuse runtimes across upgrades, repair damage, reject corr
   const root = mkdtempSync(join(tmpdir(), "devo shared installer QA "));
   const assets = join(root, "assets");
   const requests: string[] = [];
+  const requestLog: Array<{ at: number; name: string }> = [];
   const runtimeUrls: string[] = [];
   let corrupt = "";
   const missing = new Set<string>();
   const server = Bun.serve({ hostname: "127.0.0.1", port: 0, async fetch(request) {
     const name = basename(new URL(request.url).pathname);
     requests.push(name);
+    requestLog.push({ at: Date.now(), name });
     if (name.startsWith("devo-runtime-")) runtimeUrls.push(new URL(request.url).pathname);
     if (missing.has(name)) return new Response("Not found", { status: 404 });
     if (name === corrupt) return new Response("corrupt bytes");
@@ -85,6 +184,20 @@ test("real installers reuse runtimes across upgrades, repair damage, reject corr
     const index = await buildPacks(source, assets);
     const first = readFileSync(index, "utf8").trim().split("\n").slice(1).map(line => line.split(" "));
     expect(first.map(parts => parts[0])).toEqual(["app", "node", "python"]);
+    if (process.platform === "win32") {
+      const repeat = join(root, "repeat assets");
+      const repeatIndex = await buildPacks(source, repeat);
+      expect(readFileSync(repeatIndex, "utf8")).toEqual(readFileSync(index, "utf8"));
+      const powershell = join(process.env.SystemRoot!, "System32/WindowsPowerShell/v1.0/powershell.exe");
+      const listedFile = join(root, "zip-list.txt");
+      const listed = Bun.spawnSync([
+        powershell, "-NoProfile", "-NonInteractive", "-ExecutionPolicy", "Bypass",
+        "-File", join(import.meta.dir, "zip-list.ps1"), "-Archive", join(repeat, first[0][2]),
+        "-OutputFile", listedFile,
+      ], { stdout: "pipe", stderr: "pipe" });
+      expect(listed.exitCode).toBe(0);
+      expect(readFileSync(listedFile, "utf8").split(/\r?\n/)).toContain(WINDOWS_LONG_APP_FILE);
+    }
     writeFileSync(join(source, "runtime/manifest.json"), JSON.stringify({ schema: 1, version: "0.2.1", target }));
     await buildPacks(source, assets);
     const second = readFileSync(join(assets, `devo-tui-v0.2.1-${assetTarget}.install.txt`), "utf8").trim().split("\n").slice(1).map(line => line.split(" "));
@@ -98,7 +211,7 @@ test("real installers reuse runtimes across upgrades, repair damage, reject corr
     if (result.exit !== 0) throw new Error(`${result.stdout}\n${result.stderr}`);
     expect(requests.filter(name => name.startsWith("devo-runtime-")).sort()).toEqual(first.slice(1).map(parts => parts[2]).sort());
     expect(runtimeUrls.every(path => path.startsWith("/runtime-packs/"))).toBe(true);
-    expect({ localNode: existsSync(join(destination, "runtime/node")), localPython: existsSync(join(destination, "runtime/python")), nodeReference: existsSync(join(destination, "runtime/node.path")), appModule: existsSync(join(destination, "runtime/python-site/rlm/repl.py")) }).toEqual({ localNode: false, localPython: false, nodeReference: true, appModule: true });
+    expect({ localNode: existsSync(join(destination, "runtime/node")), localPython: existsSync(join(destination, "runtime/python")), nodeReference: existsSync(join(destination, "runtime/node.path")), appModule: existsSync(join(destination, "runtime/python-site/rlm/repl.py")), longUnicode: process.platform === "win32" ? readFileSync(join(destination, WINDOWS_LONG_APP_FILE), "utf8") : "unicode payload", hidden: process.platform === "win32" ? readFileSync(join(destination, WINDOWS_HIDDEN_APP_FILE), "utf8") : "hidden payload", emptyDir: process.platform === "win32" ? statSync(join(destination, WINDOWS_EMPTY_APP_DIR)).isDirectory() && readdirSync(join(destination, WINDOWS_EMPTY_APP_DIR)).length === 0 : true }).toEqual({ localNode: false, localPython: false, nodeReference: true, appModule: true, longUnicode: "unicode payload", hidden: "hidden payload", emptyDir: true });
     requests.length = 0;
     result = await installOnline(root, destination, cache, origin, target, "v0.2.1");
     if (result.exit !== 0) throw new Error(`${result.stdout}\n${result.stderr}`);
@@ -132,34 +245,56 @@ test("real installers reuse runtimes across upgrades, repair damage, reject corr
     if (process.platform !== "win32") {
       // A stale lock must fail closed: no automatic deletion. A controlled
       // `sleep` on PATH makes the 300-attempt wait deterministic without a
-      // production timeout knob.
-      const staleCache = join(root, "stale lock cache");
-      mkdirSync(staleCache);
-      const staleLock = join(staleCache, `${first[1][1]}.lock`);
-      mkdirSync(staleLock);
-      writeFileSync(join(staleLock, "pid"), "999999\n");
+      // production timeout knob. Exercise the legacy mkdir directory and the
+      // current lock file; neither may be reclaimed automatically.
       const fakeSleepDir = join(root, "fake sleep bin");
       mkdirSync(fakeSleepDir);
       writeFileSync(join(fakeSleepDir, "sleep"), "#!/bin/sh\nexit 0\n", { mode: 0o755 });
-      const blocked = await installOnline(root, join(root, "stale lock install"), staleCache, origin, target, "v0.2.0", "functions", {
-        PATH: `${fakeSleepDir}:${process.env.PATH ?? ""}`,
-      });
-      expect({
-        failed: blocked.exit !== 0,
-        lockPreserved: existsSync(staleLock),
-        manualCleanupMessage: blocked.stderr.includes("remove the stale lock directory manually"),
-      }).toEqual({ failed: true, lockPreserved: true, manualCleanupMessage: true });
-      rmSync(staleLock, { recursive: true, force: true });
-      const retry = await installOnline(root, join(root, "stale lock retry install"), staleCache, origin, target);
-      if (retry.exit !== 0) throw new Error(`${retry.stdout}\n${retry.stderr}`);
-      expect(existsSync(staleLock)).toBe(false);
-      requests.length = 0;
+      for (const legacyDirectory of [true, false]) {
+        const label = legacyDirectory ? "legacy directory" : "file";
+        const staleCache = join(root, `stale lock ${label} cache`);
+        mkdirSync(staleCache);
+        const staleLock = join(staleCache, `${first[1][1]}.lock`);
+        if (legacyDirectory) {
+          mkdirSync(staleLock);
+          writeFileSync(join(staleLock, "pid"), "999999\n");
+        } else {
+          writeFileSync(staleLock, "999999\n");
+        }
+        const blocked = await installOnline(root, join(root, `stale lock ${label} install`), staleCache, origin, target, "v0.2.0", "functions", {
+          PATH: `${fakeSleepDir}:${process.env.PATH ?? ""}`,
+        });
+        expect({
+          failed: blocked.exit !== 0,
+          lockPreserved: existsSync(staleLock),
+          pidPreserved: readFileSync(legacyDirectory ? join(staleLock, "pid") : staleLock, "utf8"),
+          manualCleanupMessage: blocked.stderr.includes("remove the stale lock manually"),
+        }).toEqual({ failed: true, lockPreserved: true, pidPreserved: "999999\n", manualCleanupMessage: true });
+        rmSync(staleLock, { recursive: true, force: true });
+        const retry = await installOnline(root, join(root, `stale lock ${label} retry install`), staleCache, origin, target);
+        if (retry.exit !== 0) throw new Error(`${retry.stdout}\n${retry.stderr}`);
+        expect(existsSync(staleLock)).toBe(false);
+        requests.length = 0;
+      }
+      // Old-version installers use mkdir for the same lock pathname. A new
+      // file lock must make that legacy acquisition fail closed too.
+      const legacyProbe = join(root, "legacy mkdir probe.lock");
+      writeFileSync(legacyProbe, "999999\n");
+      const legacyMkdir = Bun.spawnSync(["/bin/mkdir", legacyProbe]);
+      expect(legacyMkdir.exitCode).not.toBe(0);
+      rmSync(legacyProbe, { force: true });
     }
 
+    requestLog.length = 0;
     const concurrentCache = join(root, "concurrent cache");
     const results = await Promise.all(["one", "two"].map(name => installOnline(root, join(root, name), concurrentCache, origin, target)));
     for (const item of results) if (item.exit !== 0) throw new Error(`${item.stdout}\n${item.stderr}`);
-    expect(requests.filter(name => name.startsWith("devo-runtime-")).sort()).toEqual(first.slice(1).map(parts => parts[2]).sort());
+    const concurrentRuntimeRequests = requests.filter(name => name.startsWith("devo-runtime-")).sort();
+    if (JSON.stringify(concurrentRuntimeRequests) !== JSON.stringify(first.slice(1).map(parts => parts[2]).sort())) {
+      console.log("CONCURRENT_REQUEST_LOG", JSON.stringify(requestLog));
+      console.log("CONCURRENT_CACHE", JSON.stringify(readdirSync(concurrentCache, { recursive: true })));
+    }
+    expect(concurrentRuntimeRequests).toEqual(first.slice(1).map(parts => parts[2]).sort());
     expect(readdirSync(concurrentCache).some(name => name.startsWith(".stage"))).toBe(false);
     const entrypoint = await installOnline(root, join(root, "entrypoint install"), cache, origin, target, "v0.2.0", "entrypoint");
     if (entrypoint.exit !== 0) throw new Error(`${entrypoint.stdout}\n${entrypoint.stderr}`);
@@ -200,3 +335,34 @@ test("real installers reuse runtimes across upgrades, repair damage, reject corr
     }
   } finally { server.stop(true); rmSync(root, { recursive: true, force: true }); }
 }, 120_000);
+
+test.skipIf(process.platform !== "win32")("legacy ASCII tar runtime index still installs on Windows", async () => {
+  const root = mkdtempSync(join(tmpdir(), "devo legacy tar index "));
+  let server: ReturnType<typeof Bun.serve> | undefined;
+  try {
+    const source = fixture(root);
+    rmSync(join(source, WINDOWS_LONG_APP_FILE), { force: true });
+    const assets = join(root, "legacy assets");
+    mkdirSync(assets);
+    const appPaths = readdirSync(source).filter(name => name !== "runtime")
+      .concat(readdirSync(join(source, "runtime")).filter(name => !["node", "python", "node.path", "python.path"].includes(name)).map(name => `runtime/${name}`));
+    const appName = `devo-tui-app-v0.2.0-${assetTarget}.tar.gz`;
+    const nodeName = `devo-runtime-node-${assetTarget}.tar.gz`;
+    const pythonName = `devo-runtime-python-${assetTarget}.tar.gz`;
+    await archiveTree(source, appPaths, join(assets, appName));
+    await archiveTree(source, ["runtime/node"], join(assets, nodeName));
+    await archiveTree(source, ["runtime/python"], join(assets, pythonName));
+    const digest = (path: string) => createHash("sha256").update(readFileSync(path)).digest("hex");
+    const index = join(assets, `devo-tui-v0.2.0-${assetTarget}.install.txt`);
+    writeFileSync(index, ["devo-install-v1", `app ${digest(join(assets, appName))} ${appName}`, `node ${digest(join(assets, nodeName))} ${nodeName}`, `python ${digest(join(assets, pythonName))} ${pythonName}`].join("\n") + "\n");
+    writeChecksums(assets);
+    server = Bun.serve({ hostname: "127.0.0.1", port: 0, async fetch(request) {
+      const name = basename(new URL(request.url).pathname);
+      const file = Bun.file(join(assets, name));
+      return await file.exists() ? new Response(file) : new Response("Not found", { status: 404 });
+    } });
+    const result = await installOnline(root, join(root, "legacy installed"), join(root, "legacy cache"), `http://127.0.0.1:${server.port}`, target);
+    if (result.exit !== 0) throw new Error(`${result.stdout}\n${result.stderr}`);
+    expect(existsSync(join(root, "legacy installed", "runtime/manifest.json"))).toBe(true);
+  } finally { server?.stop(true); rmSync(root, { recursive: true, force: true }); }
+}, 30_000);
