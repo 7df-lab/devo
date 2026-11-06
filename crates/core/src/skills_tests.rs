@@ -59,10 +59,11 @@ fn python_manifest_honors_catalog_enablement_without_deleting_shared_assets() {
 fn discovered_workspace_code_is_not_automatically_executed() {
     let home = tempfile::tempdir().unwrap();
     let workspace = tempfile::tempdir().unwrap();
-    let package = workspace.path().join("skills/custom/src/custom");
+    let skill_root = workspace.path().join(".devo/skills/custom");
+    let package = skill_root.join("src/custom");
     std::fs::create_dir_all(&package).unwrap();
     std::fs::write(
-        workspace.path().join("skills/custom/SKILL.md"),
+        skill_root.join("SKILL.md"),
         "---\nname: custom\ndescription: Test skill\n---\nUse explicitly.",
     )
     .unwrap();
