@@ -10,9 +10,10 @@ import { WINDOWS_SANDBOX_HELPERS } from "./backend";
 const target = `${process.arch === "arm64" ? "aarch64" : "x86_64"}-${process.platform === "win32" ? "pc-windows-msvc" : process.platform === "darwin" ? "apple-darwin" : "unknown-linux-musl"}`;
 
 const assetTarget = target.replace("-unknown-linux-", "-linux-");
-const WINDOWS_LONG_APP_FILE = `${"long path ".repeat(10)}unicode-路径.txt`;
-const WINDOWS_HIDDEN_APP_FILE = ".hidden-unicode-payload";
-const WINDOWS_EMPTY_APP_DIR = "empty-app-dir";
+const WINDOWS_LONG_FILE_NAME = `${"long path ".repeat(10)}unicode-路径.txt`;
+const WINDOWS_LONG_APP_FILE = `runtime/python-site/${WINDOWS_LONG_FILE_NAME}`;
+const WINDOWS_HIDDEN_APP_FILE = "runtime/python-site/.hidden-unicode-payload";
+const WINDOWS_EMPTY_APP_DIR = "runtime/python-site/empty-app-dir";
 
 function fixture(root: string) {
   const source = join(root, "source");
@@ -76,9 +77,9 @@ test.skipIf(process.platform !== "win32")("Windows ZIP codepoint diagnostics", a
   try {
     const source = join(root, "source");
     mkdirSync(source, { recursive: true });
-    writeFileSync(join(source, WINDOWS_LONG_APP_FILE), "unicode payload");
+    writeFileSync(join(source, WINDOWS_LONG_FILE_NAME), "unicode payload");
     const manifest = join(root, "paths.json");
-    writeFileSync(manifest, JSON.stringify([WINDOWS_LONG_APP_FILE]));
+    writeFileSync(manifest, JSON.stringify([WINDOWS_LONG_FILE_NAME]));
     const zip = join(root, "diagnostic.zip");
     const powershell = join(process.env.SystemRoot!, "System32/WindowsPowerShell/v1.0/powershell.exe");
     const packed = Bun.spawnSync([
@@ -94,7 +95,7 @@ test.skipIf(process.platform !== "win32")("Windows ZIP codepoint diagnostics", a
     expect(diagnosed.exitCode).toBe(0);
     const text = readFileSync(diagnostics, "utf8");
     console.log("ZIP_CODEPOINT_DIAGNOSTICS\n" + text);
-    const expected = WINDOWS_LONG_APP_FILE;
+    const expected = WINDOWS_LONG_FILE_NAME;
     const expectedHex = Buffer.from(expected, "utf8").toString("hex").toUpperCase();
     const python = Bun.which("python") ?? Bun.which("py");
     let pythonNames: string[] | null = null;
