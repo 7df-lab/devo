@@ -459,6 +459,11 @@ pub async fn query(
             session.config.available_skills_instructions.clone(),
         ));
     }
+    // Skills are live catalog state, unlike the locked workspace/model snapshot.
+    if let Some(context) = session.session_context.as_mut() {
+        context.available_skills = session.config.available_skills_instructions.clone();
+        context.installed_python_skills = session.config.installed_python_skills.clone();
+    }
     let current_turn_context =
         TurnContext::capture(session, turn_config, current_agents_snapshot.clone());
     if let Some(context_changes) =

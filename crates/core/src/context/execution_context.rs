@@ -107,6 +107,8 @@ pub struct SessionContext {
     pub base_instructions: String,
     #[serde(default)]
     pub available_skills: Option<String>,
+    #[serde(default)]
+    pub installed_python_skills: Vec<String>,
     pub workspace_instructions: Option<String>,
     pub locked_agents_snapshot: Option<AgentsMdSnapshot>,
     pub environment: EnvironmentContext,
@@ -138,6 +140,7 @@ impl SessionContext {
         Self {
             base_instructions: model.base_instructions.clone(),
             available_skills,
+            installed_python_skills: Vec::new(),
             workspace_instructions,
             locked_agents_snapshot,
             environment: EnvironmentContext::capture(cwd),
@@ -161,8 +164,9 @@ impl SessionContext {
             .display()
             .to_string()
             .replace('\\', "/");
-        let mut base =
-            crate::build_rlm_base_prompt(&crate::RlmPromptOptions::root(cwd, "not persisted"));
+        let mut options = crate::RlmPromptOptions::root(cwd, "not persisted");
+        options.installed_skills = self.installed_python_skills.clone();
+        let mut base = crate::build_rlm_base_prompt(&options);
         // Allow catalog/custom model instructions as additional guidance only
         // when they differ from the legacy static default (avoid double doctrine).
         let catalog = self.base_instructions.trim();

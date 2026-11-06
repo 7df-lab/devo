@@ -73,8 +73,8 @@ pub use query::*;
 pub use remote_catalog::*;
 pub use response_item::*;
 pub use rlm_prompts::{
-    CatalogSkillEntry, DEFAULT_RLM_EXTRA_IMPORT_LABELS, RLM_BOOTSTRAP_SKILL_IMPORTS,
-    RlmPromptOptions, build_child_agent_doctrine, build_rlm_base_prompt, format_catalog_skills_xml,
+    CatalogSkillEntry, DEFAULT_RLM_EXTRA_IMPORT_LABELS, RlmPromptOptions,
+    build_child_agent_doctrine, build_rlm_base_prompt, format_catalog_skills_xml,
 };
 pub use session::*;
 pub use session_store::*;
@@ -82,9 +82,9 @@ pub use skills::SkillRecord as CoreSkillRecord;
 pub use skills::SkillScope as CoreSkillScope;
 pub use skills::SkillSource as CoreSkillSource;
 pub use skills::{
-    FileSystemSkillCatalog, ResolvedSkill, SkillCatalog, SkillDependencies, SkillError, SkillId,
-    SkillInterface, SkillRecord, SkillScope, SkillSelector, SkillSource, SkillsManager,
-    SkillsRuntimeConfig, build_available_skills, build_skill_injections,
+    FileSystemSkillCatalog, PythonSkill, ResolvedSkill, SkillCatalog, SkillDependencies,
+    SkillError, SkillId, SkillInterface, SkillRecord, SkillScope, SkillSelector, SkillSource,
+    SkillsManager, SkillsRuntimeConfig, build_available_skills, build_skill_injections,
     collect_explicit_skill_mentions, default_skill_metadata_budget, normalize_native_path,
     render_available_skills_body,
 };

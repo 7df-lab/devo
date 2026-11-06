@@ -480,28 +480,34 @@ async fn ensure_kernel_restores_namespace_from_session_dir() {
 
 #[tokio::test]
 async fn rlm_bootstrap_imports_core_python_skill_modules() {
-    use crate::rlm_prompts::RLM_BOOTSTRAP_SKILL_IMPORTS;
+    use crate::SkillCatalog;
 
-    let kernel = match ensure_kernel(
+    let home = tempfile::tempdir().expect("skill home");
+    let workspace = tempfile::tempdir().expect("workspace");
+    let skills = crate::FileSystemSkillCatalog::with_devo_home(
+        crate::SkillsConfig::default(),
+        home.path().into(),
+        workspace.path().into(),
+        vec![],
+    )
+    .python_skills(Some(workspace.path()))
+    .expect("bundled skill catalog");
+    let kernel = match super::ipython::ensure_kernel_with_skills(
         &None,
-        &std::env::temp_dir(),
+        workspace.path(),
         None,
         devo_protocol::CollaborationMode::Build,
+        &skills,
     )
     .await
     {
-        Ok(kernel) => kernel,
+        Ok((kernel, _, _)) => kernel,
         Err(error) => {
             eprintln!("skip: no kernel ({error})");
             return;
         }
     };
     let expected = ["compact", "refine", "goal", "agent_observe"];
-    assert!(
-        expected
-            .iter()
-            .all(|name| RLM_BOOTSTRAP_SKILL_IMPORTS.contains(name))
-    );
     let expected_json = serde_json::to_string(&expected).expect("skill names serialize");
     let code = format!(
         concat!(
@@ -523,7 +529,8 @@ async fn rlm_bootstrap_imports_core_python_skill_modules() {
         .execute(&code)
         .await
         .expect("execute skill import check");
-    assert_eq!(output.status, "ok", "stderr={}", output.stderr);
+    assert_eq!(output.status, "ok", "{output:?}");
+    kernel.shutdown().await.expect("shutdown");
 }
 
 #[tokio::test]

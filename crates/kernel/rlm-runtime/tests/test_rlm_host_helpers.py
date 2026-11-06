@@ -12,7 +12,7 @@ mcp_base = import_module("rlm.mcp_base")
 
 
 class AgentDirectoryTests(unittest.TestCase):
-    def test_harness_and_mcp_defaults_use_devo_config_dir(self):
+    def test_mcp_defaults_use_devo_config_dir(self):
         env = {
             "DEVO_CODING_AGENT_DIR": "",
             "DEVO_HOME": "",
@@ -23,7 +23,6 @@ class AgentDirectoryTests(unittest.TestCase):
         with patch.dict(os.environ, env), patch.object(
             Path, "home", return_value=home
         ):
-            self.assertEqual(harness._agent_dir(), expected)
             self.assertEqual(mcp_base._agent_dir(), expected)
 
 

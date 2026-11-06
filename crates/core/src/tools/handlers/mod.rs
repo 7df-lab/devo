@@ -37,7 +37,7 @@ pub use grep::GrepHandler;
 pub use invalid::InvalidHandler;
 pub use ipython::{
     IpythonHandler, KernelNamespaceRestoreState, ensure_kernel, ensure_kernel_with_restore_state,
-    kernel_namespace_manifest_path, kernel_namespace_snapshot_path,
+    ensure_kernel_with_skills, kernel_namespace_manifest_path, kernel_namespace_snapshot_path,
 };
 pub use lsp::LspHandler;
 pub use mcp::{McpToolHandler, mcp_search_text, mcp_tool_spec};

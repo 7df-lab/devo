@@ -40,6 +40,8 @@ pub struct SessionConfig {
     pub permission_profile: RuntimePermissionProfile,
     pub agents_md: AgentsMdConfig,
     pub available_skills_instructions: Option<String>,
+    /// Successfully bound Python skills, refreshed at the host turn boundary.
+    pub installed_python_skills: Vec<String>,
     /// Active sandbox profile name for child processes spawned by tools.
     /// `None` means no sandboxing; otherwise the value is a profile name such
     /// as `"workspace"`, `"strict"`, or `"off"`.
@@ -73,6 +75,7 @@ impl Default for SessionConfig {
             permission_profile,
             agents_md: AgentsMdConfig::default(),
             available_skills_instructions: None,
+            installed_python_skills: Vec::new(),
             sandbox_profile: Some("workspace".to_string()),
         }
     }

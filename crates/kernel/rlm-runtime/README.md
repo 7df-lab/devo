@@ -168,7 +168,7 @@ The main groups are:
 | `rlm.update_plan`, `rlm.request_user_input` | Session UI integration. |
 | `rlm.read`, `rlm.write`, `rlm.read_once`, `rlm.write_once` | Direct file I/O, with host-mediated fallback on OS denial. |
 | `rlm.spawn`, `rlm.create_session`, `rlm.find_models`, `rlm.list_subagents`, `rlm.delete_subagent` | Recursive subagent control. |
-| `rlm.harness`, `rlm.get_harness_state` | Persistent harness CRUD. |
+| `rlm.harness`, `rlm.get_harness_state` | Cached reads and async host-owned harness CRUD. |
 | `rlm.emit` | Ship a MIME-keyed display event. |
 
 A few examples:
@@ -278,9 +278,7 @@ integration package that subclasses `McpIntegration` needs it.
 
 ## Continual Harness and `crates/harness`
 
-`rlm.harness` and the Rust crate `devo-harness` are two views of one file-backed
-state store. They do not import each other. They meet on disk, through a shared
-JSON schema and a set of environment variables.
+`devo-harness` owns the persistent store. `rlm.harness` is an async Python facade over host requests; it does not read or write the state files. Rust resolves the session/global destination and checks permissions before applying a change.
 
 ### What the harness does
 
@@ -345,22 +343,23 @@ The host uses `crates/harness` for two jobs:
 
 ### Kernel side: `rlm.harness`
 
-`rlm.harness` is the Python CRUD API over the same JSON files. It provides:
+`rlm.harness` forwards persistent operations to Rust. Mutations are awaitable; synchronous `get`, `list`, and `overview` inspect the cached view. Refresh it explicitly before reading prior state:
 
 ```python
-entry = rlm.harness.create_memory(
+await rlm.harness.load()
+entry = await rlm.harness.create_memory(
     "Prefer targeted tests",
     "Run the smallest relevant test target before the full suite.",
 )
-rlm.harness.update_memory(entry.id, entry.title, entry.content + " Keep it fast.")
-rlm.harness.delete_memory(entry.id)
+await rlm.harness.update_memory(entry.id, entry.title, entry.content + " Keep it fast.")
+await rlm.harness.delete_memory(entry.id)
 
-rlm.harness.create_prompt_note(
+await rlm.harness.create_prompt_note(
     "Patch size",
     "Do not rewrite a whole file for a small change.",
     id="patch_size",
 )
-rlm.harness.create_subagent(
+await rlm.harness.create_subagent(
     "Reviewer",
     "Review one diff, list concrete defects, and cite files and lines.",
     id="reviewer",
@@ -370,24 +369,16 @@ rlm.harness.create_subagent(
 `rlm.harness.overview()` prints a bounded summary, and
 `rlm.get_harness_state(global_=True)` returns the global store explicitly.
 
-The Python store is long-lived and cached. Before every local mutation it
-checks the file's mtime and reloads if another process changed it. This is what
-prevents a kernel write from silently overwriting a host `/refine` edit. Writes
-use a unique temporary file and `os.replace`, preserving the existing file
-mode.
+The Python facade is long-lived and cached. Successful mutations refresh its view from the host result. There is no local filesystem fallback when the host is missing or denies a request. Existing callers must add `await` to persistent writes and use `await load()` to refresh reads.
 
-`rlm.harness` falls back to an in-memory view when no local session directory
-is configured (for example, a kernel started without a session artifact
-directory). Reads see an empty store; local writes raise an instructive error
-instead of disappearing when the kernel exits.
-`global_=True` still works when a global store is configured.
+Rust serializes host CRUD and `/refine` through a shared file transaction lock, re-reads the latest state, and atomically replaces it with a unique temporary file. New stores are private; replacement preserves existing file permissions. Plan mode rejects mutations. A session without a persistent artifact directory has an empty local read view and rejects local persistence. Explicit `HarnessState(in_memory=True)` remains available for temporary state.
 
 ### How the two sides cooperate
 
 ```text
 Rust host (`devo-server`)                         Python kernel
 --------------------------                         -------------
-devo-harness::HarnessState::load  <── same JSON ──  rlm.harness.HarnessState
+devo-harness transaction store   <── host RPC ───  rlm.harness.HarnessState
 HarnessDigestInjector             ── prompt ────►  next model turn
 refine.rs: schedule / plan / apply                  refine skill -> host_request
 apply_proposal_re_read            ── writes ────►  harness_state.json
@@ -398,18 +389,16 @@ The shared paths are:
 
 | Scope | Path | Written by |
 |---|---|---|
-| local | `<session_dir>/harness/harness_state.json` | host refine, kernel CRUD |
-| global | `<devo_home>/harness/harness_state.json` | host refine, kernel CRUD |
+| local | `<session_dir>/harness/harness_state.json` | host refine and host CRUD |
+| global | `<devo_home>/harness/harness_state.json` | host refine and host CRUD |
 | local audit | `<session_dir>/harness/refinements.jsonl` | host refinement apply |
 
-The kernel receives the paths through environment variables set by
+Harness paths are resolved in Rust. The kernel still receives general runtime paths through environment variables set by
 `crates/core/src/tools/handlers/ipython/startup.rs`:
 
 | Variable | Meaning |
 |---|---|
 | `RLM_SESSION_DIR` | Session artifact root. |
-| `RLM_HARNESS_STATE_DIR` | Local harness directory. |
-| `RLM_GLOBAL_HARNESS_STATE_DIR` | Global harness directory under Devo home. |
 | `DEVO_CODING_AGENT_DIR` | Devo config directory, including `auth.json`. |
 
 ### Refinement flow
@@ -432,8 +421,8 @@ The kernel receives the paths through environment variables set by
 | API | Who plans the edit | When it applies |
 |---|---|---|
 | `await refine.run(...)` | Host LLM or heuristic planner | Turn boundary, or immediately when idle |
-| `rlm.harness.create_memory(...)` / `update_*` / `delete_*` | The caller | Immediately |
-| `rlm.harness.record_refinement(...)` | The caller | Immediately, as a history event |
+| `await rlm.harness.create_memory(...)` / `await update_*` / `await delete_*` | The caller | Immediately |
+| `await rlm.harness.record_refinement(...)` | The caller | Immediately, as a history event |
 
 Direct CRUD is useful for explicit, known facts. `refine.run()` is useful when
 the agent wants the host to review evidence and decide the smallest edit.
@@ -445,7 +434,7 @@ the agent wants the host to review evidence and decide the smallest edit.
   invents content.
 - The Python loader treats an unreadable or corrupt file as empty so a bad file
   cannot kill the REPL; the next kernel save rewrites a clean file.
-- The Rust and Python schemas are mirrored by hand. If you add or change a
+- The Rust schemas are mirrored by hand. If you add or change a
   field, update both sides and bump `SCHEMA_VERSION`.
 - The host's `refinements.jsonl` is an append-only audit/undo log. Python's
   `record_refinement` writes a `RefinementEvent` into the state JSON's

@@ -172,6 +172,16 @@ impl ToolRuntime {
         &self.execution_options.cancel_token
     }
 
+    /// Immutable capability context for host-request adapters outside the tool registry.
+    pub fn context(&self) -> &ToolRuntimeContext {
+        &self.context
+    }
+
+    /// Reuse this runtime's authorization policy for host-owned operations.
+    pub fn permission_checker(&self) -> &PermissionChecker {
+        &self.permission
+    }
+
     pub async fn execute_batch(&self, calls: &[ToolCall]) -> Vec<ToolCallResult> {
         self.execute_batch_inner(
             calls, /*on_progress*/ None, /*on_completion*/ None,

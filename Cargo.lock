@@ -1403,6 +1403,7 @@ dependencies = [
  "colored",
  "devo-arg0",
  "devo-core",
+ "devo-harness",
  "devo-kernel",
  "devo-mcp",
  "devo-protocol",
@@ -1416,6 +1417,7 @@ dependencies = [
  "pretty_assertions",
  "serde",
  "serde_json",
+ "tempfile",
  "tokio",
  "toml",
  "tracing",
@@ -1544,6 +1546,7 @@ name = "devo-harness"
 version = "0.2.16"
 dependencies = [
  "chrono",
+ "fs2",
  "pretty_assertions",
  "serde",
  "serde_json",

@@ -64,21 +64,6 @@ pub const DEFAULT_RLM_EXTRA_IMPORT_LABELS: &[&str] = &[
     "tyro",
 ];
 
-/// Built-in Python skill modules the kernel bootstrap should pre-import.
-pub const RLM_BOOTSTRAP_SKILL_IMPORTS: &[&str] = &[
-    "compact",
-    "refine",
-    "goal",
-    "agent_observe",
-    "agent_message",
-    "edit",
-    "websearch",
-    "rlm_heartbeat",
-    "linear",
-    "notion",
-    "attach_image",
-];
-
 /// Options for [`build_rlm_base_prompt`].
 #[derive(Debug, Clone, PartialEq, Eq)]
 pub struct RlmPromptOptions {
@@ -99,10 +84,7 @@ impl RlmPromptOptions {
             cwd: cwd.into(),
             messages_path: messages_path.into(),
             skills_dir: None,
-            installed_skills: RLM_BOOTSTRAP_SKILL_IMPORTS
-                .iter()
-                .map(|name| (*name).to_string())
-                .collect(),
+            installed_skills: Vec::new(),
             allow_recursion: true,
             depth: 0,
             parent_agent: None,
@@ -443,7 +425,9 @@ mod tests {
     /// Verifies: root RLM base prompt carries Devo doctrine strings and denies create_session.
     #[test]
     fn build_rlm_base_prompt_contains_key_doctrine() {
-        let prompt = build_rlm_base_prompt(&RlmPromptOptions::root("/repo", "/tmp/messages.jsonl"));
+        let mut options = RlmPromptOptions::root("/repo", "/tmp/messages.jsonl");
+        options.installed_skills = vec!["refine".into(), "goal".into()];
+        let prompt = build_rlm_base_prompt(&options);
 
         assert!(prompt.contains("You are Devo"));
         assert!(prompt.contains("ipython"));
@@ -463,9 +447,11 @@ mod tests {
 
     #[test]
     fn built_in_python_skills_are_not_assumed_to_be_shell_commands() {
-        let prompt = build_rlm_base_prompt(&RlmPromptOptions::root("/repo", "/tmp/messages.jsonl"));
+        let mut options = RlmPromptOptions::root("/repo", "/tmp/messages.jsonl");
+        options.installed_skills = vec!["refine".into(), "goal".into()];
+        let prompt = build_rlm_base_prompt(&options);
 
-        for import in RLM_BOOTSTRAP_SKILL_IMPORTS {
+        for import in &options.installed_skills {
             assert!(
                 prompt.contains(&format!("`{import}`")),
                 "missing skill import {import}"

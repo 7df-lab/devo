@@ -220,6 +220,11 @@ jobs:
       - uses: actions/checkout@v4
       - uses: dtolnay/rust-toolchain@stable
       - uses: Swatinem/rust-cache@v2
+      - uses: actions/setup-python@v5
+        with:
+          python-version: "3.13"
+      - name: Install kernel snapshot dependency
+        run: python -m pip install dill==0.4.1
       - run: cargo test --workspace --jobs 1
 
   fmt:

@@ -1,3 +1,5 @@
+mod harness;
+
 use std::sync::Arc;
 
 use devo_core::tools::{PermissionChecker, PermissionGrant, ToolCall, ToolContent, ToolRuntime};
@@ -52,6 +54,15 @@ async fn dispatch_host_request(runtime: &ToolRuntime, request_id: String, data: 
     else {
         return error_reply("host request is missing a type");
     };
+
+    if action.starts_with("harness.") {
+        let (_, params) = devo_kernel::parse_host_request_data(&data);
+        let home = match devo_util_paths::find_devo_home() {
+            Ok(home) => home,
+            Err(error) => return error_reply(error.to_string()),
+        };
+        return harness::handle_harness(runtime, request_id, action, &params, &home).await;
+    }
 
     if matches!(action, "bash.poll" | "bash.kill" | "bash.forget") {
         return runtime.control_host_bash(action, &data);

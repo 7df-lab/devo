@@ -53,12 +53,7 @@ pub(crate) struct PendingRefine {
 /// Ensure the session harness directory exists with a valid (or empty) state file.
 pub(crate) fn ensure_session_harness(session_dir: &Path) -> Result<PathBuf, String> {
     let path = HarnessState::file_path(session_dir);
-    if path.exists() {
-        HarnessState::load(&path).map_err(|e| e.to_string())?;
-        return Ok(path);
-    }
-    let state = HarnessState::default();
-    state.save_atomic(&path).map_err(|e| e.to_string())?;
+    devo_harness::initialize_harness(&path).map_err(|e| e.to_string())?;
     Ok(path)
 }
 
@@ -78,9 +73,9 @@ pub(crate) fn refine_scope_label(pending: &PendingRefine) -> &'static str {
 
 /// Harness state path a refine applies to: the session-local store, or — for
 /// `global_=True` requests — the global continual-harness store under the
-/// Devo home (`<home>/harness/harness_state.json`, the same directory the
-/// kernel env `RLM_GLOBAL_HARNESS_STATE_DIR` and the kernel fence grant point
-/// at). Global refinements used to be applied to the session-local store
+/// Devo home (`<home>/harness/harness_state.json`, the same host-owned store
+/// used by kernel `harness.*` requests). Global refinements used to be applied
+/// to the session-local store
 /// because nothing consumed `PendingRefine::global`.
 pub(crate) fn refine_target_harness_path(
     session_dir: &Path,
@@ -242,7 +237,7 @@ fn schedule_refine_run_inner(
     session_id: &devo_protocol::native::ids::SessionId,
     params: &SessionRefineRunParams,
     is_root: bool,
-    session_dir: Option<&Path>,
+    _session_dir: Option<&Path>,
     autonomous: bool,
 ) -> SessionRefineRunResult {
     if !is_root {
@@ -253,16 +248,8 @@ fn schedule_refine_run_inner(
             refinement_id: None,
         };
     }
-    if let Some(dir) = session_dir
-        && let Err(error) = ensure_session_harness(dir)
-    {
-        return SessionRefineRunResult {
-            scheduled: false,
-            note: None,
-            reason: Some(format!("harness state unavailable: {error}")),
-            refinement_id: None,
-        };
-    }
+    // Admission only queues work. Filesystem validation and initialization run
+    // on the blocking pool at apply time, never in the actor/host-request path.
     let proposal_id = format!("refine_{}", Uuid::new_v4());
     let pending = PendingRefine {
         proposal_id: proposal_id.clone(),
@@ -454,35 +441,57 @@ impl ServerRuntime {
                 .insert(native_session_id.as_str().to_string(), pending);
             return None;
         }
-        let harness_path = match refine_target_harness_path(session_dir, &pending) {
-            Ok(path) => path,
-            Err(error) => {
+        let target_dir = session_dir.to_path_buf();
+        let target_pending = pending.clone();
+        let harness_path = match tokio::task::spawn_blocking(move || {
+            refine_target_harness_path(&target_dir, &target_pending)
+        })
+        .await
+        {
+            Ok(Ok(path)) => path,
+            Ok(Err(error)) => {
                 tracing::warn!(%error, "refine apply skipped: harness unavailable");
+                return None;
+            }
+            Err(error) => {
+                tracing::warn!(%error, "refine initialization worker failed");
                 return None;
             }
         };
         let proposal = self
             .plan_refine_proposal_llm(session_id, &pending, &harness_path)
             .await;
-        // Re-insert was already consumed; apply directly.
-        match apply_proposal_re_read(&harness_path, &proposal) {
-            Ok(_state) => {
-                let mut record = record_from_proposal(
-                    &proposal,
-                    &harness_path,
-                    Some(refine_scope_label(&pending)),
-                );
-                record.rollback_of = pending.rollback_id.clone();
-                if let Err(error) = append_refinement(session_dir, &record) {
-                    tracing::warn!(%error, "failed to append refinements.jsonl");
+        let session_dir = session_dir.to_path_buf();
+        // Planning holds no store lock. The blocking worker acquires the shared
+        // transaction lock only for re-read/drift-check/apply/atomic commit.
+        match tokio::task::spawn_blocking(move || {
+            match apply_proposal_re_read(&harness_path, &proposal) {
+                Ok(_state) => {
+                    let mut record = record_from_proposal(
+                        &proposal,
+                        &harness_path,
+                        Some(refine_scope_label(&pending)),
+                    );
+                    record.rollback_of = pending.rollback_id.clone();
+                    if let Err(error) = append_refinement(&session_dir, &record) {
+                        tracing::warn!(%error, "failed to append refinements.jsonl");
+                    }
+                    Some(AppliedRefine {
+                        proposal,
+                        autonomous: pending.autonomous,
+                    })
                 }
-                Some(AppliedRefine {
-                    proposal,
-                    autonomous: pending.autonomous,
-                })
+                Err(error) => {
+                    tracing::warn!(%error, "refine apply failed");
+                    None
+                }
             }
+        })
+        .await
+        {
+            Ok(applied) => applied,
             Err(error) => {
-                tracing::warn!(%error, "refine apply failed");
+                tracing::warn!(%error, "refine apply worker failed");
                 None
             }
         }
@@ -946,5 +955,26 @@ mod tests {
         let path = ensure_session_harness(home.path()).expect("global store path");
         assert_eq!(path, home.path().join("harness").join("harness_state.json"));
         assert!(path.is_file());
+    }
+
+    #[test]
+    fn scheduling_does_not_touch_harness_storage() {
+        let directory = tempfile::tempdir().unwrap();
+        let session_id = devo_protocol::native::ids::SessionId::new();
+        let params = SessionRefineRunParams {
+            session_id,
+            instructions: Some("remember a lesson".into()),
+            global: false,
+            rollback_id: None,
+        };
+        let result = schedule_refine_run(
+            &session_id,
+            &params,
+            /*is_root*/ true,
+            Some(directory.path()),
+        );
+        assert!(result.scheduled);
+        assert!(!directory.path().join("harness").exists());
+        assert!(take_pending_refine(&session_id).is_some());
     }
 }

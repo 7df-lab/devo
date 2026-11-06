@@ -4,15 +4,18 @@
 
 mod apply;
 mod auto;
+mod commands;
 mod digest;
 mod inject;
 mod refinements;
 mod state;
+mod store;
 
 pub use apply::{ApplyError, RefineEdit, RefineEditOp, RefineProposal, apply_proposal_re_read};
 pub use auto::{
     AutoRefineSettings, DEFAULT_COMPACT_COOLDOWN_MS, DEFAULT_TURN_INTERVAL, should_auto_refine,
 };
+pub use commands::{HarnessCommand, HarnessCommandError, mutate_harness};
 pub use digest::{
     HARNESS_DIGEST_HEADING, HARNESS_DIGEST_PREFIX, HARNESS_DIGEST_SUFFIX,
     filter_texts_for_summarizer, format_harness_state_for_prompt, is_harness_digest_only,
@@ -28,3 +31,4 @@ pub use state::{
     HarnessEntry, HarnessKind, HarnessScope, HarnessState, HarnessStateError, RefinementEvent,
     SCHEMA_VERSION,
 };
+pub use store::{canonical_harness_path, initialize_harness, transact_harness};

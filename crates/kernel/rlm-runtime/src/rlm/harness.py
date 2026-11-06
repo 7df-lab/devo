@@ -3,28 +3,24 @@
 The state model is intentionally small: it records prompt notes, memory,
 skills, subagent specs, and refinement events in the session-local harness
 store by default; pass ``global_=True`` for the cross-session global store.
-Execution still belongs to Devo's TypeScript host and the existing
-``rlm.spawn`` recursion bridge.
+Persistent mutations and refreshes are asynchronous host requests. Rust resolves
+store paths, authorizes operations, and commits transactions. Python only holds
+an explicitly refreshed view; it is not a filesystem or security boundary.
 """
 
 from __future__ import annotations
 
 import json
-import os
-import stat
 from dataclasses import asdict, dataclass, field, fields
 from datetime import datetime, timezone
 from pathlib import Path
-from uuid import uuid4
 from typing import Any, Literal
 
 HarnessKind = Literal["prompt", "memory", "skill", "subagent"]
 HarnessScope = Literal["local", "global"]
 
-_DEFAULT_FILE_NAME = "harness_state.json"
-_DEFAULT_HARNESS_DIR_NAME = "harness"
 _KINDS: tuple[HarnessKind, ...] = ("prompt", "memory", "skill", "subagent")
-_state_cache: dict[tuple[Path, HarnessScope], "HarnessState"] = {}
+_state_cache: dict[HarnessScope, "HarnessState"] = {}
 
 
 def _now() -> str:
@@ -35,15 +31,6 @@ def _slug(raw: str, fallback: str) -> str:
     normalized = "".join(ch.lower() if ch.isalnum() else "_" for ch in raw.strip())
     normalized = "_".join(part for part in normalized.split("_") if part)
     return (normalized or fallback)[:80]
-
-
-def _agent_dir() -> Path:
-    raw = (
-        os.environ.get("DEVO_CODING_AGENT_DIR")
-        or os.environ.get("PI_CODING_AGENT_DIR")
-        or str(Path.home() / ".devo")
-    )
-    return Path(raw).expanduser().resolve()
 
 
 def _resolve_global_flag(global_: bool = False, extra: dict[str, Any] | None = None) -> bool:
@@ -68,29 +55,6 @@ def _strip_scope_prefix(id: str | None, global_: bool) -> tuple[str | None, bool
         if sep and rest and scope in ("local", "global"):
             return rest, global_ or scope == "global"
     return id, global_
-
-
-def _env_dir(name: str) -> str | None:
-    # Set-but-empty env values must behave as unset; a bare "" would skip the
-    # session-dir fallback and land local writes in the global agent-dir default.
-    value = (os.environ.get(name) or "").strip()
-    return value or None
-
-
-def _state_file(state_dir: str | Path | None = None, *, global_: bool = False) -> Path:
-    root: str | Path | None = state_dir
-    if root is None:
-        root = _env_dir("RLM_GLOBAL_HARNESS_STATE_DIR") if global_ else _env_dir("RLM_HARNESS_STATE_DIR")
-    if root is None and not global_ and (session_dir := _env_dir("RLM_SESSION_DIR")):
-        root = Path(session_dir) / _DEFAULT_HARNESS_DIR_NAME
-    if root is None and not global_:
-        raise RuntimeError(
-            "Local harness state requires RLM_HARNESS_STATE_DIR or RLM_SESSION_DIR. "
-            "Use get_harness_state(global_=True) for global state."
-        )
-    if root:
-        return Path(root).expanduser().resolve() / _DEFAULT_FILE_NAME
-    return _agent_dir() / _DEFAULT_HARNESS_DIR_NAME / _DEFAULT_FILE_NAME
 
 
 @dataclass
@@ -142,7 +106,11 @@ def _validate_python_skill_reference(reference: dict[str, Any] | None) -> dict[s
 
 
 class HarnessState:
-    """CRUD store for reset-free harness refinement state."""
+    """Host-backed harness view with awaitable writes and explicit load().
+
+    get/list/snapshot/overview inspect the last loaded or committed snapshot.
+    Pass in_memory=True for a standalone volatile store, never disk fallback.
+    """
 
     def __init__(
         self,
@@ -152,173 +120,68 @@ class HarnessState:
         scope: HarnessScope = "local",
         local_write_error: str | None = None,
     ):
-        # in_memory mode never resolves or touches a path. It is the safe fallback when
-        # path resolution itself fails, so constructing it cannot re-raise that error.
-        if in_memory:
-            self.file_path: Path | None = None
-        else:
-            self.file_path = (
-                Path(file_path).expanduser().resolve()
-                if file_path
-                else _state_file(global_=(scope == "global"))
+        if file_path is not None and not in_memory:
+            raise ValueError(
+                "Harness paths are owned by the host. Use get_harness_state() or "
+                "get_harness_state(global_=True); use in_memory=True for standalone tests."
             )
+        self._in_memory = in_memory
+        self.file_path: Path | None = None
         self.scope: HarnessScope = scope
-        # When set, local mutations raise instead of vanishing into a volatile
-        # store; reads and global_=True delegation keep working.
+        if scope not in ("local", "global"):
+            raise ValueError(f"unknown harness scope {scope!r}")
         self._local_write_error = local_write_error
         self.entries: dict[HarnessKind, dict[str, HarnessEntry]] = {kind: {} for kind in _KINDS}
         self.refinements: list[RefinementEvent] = []
-        self._global_target_state_dir: Path | None = None
-        # mtime of the file as of the last load/save, used to detect out-of-process
-        # writes (e.g. the host `/refine` command) and avoid clobbering them.
-        self._loaded_mtime: int | None = None
-        self.load()
 
     def _ensure_local_writable(self) -> None:
         if self._local_write_error is not None:
             raise RuntimeError(self._local_write_error)
 
-    def _disk_mtime(self) -> int | None:
-        if self.file_path is None:
-            return None
-        try:
-            return self.file_path.stat().st_mtime_ns
-        except OSError:
-            return None
+    async def _request(self, operation: str, **payload: Any) -> dict[str, Any]:
+        from . import host_request
 
-    def _sync_from_disk(self) -> None:
-        """Reload if another process rewrote the state file since we last touched it.
-
-        The kernel keeps a long-lived ``HarnessState`` in memory while the host
-        ``/refine`` command rewrites the same file from a separate process. Without
-        this guard the next in-kernel ``save()`` would overwrite host edits with a
-        stale snapshot. We re-read whenever the on-disk mtime no longer matches the
-        value recorded at our last load/save.
-        """
-        if self._disk_mtime() != self._loaded_mtime:
-            self.load()
-
-    def load(self) -> "HarnessState":
-        if self.file_path is None or not self.file_path.exists():
-            self._loaded_mtime = None
-            return self
-        mtime = self._disk_mtime()
-        try:
-            with self.file_path.open("r", encoding="utf-8") as f:
-                data = json.load(f)
-        except (OSError, ValueError):
-            # A corrupt or unreadable state file must not crash the kernel or block
-            # refinement. Treat it as empty; the next save() rewrites it cleanly.
-            data = {}
-        # json.load returns non-dict types for valid JSON like `null`, `[]`, or a bare
-        # string; coerce those to an empty object before attribute access.
-        if not isinstance(data, dict):
-            data = {}
-
+        reply = await host_request(f"harness.{operation}", {"scope": self.scope, **payload})
+        state = reply.get("state")
+        if not isinstance(state, dict):
+            raise RuntimeError(f"harness.{operation} returned no state snapshot")
         entries: dict[HarnessKind, dict[str, HarnessEntry]] = {kind: {} for kind in _KINDS}
-        raw_entries = data.get("entries", {})
-        if isinstance(raw_entries, dict):
-            for kind in _KINDS:
-                raw_kind_entries = raw_entries.get(kind, {})
-                if not isinstance(raw_kind_entries, dict):
-                    continue
-                for entry_id, raw_entry in raw_kind_entries.items():
-                    if isinstance(raw_entry, dict):
-                        entry_data = {key: value for key, value in raw_entry.items() if key in _ENTRY_FIELDS}
-                        entry_data["id"] = str(entry_id)
-                        entry_data["kind"] = kind
-                        if not isinstance(entry_data.get("title"), str) or not isinstance(
-                            entry_data.get("content"), str
-                        ):
-                            continue
-                        if not isinstance(entry_data.get("path"), str):
-                            entry_data["path"] = "general"
-                        if entry_data.get("scope") not in ("local", "global"):
-                            entry_data["scope"] = self.scope
-                        if not isinstance(entry_data.get("source"), str):
-                            entry_data["source"] = "agent"
-                        version = entry_data.get("version", 1)
-                        if isinstance(version, str):
-                            try:
-                                version = int(version)
-                            except ValueError:
-                                version = 1
-                        if not isinstance(version, int):
-                            version = 1
-                        entry_data["version"] = version
-                        if not isinstance(entry_data.get("reference"), dict):
-                            entry_data["reference"] = {}
-                        if not isinstance(entry_data.get("arguments"), dict):
-                            entry_data["arguments"] = {}
-                        if not isinstance(entry_data.get("metadata"), dict):
-                            entry_data["metadata"] = {}
-                        entries[kind][str(entry_id)] = HarnessEntry(**entry_data)
-        self.entries = entries
+        for kind in _KINDS:
+            for entry_id, raw in state.get("entries", {}).get(kind, {}).items():
+                data = {key: value for key, value in raw.items() if key in _ENTRY_FIELDS}
+                data["id"], data["kind"] = entry_id, kind
+                data.setdefault("path", "general")
+                data.setdefault("scope", self.scope)
+                entries[kind][entry_id] = HarnessEntry(**data)
+        events = [
+            RefinementEvent(**{key: value for key, value in raw.items() if key in _REFINEMENT_FIELDS})
+            for raw in state.get("refinements", [])
+        ]
+        self.entries, self.refinements = entries, events
+        self.file_path = Path(reply["file_path"]) if reply.get("file_path") else None
+        return reply
 
-        self.refinements = []
-        raw_refinements = data.get("refinements", [])
-        if isinstance(raw_refinements, list):
-            for raw_event in raw_refinements:
-                if isinstance(raw_event, dict):
-                    event_data = {key: value for key, value in raw_event.items() if key in _REFINEMENT_FIELDS}
-                    if not isinstance(event_data.get("id"), str) or not isinstance(
-                        event_data.get("trigger"), str
-                    ):
-                        continue
-                    changes = event_data.get("changes")
-                    if isinstance(changes, str):
-                        event_data["changes"] = [changes]
-                    elif isinstance(changes, list):
-                        event_data["changes"] = [str(change) for change in changes]
-                    elif not isinstance(changes, list):
-                        continue
-                    self.refinements.append(RefinementEvent(**event_data))
-        self._loaded_mtime = mtime
+    async def load(self) -> "HarnessState":
+        """Refresh the local view from the host; construction never performs I/O."""
+        if not self._in_memory:
+            await self._request("load")
         return self
 
     def _global_target(self, global_: bool, extra: dict[str, Any] | None = None) -> "HarnessState | None":
-        if not _resolve_global_flag(global_, extra):
+        if not _resolve_global_flag(global_, extra) or self.scope == "global":
             return None
-        target = get_harness_state(state_dir=self._global_target_state_dir, global_=True)
-        if self.file_path is not None and target.file_path == self.file_path and target.scope == self.scope:
-            return None
-        return target
+        return get_harness_state(global_=True)
 
     def save(self) -> "HarnessState":
-        if self.file_path is None:
-            # in_memory fallback: nothing to persist.
-            return self
-        self.file_path.parent.mkdir(parents=True, exist_ok=True)
-        data = {
-            "schema": 1,
-            "entries": {
-                kind: {entry_id: asdict(entry) for entry_id, entry in records.items()}
-                for kind, records in self.entries.items()
-            },
-            "refinements": [asdict(event) for event in self.refinements],
-        }
-        # Atomic replace on the real file: aliases survive, readers never see a torn file.
-        target_path = Path(os.path.realpath(self.file_path))
-        temp_path = target_path.with_name(f"{target_path.name}.{os.getpid()}.{uuid4().hex}.tmp")
-        try:
-            existing_mode = stat.S_IMODE(os.stat(target_path).st_mode)
-        except FileNotFoundError:
-            existing_mode = None
-        mode = existing_mode if existing_mode is not None else 0o600
-        try:
-            # Create no looser than the destination; retain the umask for new files.
-            descriptor = os.open(temp_path, os.O_WRONLY | os.O_CREAT | os.O_EXCL, mode)
-            with os.fdopen(descriptor, "w", encoding="utf-8") as f:
-                json.dump(data, f, indent=2, ensure_ascii=False)
-            if existing_mode is not None:
-                os.chmod(temp_path, existing_mode)
-            os.replace(temp_path, target_path)
-        finally:
-            temp_path.unlink(missing_ok=True)
-        self._loaded_mtime = self._disk_mtime()
+        """In-memory compatibility only; persistent snapshots cannot be overwritten."""
+        if not self._in_memory:
+            raise RuntimeError(
+                "Harness persistence is host-owned. Use await create/update/delete/"
+                "record_refinement instead of editing entries and calling save()."
+            )
         return self
 
-    def upsert(
+    async def upsert(
         self,
         kind: HarnessKind,
         title: str,
@@ -335,7 +198,7 @@ class HarnessState:
     ) -> HarnessEntry:
         id, global_ = _strip_scope_prefix(id, global_)
         if target := self._global_target(global_, kwargs):
-            return target.upsert(
+            return await target.upsert(
                 kind,
                 title,
                 content,
@@ -347,7 +210,13 @@ class HarnessState:
                 source=source,
             )
         self._ensure_local_writable()
-        self._sync_from_disk()
+        if not self._in_memory:
+            reply = await self._request(
+                "upsert", kind=kind, id=id or _slug(title, kind), title=title,
+                content=content, path=path, reference=reference,
+                arguments=arguments, metadata=metadata, source=source,
+            )
+            return self.entries[kind][reply["entry"]["id"]]
         return self._upsert(
             kind,
             title,
@@ -373,10 +242,7 @@ class HarnessState:
         metadata: dict[str, Any] | None = None,
         source: str = "agent",
     ) -> HarnessEntry:
-        # Caller is responsible for syncing from disk first. create()/update() sync
-        # once and then call this directly so their existence check and the write are
-        # not separated by a second reload (which could turn create-or-fail into a
-        # silent update).
+        # Explicit in-memory mode only. Persistent operations are host transactions.
         if kind not in self.entries:
             raise ValueError(f"unknown harness kind {kind!r}; expected one of {_KINDS}")
 
@@ -422,17 +288,17 @@ class HarnessState:
         id, global_ = _strip_scope_prefix(id, global_)
         if target := self._global_target(global_, kwargs):
             return target.get(kind, id)
-        self._sync_from_disk()
         if kind not in self.entries:
             raise ValueError(f"unknown harness kind {kind!r}; expected one of {_KINDS}")
         return self.entries[kind].get(id)
 
-    def delete(self, kind: HarnessKind, id: str, *, global_: bool = False, **kwargs: Any) -> bool:
+    async def delete(self, kind: HarnessKind, id: str, *, global_: bool = False, **kwargs: Any) -> bool:
         id, global_ = _strip_scope_prefix(id, global_)
         if target := self._global_target(global_, kwargs):
-            return target.delete(kind, id)
+            return await target.delete(kind, id)
         self._ensure_local_writable()
-        self._sync_from_disk()
+        if not self._in_memory:
+            return bool((await self._request("delete", kind=kind, id=id))["deleted"])
         if kind not in self.entries:
             raise ValueError(f"unknown harness kind {kind!r}; expected one of {_KINDS}")
         if id not in self.entries[kind]:
@@ -444,7 +310,6 @@ class HarnessState:
     def list(self, kind: HarnessKind | None = None, *, global_: bool = False, **kwargs: Any) -> list[HarnessEntry]:
         if target := self._global_target(global_, kwargs):
             return target.list(kind)
-        self._sync_from_disk()
         kinds = [kind] if kind else list(_KINDS)
         records: list[HarnessEntry] = []
         for current_kind in kinds:
@@ -453,7 +318,7 @@ class HarnessState:
             records.extend(self.entries[current_kind].values())
         return sorted(records, key=lambda entry: (entry.kind, entry.path, entry.title, entry.id))
 
-    def create(
+    async def create(
         self,
         kind: HarnessKind,
         title: str,
@@ -470,7 +335,7 @@ class HarnessState:
     ) -> HarnessEntry:
         id, global_ = _strip_scope_prefix(id, global_)
         if target := self._global_target(global_, kwargs):
-            return target.create(
+            return await target.create(
                 kind,
                 title,
                 content,
@@ -482,7 +347,13 @@ class HarnessState:
                 source=source,
             )
         self._ensure_local_writable()
-        self._sync_from_disk()
+        if not self._in_memory:
+            reply = await self._request(
+                "create", kind=kind, id=id or _slug(title, kind), title=title,
+                content=content, path=path, reference=reference,
+                arguments=arguments, metadata=metadata, source=source,
+            )
+            return self.entries[kind][reply["entry"]["id"]]
         if kind not in self.entries:
             raise ValueError(f"unknown harness kind {kind!r}; expected one of {_KINDS}")
         entry_id = id or _slug(title, kind)
@@ -500,7 +371,7 @@ class HarnessState:
             source=source,
         )
 
-    def update(
+    async def update(
         self,
         kind: HarnessKind,
         id: str,
@@ -517,7 +388,7 @@ class HarnessState:
     ) -> HarnessEntry:
         id, global_ = _strip_scope_prefix(id, global_)
         if target := self._global_target(global_, kwargs):
-            return target.update(
+            return await target.update(
                 kind,
                 id,
                 title,
@@ -529,7 +400,13 @@ class HarnessState:
                 source=source,
             )
         self._ensure_local_writable()
-        self._sync_from_disk()
+        if not self._in_memory:
+            reply = await self._request(
+                "update", kind=kind, id=id or _slug(title, kind), title=title,
+                content=content, path=path, reference=reference,
+                arguments=arguments, metadata=metadata, source=source,
+            )
+            return self.entries[kind][reply["entry"]["id"]]
         if kind not in self.entries:
             raise ValueError(f"unknown harness kind {kind!r}; expected one of {_KINDS}")
         if id not in self.entries[kind]:
@@ -546,7 +423,7 @@ class HarnessState:
             source=source,
         )
 
-    def create_memory(
+    async def create_memory(
         self,
         title: str,
         content: str,
@@ -557,9 +434,9 @@ class HarnessState:
         global_: bool = False,
         **kwargs: Any,
     ) -> HarnessEntry:
-        return self.create("memory", title, content, id=id, path=path, metadata=metadata, global_=global_, **kwargs)
+        return await self.create("memory", title, content, id=id, path=path, metadata=metadata, global_=global_, **kwargs)
 
-    def update_memory(
+    async def update_memory(
         self,
         id: str,
         title: str,
@@ -570,12 +447,12 @@ class HarnessState:
         global_: bool = False,
         **kwargs: Any,
     ) -> HarnessEntry:
-        return self.update("memory", id, title, content, path=path, metadata=metadata, global_=global_, **kwargs)
+        return await self.update("memory", id, title, content, path=path, metadata=metadata, global_=global_, **kwargs)
 
-    def delete_memory(self, id: str, *, global_: bool = False, **kwargs: Any) -> bool:
-        return self.delete("memory", id, global_=global_, **kwargs)
+    async def delete_memory(self, id: str, *, global_: bool = False, **kwargs: Any) -> bool:
+        return await self.delete("memory", id, global_=global_, **kwargs)
 
-    def create_prompt_note(
+    async def create_prompt_note(
         self,
         title: str,
         content: str,
@@ -586,9 +463,9 @@ class HarnessState:
         global_: bool = False,
         **kwargs: Any,
     ) -> HarnessEntry:
-        return self.create("prompt", title, content, id=id, path=path, metadata=metadata, global_=global_, **kwargs)
+        return await self.create("prompt", title, content, id=id, path=path, metadata=metadata, global_=global_, **kwargs)
 
-    def update_prompt_note(
+    async def update_prompt_note(
         self,
         id: str,
         title: str,
@@ -599,12 +476,12 @@ class HarnessState:
         global_: bool = False,
         **kwargs: Any,
     ) -> HarnessEntry:
-        return self.update("prompt", id, title, content, path=path, metadata=metadata, global_=global_, **kwargs)
+        return await self.update("prompt", id, title, content, path=path, metadata=metadata, global_=global_, **kwargs)
 
-    def delete_prompt_note(self, id: str, *, global_: bool = False, **kwargs: Any) -> bool:
-        return self.delete("prompt", id, global_=global_, **kwargs)
+    async def delete_prompt_note(self, id: str, *, global_: bool = False, **kwargs: Any) -> bool:
+        return await self.delete("prompt", id, global_=global_, **kwargs)
 
-    def create_skill(
+    async def create_skill(
         self,
         title: str,
         content: str,
@@ -617,7 +494,7 @@ class HarnessState:
         global_: bool = False,
         **kwargs: Any,
     ) -> HarnessEntry:
-        return self.create(
+        return await self.create(
             "skill",
             title,
             content,
@@ -630,7 +507,7 @@ class HarnessState:
             **kwargs,
         )
 
-    def update_skill(
+    async def update_skill(
         self,
         id: str,
         title: str,
@@ -647,7 +524,7 @@ class HarnessState:
         # existing reference (see _upsert) rather than forcing every title/content-only
         # update to re-send the full Python reference.
         validated_reference = _validate_python_skill_reference(reference) if reference is not None else None
-        return self.update(
+        return await self.update(
             "skill",
             id,
             title,
@@ -660,10 +537,10 @@ class HarnessState:
             **kwargs,
         )
 
-    def delete_skill(self, id: str, *, global_: bool = False, **kwargs: Any) -> bool:
-        return self.delete("skill", id, global_=global_, **kwargs)
+    async def delete_skill(self, id: str, *, global_: bool = False, **kwargs: Any) -> bool:
+        return await self.delete("skill", id, global_=global_, **kwargs)
 
-    def create_subagent(
+    async def create_subagent(
         self,
         title: str,
         content: str,
@@ -674,9 +551,9 @@ class HarnessState:
         global_: bool = False,
         **kwargs: Any,
     ) -> HarnessEntry:
-        return self.create("subagent", title, content, id=id, path=path, metadata=metadata, global_=global_, **kwargs)
+        return await self.create("subagent", title, content, id=id, path=path, metadata=metadata, global_=global_, **kwargs)
 
-    def update_subagent(
+    async def update_subagent(
         self,
         id: str,
         title: str,
@@ -687,12 +564,12 @@ class HarnessState:
         global_: bool = False,
         **kwargs: Any,
     ) -> HarnessEntry:
-        return self.update("subagent", id, title, content, path=path, metadata=metadata, global_=global_, **kwargs)
+        return await self.update("subagent", id, title, content, path=path, metadata=metadata, global_=global_, **kwargs)
 
-    def delete_subagent(self, id: str, *, global_: bool = False, **kwargs: Any) -> bool:
-        return self.delete("subagent", id, global_=global_, **kwargs)
+    async def delete_subagent(self, id: str, *, global_: bool = False, **kwargs: Any) -> bool:
+        return await self.delete("subagent", id, global_=global_, **kwargs)
 
-    def record_refinement(
+    async def record_refinement(
         self,
         trigger: str,
         changes: list[str] | str,
@@ -704,9 +581,15 @@ class HarnessState:
         **kwargs: Any,
     ) -> RefinementEvent:
         if target := self._global_target(global_, kwargs):
-            return target.record_refinement(trigger, changes, evidence=evidence, outcome=outcome, id=id)
+            return await target.record_refinement(trigger, changes, evidence=evidence, outcome=outcome, id=id)
         self._ensure_local_writable()
-        self._sync_from_disk()
+        if not self._in_memory:
+            reply = await self._request(
+                "record_refinement", trigger=trigger,
+                changes=[changes] if isinstance(changes, str) else list(changes),
+                evidence=evidence, outcome=outcome, id=id,
+            )
+            return RefinementEvent(**reply["event"])
         event_id = id or f"refine_{len(self.refinements) + 1:04d}"
         normalized_changes = [changes] if isinstance(changes, str) else list(changes)
         event = RefinementEvent(
@@ -740,7 +623,6 @@ class HarnessState:
     def overview(self, *, max_entries_per_kind: int = 20, global_: bool = False, **kwargs: Any) -> str:
         if target := self._global_target(global_, kwargs):
             return target.overview(max_entries_per_kind=max_entries_per_kind)
-        self._sync_from_disk()
         lines = [
             f"Harness state ({self.scope}): {self.file_path}",
             "Call contract: installed Python skills use await <skill_import>(...) or a matching shell CLI; "
@@ -790,7 +672,6 @@ class HarnessState:
     def snapshot(self, *, global_: bool = False, **kwargs: Any) -> dict[str, Any]:
         if target := self._global_target(global_, kwargs):
             return target.snapshot()
-        self._sync_from_disk()
         return {
             "file_path": str(self.file_path),
             "scope": self.scope,
@@ -805,28 +686,19 @@ class HarnessState:
 def get_harness_state(
     state_dir: str | Path | None = None, *, global_: bool = False, **kwargs: Any
 ) -> HarnessState:
-    """Return the cached local harness state, or global when requested."""
+    """Return a lazy host-backed view. Await load() before reading existing state.
+
+    Mutations must be awaited; they refresh this view from the committed host
+    snapshot. Arbitrary Python-selected persistence paths are not supported.
+    """
+    if state_dir is not None:
+        raise ValueError("state_dir is host-owned; select local or global_=True instead")
     global_ = _resolve_global_flag(global_, kwargs)
-    file_path = _state_file(state_dir, global_=global_)
     scope: HarnessScope = "global" if global_ else "local"
-    cache_key = (file_path, scope)
-    state = _state_cache.get(cache_key)
-    if state is None:
-        state = HarnessState(file_path, scope=scope)
-        # Recorded at construction only: an instance created from env defaults must
-        # keep targeting RLM_GLOBAL_HARNESS_STATE_DIR even when a later explicit
-        # state_dir call aliases the same local file. An explicit dir that merely
-        # aliases the env resolution must not sandbox later global_=True writes
-        # either, so pin only when the explicit dir actually diverges.
-        if state_dir is not None:
-            try:
-                env_file: Path | None = _state_file(global_=global_)
-            except RuntimeError:
-                env_file = None
-            if file_path != env_file:
-                state._global_target_state_dir = Path(state_dir).expanduser().resolve()
-        _state_cache[cache_key] = state
-    return state
+    if scope not in _state_cache:
+        _state_cache[scope] = HarnessState(scope=scope)
+    return _state_cache[scope]
+
 
 
 __all__ = [

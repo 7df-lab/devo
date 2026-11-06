@@ -41,3 +41,19 @@ await refine.run("promote the error-handling pattern to a global skill", global_
   repeated delegation role, or a behavior policy worth persisting. Do not
   rewrite the whole harness when a focused memory, skill, prompt note, or
   subagent spec is enough.
+
+## Direct harness entries
+
+Use the host-backed harness facade for a specific change. Mutations are awaited
+and refresh the local view. Read helpers inspect that cached view, so load it
+explicitly before inspecting entries saved by an earlier turn:
+
+```python
+await rlm.harness.load()
+await rlm.harness.create_memory(title="Useful lesson", content="...")
+rlm.harness.overview()
+```
+
+Use `global_=True` for stable cross-session lessons. Persistent local writes are
+unavailable in ephemeral sessions; the host rejects mutations in Plan mode.
+Python does not choose persistence paths or write harness state files.

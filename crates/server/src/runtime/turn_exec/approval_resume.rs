@@ -2,7 +2,7 @@
 
 use std::sync::Arc;
 
-use devo_core::tools::handlers::{KernelNamespaceRestoreState, ensure_kernel_with_restore_state};
+use devo_core::tools::handlers::{KernelNamespaceRestoreState, ensure_kernel_with_skills};
 use devo_core::tools::registry_plan::ToolPlanConfig;
 use devo_core::tools::{
     AgentToolCoordinator, ClientFilesystem, PermissionChecker, ToolAgentScope, ToolCall,
@@ -674,15 +674,22 @@ impl ServerRuntime {
             })
         });
         let session_dir = working.state.summary.session_dir.clone();
-        let kernel = match ensure_kernel_with_restore_state(
+        let python_skills = working
+            .state
+            .runtime_context
+            .refresh_skill_context(&mut working.state.core)
+            .map_err(|error| error.to_string())?;
+        let kernel = match ensure_kernel_with_skills(
             &working.state.kernel,
             &working.state.core.cwd,
             session_dir.as_deref(),
             collaboration_mode,
+            &python_skills,
         )
         .await
         {
-            Ok((arc, namespace_state)) => {
+            Ok((arc, namespace_state, imports)) => {
+                working.state.core.config.installed_python_skills = imports;
                 working.state.kernel = Some(Arc::clone(&arc));
                 // Persist the actual restore outcome so the TUI can show the
                 // same state notice live and when the history is reopened.

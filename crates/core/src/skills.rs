@@ -6,6 +6,7 @@ use std::path::PathBuf;
 use serde::{Deserialize, Serialize};
 use smol_str::SmolStr;
 
+pub use devo_skills::PythonSkill;
 pub use devo_skills::SkillDependencies;
 pub use devo_skills::SkillInterface;
 pub use devo_skills::SkillScope;
@@ -73,6 +74,31 @@ pub trait SkillCatalog {
         workspace_root: Option<&Path>,
         force_reload: bool,
     ) -> Result<Vec<SkillRecord>, SkillError>;
+
+    /// Select enabled bundled Python packages from this catalog, never from a
+    /// second directory scan. User/workspace instructions do not execute merely
+    /// because discovery encountered them.
+    fn python_skills(
+        &mut self,
+        workspace_root: Option<&Path>,
+    ) -> Result<Vec<PythonSkill>, SkillError> {
+        let mut skills = self
+            .discover(workspace_root, false)?
+            .into_iter()
+            .filter(|skill| skill.enabled && skill.scope == SkillScope::System)
+            .filter_map(|skill| PythonSkill::from_skill(&skill.name, &skill.path))
+            .collect::<Vec<_>>();
+        skills.sort_by(|left, right| left.module.cmp(&right.module));
+        // A global Python binding cannot represent two different identities.
+        // Fail closed rather than silently picking a root by filesystem order.
+        let ambiguous = skills
+            .windows(2)
+            .filter(|pair| pair[0].module == pair[1].module)
+            .map(|pair| pair[0].module.clone())
+            .collect::<std::collections::HashSet<_>>();
+        skills.retain(|skill| !ambiguous.contains(&skill.module));
+        Ok(skills)
+    }
 
     /// Loads the content for one discovered skill.
     fn load(
@@ -337,3 +363,7 @@ pub enum SkillError {
         second_path: PathBuf,
     },
 }
+
+#[cfg(test)]
+#[path = "skills_tests.rs"]
+mod tests;

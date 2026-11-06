@@ -867,10 +867,26 @@ impl KernelSession {
     /// Execute a code cell and wait until its `done` event.
     pub async fn execute(&self, code: impl Into<String>) -> Result<CellOutput, ReplError> {
         let _gate = self.execute_gate.lock().await;
+        self.execute_locked(code.into()).await
+    }
+
+    /// Execute only if no cell owns the request stream. Maintenance must not
+    /// block a new turn behind a parked foreground/background cell.
+    pub async fn try_execute(
+        &self,
+        code: impl Into<String>,
+    ) -> Result<Option<CellOutput>, ReplError> {
+        let Ok(_gate) = self.execute_gate.try_lock() else {
+            return Ok(None);
+        };
+        self.execute_locked(code.into()).await.map(Some)
+    }
+
+    async fn execute_locked(&self, code: String) -> Result<CellOutput, ReplError> {
         let id = format!("c{}", self.cell_seq.fetch_add(1, Ordering::Relaxed) + 1);
         let req = KernelRequest::Execute {
             id: id.clone(),
-            code: code.into(),
+            code,
         };
         let host_handler = self.host_handler.lock().await.clone();
         self.set_active_request(id.clone(), host_handler).await;
