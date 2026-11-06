@@ -13,7 +13,6 @@ import {
 	updateAutomation,
 } from "./automation"
 import type { CreateAutomationInput, UpdateAutomationInput } from "./automation/types"
-import { deleteCredential, getCredential, storeCredential } from "./credential-store"
 import { checkDesktopRuntime } from "./desktop-runtime-check"
 import { createDesktopFolder, statDesktopFolders } from "./desktop-folders"
 import {
@@ -31,11 +30,6 @@ import {
 	stashAndCheckout,
 	stashPop,
 } from "./git-service"
-import {
-	localWorkspaceChangesSummary,
-	localWorkspaceFilePatch,
-	type LocalGitChangeScope,
-} from "./git-workspace-changes"
 import { getResolvedChromeTier, resolveTitleBarOverlay } from "./liquid-glass"
 import { createProjectAgentsMd, listRuleFiles } from "./rules-files"
 import { createLogger } from "./logger"
@@ -540,39 +534,6 @@ export function registerIpcHandlers({ recreateWindows }: { recreateWindows?: () 
 	)
 
 	ipcMain.handle(
-		"git:workspace-changes-summary",
-		withLogging(
-			"git:workspace-changes-summary",
-			async (
-				_,
-				directory: string,
-				scope: LocalGitChangeScope,
-				options?: { baseBranch?: string | null; ignoreWhitespace?: boolean },
-			) => await localWorkspaceChangesSummary(directory, scope, options ?? {}),
-		),
-	)
-
-	ipcMain.handle(
-		"git:workspace-file-patch",
-		withLogging(
-			"git:workspace-file-patch",
-			async (
-				_,
-				directory: string,
-				scope: LocalGitChangeScope | "turn",
-				filePath: string,
-				options?: {
-					baseBranch?: string | null
-					ignoreWhitespace?: boolean
-					fileStatus?: string | null
-					checkpointId?: string | null
-					mergeBase?: string | null
-				},
-			) => await localWorkspaceFilePatch(directory, scope, filePath, options ?? {}),
-		),
-	)
-
-	ipcMain.handle(
 		"git:remote-url",
 		withLogging(
 			"git:remote-url",
@@ -703,24 +664,6 @@ export function registerIpcHandlers({ recreateWindows }: { recreateWindows?: () 
 	ipcMain.handle("settings:get", () => getSettings())
 
 	ipcMain.handle("settings:update", (_, partial) => updateSettings(partial))
-
-	// --- Credential storage (safeStorage-backed) ---
-
-	ipcMain.handle(
-		"credential:store",
-		withLogging("credential:store", (_, serverId: string, password: string) => {
-			storeCredential(serverId, password)
-		}),
-	)
-
-	ipcMain.handle("credential:get", (_, serverId: string) => getCredential(serverId))
-
-	ipcMain.handle(
-		"credential:delete",
-		withLogging("credential:delete", (_, serverId: string) => {
-			deleteCredential(serverId)
-		}),
-	)
 
 	// --- Native theme (controls macOS glass tint color) ---
 

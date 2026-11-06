@@ -112,22 +112,20 @@ mock.module("./devo-manager", () => ({
 	stopServer: unused,
 }))
 
+const runtimeResult = { installed: true, path: "/selected/runtime/devo" }
+const checkDesktopRuntime = mock(async () => runtimeResult)
+mock.module("./desktop-runtime-check", () => ({ checkDesktopRuntime }))
+
 // Avoid starting unrelated Electron services when registering IPC handlers.
 const stubModules: Array<[string, string]> = [
 	[
 		"./automation",
 		"acceptRun archiveRun createAutomation deleteAutomation getAutomation listAutomations listRuns markRunRead previewSchedule runNow updateAutomation",
 	],
-	["./credential-store", "deleteCredential getCredential storeCredential"],
-	["./desktop-runtime-check", "checkDesktopRuntime"],
 	["./desktop-folders", "createDesktopFolder statDesktopFolders"],
 	[
 		"./git-service",
 		"applyChangesToLocal applyDiffTextToLocal checkout commitAll createBranch getDiffStat getGitRoot getRemoteUrl getStatus listBranches push stashAndCheckout stashPop",
-	],
-	[
-		"./git-workspace-changes",
-		"localWorkspaceChangesSummary localWorkspaceFilePatch",
 	],
 	["./liquid-glass", "getResolvedChromeTier resolveTitleBarOverlay"],
 	["./rules-files", "createProjectAgentsMd listRuleFiles"],
@@ -365,5 +363,27 @@ describe("Desktop OAuth credential cancellation", () => {
 		await second
 		writes[0].gate.resolve()
 		await first
+	})
+})
+
+describe("retained Desktop IPC surface", () => {
+	test("does not register obsolete credentials or workspace diff handlers", () => {
+		const removed = [
+			"credential:store",
+			"credential:get",
+			"credential:delete",
+			"git:workspace-changes-summary",
+			"git:workspace-file-patch",
+		]
+		expect(removed.filter((channel) => handlers.has(channel))).toEqual([])
+		const retained = ["git:checkout", "git:commit-all", "devo:restart"]
+		expect(retained.filter((channel) => handlers.has(channel))).toEqual(retained)
+	})
+
+	test("checks the selected Desktop runtime through onboarding IPC", async () => {
+		checkDesktopRuntime.mockClear()
+		const result: unknown = await handler("onboarding:check-devo")(sender(1))
+		expect(result).toEqual(runtimeResult)
+		expect(checkDesktopRuntime.mock.calls).toEqual([[]])
 	})
 })

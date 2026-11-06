@@ -7,8 +7,6 @@
  */
 
 import { execFile } from "node:child_process"
-import { homedir } from "node:os"
-import path from "node:path"
 import { coerce, satisfies, valid } from "semver"
 import { createLogger } from "./logger"
 
@@ -57,13 +55,6 @@ export interface CheckDevoProgramOptions {
 // Binary detection
 // ============================================================
 
-/** Build the augmented PATH that includes ~/.devo/bin. */
-function getAugmentedPath(): string {
-	const devoBinDir = path.join(homedir(), ".devo", "bin")
-	const sep = process.platform === "win32" ? ";" : ":"
-	return `${devoBinDir}${sep}${process.env.PATH ?? ""}`
-}
-
 /** Run a command and return stdout, or null on failure. */
 function execAsync(
 	cmd: string,
@@ -80,65 +71,6 @@ function execAsync(
 			resolve(stdout.trim())
 		})
 	})
-}
-
-/** Try to find the devo binary and get its version. */
-async function detectDevo(): Promise<{ version: string | null; path: string | null }> {
-	const augmentedPath = getAugmentedPath()
-	const env = { ...process.env, PATH: augmentedPath }
-
-	// Try `devo --version` (the correct flag)
-	const versionOutput = await execAsync("devo", ["--version"], env)
-	if (versionOutput) {
-		// Parse version from output -- could be "v0.2.14", "devo v0.2.14", or "local"
-		const match = versionOutput.match(/v?(\d+\.\d+\.\d+(?:-[a-zA-Z0-9.]+)?)/)
-		const version = match ? match[1] : versionOutput.trim()
-
-		// Try to find the path with `which` or `where`
-		const whichCmd = process.platform === "win32" ? "where" : "which"
-		const binaryPath = await execAsync(whichCmd, ["devo"], env)
-
-		return { version, path: binaryPath }
-	}
-
-	// Fallback: check if the binary exists at all (might not support --version)
-	const whichCmd = process.platform === "win32" ? "where" : "which"
-	const binaryPath = await execAsync(whichCmd, ["devo"], env)
-	if (binaryPath) {
-		return { version: "unknown", path: binaryPath }
-	}
-
-	return { version: null, path: null }
-}
-
-// ============================================================
-// Public API
-// ============================================================
-
-/**
- * Check whether Devo is installed and compatible with this version of Devo.
- * Runs the binary to get its version, then compares against the compatibility range.
- */
-export async function checkDevo(): Promise<DevoCheckResult> {
-	log.info("Checking Devo installation...")
-
-	const { version, path: binaryPath } = await detectDevo()
-
-	if (!version) {
-		log.warn("Devo CLI not found")
-		return {
-			installed: false,
-			version: null,
-			path: null,
-			compatible: false,
-			compatibility: "unknown",
-			message: "Devo CLI not found. Install it from https://devo.ai",
-		}
-	}
-
-	log.info("Devo found", { version, path: binaryPath })
-
-	return compatibilityResult(version, binaryPath)
 }
 
 export async function checkDevoProgram({
