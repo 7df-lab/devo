@@ -109,7 +109,7 @@ The full behavior, ordering rules, and examples live in
 | `snapshot` | Serialize the namespace with dill and write a manifest. |
 | `restore` | Load names from a snapshot. |
 | `list_names` | List user-defined top-level names. |
-| `shutdown` | Stop the runtime, close MCP children, and exit. |
+| `shutdown` | Stop the runtime, kill local Bash children, and exit. |
 
 | Event | Purpose |
 |---|---|
@@ -138,7 +138,7 @@ exactly one per id'd request, always last, and the collector stops there. An
 | `local_bash.py` | Explicit local shell implementation. Not the product default. |
 | `shell.py` | One-shot shell command through the host approval pipeline. |
 | `harness.py` | Kernel-side CRUD for persistent harness state. |
-| `mcp.py` | Kernel-owned generic MCP client registry. |
+| `mcp.py` | Generic MCP facade for the Rust host. |
 | `mcp_base.py` | Base class for MCP integration skill packages. |
 | `skill.py` | CLI helpers for Python skill packages. |
 | `windows_shell.py` | Git Bash discovery on Windows without trusting `PATH`. |
@@ -254,14 +254,24 @@ to host commands.
 
 There are two layers:
 
-- `rlm.mcp` is the kernel-owned generic MCP client registry for servers
-  configured in `mcpServers`. It supports stdio and streamable HTTP servers,
-  reads credentials from the host's `auth.json`, and asks the host to refresh
-  expired tokens through `mcp.refresh`.
+- `rlm.mcp` is a thin facade for the session's Rust MCP manager. Use
+  `await mcp.list_tools(server)` for `{name, description, inputSchema}` entries
+  and `await mcp.call_tool(server, tool, arguments)` for the complete MCP
+  `CallToolResult`, including `content`, `structuredContent`, and `isError`.
+  Tool-level `isError` results are returned unchanged. Host call rejections
+  raise `PermissionError`; discovery, transport, and malformed-response errors
+  remain visible. Neither API retries through a Python transport. An older
+  host that lacks these actions must be upgraded and the session restarted.
+  Connections, authentication, discovery, and approvals belong to the Rust
+  host. The former kernel-local `reload`, `close`, and `McpStartupError` exports
+  are removed; the session owns connection lifecycle and `list_tools` refreshes
+  discovery through the host.
 - `rlm.mcp_base.McpIntegration` is the base class for a Python skill package
   that exposes one MCP server as ordinary async Python methods. Tools are
   discovered on first use and bound through `__getattr__`; `call_tool(name,
-  args)` is the explicit escape hatch.
+  args)` is the explicit escape hatch. These authored integrations, including
+  Linear and Notion, still use the Python SDK and retain their parsed-result
+  contract; they are separate from the generic host facade.
 
 The MCP exports are lazy. `import rlm` does not import the `mcp` SDK; only an
 integration package that subclasses `McpIntegration` needs it.
@@ -501,7 +511,8 @@ main test files are:
 | `test_host_bash.py` | Pending state, approval, cancellation, notices, opaque handles. |
 | `test_rlm_shell.py` | Shell approval arguments and denial propagation. |
 | `test_file_helpers.py` | Direct file I/O and host-mediated fallback. |
-| `test_mcp_host_list_tools.py` | MCP tool listing and host fallback behavior. |
+| `test_mcp_host_list_tools.py` | MCP host-only listing, calls, failures, and result contracts. |
+| `test_mcp_integrations.py` | Bundled Linear/Notion discovery and parsed-result contracts. |
 | `test_snapshot_files.py` | File-handle rejection in snapshots. |
 | `test_snapshot_staging.py` | Exclusive staging and collision handling. |
 | `test_windows_*` | Windows loop, shell discovery, and environment mapping. |
