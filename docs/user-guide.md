@@ -176,6 +176,9 @@ same version number while reusing unchanged cached runtimes.
 Online installers download the smaller app package and cache checksum-pinned
 Node/Python runtimes separately. Upgrades reuse unchanged runtimes without
 downloading or extracting them again. No package manager runs during installation.
+On Windows, online app and runtime packs use `.zip` archives and are extracted
+with the .NET ZIP reader; Unix packs remain `.tar.gz`. Older Windows indexes that
+still reference `.tar.gz` packs remain installable.
 The cache defaults to `%LOCALAPPDATA%\devo\runtimes` on Windows and
 `${XDG_CACHE_HOME:-~/.cache}/devo/runtimes` on Unix. Set `DEVO_RUNTIME_CACHE` before
 installing to choose another persistent directory. Keep this cache while the
