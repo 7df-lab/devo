@@ -227,7 +227,7 @@ impl SessionRuntimeContext {
             &provider_config,
             Some(user_config_dir.as_path()),
         )
-        .context("failed to merge builtin provider catalog with user overlay")?;
+        .context("failed to merge live provider catalog with user configuration")?;
         let auth = read_user_auth_config(&user_config_dir.join(AUTH_CONFIG_FILE_NAME))?;
         let routes = crate::provider_config::build_connection_route_table(
             &provider_config,
@@ -317,7 +317,10 @@ impl SessionRuntimeContext {
                 &config.provider.model_overrides,
                 Some(user_config_dir.as_path()),
             )?);
-        let default_model = model_catalog.resolve_for_turn(None)?.slug.clone();
+        let default_model = model_catalog
+            .resolve_for_turn(None)
+            .map(|model| model.slug.clone())
+            .unwrap_or_default();
         let (provider, provider_router, provider_default_model) = if provider_runtime_config_changed
         {
             let provider =
@@ -467,10 +470,22 @@ impl SessionRuntimeContext {
         state
     }
 
+    pub(crate) fn live_model_catalog(&self) -> Option<PresetModelCatalog> {
+        let store = self.config_store.lock().expect("config store mutex");
+        let config = store.effective_config();
+        PresetModelCatalog::load_from_provider_config_with_home(
+            &config.provider_catalog_config(),
+            &config.provider.model_overrides,
+            Some(store.user_config_dir()),
+        )
+        .ok()
+    }
+
     fn catalog_model_or_fallback(&self, model_slug: &str) -> Model {
-        self.model_catalog
-            .get(model_slug)
-            .cloned()
+        self.live_model_catalog()
+            .as_ref()
+            .and_then(|catalog| catalog.get(model_slug).cloned())
+            .or_else(|| self.model_catalog.get(model_slug).cloned())
             .unwrap_or_else(|| Model {
                 slug: model_slug.to_string(),
                 base_instructions: default_base_instructions().to_string(),
@@ -479,19 +494,24 @@ impl SessionRuntimeContext {
     }
 
     pub(crate) fn resolve_turn_model(&self, requested_model: Option<&str>) -> Model {
+        let live = self.live_model_catalog();
+        let catalog: &dyn ModelCatalog = live
+            .as_ref()
+            .filter(|catalog| !catalog.list_visible().is_empty())
+            .map(|catalog| catalog as &dyn ModelCatalog)
+            .unwrap_or(self.model_catalog.as_ref());
         if let Some(model) = requested_model.and_then(|requested| {
-            self.model_catalog.get(requested).or_else(|| {
+            catalog.get(requested).or_else(|| {
                 requested
                     .rsplit_once('/')
-                    .and_then(|(base, _)| self.model_catalog.get(base))
+                    .and_then(|(base, _)| catalog.get(base))
             })
         }) {
             return model.clone();
         }
-
-        self.model_catalog
+        catalog
             .resolve_for_turn(Some(&self.default_model))
-            .or_else(|_| self.model_catalog.resolve_for_turn(None))
+            .or_else(|_| catalog.resolve_for_turn(None))
             .cloned()
             .unwrap_or_else(|_| Model {
                 slug: self.default_model.clone(),
@@ -516,9 +536,7 @@ impl SessionRuntimeContext {
             )
         };
         let provider_config = config.provider_catalog_config();
-        // Include `$DEVO_HOME/cache` models.dev overlay so remote-only model
-        // ids (for example `deepseek/deepseek-flash`) resolve and get a bare
-        // wire `request_model` instead of the catalog slug.
+        // Resolve live metadata over pinned user connection routes.
         let effective = devo_core::effective_provider_catalog_with_home(
             &provider_config,
             Some(user_config_dir.as_path()),
@@ -583,11 +601,14 @@ impl SessionRuntimeContext {
                 .providers
                 .get(&selection.provider_id)
                 .into_iter()
-                .flat_map(|provider| provider.models.keys())
-                .map(|model_id| {
+                .flat_map(|provider| provider.models.iter())
+                .map(|(model_id, model)| {
                     (
                         format!("{}/{model_id}", selection.provider_id),
-                        model_id.clone(),
+                        model
+                            .request_model
+                            .clone()
+                            .unwrap_or_else(|| model_id.clone()),
                     )
                 })
                 .collect::<std::collections::HashMap<_, _>>();
@@ -595,9 +616,23 @@ impl SessionRuntimeContext {
                 .with_request_config(request_defaults, request_headers);
             let mut turn_config = TurnConfig::with_provider_route_and_web_tools(
                 model,
-                selection.model_id,
+                model_config
+                    .as_ref()
+                    .and_then(|model| model.request_model.clone())
+                    .unwrap_or_else(|| selection.model_id.clone()),
                 provider_request_models,
-                ProviderRoute::connection(selection.provider_id.clone(), selection.wire_api),
+                if model_config
+                    .as_ref()
+                    .is_some_and(|model| model.base_url.is_some())
+                {
+                    ProviderRoute::connection_model(
+                        selection.provider_id.clone(),
+                        selection.wire_api,
+                        selection.model_id,
+                    )
+                } else {
+                    ProviderRoute::connection(selection.provider_id.clone(), selection.wire_api)
+                },
                 web_search,
                 web_fetch,
                 reasoning_effort_selection,

@@ -1486,9 +1486,7 @@ class NativeClient {
 		},
 		discover: async (params: ProviderDiscoverParams): Promise<ProviderDiscoverResult> => {
 			const result = (await this.requestCanonical("provider/discover", params)) as ProviderDiscoverResult
-			// Discover mutates the connection model directory; composer selectors
-			// read model/preferences which must not keep a pre-discover snapshot.
-			this.invalidateConfigOptionCaches()
+			// Discovery is read-only. Callers may explicitly save selected results.
 			return result
 		},
 		auth: async () => ({ data: [] }),

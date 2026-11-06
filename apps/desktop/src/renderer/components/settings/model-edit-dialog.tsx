@@ -224,13 +224,12 @@ export function ModelEditDialog({
 	onSaved,
 }: ModelEditDialogProps) {
 	const isCreate = mode === "create"
-	const providerDefaultWire = provider.wireApis[0] ?? "openai_chat_completions"
 	const existingModels = provider.models ?? {}
 
 	const [modelId, setModelId] = useState(originalModelId)
 	const [displayName, setDisplayName] = useState(model.name ?? "")
 	const [wireApi, setWireApi] = useState<CatalogWireApi>(
-		isCreate ? providerDefaultWire : effectiveWireApi(model, provider),
+		effectiveWireApi(model, provider),
 	)
 	const [enabled, setEnabled] = useState(model.enabled !== false)
 	const [advancedOpen, setAdvancedOpen] = useState(false)

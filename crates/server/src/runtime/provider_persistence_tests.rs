@@ -75,10 +75,11 @@ async fn remote_models_remain_read_only_after_restart_and_settings_edits() -> Re
             json!(1),
             json!({
                 "provider": {"id": "catalog-qa", "name": "Catalog QA", "enabled": true,
+                    "baseUrl": "http://127.0.0.1:1/v1",
                     "wireApis": ["openai_chat_completions"], "models": {
                         "remote": {"name": "Remote", "origin": "remote"},
                         "manual": {"name": "Manual"}
-                    }}
+                    }}, "defaultModel": "catalog-qa/remote"
             }),
         )
         .await;
@@ -89,7 +90,7 @@ async fn remote_models_remain_read_only_after_restart_and_settings_edits() -> Re
     assert_eq!(
         before["result"]["connectionModels"]["catalog-qa"],
         json!({
-            "remote": {"name": "Remote", "origin": "remote"},
+            "remote": {"origin": "remote", "wireApi": "openai_chat_completions"},
             "manual": {"name": "Manual", "origin": "user"}
         })
     );
@@ -99,6 +100,7 @@ async fn remote_models_remain_read_only_after_restart_and_settings_edits() -> Re
             json!(3),
             json!({
                 "provider": {"id": "catalog-qa", "name": "Catalog QA", "enabled": true,
+                    "baseUrl": "http://127.0.0.1:1/v1",
                     "wireApis": ["openai_chat_completions"], "models": {
                         "remote": {"name": "Remote", "origin": "user"}
                     }}
@@ -138,7 +140,7 @@ async fn remote_models_remain_read_only_after_restart_and_settings_edits() -> Re
     assert_eq!(
         remaining["result"]["connectionModels"]["catalog-qa"],
         json!({
-            "remote": {"name": "Remote", "origin": "remote"}
+            "remote": {"origin": "remote", "wireApi": "openai_chat_completions"}
         })
     );
     Ok(())

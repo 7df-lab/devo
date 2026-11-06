@@ -3,7 +3,6 @@ mod acp_session_setup;
 
 use anyhow::Context;
 use anyhow::Result;
-use devo_core::ModelCatalog;
 use pretty_assertions::assert_eq;
 use tempfile::TempDir;
 
@@ -25,6 +24,19 @@ async fn stdio_model_preferences_read_returns_cold_start_options_without_creatin
         &["stdio://"],
         "http://127.0.0.1:1",
         "\n[providers.deepseek]\nenabled = true\nname = \"DeepSeek\"\n",
+    )?;
+
+    // Explicit user model configuration works without a bundled or remote directory.
+    std::fs::write(
+        home_dir.path().join(".devo/providers.json"),
+        serde_json::to_vec_pretty(&serde_json::json!({
+            "provider": {"deepseek": {
+                "name": "DeepSeek", "base_url": "http://127.0.0.1:1/v1",
+                "wire_api": "openai_chat_completions", "models": {
+                    "deepseek-v4-flash": {"name": "DeepSeek fixture"}
+                }
+            }}
+        }))?,
     )?;
 
     let cwd = home_dir.path().join("workspace");
@@ -96,37 +108,11 @@ base_instructions = "Catalog-only model instructions"
     let available_models = preferences["availableModels"]
         .as_array()
         .expect("availableModels array");
-    // A Connection may contain only a credential/provider overlay. Its models
-    // still come from the embedded directory; unrelated templates stay hidden.
-    let inherited_model = available_models
+    let configured_model = available_models
         .iter()
         .find(|model| model["value"] == "deepseek/deepseek-v4-flash")
-        .context("credential-only DeepSeek Connection must expose inherited models")?;
-    let catalog = devo_core::PresetModelCatalog::load()?;
-    let model = catalog
-        .get("deepseek/deepseek-v4-flash")
-        .context("builtin DeepSeek model")?;
-    let efforts: Vec<_> = model
-        .effective_reasoning_capability()
-        .options()
-        .into_iter()
-        .map(|effort| {
-            serde_json::json!({
-                "value": effort.value,
-                "label": effort.label,
-                "description": effort.description,
-            })
-        })
-        .collect();
-    assert_eq!(
-        inherited_model,
-        &serde_json::json!({
-            "value": model.slug,
-            "label": model.display_name,
-            "description": "deepseek: deepseek-v4-flash",
-            "availableEfforts": efforts,
-        })
-    );
+        .context("explicit DeepSeek Connection must expose its saved model")?;
+    assert_eq!(configured_model["label"], "DeepSeek fixture");
     assert!(available_models.iter().all(|model| {
         !model["value"]
             .as_str()

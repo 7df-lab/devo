@@ -76,6 +76,12 @@ pub struct ProviderModelInfo {
     pub capabilities: Option<Value>,
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub wire_api: Option<ProviderWireApi>,
+    /// Explicit per-model endpoint, independent of the provider default.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub base_url: Option<String>,
+    /// Wire model id when this entry is a user-named alias.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub request_model: Option<String>,
     #[serde(
         default,
         alias = "context_window",

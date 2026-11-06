@@ -87,25 +87,24 @@ normally reserves that shortcut for its own scrolling.
 Devo supports configurable connections for
 **OpenAI-compatible Chat Completions**, **OpenAI-compatible Responses**, and
 **Anthropic Messages** APIs.
-Its bundled catalog includes model definitions for providers such as DeepSeek,
-Qwen, Kimi, GLM, and MiniMax. You can configure a compatible endpoint or private
-gateway rather than relying on the bundled entries.
+There are two model data sources: the live models.dev directory and your saved
+configuration. No provider/model directory is bundled, and remote responses are
+not saved as disk snapshots. A configured connection pins its endpoint, protocol,
+and model IDs so remote updates cannot silently reroute existing requests.
 
-Desktop onboarding, Settings, and the composer share the server's provider and
-model catalog. Onboarding shows all available providers, supports searching by
-provider or model, and refreshes remote model metadata. Use **Refresh catalog**
-to check for updates; the saved catalog remains available offline. Catalog providers
-and remotely fetched models cannot be deleted. You can disconnect a provider,
-change model preferences, or remove models you added manually.
+Desktop onboarding, Settings, and the composer share this server-owned directory.
+Use **Refresh catalog** to check models.dev for updates. In the TUI, `/model`
+shows the current in-memory directory and checks in the background at startup
+and while the picker is open. The default refresh interval is one hour.
+Failed updates preserve the last successful directory within the same server
+process and all user-configured models; they never switch your active model.
 
-In the TUI, `/model` shows the saved catalog immediately and checks for updates
-in the background at startup and while the picker is open. The public catalog
-is refreshed at most once per hour by default; connected Codex accounts also
-refresh their authenticated model directory. Search and selection stay in place.
-Failed updates keep the last complete catalog, and never switch your active model.
+Provider **Discover** is an explicit, read-only request, including for Codex.
+Results are temporary suggestions. Save individual discovered models to add them
+to your configuration; opening a model picker does not discover or save models.
 
-To change the public catalog refresh interval or use an offline catalog, add to
-`~/.devo/config.toml` (Windows: `%USERPROFILE%\.devo\config.toml`):
+To change refresh behavior, add to `~/.devo/config.toml`
+(Windows: `%USERPROFILE%\.devo\config.toml`):
 
 ```toml
 [catalog]
@@ -115,10 +114,52 @@ refresh_interval_hours = 1
 ```
 
 `offline = true` prevents catalog and provider-discovery network requests.
-Local catalog files can still be refreshed, and the bundled catalog is always available.
+An explicitly configured local source can still be refreshed. On a fresh offline
+start there is no public directory: only your configured models are available.
+
+Existing configuration files are preserved. Older sparse connections without a
+pinned endpoint need an explicit reconnect or endpoint configuration. Old catalog
+snapshot files are ignored, not deleted. The Native TUI also ignores the legacy
+`models.json` directory; configure models through the server-backed provider settings.
+This favors live metadata and stable
+configured routes over first-run offline browsing.
 
 Model requests go to the endpoint you configure. For local model traffic,
 choose a compatible local endpoint.
+
+### Private or custom backends
+
+For example, a user-owned `custom-providers.json` can define a compatible private
+backend and a model-specific route:
+
+```json
+{
+  "provider": {
+    "private": {
+      "name": "Private backend",
+      "base_url": "https://gateway.example/v1",
+      "wire_api": "openai_chat_completions",
+      "credential": "private_api_key",
+      "models": {
+        "review": {
+          "base_url": "https://review.example/v1",
+          "wire_api": "openai_responses",
+          "request_model": "organization/review-v2"
+        }
+      }
+    }
+  }
+}
+```
+
+Select `private/review`; its upstream request uses `organization/review-v2` at
+the model-specific endpoint with Responses. Store the secret through provider
+setup, not in this file; `credential` references its saved ID.
+
+models.dev providers using unsupported SDK packages are omitted rather than
+assigned a guessed protocol. OpenAI, Anthropic, and Google adapter defaults are
+protocol behavior, not another model directory. Explicit connection saves the
+resolved `base_url` so later catalog changes cannot silently reroute it.
 
 ### Errors during a conversation
 

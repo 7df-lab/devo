@@ -22,7 +22,7 @@ import {
 import { Input } from "@devo/ui/components/input"
 import { Spinner } from "@devo/ui/components/spinner"
 import { PlusIcon, RefreshCwIcon, SearchIcon, Trash2Icon } from "lucide-react"
-import { useCallback, useMemo, useState } from "react"
+import { useCallback, useEffect, useMemo, useRef, useState } from "react"
 import { getBaseClient } from "../../services/connection-manager"
 import {
 	effectiveContextWindowTokens,
@@ -51,10 +51,20 @@ export function ConnectionDetailDialog({
 	const [removingModel, setRemovingModel] = useState<string | null>(null)
 	const [addingModel, setAddingModel] = useState(false)
 	const [error, setError] = useState<string | null>(null)
-	const catalogRefresh = provider.id === "openai-codex"
+	const [discovered, setDiscovered] = useState<Record<string, CatalogModelInfo>>({})
+	const [savingModel, setSavingModel] = useState<string | null>(null)
+	const discoveryVersion = useRef(0)
+	useEffect(() => {
+		discoveryVersion.current++
+		setDiscovering(false)
+		setDiscovered({})
+		setSearch("")
+		setError(null)
+		return () => { discoveryVersion.current++ }
+	}, [provider.id, open])
 
 	const models = useMemo(() => {
-		const entries = Object.entries({ ...provider.models, ...connectionModels })
+		const entries = Object.entries({ ...provider.models, ...discovered, ...connectionModels })
 		if (!search.trim()) return entries
 		const lower = search.toLowerCase()
 		return entries.filter(
@@ -62,27 +72,46 @@ export function ConnectionDetailDialog({
 				id.toLowerCase().includes(lower) ||
 				(m.name ?? "").toLowerCase().includes(lower),
 		)
-	}, [provider.models, connectionModels, search])
+	}, [provider.models, discovered, connectionModels, search])
 
 	const handleDiscover = useCallback(async () => {
+		const version = ++discoveryVersion.current
 		setDiscovering(true)
 		setError(null)
 		try {
 			const client = getBaseClient()
 			if (!client) throw new Error("Not connected to server")
-			await client.provider.discover({
+			const result = await client.provider.discover({
 				providerId: provider.id,
 				forceRefresh: true,
 			})
-			onChanged()
+			if (version === discoveryVersion.current) setDiscovered(result.models)
 		} catch (error) {
+			if (version !== discoveryVersion.current) return
 			setError(
 				error instanceof Error ? error.message : "Failed to discover models",
 			)
 		} finally {
-			setDiscovering(false)
+			if (version === discoveryVersion.current) setDiscovering(false)
 		}
-	}, [provider.id, onChanged])
+	}, [provider.id])
+
+	const handleSaveModel = useCallback(async (modelId: string, model: CatalogModelInfo) => {
+		setSavingModel(modelId)
+		setError(null)
+		try {
+			const client = getBaseClient()
+			if (!client) throw new Error("Not connected to server")
+			await client.provider.upsert({
+				provider: { ...provider, models: { [modelId]: { ...model, origin: "user" } } },
+			})
+			onChanged()
+		} catch (error) {
+			setError(error instanceof Error ? error.message : "Failed to save model")
+		} finally {
+			setSavingModel(null)
+		}
+	}, [provider, onChanged])
 
 	const handleRemoveModel = useCallback(
 		async (modelId: string) => {
@@ -118,15 +147,15 @@ export function ConnectionDetailDialog({
 							<Badge variant="secondary">Connected</Badge>
 						</div>
 						<DialogDescription>
-							{Object.keys({ ...provider.models, ...connectionModels }).length}{" "}
+							{Object.keys({ ...provider.models, ...discovered, ...connectionModels }).length}{" "}
 							model
-							{Object.keys({ ...provider.models, ...connectionModels })
+							{Object.keys({ ...provider.models, ...discovered, ...connectionModels })
 								.length !== 1
 								? "s"
 								: ""}{" "}
 							available.
 							{provider.baseUrl ? ` Endpoint: ${provider.baseUrl}` : ""}
-							{" Catalog models cannot be removed."}
+							{" Discovery is temporary. Save a model to keep it in your configuration."}
 						</DialogDescription>
 					</DialogHeader>
 
@@ -152,7 +181,7 @@ export function ConnectionDetailDialog({
 							) : (
 								<RefreshCwIcon className="size-3.5 stroke-[1.5]" />
 							)}
-							{catalogRefresh ? "Refresh catalog" : "Discover"}
+							Discover
 						</Button>
 						<Button
 							variant="outline"
@@ -199,6 +228,14 @@ export function ConnectionDetailDialog({
 											<span className="shrink-0 text-[11px] text-muted-foreground">
 												{contextLabel}
 											</span>
+										)}
+										{discovered[modelId] && connectionModels[modelId]?.origin !== "user" && (
+											<Button variant="outline" size="sm"
+												aria-label={`Save discovered model ${model.name ?? modelId}`}
+												onClick={() => handleSaveModel(modelId, model)}
+												disabled={savingModel === modelId}>
+												Save
+											</Button>
 										)}
 										{connectionModels[modelId]?.origin === "user" &&
 									provider.models?.[modelId]?.origin !== "remote" && (

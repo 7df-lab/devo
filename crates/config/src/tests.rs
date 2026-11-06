@@ -1002,8 +1002,8 @@ provider = "Deepseek"
         )
         .expect("upsert provider");
 
-    let user_config = std::fs::read_to_string(fixture.home.join("custom-providers.json"))
-        .expect("provider config");
+    let user_config =
+        std::fs::read_to_string(fixture.home.join("providers.json")).expect("provider config");
     let document: serde_json::Value =
         serde_json::from_str(&user_config).expect("parse provider config");
     let provider = &document["provider"]["Deepseek"];

@@ -121,6 +121,12 @@ pub struct ProviderConfigEntry {
 /// description field is needed in the persisted format.
 #[derive(Debug, Clone, Default, PartialEq, Serialize, Deserialize)]
 pub struct ProviderModelConfig {
+    /// Explicit endpoint for this model, taking precedence over the provider endpoint.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub base_url: Option<String>,
+    /// Wire model identifier when different from the catalog map key.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub request_model: Option<String>,
     /// Persisted ownership; missing provenance is conservatively read-only.
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub origin: Option<devo_protocol::ProviderModelOrigin>,
@@ -277,6 +283,28 @@ impl ProviderConfigFile {
         if provider.enabled == Some(false) {
             return Err(crate::ProviderConfigError::Validation {
                 message: format!("provider Connection `{provider_id}` is disabled"),
+            });
+        }
+
+        // Session settings can retain a selected model id even when discovery
+        // is unavailable after restart. An explicit pinned connection can send
+        // that id without needing a persisted directory snapshot.
+        if !requested_model_id.is_empty()
+            && !provider.models.contains_key(requested_model_id)
+            && !requested_model_id
+                .rsplit_once('/')
+                .is_some_and(|(model, _)| provider.models.contains_key(model))
+            && provider
+                .base_url
+                .as_deref()
+                .is_some_and(|url| !url.trim().is_empty())
+            && let Some(wire_api) = provider.wire_api
+        {
+            return Ok(ProviderModelSelection {
+                provider_id: provider_id.to_string(),
+                model_id: requested_model_id.to_string(),
+                variant_id: None,
+                wire_api,
             });
         }
 
@@ -439,7 +467,10 @@ impl ProviderConfigFile {
                     LegacyModelBindingConfig {
                         model_slug: model_ref.clone(),
                         provider: provider_id.clone(),
-                        request_model: model_id.clone(),
+                        request_model: model
+                            .request_model
+                            .clone()
+                            .unwrap_or_else(|| model_id.clone()),
                         display_name: model.name.clone(),
                         invocation_method: model_wire_api,
                         default_reasoning_effort: model
@@ -719,6 +750,8 @@ impl ProviderModelConfig {
             };
         }
         replace_some!(name);
+        replace_some!(base_url);
+        replace_some!(request_model);
         replace_some!(wire_api);
         replace_some!(context_window);
         replace_some!(effective_context_window_percent);

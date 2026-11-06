@@ -64,8 +64,9 @@ export function createDevoUiServices(options: {
 
   const authPath = path.join(home, "auth.json");
   const authStorage = AuthStorage.create(authPath, { usePrimeCliConfig: false });
-  const modelsJsonPath = path.join(home, "models.json");
-  const modelRegistry = ModelRegistry.create(authStorage, modelsJsonPath);
+  // Native owns the model directory. Retain auth helpers without loading legacy
+  // models.json or adjacent provider snapshots as a competing catalog.
+  const modelRegistry = ModelRegistry.inMemory(authStorage);
   const settingsManager = SettingsManager.create(cwd, home);
 
   return {

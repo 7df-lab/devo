@@ -121,7 +121,7 @@ mod tests {
                     }
                 }
                 assert!(received.starts_with(b"GET /api.json HTTP/1.1\r\n"));
-                let body = json!({"anthropic": {"models": {"desktop-remote-qa": {
+                let body = json!({"anthropic": {"npm": "@ai-sdk/anthropic", "api": "https://api.anthropic.com/v1", "models": {"desktop-remote-qa": {
                     "name": format!("Remote model {version}"),
                     "tool_call": true,
                     "limit": {"context": 200000, "output": 8192}
@@ -163,7 +163,9 @@ mod tests {
             json!({"slug": model["slug"], "name": model["displayName"], "context": model["contextWindow"]}),
             json!({"slug": "anthropic/desktop-remote-qa", "name": "Remote model 2", "context": 200000}),
         );
-        // A broken update leaves the previous complete cache readable.
+        // A broken update leaves the previous process-local catalog readable.
+        assert!(!home.path().join("cache/models.dev-api.json").exists());
+        assert!(!home.path().join("cache/models.dev-meta.json").exists());
         let failed = runtime
             .handle_native_catalog_refresh(json!(5), json!({"policy": "force"}))
             .await;
@@ -238,10 +240,23 @@ mod tests {
             .lock()
             .unwrap()
             .upsert_provider_connection_with_baseline(
-                provider, /*default_model*/ None, /*small_model*/ None,
-                /*api_key*/ None, /*builtin_baseline*/ None,
+                provider.clone(),
+                /*default_model*/ None,
+                /*small_model*/ None,
+                /*api_key*/ None,
+                /*builtin_baseline*/ None,
             )
             .unwrap();
+        let read_config_files = || {
+            [
+                "config.toml",
+                "providers.json",
+                "custom-providers.json",
+                "auth.json",
+            ]
+            .map(|name| std::fs::read(home.path().join(name)).ok())
+        };
+        let before = read_config_files();
         let source = tokio::spawn(async move {
             let (mut stream, _) = listener.accept().await.unwrap();
             let mut request = [0_u8; 4096];
@@ -255,6 +270,11 @@ mod tests {
             .handle_native_provider_discover(json!(1), json!({"providerId": "qa-refresh"}))
             .await;
         source.await.unwrap();
+        assert_eq!(
+            read_config_files(),
+            before,
+            "discovery must not persist remote metadata"
+        );
         let models = response["result"]["models"]
             .as_object()
             .expect("discovered models");
@@ -265,5 +285,25 @@ mod tests {
                 .collect::<Vec<_>>(),
             vec![("fresh", "remote"), ("my-model", "user")]
         );
+        // Persist only after the caller explicitly chooses the discovered model.
+        let mut selected = provider;
+        selected.models.insert(
+            "fresh".to_string(),
+            devo_protocol::ProviderModelInfo {
+                origin: Some(devo_protocol::ProviderModelOrigin::User),
+                ..Default::default()
+            },
+        );
+        runtime
+            .deps
+            .config_store
+            .lock()
+            .unwrap()
+            .upsert_provider_connection_with_baseline(
+                selected, /*default_model*/ None, /*small_model*/ None,
+                /*api_key*/ None, /*builtin_baseline*/ None,
+            )
+            .unwrap();
+        assert_ne!(read_config_files(), before);
     }
 }

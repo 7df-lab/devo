@@ -14,7 +14,7 @@ use crate::{
 impl AppConfigStore {
     /// Returns the effective user provider Connections in canonical form.
     ///
-    /// Built-in directory templates are supplied by `ModelCatalog`; this
+    /// Live directory templates are supplied by `ModelCatalog`; this
     /// method only exposes persisted user entries and their explicit models.
     pub fn provider_connections(&self) -> anyhow::Result<Vec<ProviderInfo>> {
         Ok(self
@@ -27,7 +27,7 @@ impl AppConfigStore {
 
     /// Returns the model directory explicitly stored for each user Connection.
     ///
-    /// The embedded provider directory is deliberately excluded. This keeps
+    /// The remote provider directory is deliberately excluded. This keeps
     /// Connection management separate from read-only provider templates.
     pub fn provider_connection_models(
         &self,
@@ -146,12 +146,9 @@ impl AppConfigStore {
         )
     }
 
-    /// Like [`Self::upsert_provider_connection`], but when `builtin_baseline` is
-    /// the embedded catalog entry for this provider id, only novel models and
-    /// sparse `model_overrides` are written (sparse overlay semantics).
-    ///
-    /// Builtin Connections are stored in `providers.json`. User-owned custom
-    /// providers/models are stored in `custom-providers.json`.
+    /// Saves a connection selected from a live directory baseline. Remote models
+    /// retain only explicit transport settings; existing user metadata is preserved.
+    /// The baseline is not persisted and is never required for offline requests.
     pub fn upsert_provider_connection_with_baseline(
         &mut self,
         provider: ProviderInfo,
@@ -170,21 +167,19 @@ impl AppConfigStore {
             validate_model(&provider_id, &provider.wire_apis, model_id, model)?;
         }
 
-        let target_config_file = if builtin_baseline.is_some() {
-            self.user_provider_config_file()
+        // Keep existing authored entries in their original file. Never delete a
+        // second overlay merely because the connection was edited.
+        let connection_path = self.user_provider_config_file();
+        let custom_path = self.user_custom_provider_config_file();
+        let connections = read_provider_catalog_config(&connection_path)?;
+        let customs = read_provider_catalog_config(&custom_path)?;
+        let target_is_connection = !customs.providers.contains_key(&provider_id)
+            && (connections.providers.contains_key(&provider_id) || builtin_baseline.is_some());
+        let (target_config_file, mut config, other) = if target_is_connection {
+            (connection_path, connections, customs)
         } else {
-            self.user_custom_provider_config_file()
+            (custom_path, customs, connections)
         };
-        let other_config_file = if builtin_baseline.is_some() {
-            self.user_custom_provider_config_file()
-        } else {
-            self.user_provider_config_file()
-        };
-        let mut config = read_provider_catalog_config(&target_config_file)?;
-        let mut other = read_provider_catalog_config(&other_config_file)?;
-        if other.providers.remove(&provider_id).is_some() {
-            write_provider_catalog_config(&other_config_file, &other)?;
-        }
 
         let api_key = api_key.as_deref().and_then(non_empty_string);
         let credential = provider
@@ -220,27 +215,35 @@ impl AppConfigStore {
             let entry = config.providers.entry(provider_id.clone()).or_default();
             apply_provider_info(entry, &provider, credential.clone());
             for (model_id, mut model_info) in provider.models {
-                let existing = entry
-                    .models
-                    .get(&model_id)
-                    .or_else(|| entry.model_overrides.get(&model_id));
-                model_info.origin = if existing.and_then(|model| model.origin)
+                let existing = entry.models.get(&model_id);
+                let remote = existing.and_then(|model| model.origin)
                     == Some(ProviderModelOrigin::Remote)
                     || model_info.origin == Some(ProviderModelOrigin::Remote)
-                {
-                    Some(ProviderModelOrigin::Remote)
-                } else if builtin_baseline
-                    .is_some_and(|baseline| baseline.models.contains_key(&model_id))
-                {
-                    None
-                } else if let Some(existing) = existing {
-                    existing.origin
+                    || builtin_baseline
+                        .is_some_and(|baseline| baseline.models.contains_key(&model_id));
+                if remote {
+                    // Persist only the transport selected by the user, never a
+                    // copy of the remote catalog's capabilities or pricing.
+                    let model = entry.models.entry(model_id).or_default();
+                    if model_info.base_url.is_some() {
+                        model.base_url = model_info.base_url;
+                    }
+                    if model_info.request_model.is_some() {
+                        model.request_model = model_info.request_model;
+                    }
+                    model.wire_api = model_info.wire_api.or(entry.wire_api);
+                    model.origin.get_or_insert(ProviderModelOrigin::Remote);
                 } else {
-                    Some(ProviderModelOrigin::User)
-                };
-                entry
-                    .models
-                    .insert(model_id, provider_model_config_from_info(model_info));
+                    model_info.origin = existing
+                        .and_then(|model| model.origin)
+                        .or(model_info.origin)
+                        .or(Some(ProviderModelOrigin::User));
+                    entry
+                        .models
+                        .entry(model_id)
+                        .or_default()
+                        .apply_overlay(provider_model_config_from_info(model_info));
+                }
             }
             if let Some(model) = default_model.as_deref().and_then(non_empty_string) {
                 if !provider_has_model(entry, &provider_id, &model)
@@ -269,11 +272,6 @@ impl AppConfigStore {
                 }
                 super::write_user_session_default(&self.user_config_file, "small_model", &model)?;
             }
-
-            // Builtin providers persist sparse overlays; custom providers stay full.
-            if let Some(baseline) = builtin_baseline {
-                sparsify_provider_entry_against_builtin(entry, baseline);
-            }
         }
 
         // Session defaults are preferences in config.toml, not catalog fields.
@@ -297,46 +295,67 @@ impl AppConfigStore {
         Ok(provider_info_from_config(&provider_id, effective))
     }
 
+    /// Saves the transport of a selected model without copying remote metadata.
+    /// Existing user-authored model settings and credential references are preserved.
+    /// A legacy connection without an explicit endpoint must be reconnected first.
+    pub fn pin_provider_model(
+        &mut self,
+        provider_id: &str,
+        model_id: &str,
+        model: ProviderModelConfig,
+    ) -> anyhow::Result<()> {
+        let custom_path = self.user_custom_provider_config_file();
+        let custom = read_provider_catalog_config(&custom_path)?;
+        let (path, mut config) = if custom.providers.contains_key(provider_id) {
+            (custom_path, custom)
+        } else {
+            let path = self.user_provider_config_file();
+            let config = read_provider_catalog_config(&path)?;
+            (path, config)
+        };
+        let entry = config
+            .providers
+            .get_mut(provider_id)
+            .ok_or_else(|| anyhow::anyhow!("provider `{provider_id}` is not connected"))?;
+        let existing = entry.models.get(model_id);
+        if entry
+            .base_url
+            .as_deref()
+            .and_then(non_empty_string)
+            .is_none()
+            && existing
+                .and_then(|model| model.base_url.as_deref())
+                .and_then(non_empty_string)
+                .is_none()
+        {
+            anyhow::bail!(
+                "provider `{provider_id}` has no pinned endpoint; reconnect it with an explicit endpoint before selecting a model"
+            );
+        }
+        let pinned = entry.models.entry(model_id.to_string()).or_default();
+        // Missing incoming transport preserves existing authored transport.
+        if model.base_url.is_some() {
+            pinned.base_url = model.base_url;
+        }
+        if model.request_model.is_some() {
+            pinned.request_model = model.request_model;
+        }
+        pinned.wire_api = model.wire_api.or(pinned.wire_api).or(entry.wire_api);
+        pinned.origin = pinned.origin.or(model.origin);
+        write_provider_catalog_config(&path, &config)?;
+        self.config = self
+            .loader
+            .load(self.workspace_root.as_deref())
+            .map_err(|error| anyhow::anyhow!(error))?;
+        Ok(())
+    }
+
     fn load_editable_provider_catalog(&self) -> anyhow::Result<ProviderConfigFile> {
         let mut config = read_provider_catalog_config(&self.user_provider_config_file())?;
         config.merge_overlay(read_provider_catalog_config(
             &self.user_custom_provider_config_file(),
         )?);
         Ok(config)
-    }
-}
-
-/// Rewrites a user provider entry so built-in models become sparse
-/// `model_overrides` (or are omitted when identical) and only novel models stay
-/// in `models` — matching the `models.json` sparse overlay rules.
-pub fn sparsify_provider_entry_against_builtin(
-    entry: &mut ProviderConfigEntry,
-    builtin: &ProviderConfigEntry,
-) {
-    let mut custom_models = BTreeMap::new();
-    let mut overrides = entry.model_overrides.clone();
-    for (model_id, model) in std::mem::take(&mut entry.models) {
-        match builtin.models.get(&model_id) {
-            None => {
-                custom_models.insert(model_id, model);
-            }
-            Some(baseline_model) if model == *baseline_model => {
-                // Identical to builtin — inherit; do not persist.
-            }
-            Some(_) => {
-                overrides.insert(model_id, model);
-            }
-        }
-    }
-    entry.models = custom_models;
-    entry.model_overrides = overrides;
-
-    if entry.name.is_some() && entry.name == builtin.name {
-        // Keep display name; harmless. Prefer omitting when equal to shrink file.
-        entry.name = None;
-    }
-    if entry.description.is_some() && entry.description == builtin.description {
-        entry.description = None;
     }
 }
 
@@ -402,26 +421,40 @@ fn apply_provider_info(
     provider: &ProviderInfo,
     credential: Option<String>,
 ) {
-    entry.name = non_empty_string(&provider.name);
+    entry.name = non_empty_string(&provider.name).or_else(|| entry.name.clone());
     entry.description = provider.description.as_deref().and_then(non_empty_string);
-    entry.base_url = provider.base_url.as_deref().and_then(non_empty_string);
+    entry.base_url = provider
+        .base_url
+        .as_deref()
+        .and_then(non_empty_string)
+        .or_else(|| entry.base_url.clone());
     entry.credential = credential;
     entry.headers = (!provider.headers.is_empty()).then(|| provider.headers.clone());
-    entry.options = provider.options.clone();
-    entry.request = provider.request.clone();
-    entry.compat = provider.compat.clone();
-    entry.model_overrides = provider
-        .model_overrides
-        .clone()
-        .into_iter()
-        .map(|(model_id, model)| (model_id, provider_model_config_from_info(model)))
-        .collect();
+    if provider.options.is_some() {
+        entry.options = provider.options.clone();
+    }
+    if provider.request.is_some() {
+        entry.request = provider.request.clone();
+    }
+    if provider.compat.is_some() {
+        entry.compat = provider.compat.clone();
+    }
+    entry.model_overrides.extend(
+        provider
+            .model_overrides
+            .clone()
+            .into_iter()
+            .map(|(model_id, model)| (model_id, provider_model_config_from_info(model)))
+            .collect::<BTreeMap<_, _>>(),
+    );
     entry.wire_api = provider.wire_apis.first().copied();
     entry.enabled = Some(provider.enabled);
 }
 
 fn provider_model_config_from_info(info: ProviderModelInfo) -> ProviderModelConfig {
     ProviderModelConfig {
+        base_url: info.base_url,
+        request_model: info.request_model,
         origin: info.origin,
         name: info.name,
         family: info.family,
@@ -496,11 +529,19 @@ fn provider_info_from_config(provider_id: &str, config: &ProviderConfigEntry) ->
         options: config.options.clone(),
         request: config.request.clone(),
         compat: config.compat.clone(),
-        wire_apis: vec![
-            config
-                .wire_api
-                .unwrap_or(devo_protocol::ProviderWireApi::OpenAIChatCompletions),
-        ],
+        wire_apis: {
+            let mut protocols = vec![
+                config
+                    .wire_api
+                    .unwrap_or(devo_protocol::ProviderWireApi::OpenAIChatCompletions),
+            ];
+            for protocol in config.models.values().filter_map(|model| model.wire_api) {
+                if !protocols.contains(&protocol) {
+                    protocols.push(protocol);
+                }
+            }
+            protocols
+        },
         model_overrides: config
             .model_overrides
             .iter()
@@ -532,6 +573,8 @@ fn provider_model_info_from_config(config: &ProviderModelConfig) -> ProviderMode
             .is_some_and(|map| !map.is_empty())
         || !matches!(capability, devo_protocol::ReasoningCapability::Unsupported);
     ProviderModelInfo {
+        base_url: config.base_url.clone(),
+        request_model: config.request_model.clone(),
         origin: config.origin,
         name: config.name.clone(),
         family: config.family.clone(),
@@ -601,3 +644,7 @@ fn provider_model_info_from_config(config: &ProviderModelConfig) -> ProviderMode
         priority: config.priority,
     }
 }
+
+#[cfg(test)]
+#[path = "provider_connection_tests.rs"]
+mod tests;

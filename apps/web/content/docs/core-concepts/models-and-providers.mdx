@@ -3,26 +3,22 @@ title: Models and Provider Connections
 description: Understand provider templates, Connections, models, and variants.
 ---
 
-Devo uses one catalog to describe provider templates and their models, and a
-separate user overlay to record the Connections a user has configured. A model
-is owned by its provider, so its stable public identity is `provider/model`.
+Devo has two model data sources: the live models.dev directory and user
+configuration. Public provider endpoints and model metadata are fetched into
+server memory, never bundled or persisted as catalog snapshots. Configured
+Connections pin endpoint, protocol and model IDs in user/workspace
+`providers.json`; credentials remain in user-scoped `auth.json`.
 
-## Three concepts
-
-| Concept | Meaning | Stored where |
-| --- | --- | --- |
-| Provider template | Built-in endpoint defaults, supported wire API, and model metadata. | Git-tracked `crates/core/providers.json` |
-| Connection | A configured instance of a provider, with endpoint overrides and a credential reference. | User/workspace `providers.json` |
-| Model | A provider-facing model id plus optional capability and request metadata. | Nested under the provider in both files |
-
-The API key itself is stored in the user-scoped `auth.json`. `providers.json`
-contains only the credential id. A provider template cannot be deleted from the
-TUI; disconnecting a Connection removes the user's provider overlay.
+Refresh failures keep the same process's last successful directory and all
+configured models. A fresh offline start has no public directory. Provider
+Discover is read-only: save selected suggestions explicitly to configure them.
+Older sparse connections without pinned endpoints must be reconnected explicitly.
+Existing configuration files are preserved; old snapshots are ignored, not deleted.
 
 ## Provider and model identity
 
-Provider ids and nested model ids are map keys. Devo does not require a second
-model slug, model name, request model, or description to keep synchronized:
+Provider ids and nested model ids are map keys. The optional `request_model` field overrides the upstream request ID without
+changing the stable selection identity:
 
 ```json
 {
@@ -43,8 +39,9 @@ model slug, model name, request model, or description to keep synchronized:
 }
 ```
 
-The nested model key is both the provider-facing id sent in the request and the
-second half of the `provider/model` reference. `name` is only a display label.
+The nested key is the second half of `provider/model` and defaults to the upstream
+request ID. Model-level `base_url` and `wire_api` can pin a route independently
+of provider defaults. `name` is only a display label.
 
 ## Model metadata
 

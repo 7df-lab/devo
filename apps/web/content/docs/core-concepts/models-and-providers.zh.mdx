@@ -3,24 +3,17 @@ title: Models and Provider Connections
 description: 理解 provider template、Connection、model 和 variant。
 ---
 
-Devo 用一个目录描述 provider template 及其模型，再用用户覆盖文件记录用户已经配置的
-Connection。模型归属于 provider，因此稳定的公开身份是 `provider/model`。
+Devo 的模型数据只有两类：实时 models.dev 目录和用户配置。公共 provider endpoint 和模型
+元数据只保存在服务端内存中，不内置目录，也不保存磁盘快照。用户配置的 Connection 在
+用户/工作区 `providers.json` 中固定 endpoint、协议和 model ID；凭据仍保存在用户级 `auth.json`。
 
-## 三个概念
-
-| 概念 | 含义 | 存储位置 |
-| --- | --- | --- |
-| Provider template | 内置的 endpoint 默认值、wire API 和模型元数据。 | git 跟踪的 `crates/core/providers.json` |
-| Connection | 用户配置的 provider 实例，包含 endpoint 覆盖项和 credential 引用。 | 用户/工作区 `providers.json` |
-| Model | provider-facing model id，以及可选的能力和请求元数据。 | 两个文件中 provider 的嵌套 map |
-
-API key 本身存储在用户级 `auth.json`；`providers.json` 只保存 credential id。TUI 中不能删除
-provider template；断开 Connection 会删除用户的 provider 覆盖项。
+刷新失败会保留本进程最近一次成功的目录和全部用户配置模型。首次离线启动没有公共目录。
+Provider Discover 只返回临时建议，不会写入配置；需要显式保存选中的模型。
+旧的稀疏连接若没有固定 endpoint，需要显式重新连接。现有配置文件保留，旧快照忽略但不删除。
 
 ## Provider 和 Model 身份
 
-Provider id 和嵌套 model id 都是 map key。Devo 不再需要额外的 model slug、model name、request
-model 或 description 来保持同步：
+Provider id 和嵌套 model id 都是 map key。可选的 `request_model` 字段可以覆盖上游请求 ID，不改变稳定的选择身份：
 
 ```json
 {
@@ -41,8 +34,8 @@ model 或 description 来保持同步：
 }
 ```
 
-嵌套 model key 同时是发送给 provider 的 id，也是 `provider/model` 引用的后半部分；`name`
-仅用于显示。
+嵌套 model key 是 `provider/model` 引用的后半部分，默认也是上游请求 ID。模型级
+`base_url` 和 `wire_api` 可以独立固定路由；`name` 仅用于显示。
 
 ## Model 元数据
 

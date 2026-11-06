@@ -24,7 +24,7 @@ test("background checks coalesce, respect cooldown and retry when due", async ()
   assert.equal(calls.length, 2);
 });
 
-test("refresh updates authenticated Codex models without forcing network requests", async () => {
+test("refresh only updates models.dev and never discovers provider models", async () => {
   const calls: unknown[] = [];
   const refresh = new ModelCatalogRefresh({ request: async (method, params) => {
     calls.push({ method, params });
@@ -33,8 +33,6 @@ test("refresh updates authenticated Codex models without forcing network request
   await refresh.refresh();
   assert.deepEqual(calls, [
     { method: "model/catalog/refresh", params: { policy: "ifStale" } },
-    { method: "provider/list", params: {} },
-    { method: "provider/discover", params: { providerId: "openai-codex", forceRefresh: false } },
   ]);
 });
 

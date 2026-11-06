@@ -18,6 +18,7 @@ pub enum ProviderRoute {
     Connection {
         provider_id: String,
         wire_api: ProviderWireApi,
+        model_id: Option<String>,
     },
 }
 
@@ -26,6 +27,20 @@ impl ProviderRoute {
         Self::Connection {
             provider_id: provider_id.into(),
             wire_api,
+            model_id: None,
+        }
+    }
+
+    /// Select a model-specific endpoint on a configured connection.
+    pub fn connection_model(
+        provider_id: impl Into<String>,
+        wire_api: ProviderWireApi,
+        model_id: impl Into<String>,
+    ) -> Self {
+        Self::Connection {
+            provider_id: provider_id.into(),
+            wire_api,
+            model_id: Some(model_id.into()),
         }
     }
 }
@@ -139,7 +154,7 @@ impl MultiProviderRouter {
         // selected adapter instead of cloning an Arc for each request.
         match route {
             ProviderRoute::Default => Ok(self.default_provider.as_ref()),
-            ProviderRoute::Connection { provider_id, wire_api } => self
+            ProviderRoute::Connection { provider_id, wire_api, .. } => self
                 .providers
                 .get(route)
                 .map(Arc::as_ref)

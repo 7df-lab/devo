@@ -46,8 +46,6 @@ mod mcp_store;
 #[path = "provider_connection.rs"]
 mod provider_connection;
 
-pub use provider_connection::sparsify_provider_entry_against_builtin;
-
 pub use mcp_store::mcp_server_record_for_cli;
 
 /// Stores the fully normalized runtime configuration.
@@ -140,17 +138,17 @@ pub struct UpdatesConfig {
 /// `source` at a local `api.json` file instead of the public URL.
 #[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
 pub struct CatalogConfig {
-    /// When true, never fetch over the network. Local `source` file paths still
-    /// refresh the on-disk cache; the embedded builtin catalog always remains.
+    /// When true, never fetch over the network. Local `source` file paths
+    /// can still supply metadata in memory. Saved user connections remain usable.
     #[serde(default)]
     pub offline: bool,
     /// `https://models.dev/api.json` or a filesystem path to a models.dev dump.
     #[serde(default = "default_catalog_source")]
     pub source: String,
-    /// Whether bootstrap should refresh the cached remote directory.
+    /// Whether bootstrap should fetch the live remote directory into memory.
     #[serde(default = "default_catalog_refresh_on_startup")]
     pub refresh_on_startup: bool,
-    /// Minimum hours between network refreshes when `source` is a URL.
+    /// Minimum hours between in-memory network refreshes when `source` is a URL.
     #[serde(default = "default_catalog_refresh_interval_hours")]
     pub refresh_interval_hours: u64,
 }
@@ -416,10 +414,9 @@ impl AppConfigStore {
                     .split_once('/')
                     .ok_or_else(|| anyhow::anyhow!("model must use `provider/model` form"))?;
                 let catalog = self.config.provider_catalog_config();
-                // Sparse overlays omit unchanged builtin models. Reject only an
-                // explicitly disabled Connection / model in the user overlay;
-                // builtin inheritance is validated at runtime via the effective
-                // (builtin + overlay) catalog.
+                // Reject explicitly disabled user connections and models. The
+                // runtime validates live-directory selections and pins their
+                // transport before persisting this preference.
                 if let Some(provider) = catalog.providers.get(provider_id) {
                     if provider.enabled == Some(false) {
                         anyhow::bail!("provider `{provider_id}` is disabled");

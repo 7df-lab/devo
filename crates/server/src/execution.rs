@@ -707,12 +707,6 @@ invocation_method = "openai_chat_completions"
             "precondition: codex route absent before the connection exists"
         );
 
-        let builtin = devo_core::builtin_provider_config().expect("builtin provider catalog");
-        let baseline = builtin
-            .providers
-            .get("openai-codex")
-            .cloned()
-            .expect("builtin codex entry");
         deps.config_store
             .lock()
             .expect("config store")
@@ -720,6 +714,7 @@ invocation_method = "openai_chat_completions"
                 ProviderInfo {
                     id: "openai-codex".to_string(),
                     name: "Codex".to_string(),
+                    base_url: Some("https://chatgpt.com/backend-api/codex".to_string()),
                     wire_apis: vec![ProviderWireApi::OpenAIResponses],
                     enabled: true,
                     ..ProviderInfo::default()
@@ -727,7 +722,7 @@ invocation_method = "openai_chat_completions"
                 None,
                 None,
                 None,
-                Some(&baseline),
+                /*builtin_baseline*/ None,
             )
             .expect("persist codex connection");
 

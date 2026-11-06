@@ -123,19 +123,7 @@ test("Devo hides the upstream provider from login surfaces", () => {
   assert.match(host, /excludedLoginProviderIds:\s*\["prime-inference"\]/);
 });
 
-test("hosted inference surfaces use neutral labels and keep the service endpoint", () => {
-  const catalog = JSON.parse(
-    readFileSync(join(repoRoot, "crates/core/providers.json"), "utf8"),
-  ) as {
-    provider: Record<string, { name: string; description: string; base_url: string; models: Record<string, { channel?: string }> }>;
-  };
-  const hosted = catalog.provider["prime-inference"];
-  assert.ok(hosted);
-  assert.equal(hosted.name, "Hosted Inference");
-  assert.equal(hosted.description, "Hosted inference models");
-  assert.equal(hosted.base_url, "https://api.pinference.ai/api/v1");
-  assert.ok(Object.values(hosted.models).every((model) => model.channel === "Hosted Inference"));
-
+test("hosted inference surfaces use neutral labels", () => {
   const visibleSources = [
     "apps/tui/lib/coding-agent/src/modes/interactive/components/login-dialog.ts",
     "apps/tui/lib/coding-agent/src/modes/interactive/components/prime-team-selector.ts",

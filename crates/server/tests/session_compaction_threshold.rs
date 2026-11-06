@@ -18,10 +18,22 @@ use pretty_assertions::assert_eq;
 use tempfile::TempDir;
 
 fn build_runtime(data_root: &Path) -> Result<Arc<ServerRuntime>> {
+    let config: devo_core::ProviderConfigFile = serde_json::from_value(serde_json::json!({
+        "model": "fixture/model", "provider": {"fixture": {
+            "base_url": "http://127.0.0.1:1/v1", "wire_api": "openai_chat_completions",
+            "models": {"model": {"context_window": 128000}}
+        }}
+    }))?;
+    devo_core::write_provider_catalog_config(
+        &data_root.join(devo_core::PROVIDER_CONFIG_FILE_NAME),
+        &config,
+    )?;
     Ok(TestRuntime::new(Arc::new(
         NoopProvider::text().named("noop-compaction-threshold-provider"),
     ))
-    .catalog(Arc::new(PresetModelCatalog::load()?))
+    .catalog(Arc::new(PresetModelCatalog::load_from_provider_config(
+        &config,
+    )?))
     .db_file("compaction_threshold.db")
     .runtime(data_root))
 }
