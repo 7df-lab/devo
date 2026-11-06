@@ -14,6 +14,7 @@ use crate::ProtocolErrorCode;
 use crate::SuccessResponse;
 
 use super::ServerRuntime;
+use super::credential_binding::{bind_provider_credential_id, oauth_transport_defaults};
 
 fn mask_secret(secret: &str) -> String {
     let trimmed = secret.trim();
@@ -24,63 +25,6 @@ fn mask_secret(secret: &str) -> String {
         return "*".repeat(trimmed.len().max(4));
     }
     format!("****{}", &trimmed[trimmed.len().saturating_sub(4)..])
-}
-
-/// Ensures the provider entry points at the newly written credential.
-///
-/// The entry is patched in whichever catalog file it actually lives in —
-/// `providers.json` or `custom-providers.json`. Writing a fresh stub into
-/// `providers.json` when the full Connection lives in the custom file would
-/// later be "migrated" over it by [`migrate_custom_providers_file`] and
-/// clobber `base_url`/`wire_api`/`models`, leaving the provider unusable.
-fn bind_provider_credential_id(
-    user_dir: &std::path::Path,
-    provider_id: &str,
-    credential_id: &str,
-) -> Result<(), String> {
-    let config_file = user_dir.join(PROVIDER_CONFIG_FILE_NAME);
-    let custom_file = user_dir.join(devo_core::CUSTOM_PROVIDER_CONFIG_FILE_NAME);
-    let mut config =
-        devo_core::read_provider_catalog_config(&config_file).map_err(|error| error.to_string())?;
-
-    if let Some(entry) = config.providers.get_mut(provider_id) {
-        entry.credential = Some(credential_id.to_string());
-        if entry.enabled.is_none() {
-            entry.enabled = Some(true);
-        }
-        return devo_core::write_provider_catalog_config(&config_file, &config)
-            .map_err(|error| error.to_string());
-    }
-
-    let mut custom =
-        devo_core::read_provider_catalog_config(&custom_file).map_err(|error| error.to_string())?;
-    if let Some(entry) = custom.providers.get_mut(provider_id) {
-        entry.credential = Some(credential_id.to_string());
-        if entry.enabled.is_none() {
-            entry.enabled = Some(true);
-        }
-        return devo_core::write_provider_catalog_config(&custom_file, &custom)
-            .map_err(|error| error.to_string());
-    }
-
-    // Seed only the credential for a built-in Connection. The embedded
-    // directory still owns its name, base URL, and wire API. Truly unknown
-    // providers keep their name for display until configured by the user.
-    let builtin = devo_core::builtin_provider_config()
-        .map_err(|error| error.to_string())?
-        .providers
-        .contains_key(provider_id);
-    config.providers.insert(
-        provider_id.to_string(),
-        devo_core::ProviderConfigEntry {
-            name: (!builtin).then(|| provider_id.to_string()),
-            credential: Some(credential_id.to_string()),
-            enabled: Some(true),
-            ..Default::default()
-        },
-    );
-    devo_core::write_provider_catalog_config(&config_file, &config)
-        .map_err(|error| error.to_string())
 }
 
 impl ServerRuntime {
@@ -124,15 +68,13 @@ impl ServerRuntime {
         }
     }
 
-    /// Native `provider/list` (ratified #11), backed by the bundled provider
+    /// Native `provider/list` (ratified #11), backed by the live models.dev
     /// directory plus the effective config store and projected into the
     /// canonical camelCase result.
     pub(super) async fn handle_native_provider_list(
         &self,
         request_id: serde_json::Value,
     ) -> serde_json::Value {
-        let mut providers = self.deps.model_catalog.list_providers();
-        let template_provider_ids = self.deps.model_catalog.list_template_provider_ids();
         let store = self
             .deps
             .config_store
@@ -150,6 +92,8 @@ impl ServerRuntime {
             .as_ref()
             .map(|catalog| catalog as &dyn ModelCatalog)
             .unwrap_or(self.deps.model_catalog.as_ref());
+        let mut providers = catalog.list_providers();
+        let template_provider_ids = catalog.list_template_provider_ids();
         let connected_provider_ids = match store.provider_connection_ids() {
             Ok(provider_ids) => provider_ids,
             Err(error) => {
@@ -181,10 +125,8 @@ impl ServerRuntime {
             }
         };
         for configured in configured_providers {
-            // Editable Connections are sparse overlays. Projecting a credential-only
-            // built-in entry directly defaults its missing wire API to OpenAI Chat
-            // Completions and drops the bundled base URL. The live catalog has
-            // already merged the built-in, user, and custom-provider layers.
+            // Effective metadata includes live models, while transport remains
+            // pinned by user connection configuration.
             let effective = live_catalog
                 .as_ref()
                 .and_then(|live| {
@@ -314,6 +256,27 @@ impl ServerRuntime {
             .unwrap_or("api_key")
             .trim()
             .to_ascii_lowercase();
+        let transport = if params.configure_connection {
+            if kind != "oauth" {
+                return self.error_response(
+                    request_id,
+                    ProtocolErrorCode::InvalidParams,
+                    "configureConnection is only valid for OAuth credentials",
+                );
+            }
+            match oauth_transport_defaults(provider) {
+                Some(transport) => Some(transport),
+                None => {
+                    return self.error_response(
+                        request_id,
+                        ProtocolErrorCode::InvalidParams,
+                        format!("provider {provider} has no retained OAuth transport adapter"),
+                    );
+                }
+            }
+        } else {
+            None
+        };
         // Use the same config home as the process store and session contexts.
         // This also keeps isolated runtimes from writing credentials to the
         // machine-wide user config directory.
@@ -362,7 +325,9 @@ impl ServerRuntime {
                     format!("failed to persist oauth credential: {error}"),
                 );
             }
-            if let Err(error) = bind_provider_credential_id(&user_dir, provider, &credential_id) {
+            if let Err(error) =
+                bind_provider_credential_id(&user_dir, provider, &credential_id, transport)
+            {
                 return self.error_response(
                     request_id,
                     ProtocolErrorCode::InternalError,
@@ -400,7 +365,9 @@ impl ServerRuntime {
                     format!("failed to persist api key credential: {error}"),
                 );
             }
-            if let Err(error) = bind_provider_credential_id(&user_dir, provider, &credential_id) {
+            if let Err(error) =
+                bind_provider_credential_id(&user_dir, provider, &credential_id, transport)
+            {
                 return self.error_response(
                     request_id,
                     ProtocolErrorCode::InternalError,
@@ -523,22 +490,35 @@ impl ServerRuntime {
         let default_model = params.default_model.clone();
         let small_model = params.small_model.clone();
         let provider_id = params.provider.id.clone();
-        let builtin = devo_core::builtin_provider_config().ok();
         let provider = {
             let mut store = self
                 .deps
                 .config_store
                 .lock()
                 .expect("app config store mutex should not be poisoned");
-            let baseline = builtin
-                .as_ref()
-                .and_then(|config| config.providers.get(&provider_id));
+            let existing = store.effective_config().provider_catalog_config();
+            let mut provider = params.provider;
+            let authored_overrides = &provider.model_overrides;
+            provider.models.retain(|model_id, model| {
+                model.origin != Some(devo_protocol::ProviderModelOrigin::Remote)
+                    || authored_overrides.contains_key(model_id)
+                    || params.default_model.as_deref().is_some_and(|selected| {
+                        selected == model_id || selected == format!("{provider_id}/{model_id}")
+                    })
+                    || params.small_model.as_deref().is_some_and(|selected| {
+                        selected == model_id || selected == format!("{provider_id}/{model_id}")
+                    })
+                    || existing
+                        .providers
+                        .get(&provider_id)
+                        .is_some_and(|entry| entry.models.contains_key(model_id))
+            });
             match store.upsert_provider_connection_with_baseline(
-                params.provider,
+                provider,
                 params.default_model,
                 params.small_model,
                 params.api_key,
-                baseline,
+                /*builtin_baseline*/ None,
             ) {
                 Ok(provider) => provider,
                 Err(error) => {
@@ -892,6 +872,19 @@ async fn validate_provider_candidate(
         anyhow::bail!("model wire API must be supported by provider");
     }
 
+    let base_url = model_info
+        .base_url
+        .clone()
+        .or_else(|| params.provider.base_url.clone())
+        .filter(|endpoint| !endpoint.trim().is_empty())
+        .context("provider validation requires an explicit base URL")?;
+    let variant = requested_model_id
+        .strip_prefix(&format!("{model_id}/"))
+        .and_then(|variant| model_info.variants.get(variant));
+    let request_model = variant
+        .and_then(|variant| variant.request_model.as_deref())
+        .or(model_info.request_model.as_deref())
+        .unwrap_or(&model_id);
     let model_ref = format!("{provider_id}/{model_id}");
     let (validation_model, model_profile) = resolve_validation_model(catalog, wire_api, &model_ref);
     let api_key = resolve_validation_api_key(&provider_id, &params, user_config_dir).await?;
@@ -900,7 +893,7 @@ async fn validate_provider_candidate(
         .transpose()?;
     let provider = crate::provider_config::build_provider_adapter(
         wire_api,
-        params.provider.base_url.clone(),
+        Some(base_url),
         api_key,
         ProviderHttpOptions::from_raw_with_no_proxy(
             provider_http.proxy_url,
@@ -914,7 +907,7 @@ async fn validate_provider_candidate(
         provider.as_ref(),
         &validation_model,
         model_profile,
-        requested_model_id,
+        request_model,
         "Reply with OK only.",
     )
     .await
@@ -1128,7 +1121,8 @@ mod tests {
         )
         .expect("write custom provider catalog");
 
-        bind_provider_credential_id(dir.path(), "ccproxy", "ccproxy").expect("bind");
+        bind_provider_credential_id(dir.path(), "ccproxy", "ccproxy", /*transport*/ None)
+            .expect("bind");
 
         let connection = devo_core::read_provider_catalog_config(
             &dir.path().join(devo_core::PROVIDER_CONFIG_FILE_NAME),
@@ -1156,9 +1150,15 @@ mod tests {
     }
 
     #[test]
-    fn bind_builtin_oauth_credential_inherits_protocol_unless_user_or_custom_overrides_it() {
+    fn binding_credentials_requires_explicit_connection_transport() {
         let dir = tempfile::tempdir().expect("tempdir");
-        bind_provider_credential_id(dir.path(), "anthropic", "anthropic").expect("bind builtin");
+        bind_provider_credential_id(
+            dir.path(),
+            "anthropic",
+            "anthropic",
+            /*transport*/ None,
+        )
+        .expect("bind credential");
         let user = devo_core::read_provider_catalog_config(
             &dir.path().join(devo_core::PROVIDER_CONFIG_FILE_NAME),
         )
@@ -1166,6 +1166,7 @@ mod tests {
         assert_eq!(
             user.providers.get("anthropic"),
             Some(&devo_core::ProviderConfigEntry {
+                name: Some("anthropic".to_string()),
                 credential: Some("anthropic".to_string()),
                 enabled: Some(true),
                 ..devo_core::ProviderConfigEntry::default()
@@ -1178,10 +1179,7 @@ mod tests {
             .expect("anthropic builtin");
         assert_eq!(
             (inherited.base_url.as_deref(), inherited.wire_api),
-            (
-                Some("https://api.anthropic.com"),
-                Some(ProviderWireApi::AnthropicMessages)
-            ),
+            (None, None),
         );
 
         let mut custom = user;
@@ -1229,7 +1227,8 @@ mod tests {
         )
         .expect("write custom provider catalog");
 
-        bind_provider_credential_id(dir.path(), "fresh", "fresh").expect("bind");
+        bind_provider_credential_id(dir.path(), "fresh", "fresh", /*transport*/ None)
+            .expect("bind");
 
         let connection = devo_core::read_provider_catalog_config(
             &dir.path().join(devo_core::PROVIDER_CONFIG_FILE_NAME),

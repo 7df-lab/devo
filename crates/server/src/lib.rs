@@ -21,6 +21,8 @@ mod prompt_from_native_item;
 mod protocol;
 mod protocols;
 mod provider_config;
+#[cfg(test)]
+mod provider_config_tests;
 mod replay_hydrate;
 mod runtime;
 mod runtime_session_summary;

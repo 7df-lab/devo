@@ -10,8 +10,6 @@ use anyhow::Result;
 use devo_core::AUTH_CONFIG_FILE_NAME;
 use devo_core::AppConfig;
 use devo_core::AuthCredentialKind;
-use devo_core::ModelCatalog;
-use devo_core::PresetModelCatalog;
 use devo_core::ProviderConfigEntry;
 use devo_core::ProviderConfigFile;
 use devo_core::ProviderHttpConfig;
@@ -58,10 +56,7 @@ pub async fn load_server_provider(
     if !app_config.has_provider_configuration() {
         let default_model = match default_model {
             Some(default_model) => default_model.to_string(),
-            None => PresetModelCatalog::load()?
-                .resolve_for_turn(None)?
-                .slug
-                .clone(),
+            None => String::new(),
         };
         let provider: Arc<dyn ModelProviderSDK> = Arc::new(MissingProvider);
         return Ok(ResolvedServerProvider {
@@ -73,11 +68,34 @@ pub async fn load_server_provider(
 
     let provider_config = app_config.provider_catalog_config();
     let auth = read_user_auth_config(&user_config_dir.join(AUTH_CONFIG_FILE_NAME))?;
-    let selection =
-        resolve_server_model_with_home(&provider_config, default_model, Some(user_config_dir))?;
     let effective =
         devo_core::effective_provider_catalog_with_home(&provider_config, Some(user_config_dir))
-            .context("failed to merge builtin provider catalog with user overlay")?;
+            .context("failed to merge live provider catalog with user configuration")?;
+    let selection = match resolve_server_model_with_home(
+        &provider_config,
+        default_model,
+        Some(user_config_dir),
+    ) {
+        Ok(selection) => selection,
+        Err(error) => {
+            let provider: Arc<dyn ModelProviderSDK> =
+                Arc::new(UnavailableProvider::new(error.to_string()));
+            let provider_router = build_multi_provider_router(
+                &provider_config,
+                &effective,
+                &app_config.provider_http,
+                &auth,
+                Arc::clone(&provider),
+                user_config_dir,
+            )
+            .await?;
+            return Ok(ResolvedServerProvider {
+                provider,
+                provider_router,
+                default_model: default_model.unwrap_or_default().to_string(),
+            });
+        }
+    };
     let provider_config_entry = effective
         .providers
         .get(&selection.provider_id)
@@ -87,10 +105,17 @@ pub async fn load_server_provider(
                 selection.provider_id
             )
         })?;
+    let mut provider_config_entry = provider_config_entry.clone();
+    if let Some(model) = provider_config_entry.models.get(&selection.model_id) {
+        if let Some(endpoint) = model.base_url.clone() {
+            provider_config_entry.base_url = Some(endpoint);
+        }
+        provider_config_entry.wire_api = model.wire_api.or(provider_config_entry.wire_api);
+    }
     let provider = match build_provider_route(
         selection.wire_api,
         &selection.provider_id,
-        provider_config_entry,
+        &provider_config_entry,
         &auth,
         &app_config.provider_http,
         user_config_dir,
@@ -101,9 +126,7 @@ pub async fn load_server_provider(
         Err(error) => Arc::new(UnavailableProvider::new(error.to_string())),
     };
     let auth = read_user_auth_config(&user_config_dir.join(AUTH_CONFIG_FILE_NAME))?;
-    // Route table stays sparse/user Connections only — do not register every builtin.
-    // Adapter fields (base_url, wire_api, headers) come from the effective catalog
-    // so sparse Connections still inherit builtin endpoints.
+    // Register only user connections. Remote metadata cannot change their transport.
     let provider_router = build_multi_provider_router(
         &provider_config,
         &effective,
@@ -180,6 +203,10 @@ pub(crate) fn build_provider_adapter(
             let api_key =
                 api_key.context("anthropic provider requires an API key or OAuth access token")?;
             let base_url = base_url.unwrap_or_else(|| "https://api.anthropic.com".to_string());
+            // models.dev uses SDK base URLs, which may already include /v1.
+            // The Anthropic adapter adds that path itself.
+            let base_url = base_url.trim_end_matches('/');
+            let base_url = base_url.strip_suffix("/v1").unwrap_or(base_url).to_string();
             let mut anthropic = AnthropicProvider::new(base_url).with_http_options(http_options)?;
             anthropic = match auth_kind {
                 Some(AuthCredentialKind::Oauth) => anthropic.with_oauth_access(api_key),
@@ -256,83 +283,87 @@ pub(crate) async fn build_connection_route_table(
     user_config_dir: &Path,
 ) -> Result<Vec<(ProviderRoute, Arc<dyn ModelProviderSDK>)>> {
     let mut routes = Vec::new();
-    for (provider_id, sparse_provider) in &sparse_connections.providers {
-        if sparse_provider.enabled == Some(false) {
+    for (provider_id, configured) in &sparse_connections.providers {
+        if configured.enabled == Some(false) {
             continue;
         }
-        // Sparse overlays omit unchanged builtin fields (including base_url).
-        // Build the HTTP adapter from the effective entry so openai-compatible
-        // Connections do not fall back to api.openai.com.
         let provider =
-            connection_provider_entry_for_adapter(provider_id, sparse_provider, effective_catalog);
-        let mut wire_apis = Vec::new();
+            connection_provider_entry_for_adapter(provider_id, configured, effective_catalog);
+        if let Some(headers) = &provider.headers {
+            ProviderHttpOptions::from_raw_with_no_proxy(
+                provider_http.proxy_url.clone(),
+                provider_http.no_proxy.clone(),
+                Some(serde_json::to_string(headers)?),
+            )?;
+        }
+        let mut wire_apis = std::collections::HashSet::new();
         if let Some(wire_api) = provider.wire_api {
-            wire_apis.push(wire_api);
+            wire_apis.insert(wire_api);
         }
         for model in provider.models.values() {
-            if let Some(wire_api) = model.wire_api
-                && !wire_apis.contains(&wire_api)
-            {
-                wire_apis.push(wire_api);
+            if let Some(wire_api) = model.wire_api {
+                wire_apis.insert(wire_api);
             }
         }
         if wire_apis.is_empty() {
-            wire_apis.push(ProviderWireApi::OpenAIChatCompletions);
-        }
-        let api_key =
-            resolve_provider_api_key(provider_id, sparse_provider, auth, user_config_dir).await;
-        let credential_id = resolve_provider_credential_id(provider_id, sparse_provider, auth);
-        let auth_kind = credential_id
-            .as_deref()
-            .and_then(|id| auth.credentials.get(id))
-            .map(|credential| credential.kind);
-        let account_id = credential_id.as_deref().and_then(|id| {
-            auth.credentials
-                .get(id)
-                .and_then(|credential| credential.account_id.clone())
-        });
-        let mut headers = provider.headers.clone().unwrap_or_default();
-        if provider_id == "openai-codex"
-            && let Some(account_id) = account_id.filter(|value| !value.is_empty())
-        {
-            headers
-                .entry("chatgpt-account-id".to_string())
-                .or_insert(account_id);
+            routes.push((
+                ProviderRoute::connection(provider_id.clone(), ProviderWireApi::OpenAIChatCompletions),
+                Arc::new(UnavailableProvider::new(format!("provider `{provider_id}` has no pinned protocol; reconnect it with an explicit endpoint and protocol"))) as Arc<dyn ModelProviderSDK>,
+            ));
         }
         for wire_api in wire_apis {
-            let provider_instance = match &api_key {
-                Ok(api_key) => build_provider_adapter(
-                    wire_api,
-                    provider.base_url.clone(),
-                    api_key.clone(),
-                    ProviderHttpOptions::from_raw_with_no_proxy(
-                        provider_http.proxy_url.clone(),
-                        provider_http.no_proxy.clone(),
-                        if headers.is_empty() {
-                            None
-                        } else {
-                            Some(serde_json::to_string(&headers)?)
-                        },
-                    )?,
-                    auth_kind,
-                )
-                .unwrap_or_else(|error| Arc::new(UnavailableProvider::new(error.to_string()))),
-                Err(error) => Arc::new(UnavailableProvider::new(error.to_string())),
-            };
+            let mut connection = provider.clone();
+            connection.wire_api = Some(wire_api);
+            let adapter = build_provider_route(
+                wire_api,
+                provider_id,
+                &connection,
+                auth,
+                provider_http,
+                user_config_dir,
+            )
+            .await
+            .unwrap_or_else(|error| Arc::new(UnavailableProvider::new(error.to_string())));
             routes.push((
                 ProviderRoute::connection(provider_id.clone(), wire_api),
-                provider_instance,
+                adapter,
+            ));
+        }
+        for (model_id, model) in &provider.models {
+            if model.enabled == Some(false) {
+                continue;
+            }
+            let (Some(base_url), Some(wire_api)) =
+                (&model.base_url, model.wire_api.or(provider.wire_api))
+            else {
+                continue;
+            };
+            let mut model_connection = provider.clone();
+            model_connection.base_url = Some(base_url.clone());
+            model_connection.wire_api = Some(wire_api);
+            let adapter = build_provider_route(
+                wire_api,
+                provider_id,
+                &model_connection,
+                auth,
+                provider_http,
+                user_config_dir,
+            )
+            .await
+            .unwrap_or_else(|error| Arc::new(UnavailableProvider::new(error.to_string())));
+            routes.push((
+                ProviderRoute::connection_model(provider_id.clone(), wire_api, model_id.clone()),
+                adapter,
             ));
         }
     }
-
     Ok(routes)
 }
 
 /// Picks the provider entry used to construct a Connection HTTP adapter.
 ///
-/// Prefer the effective (builtin + overlay) entry so sparse `providers.json`
-/// Connections inherit `base_url` / `wire_api` from the embedded directory.
+/// The effective catalog strips remote transport fields on configured providers.
+/// Only explicit user endpoint and protocol values may govern credentials.
 pub(crate) fn connection_provider_entry_for_adapter<'a>(
     provider_id: &str,
     sparse: &'a ProviderConfigEntry,
@@ -349,6 +380,20 @@ async fn build_provider_route(
     provider_http: &ProviderHttpConfig,
     user_config_dir: &Path,
 ) -> Result<Arc<dyn ModelProviderSDK>> {
+    if provider.wire_api.is_none() {
+        anyhow::bail!(
+            "provider `{provider_id}` has no pinned protocol; reconnect it with an explicit protocol"
+        );
+    }
+    if provider
+        .base_url
+        .as_deref()
+        .is_none_or(|endpoint| endpoint.trim().is_empty())
+    {
+        anyhow::bail!(
+            "provider `{provider_id}` has no pinned endpoint; reconnect it with an explicit base URL before using credentials"
+        );
+    }
     let credential_id = resolve_provider_credential_id(provider_id, provider, auth);
     let auth_kind = credential_id
         .as_deref()
@@ -360,6 +405,7 @@ async fn build_provider_route(
             .and_then(|credential| credential.account_id.clone())
     });
     let mut headers = provider.headers.clone().unwrap_or_default();
+    crate::oauth_refresh::apply_oauth_adapter_headers(provider_id, auth_kind, &mut headers);
     if provider_id == "openai-codex"
         && let Some(account_id) = account_id.filter(|value| !value.is_empty())
     {
@@ -389,18 +435,24 @@ fn resolve_server_model_with_home(
     default_model: Option<&str>,
     home_dir: Option<&Path>,
 ) -> Result<devo_core::ProviderModelSelection> {
-    // Sparse providers.json overlays omit unchanged builtin models; resolve
-    // against the effective (builtin + remote cache + overlay) catalog.
+    // Resolve live metadata and user-authored model entries together.
     let effective = devo_core::effective_provider_catalog_with_home(provider_config, home_dir)
-        .context("failed to merge builtin provider catalog with user overlay")?;
+        .context("failed to merge live provider catalog with user configuration")?;
     // Explicit caller override (CLI `--model`, session default argument) wins
     // over a persisted catalog/config.toml selection.
-    if let Some(default_model) = default_model
+    if let Some(default_model) = default_model.filter(|model| !model.is_empty())
         && let Ok(selection) = effective.resolve_model(Some(default_model))
+        && provider_config
+            .providers
+            .contains_key(&selection.provider_id)
     {
         return Ok(selection);
     }
-    effective.resolve_model(None).map_err(Into::into)
+    let mut connected = effective;
+    connected
+        .providers
+        .retain(|id, _| provider_config.providers.contains_key(id));
+    connected.resolve_model(None).map_err(Into::into)
 }
 
 pub(crate) async fn resolve_provider_api_key(
@@ -523,38 +575,20 @@ mod tests {
     }
 
     #[test]
-    fn sparse_deepseek_connection_inherits_builtin_base_url_for_adapter() {
+    fn sparse_connection_never_inherits_a_remote_endpoint() {
         let sparse = ProviderConfigEntry {
-            name: Some("deepseek".to_string()),
             credential: Some("deepseek".to_string()),
             enabled: Some(true),
-            ..ProviderConfigEntry::default()
+            ..Default::default()
         };
         let overlay = ProviderConfigFile {
             providers: BTreeMap::from([("deepseek".to_string(), sparse.clone())]),
-            ..ProviderConfigFile::default()
+            ..Default::default()
         };
-        let effective = devo_core::effective_provider_catalog(&overlay)
-            .expect("merge builtin deepseek catalog");
-        let entry = super::connection_provider_entry_for_adapter("deepseek", &sparse, &effective);
+        let effective = devo_core::effective_provider_catalog(&overlay).expect("merge");
         assert_eq!(
-            entry.base_url.as_deref(),
-            Some("https://api.deepseek.com"),
-            "sparse Connection must inherit builtin DeepSeek base_url"
-        );
-        assert_eq!(
-            normalize_openai_base_url(entry.base_url.as_deref().unwrap()),
-            "https://api.deepseek.com/v1"
-        );
-        assert_ne!(
-            normalize_openai_base_url(
-                &sparse
-                    .base_url
-                    .clone()
-                    .unwrap_or_else(|| "https://api.openai.com".to_string())
-            ),
-            "https://api.deepseek.com/v1",
-            "precondition: sparse-only path would incorrectly hit OpenAI"
+            super::connection_provider_entry_for_adapter("deepseek", &sparse, &effective),
+            &sparse
         );
     }
 
@@ -603,6 +637,7 @@ mod tests {
                     "openai".to_string(),
                     ProviderConfigEntry {
                         name: Some("OpenAI".to_string()),
+                        base_url: Some("https://api.openai.com/v1".to_string()),
                         headers: Some(BTreeMap::from([(
                             "bad header".to_string(),
                             "value".to_string(),

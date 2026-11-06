@@ -525,9 +525,10 @@ fn acp_model_config_option_for_turn_config(
 
 fn canonical_model_selection(turn_config: &TurnConfig) -> String {
     let base = match &turn_config.provider_route {
-        devo_provider::ProviderRoute::Connection { provider_id, .. } => {
-            format!("{provider_id}/{}", turn_config.request_model)
-        }
+        devo_provider::ProviderRoute::Connection { provider_id, .. } => turn_config
+            .model_binding_id
+            .clone()
+            .unwrap_or_else(|| format!("{provider_id}/{}", turn_config.request_model)),
         devo_provider::ProviderRoute::Default => turn_config.model.slug.clone(),
     };
     turn_config

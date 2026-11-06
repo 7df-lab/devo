@@ -57,6 +57,20 @@ fn build_runtime_with_provider_and_catalog(
         .runtime(data_root)
 }
 
+fn saved_test_catalog(
+    data_root: &std::path::Path,
+    value: serde_json::Value,
+) -> Result<Arc<PresetModelCatalog>> {
+    let config: devo_core::ProviderConfigFile = serde_json::from_value(value)?;
+    devo_core::write_provider_catalog_config(
+        &data_root.join(devo_core::PROVIDER_CONFIG_FILE_NAME),
+        &config,
+    )?;
+    Ok(Arc::new(PresetModelCatalog::load_from_provider_config(
+        &config,
+    )?))
+}
+
 fn build_runtime_with_provider_catalog_and_protocols(
     data_root: &std::path::Path,
     provider: Arc<dyn ModelProviderSDK>,
@@ -5482,10 +5496,19 @@ async fn native_search_and_workspace_reads() -> Result<()> {
 #[tokio::test]
 async fn native_model_catalog_and_preferences() -> Result<()> {
     let data_root = TempDir::new()?;
+    let catalog = saved_test_catalog(
+        data_root.path(),
+        serde_json::json!({
+            "model": "fixture/model", "provider": {"fixture": {
+                "base_url": "http://127.0.0.1:1/v1", "wire_api": "openai_chat_completions",
+                "models": {"model": {"context_window": 128000, "reasoning_capability": {"levels": ["low", "medium", "high"]}}}
+            }}
+        }),
+    )?;
     let runtime = build_runtime_with_provider_and_catalog(
         data_root.path(),
         Arc::new(NoopProvider::failing()),
-        Arc::new(PresetModelCatalog::load().expect("embedded model catalog")),
+        catalog,
     );
     let connection_id = initialized_with_protocol_meta(&runtime, true).await;
     let listed: devo_protocol::native::rpc_admin::ModelListResult = json_result(
@@ -5574,13 +5597,8 @@ async fn native_admin_directory_lists() -> Result<()> {
         .await,
         "rpc",
     );
-    assert!(
-        listed
-            .providers
-            .iter()
-            .any(|provider| provider.id == "deepseek")
-    );
-    assert!(listed.template_provider_ids.contains(&"zhipu".to_string()));
+    assert!(listed.providers.is_empty());
+    assert!(listed.template_provider_ids.is_empty());
 
     let env = NativeEnv::native().await?;
     let listed: devo_protocol::native::rpc_admin::SkillListResult = json_result(
@@ -5670,19 +5688,30 @@ async fn native_admin_directory_lists() -> Result<()> {
     Ok(())
 }
 
-/// A credential-only overlay must inherit the bundled protocol and URL, and
+/// A credential-only overlay must preserve the saved protocol and URL, and
 /// credential/set must refresh routers held by already-live sessions.
 #[tokio::test]
-async fn native_oauth_credential_set_keeps_builtin_protocol_and_refreshes_live_routers()
--> Result<()> {
+async fn native_oauth_credential_set_keeps_saved_protocol_and_refreshes_live_routers() -> Result<()>
+{
     use devo_protocol::ProviderWireApi;
     use devo_provider::ProviderRoute;
 
     let data_root = TempDir::new()?;
+    let catalog = saved_test_catalog(
+        data_root.path(),
+        serde_json::json!({
+            "model": "anthropic/test-model", "provider": {
+                "anthropic": {"base_url": "https://api.anthropic.com", "wire_api": "anthropic_messages",
+                    "models": {"test-model": {"context_window": 128000}}},
+                "openai-codex": {"base_url": "https://chatgpt.com/backend-api/codex", "wire_api": "openai_responses",
+                    "models": {"test-model": {"context_window": 128000}}}
+            }
+        }),
+    )?;
     let runtime = build_runtime_with_provider_and_catalog(
         data_root.path(),
         Arc::new(NoopProvider::failing()),
-        Arc::new(PresetModelCatalog::load()?),
+        catalog,
     );
     let connection_id = initialized_with_protocol_meta(&runtime, true).await;
     let session_id = start_durable_session(&runtime, connection_id, data_root.path()).await?;
@@ -5744,7 +5773,7 @@ async fn native_oauth_credential_set_keeps_builtin_protocol_and_refreshes_live_r
             .providers
             .iter()
             .find(|entry| entry.id == provider_id)
-            .expect("bundled provider");
+            .expect("saved provider");
         assert_eq!(
             (
                 entry.base_url.as_deref(),
@@ -5753,10 +5782,7 @@ async fn native_oauth_credential_set_keeps_builtin_protocol_and_refreshes_live_r
             ),
             (Some(base_url), &[wire_api][..], Some(provider_id)),
         );
-        assert!(
-            !entry.models.is_empty(),
-            "bundled models must remain visible"
-        );
+        assert!(!entry.models.is_empty(), "saved models must remain visible");
     }
     assert_eq!(
         listed.connected_provider_ids,
@@ -5799,7 +5825,7 @@ async fn native_oauth_credential_set_keeps_builtin_protocol_and_refreshes_live_r
         )));
     }
 
-    // An explicit user override beats the builtin; an explicit custom-provider
+    // An explicit user edit changes the saved endpoint; an explicit custom-provider
     // override beats the user connection without dropping its OAuth binding.
     let provider_path = data_root.path().join(devo_core::PROVIDER_CONFIG_FILE_NAME);
     let mut user = devo_core::read_provider_catalog_config(&provider_path)?;

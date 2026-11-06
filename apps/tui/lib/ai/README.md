@@ -1,3 +1,9 @@
+> Devo vendoring note: this package contains provider adapters and model utilities,
+> not a bundled model directory. `getProviders()` / `getModels()` return empty
+> lists and `getModel()` returns `undefined`. Native clients obtain resolved models
+> from the server's live models.dev directory and user configuration. Historical
+> upstream examples below that use generated models require caller-supplied models.
+
 <h1 align="center">Devo AI</h1>
 
 <p align="center">
@@ -1270,11 +1276,11 @@ Create a new provider file (for example `amazon-bedrock.ts`) that exports:
 - Add credential detection in `env-api-keys.ts` for the new provider
 - Ensure `streamSimple` handles auth lookup via `getEnvApiKey()` or provider-specific auth
 
-#### 4. Model Generation (`scripts/generate-models.ts`)
+#### 4. Model metadata
 
-- Add logic to fetch and parse models from the provider's source (e.g., models.dev API)
-- Map provider model data to the standardized `Model` interface
-- Handle provider-specific quirks (pricing format, capability flags, model ID transformations)
+Devo loads model metadata from models.dev and user configuration on the Native
+server. Do not add generated model tables or local catalog snapshots here.
+Provider adapters accept the resolved `Model` supplied by their caller.
 
 #### 5. Tests (`test/`)
 

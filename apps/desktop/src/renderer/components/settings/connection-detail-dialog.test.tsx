@@ -25,14 +25,16 @@ mock.module("@devo/ui/components/dialog", () => ({
 }))
 mock.module("./provider-icon", () => ({ ProviderIcon: () => null }))
 mock.module("./model-edit-dialog", () => ({ ModelEditDialog: () => null }))
-const discover = mock(async (_params: unknown) => {})
+const discoveredModels = { fresh: { name: "Fresh model", wireApi: "openai_responses" as const, baseUrl: "https://gateway.example/v1", requestModel: "upstream", cost: { input: 2, output: 3 }, capabilities: { vision: true }, contextWindow: 100000 } }
+const discover = mock(async (_params: unknown) => ({ providerId: "openai-codex", models: discoveredModels }))
+const upsert = mock(async (_params: unknown) => ({}))
 const modelRemove = mock(async (_params: unknown) => {})
 const refreshCatalog = mock(async (_params: unknown) => ({
 	data: { status: "updated" },
 }))
 mock.module("../../services/connection-manager", () => ({
 	getBaseClient: () => ({
-		provider: { discover, modelRemove },
+		provider: { discover, modelRemove, upsert },
 		model: { refreshCatalog },
 	}),
 }))
@@ -79,6 +81,8 @@ afterEach(async () => {
 	await act(async () => root?.unmount())
 	mount?.remove()
 	discover.mockReset()
+	discover.mockImplementation(async () => ({ providerId: "openai-codex", models: discoveredModels }))
+	upsert.mockReset()
 	modelRemove.mockReset()
 	refreshCatalog.mockReset()
 	changed.mockReset()
@@ -115,12 +119,12 @@ describe("connected provider details", () => {
 			changed: 1,
 		})
 	})
-	test("Codex refreshes its authenticated provider catalog", async () => {
+	test("Codex discovery displays temporary models without changing configuration", async () => {
 		refreshCatalog.mockImplementation(async () => ({
 			data: { status: "updated" },
 		}))
 		await renderDialog()
-		await click("Refresh catalog")
+		await click("Discover")
 		expect({
 			refresh: refreshCatalog.mock.calls,
 			discover: discover.mock.calls,
@@ -128,14 +132,16 @@ describe("connected provider details", () => {
 		}).toEqual({
 			refresh: [],
 			discover: [[{ providerId: "openai-codex", forceRefresh: true }]],
-			changed: 1,
+			changed: 0,
 		})
+		expect(mount.textContent).toContain("Fresh model")
+		expect(upsert.mock.calls).toEqual([])
 	})
 	test("failed discovery is visible and can be retried", async () => {
 		discover.mockImplementationOnce(async () => {
 			throw new Error("Provider unavailable")
 		})
-		discover.mockImplementation(async () => {})
+		discover.mockImplementation(async () => ({ providerId: "settings-qa", models: discoveredModels }))
 		await renderDialog("settings-qa")
 		await click("Discover")
 		expect(mount.querySelector('[role="alert"]')?.textContent).toBe(
@@ -146,6 +152,17 @@ describe("connected provider details", () => {
 			alert: mount.querySelector('[role="alert"]'),
 			attempts: discover.mock.calls.length,
 			changed: changed.mock.calls.length,
-		}).toEqual({ alert: null, attempts: 2, changed: 1 })
+		}).toEqual({ alert: null, attempts: 2, changed: 0 })
 	})
+	test("saving a discovered model persists only the explicit selection and preserves routing", async () => {
+		await renderDialog()
+		await click("Discover")
+		await click("Save")
+		expect(upsert.mock.calls).toEqual([[{ provider: {
+			...provider,
+			models: { fresh: { origin: "user", baseUrl: "https://gateway.example/v1", wireApi: "openai_responses", requestModel: "upstream" } },
+		} }]])
+		expect(changed.mock.calls.length).toBe(1)
+	})
+
 })

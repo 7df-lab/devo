@@ -40147,6 +40147,10 @@
             "null"
           ]
         },
+        "configureConnection": {
+          "description": "Explicit OAuth connect action: initialize missing transport from its auth adapter. Credential synchronization and token refresh must leave this false.",
+          "type": "boolean"
+        },
         "enterpriseUrl": {
           "type": [
             "string",
@@ -91711,6 +91715,13 @@
                 "null"
               ]
             },
+            "baseUrl": {
+              "description": "Explicit per-model endpoint, independent of the provider default.",
+              "type": [
+                "string",
+                "null"
+              ]
+            },
             "capabilities": {
               "description": "Open-ended model capabilities, compatible with directory sources such as OpenCode/models.dev (for example tools, input/output, attachment, and interleaved reasoning support)."
             },
@@ -91854,6 +91865,13 @@
               ]
             },
             "request": true,
+            "requestModel": {
+              "description": "Wire model id when this entry is a user-named alias.",
+              "type": [
+                "string",
+                "null"
+              ]
+            },
             "status": {
               "type": [
                 "string",
@@ -92280,6 +92298,13 @@
                 "null"
               ]
             },
+            "baseUrl": {
+              "description": "Explicit per-model endpoint, independent of the provider default.",
+              "type": [
+                "string",
+                "null"
+              ]
+            },
             "capabilities": {
               "description": "Open-ended model capabilities, compatible with directory sources such as OpenCode/models.dev (for example tools, input/output, attachment, and interleaved reasoning support)."
             },
@@ -92423,6 +92448,13 @@
               ]
             },
             "request": true,
+            "requestModel": {
+              "description": "Wire model id when this entry is a user-named alias.",
+              "type": [
+                "string",
+                "null"
+              ]
+            },
             "status": {
               "type": [
                 "string",
@@ -92870,6 +92902,13 @@
                 "null"
               ]
             },
+            "baseUrl": {
+              "description": "Explicit per-model endpoint, independent of the provider default.",
+              "type": [
+                "string",
+                "null"
+              ]
+            },
             "capabilities": {
               "description": "Open-ended model capabilities, compatible with directory sources such as OpenCode/models.dev (for example tools, input/output, attachment, and interleaved reasoning support)."
             },
@@ -93013,6 +93052,13 @@
               ]
             },
             "request": true,
+            "requestModel": {
+              "description": "Wire model id when this entry is a user-named alias.",
+              "type": [
+                "string",
+                "null"
+              ]
+            },
             "status": {
               "type": [
                 "string",
@@ -93417,6 +93463,13 @@
                 "null"
               ]
             },
+            "baseUrl": {
+              "description": "Explicit per-model endpoint, independent of the provider default.",
+              "type": [
+                "string",
+                "null"
+              ]
+            },
             "capabilities": {
               "description": "Open-ended model capabilities, compatible with directory sources such as OpenCode/models.dev (for example tools, input/output, attachment, and interleaved reasoning support)."
             },
@@ -93560,6 +93613,13 @@
               ]
             },
             "request": true,
+            "requestModel": {
+              "description": "Wire model id when this entry is a user-named alias.",
+              "type": [
+                "string",
+                "null"
+              ]
+            },
             "status": {
               "type": [
                 "string",
@@ -93963,6 +94023,13 @@
                 "null"
               ]
             },
+            "baseUrl": {
+              "description": "Explicit per-model endpoint, independent of the provider default.",
+              "type": [
+                "string",
+                "null"
+              ]
+            },
             "capabilities": {
               "description": "Open-ended model capabilities, compatible with directory sources such as OpenCode/models.dev (for example tools, input/output, attachment, and interleaved reasoning support)."
             },
@@ -94106,6 +94173,13 @@
               ]
             },
             "request": true,
+            "requestModel": {
+              "description": "Wire model id when this entry is a user-named alias.",
+              "type": [
+                "string",
+                "null"
+              ]
+            },
             "status": {
               "type": [
                 "string",

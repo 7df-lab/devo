@@ -103,6 +103,8 @@ export interface ProviderAuthFlowsHost {
 	onAuthChanged?(): void | Promise<void>;
 	/** Invoked after a successful login (e.g. to surface billing warnings). */
 	onLoginCompleted?(): void;
+	/** Explicit login only, awaited before refreshing the host model catalog. */
+	onProviderAuthenticated?(providerId: string, authType: "oauth" | "api_key", kind: "provider" | "service"): Promise<void>;
 	/**
 	 * Provider ids omitted from /login and the providers configuration tab.
 	 * Used by rebranded hosts (e.g. Devo) that should not surface hosted-provider branding.
@@ -315,6 +317,7 @@ export class ProviderAuthFlows {
 		this.host.modelRegistry.refresh();
 
 		const actionLabel = authType === "oauth" ? `Logged in to ${providerName}` : `Saved API key for ${providerName}`;
+		await this.host.onProviderAuthenticated?.(providerId, authType, kind);
 		await this.host.onAuthChanged?.();
 		this.host.showStatus(
 			`${actionLabel}. Credentials saved to ${credentialPath}${statusSuffix ? `. ${statusSuffix}` : ""}`,

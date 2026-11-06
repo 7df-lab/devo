@@ -1,7 +1,4 @@
-//! Builtin model catalog loading and resolution for core.
-//!
-//! The embedded `providers.json` asset is the canonical provider/model
-//! directory. Provider and model identity are resolved from the same map.
+//! Model catalog resolution from live models.dev discovery and user configuration.
 use std::collections::BTreeMap;
 
 use crate::{
@@ -10,7 +7,6 @@ use crate::{
 };
 use devo_config::{ModelOverrideConfig, ProviderConfigFile, ProviderModelConfig, model_reference};
 
-const BUILTIN_PROVIDERS_JSON: &str = include_str!("../providers.json");
 const DEFAULT_BASE_INSTRUCTIONS: &str = include_str!("../default_base_instructions.txt");
 
 /// Returns the shared fallback base instructions used when a catalog model
@@ -19,31 +15,29 @@ pub fn default_base_instructions() -> &'static str {
     DEFAULT_BASE_INSTRUCTIONS
 }
 
-/// A catalog resolved from embedded presets and configuration overrides.
+/// A catalog resolved from live discovery and user configuration.
 #[derive(Debug, Clone, Default)]
 pub struct PresetModelCatalog {
     models: Vec<Model>,
     providers: Vec<ProviderInfo>,
     provider_models: BTreeMap<String, BTreeMap<String, ProviderModelInfo>>,
-    builtin_provider_ids: Vec<String>,
+    remote_provider_ids: Vec<String>,
 }
 
 impl PresetModelCatalog {
-    /// Loads the embedded provider/model directory without user overlays.
+    /// Loads an empty catalog without a home or user configuration.
     pub fn load() -> Result<Self, PresetModelCatalogError> {
         Self::load_from_provider_config(&ProviderConfigFile::default())
     }
 
-    /// Loads the embedded provider/model directory and overlays user-defined
-    /// providers and models on top of it.
+    /// Loads user-defined providers and models without remote discovery.
     pub fn load_from_provider_config(
         provider_config: &ProviderConfigFile,
     ) -> Result<Self, PresetModelCatalogError> {
         Self::load_from_provider_config_with_home(provider_config, &BTreeMap::new(), None)
     }
 
-    /// Loads the embedded catalog, merges the user provider file, then applies
-    /// `[model.<slug>]` overlays onto matching builtin or user models.
+    /// Loads user configuration and applies `[model.<slug>]` overrides.
     pub fn load_from_provider_config_with_overrides(
         provider_config: &ProviderConfigFile,
         model_overrides: &BTreeMap<String, ModelOverrideConfig>,
@@ -52,16 +46,15 @@ impl PresetModelCatalog {
     }
 
     /// Like [`Self::load_from_provider_config_with_overrides`], and also merges
-    /// a cached models.dev overlay from `$DEVO_HOME/cache/` when `home_dir` is
-    /// provided.
+    /// process-local models.dev catalog when `home_dir` is provided.
     pub fn load_from_provider_config_with_home(
         provider_config: &ProviderConfigFile,
         model_overrides: &BTreeMap<String, ModelOverrideConfig>,
         home_dir: Option<&std::path::Path>,
     ) -> Result<Self, PresetModelCatalogError> {
         let mut directory = load_base_provider_config(home_dir)?;
-        let builtin_provider_ids = directory.providers.keys().cloned().collect();
-        directory.merge_overlay(provider_config.clone());
+        let remote_provider_ids = directory.providers.keys().cloned().collect();
+        merge_user_connections(&mut directory, provider_config);
         directory.apply_model_overrides(model_overrides);
         let providers = directory
             .providers
@@ -154,7 +147,7 @@ impl PresetModelCatalog {
             models,
             providers,
             provider_models,
-            builtin_provider_ids,
+            remote_provider_ids,
         })
     }
 
@@ -164,7 +157,7 @@ impl PresetModelCatalog {
             models,
             providers: Vec::new(),
             provider_models: BTreeMap::new(),
-            builtin_provider_ids: Vec::new(),
+            remote_provider_ids: Vec::new(),
         }
     }
 
@@ -184,7 +177,7 @@ impl ModelCatalog for PresetModelCatalog {
     }
 
     fn list_template_provider_ids(&self) -> Vec<String> {
-        self.builtin_provider_ids.clone()
+        self.remote_provider_ids.clone()
     }
 
     fn list_provider_models(&self, provider_id: &str) -> BTreeMap<String, ProviderModelInfo> {
@@ -213,36 +206,38 @@ impl ModelCatalog for PresetModelCatalog {
     }
 }
 
-fn load_builtin_provider_config() -> Result<ProviderConfigFile, PresetModelCatalogError> {
-    serde_json::from_str(BUILTIN_PROVIDERS_JSON).map_err(Into::into)
-}
-
 fn load_base_provider_config(
     home_dir: Option<&std::path::Path>,
 ) -> Result<ProviderConfigFile, PresetModelCatalogError> {
-    let mut directory = load_builtin_provider_config()?;
-    if let Some(home_dir) = home_dir {
-        match crate::load_remote_catalog_overlay(home_dir) {
-            Ok(Some(remote)) => directory.merge_overlay(remote),
-            Ok(None) => {}
-            Err(error) => {
-                tracing::warn!(
-                    error = %error,
-                    "failed to load cached models.dev catalog overlay"
-                );
+    match home_dir {
+        Some(home) => crate::load_remote_catalog_overlay(home)
+            .map(|catalog| catalog.unwrap_or_default())
+            .map_err(|error| PresetModelCatalogError::InvalidProviderConfig {
+                message: error.to_string(),
+            }),
+        None => Ok(ProviderConfigFile::default()),
+    }
+}
+
+/// Remote metadata may enrich a user connection, never change its transport.
+/// In particular, a remote model override must not redirect an existing credential.
+fn merge_user_connections(directory: &mut ProviderConfigFile, overlay: &ProviderConfigFile) {
+    for id in overlay.providers.keys() {
+        if let Some(remote) = directory.providers.get_mut(id) {
+            remote.base_url = None;
+            remote.wire_api = None;
+            remote.env.clear();
+            for model in remote.models.values_mut() {
+                model.base_url = None;
+                model.wire_api = None;
+                model.request_model = None;
             }
         }
     }
-    Ok(directory)
+    directory.merge_overlay(overlay.clone());
 }
 
-/// Returns the embedded built-in provider directory (no user overlays).
-pub fn builtin_provider_config() -> Result<ProviderConfigFile, PresetModelCatalogError> {
-    load_builtin_provider_config()
-}
-
-/// Builds the effective provider catalog: embedded builtins merged with a
-/// sparse user/project overlay (sparse overlay semantics).
+/// Builds the effective provider catalog from user configuration.
 ///
 /// Prefer this for model resolution and routing. Persist/edit paths should
 /// keep reading the sparse overlay alone.
@@ -252,14 +247,13 @@ pub fn effective_provider_catalog(
     effective_provider_catalog_with_home(overlay, None)
 }
 
-/// Like [`effective_provider_catalog`], including a cached models.dev overlay
-/// from `$DEVO_HOME/cache/` when `home_dir` is set.
+/// Like [`effective_provider_catalog`], including process-local live discovery.
 pub fn effective_provider_catalog_with_home(
     overlay: &ProviderConfigFile,
     home_dir: Option<&std::path::Path>,
 ) -> Result<ProviderConfigFile, PresetModelCatalogError> {
     let mut directory = load_base_provider_config(home_dir)?;
-    directory.merge_overlay(overlay.clone());
+    merge_user_connections(&mut directory, overlay);
     // Session defaults live on the overlay / config.toml projection.
     if directory.model.is_none() {
         directory.model = overlay.model.clone();
@@ -271,46 +265,6 @@ pub fn effective_provider_catalog_with_home(
         directory.reasoning_effort = overlay.reasoning_effort.clone();
     }
     Ok(directory)
-}
-
-/// Rewrites user `providers.json` so built-in Connections store sparse overlays
-/// (sparse overlay semantics) and credential ids are provider-keyed.
-pub fn migrate_user_provider_catalog_overlays(
-    user_config_dir: &std::path::Path,
-) -> anyhow::Result<bool> {
-    use crate::{
-        PROVIDER_CONFIG_FILE_NAME, provider_id_from_credential_id, read_provider_catalog_config,
-        sparsify_provider_entry_against_builtin, write_provider_catalog_config,
-    };
-
-    let path = user_config_dir.join(PROVIDER_CONFIG_FILE_NAME);
-    if !path.exists() {
-        return Ok(false);
-    }
-    let mut config = read_provider_catalog_config(&path)?;
-    let builtin = load_builtin_provider_config()?;
-    let mut changed = false;
-    for (provider_id, entry) in config.providers.iter_mut() {
-        if let Some(credential) = entry.credential.clone() {
-            let migrated = provider_id_from_credential_id(&credential);
-            if migrated != credential {
-                entry.credential = Some(migrated);
-                changed = true;
-            }
-        }
-        let Some(baseline) = builtin.providers.get(provider_id) else {
-            continue;
-        };
-        let before = entry.clone();
-        sparsify_provider_entry_against_builtin(entry, baseline);
-        if *entry != before {
-            changed = true;
-        }
-    }
-    if changed {
-        write_provider_catalog_config(&path, &config)?;
-    }
-    Ok(changed)
 }
 
 fn model_from_provider_config(
@@ -375,6 +329,14 @@ fn provider_info_from_config(
     let wire_api = config
         .wire_api
         .unwrap_or(ProviderWireApi::OpenAIChatCompletions);
+    let mut wire_apis = vec![wire_api];
+    for model in config.models.values() {
+        if let Some(model_api) = model.wire_api
+            && !wire_apis.contains(&model_api)
+        {
+            wire_apis.push(model_api);
+        }
+    }
     ProviderInfo {
         id: provider_id.to_string(),
         name: config
@@ -388,7 +350,7 @@ fn provider_info_from_config(
         options: config.options.clone(),
         request: config.request.clone(),
         compat: config.compat.clone(),
-        wire_apis: vec![wire_api],
+        wire_apis,
         model_overrides: config
             .model_overrides
             .iter()
@@ -425,6 +387,8 @@ fn provider_model_info_from_config(
         || !matches!(capability, ReasoningCapability::Unsupported);
     ProviderModelInfo {
         origin: config.origin,
+        base_url: config.base_url.clone(),
+        request_model: config.request_model.clone(),
         name: config.name.clone(),
         family: config.family.clone(),
         release_date: config.release_date.clone(),
@@ -494,11 +458,11 @@ fn provider_model_info_from_config(
     }
 }
 
-/// Errors produced while loading the builtin catalog.
+/// Errors produced while loading the provider catalog.
 #[derive(Debug, thiserror::Error)]
 pub enum PresetModelCatalogError {
-    /// Parsing the bundled provider directory failed.
-    #[error("failed to parse builtin provider catalog: {0}")]
+    /// Parsing a provider directory failed.
+    #[error("failed to parse provider catalog: {0}")]
     Parse(#[from] serde_json::Error),
     /// Writing or validating user provider catalog config failed.
     #[error("invalid provider catalog config: {message}")]
@@ -507,367 +471,112 @@ pub enum PresetModelCatalogError {
 
 #[cfg(test)]
 mod tests {
-    use std::collections::BTreeMap;
-
+    use super::*;
     use pretty_assertions::assert_eq;
-
-    use super::{PresetModelCatalog, default_base_instructions};
-    use crate::{
-        Model, ModelCatalog, ProviderInfo, ProviderWireApi, ReasoningCapability, ThinkingLevelMap,
-    };
-    use devo_protocol::resolve_thinking_fields_for_model_info;
+    use serde_json::json;
 
     #[test]
-    fn builtin_models_load_from_provider_directory() {
-        let catalog = PresetModelCatalog::load().expect("load provider catalog");
-        assert!(!catalog.list_visible().is_empty());
-        assert_eq!(catalog.list_visible()[0].slug, "openai/gpt-5.5");
-    }
-
-    #[test]
-    fn builtin_catalog_resolves_visible_defaults() {
-        let catalog = PresetModelCatalog::load().expect("load catalog");
-        let model = catalog.resolve_for_turn(None).expect("resolve default");
-        assert!(!model.slug.is_empty());
-    }
-
-    #[test]
-    fn default_base_instructions_are_available() {
+    fn empty_catalog_has_no_embedded_fallback() {
+        let catalog = PresetModelCatalog::load().unwrap();
+        assert!(catalog.list_visible().is_empty());
+        assert!(catalog.list_providers().is_empty());
+        assert!(catalog.resolve_for_turn(None).is_err());
         assert!(!default_base_instructions().trim().is_empty());
     }
 
     #[test]
-    fn builtin_models_have_channel_fields() {
-        let catalog = PresetModelCatalog::load().expect("load provider catalog");
-        assert!(
-            catalog
-                .list_visible()
-                .iter()
-                .any(|model| model.channel.as_deref() == Some("DeepSeek"))
+    fn configured_models_work_without_remote_data() {
+        let config: ProviderConfigFile = serde_json::from_value(json!({
+            "model": "local/custom", "provider": {"local": {
+                "base_url": "http://localhost:8000/v1", "wire_api": "openai_chat_completions",
+                "models": {"custom": {"name": "My model", "context_window": 8192}}
+            }}
+        }))
+        .unwrap();
+        let catalog = PresetModelCatalog::load_from_provider_config(&config).unwrap();
+        assert_eq!(catalog.resolve_for_turn(None).unwrap().slug, "local/custom");
+        assert_eq!(
+            catalog.list_provider_models("local")["custom"].context_window,
+            Some(8192)
+        );
+        assert!(catalog.list_template_provider_ids().is_empty());
+    }
+
+    #[test]
+    fn remote_metadata_never_redirects_user_credentials() {
+        let mut remote: ProviderConfigFile = serde_json::from_value(json!({"provider": {"custom": {
+            "base_url": "https://remote.example", "wire_api": "anthropic_messages",
+            "models": {"model": {"base_url": "https://model-remote.example",
+                "wire_api": "google_generative_ai", "request_model": "redirected", "context_window": 64000}}
+        }}})).unwrap();
+        let user: ProviderConfigFile = serde_json::from_value(json!({"provider": {"custom": {
+            "base_url": "https://user.example", "wire_api": "openai_chat_completions", "credential": "private"
+        }}})).unwrap();
+        merge_user_connections(&mut remote, &user);
+        let expected: ProviderConfigFile = serde_json::from_value(json!({"provider": {"custom": {
+            "base_url": "https://user.example", "wire_api": "openai_chat_completions", "credential": "private",
+            "models": {"model": {"context_window": 64000}}
+        }}})).unwrap();
+        assert_eq!(remote, expected);
+    }
+
+    #[test]
+    fn sparse_credential_config_does_not_trust_remote_endpoint() {
+        let mut remote: ProviderConfigFile =
+            serde_json::from_value(json!({"provider": {"custom": {
+                "base_url": "https://untrusted.example", "wire_api": "anthropic_messages"
+            }}}))
+            .unwrap();
+        let user: ProviderConfigFile =
+            serde_json::from_value(json!({"provider": {"custom": {"credential": "private"}}}))
+                .unwrap();
+        merge_user_connections(&mut remote, &user);
+        assert_eq!(remote, user);
+    }
+    #[test]
+    fn authored_model_transport_and_thinking_survive_projection() {
+        let config: ProviderConfigFile = serde_json::from_value(json!({"provider": {"custom": {
+            "wire_api": "openai_chat_completions", "models": {"reasoner": {
+                "base_url": "https://messages.example", "request_model": "wire-reasoner",
+                "wire_api": "anthropic_messages", "reasoning": true,
+                "thinking_level_map": {"off": "none", "high": "maximum"}
+            }}
+        }}}))
+        .unwrap();
+        let catalog = PresetModelCatalog::load_from_provider_config(&config).unwrap();
+        let model = &catalog.list_provider_models("custom")["reasoner"];
+        assert_eq!(
+            (
+                model.base_url.as_deref(),
+                model.request_model.as_deref(),
+                model.wire_api
+            ),
+            (
+                Some("https://messages.example"),
+                Some("wire-reasoner"),
+                Some(ProviderWireApi::AnthropicMessages)
+            )
+        );
+        assert_eq!(
+            model.thinking_level_map,
+            config.providers["custom"].models["reasoner"].thinking_level_map
+        );
+        assert_eq!(
+            catalog.list_providers()[0].wire_apis,
+            vec![
+                ProviderWireApi::OpenAIChatCompletions,
+                ProviderWireApi::AnthropicMessages
+            ]
         );
     }
 
     #[test]
-    fn provider_catalog_uses_provider_model_references_and_accepts_custom_models() {
-        let config = crate::ProviderConfigFile {
-            providers: BTreeMap::from([(
-                "local".to_string(),
-                crate::ProviderConfigEntry {
-                    wire_api: Some(ProviderWireApi::OpenAIResponses),
-                    models: BTreeMap::from([(
-                        "qwen3".to_string(),
-                        crate::ProviderModelConfig {
-                            name: Some("Qwen 3".to_string()),
-                            context_window: Some(131_072),
-                            ..crate::ProviderModelConfig::default()
-                        },
-                    )]),
-                    ..crate::ProviderConfigEntry::default()
-                },
-            )]),
-            model: Some("local/qwen3".to_string()),
-            ..crate::ProviderConfigFile::default()
-        };
-
-        let catalog =
-            PresetModelCatalog::load_from_provider_config(&config).expect("load provider catalog");
-        assert_eq!(
-            catalog
-                .resolve_for_turn(None)
-                .expect("resolve default")
-                .slug,
-            "local/qwen3"
-        );
-        assert_eq!(
-            catalog
-                .get("local/qwen3")
-                .expect("custom model")
-                .display_name,
-            "Qwen 3"
-        );
-        assert_eq!(
-            catalog.get("local/qwen3").expect("custom model").provider,
-            ProviderWireApi::OpenAIResponses
-        );
-    }
-
-    /// Verifies: authored thinking fields survive catalog load and model/list metadata projection.
-    #[test]
-    fn custom_catalog_preserves_authored_thinking_fields() {
-        let thinking_level_map = ThinkingLevelMap::from([
-            ("off".to_string(), Some("none".to_string())),
-            ("high".to_string(), Some("maximum".to_string())),
-        ]);
-        let config = crate::ProviderConfigFile {
-            providers: BTreeMap::from([(
-                "custom".to_string(),
-                crate::ProviderConfigEntry {
-                    models: BTreeMap::from([(
-                        "reasoner".to_string(),
-                        crate::ProviderModelConfig {
-                            reasoning_capability: Some(ReasoningCapability::Toggle),
-                            reasoning: Some(true),
-                            thinking_level_map: Some(thinking_level_map.clone()),
-                            ..crate::ProviderModelConfig::default()
-                        },
-                    )]),
-                    ..crate::ProviderConfigEntry::default()
-                },
-            )]),
-            ..crate::ProviderConfigFile::default()
-        };
-
-        let catalog =
-            PresetModelCatalog::load_from_provider_config(&config).expect("load custom catalog");
-        assert_eq!(
-            catalog
-                .get("custom/reasoner")
-                .and_then(|model| model.thinking_level_map.clone()),
-            Some(thinking_level_map.clone())
-        );
-        let info = &catalog.list_provider_models("custom")["reasoner"];
-        assert_eq!(info.reasoning, Some(true));
-        assert_eq!(info.thinking_level_map, Some(thinking_level_map));
-    }
-
-    /// Verifies: sparse user overlays still resolve pure builtin model defaults.
-    #[test]
-    fn effective_provider_catalog_resolves_builtin_model_under_sparse_overlay() {
-        let overlay = crate::ProviderConfigFile {
-            model: Some("deepseek/deepseek-v4-flash".to_string()),
-            providers: BTreeMap::from([(
-                "deepseek".to_string(),
-                crate::ProviderConfigEntry {
-                    base_url: Some("https://api.deepseek.com/anthropic".to_string()),
-                    wire_api: Some(ProviderWireApi::AnthropicMessages),
-                    credential: Some("deepseek".to_string()),
-                    enabled: Some(true),
-                    models: BTreeMap::from([(
-                        "deepseek-flash".to_string(),
-                        crate::ProviderModelConfig {
-                            name: Some("DeepSeek Flash".to_string()),
-                            ..crate::ProviderModelConfig::default()
-                        },
-                    )]),
-                    ..crate::ProviderConfigEntry::default()
-                },
-            )]),
-            ..crate::ProviderConfigFile::default()
-        };
-
-        let effective =
-            super::effective_provider_catalog(&overlay).expect("merge builtin + overlay");
-        let selection = effective
-            .resolve_model(Some("deepseek/deepseek-v4-flash"))
-            .expect("resolve builtin default through sparse overlay");
-        assert_eq!(selection.provider_id, "deepseek");
-        assert_eq!(selection.model_id, "deepseek-v4-flash");
-        assert_eq!(selection.wire_api, ProviderWireApi::AnthropicMessages);
-        assert!(
-            effective.providers["deepseek"]
-                .models
-                .contains_key("deepseek-flash"),
-            "custom models from the overlay must remain"
-        );
-    }
-
-    /// Verifies: DeepSeek builtin `reasoning_capability.levels` drive chips and
-    /// the authored map stays verbatim upstream (pi-ai import): the API's real
-    /// `max` level is aliased at the UI's `xhigh` slot (`xhigh` → wire `max`),
-    /// so selecting xhigh still sends the model's strongest level.
-    #[test]
-    fn deepseek_v4_flash_thinking_levels_follow_builtin_capability() {
-        let catalog =
-            PresetModelCatalog::load_from_provider_config(&crate::ProviderConfigFile::default())
-                .expect("load builtin provider catalog");
-        let model = catalog
-            .get("deepseek/deepseek-v4-flash")
-            .expect("deepseek-v4-flash");
-        let (reasoning, map, available) = resolve_thinking_fields_for_model_info(
-            &model.reasoning_capability,
-            model.reasoning,
-            model.thinking_level_map.as_ref(),
-        );
-        assert!(reasoning);
-        assert_eq!(map.get("high"), Some(&Some("high".to_string())));
-        assert_eq!(map.get("xhigh"), Some(&Some("max".to_string())));
-        assert_eq!(map.get("max"), Some(&None));
-        assert_eq!(
-            available,
-            vec!["off".to_string(), "high".to_string(), "xhigh".to_string()]
-        );
-        // The selection layer keeps the canonical level; the wire layer maps
-        // it through `thinking_level_map` ("xhigh" → API level "max").
-        assert_eq!(
-            model
-                .normalize_reasoning_effort_selection(Some("xhigh"))
-                .as_deref(),
-            Some("xhigh")
-        );
-        assert_eq!(
-            model
-                .normalize_reasoning_effort_selection(Some("disabled"))
-                .as_deref(),
-            Some("off")
-        );
-    }
-
-    /// Verifies: builtin catalog mirrors pi-ai static providers plus Devo-local templates.
-    #[test]
-    fn builtin_provider_catalog_contains_current_cloud_and_local_models() {
-        let catalog =
-            PresetModelCatalog::load_from_provider_config(&crate::ProviderConfigFile::default())
-                .expect("load builtin provider catalog");
-
-        assert_eq!(
-            catalog
-                .resolve_for_turn(None)
-                .expect("resolve builtin default")
-                .slug,
-            "openai/gpt-5.5"
-        );
-        // pi-ai static catalog (supported wire APIs only)
-        for model in [
-            "openai/gpt-5.5",
-            "anthropic/claude-sonnet-4-6",
-            "openai-codex/gpt-5.4",
-            "github-copilot/gpt-5.4",
-            "xai/grok-4.6",
-            "google/gemini-2.5-pro",
-            "deepseek/deepseek-v4-flash",
-            "zai/glm-5.3-flash",
-        ] {
-            assert!(
-                catalog.get(model).is_some(),
-                "missing pi-ai-derived builtin model {model}"
-            );
-        }
-        // Devo-local templates preserved alongside the pi-ai import
-        for model in [
-            "kimi/kimi-k3",
-            "zhipu/glm-5.3-flash",
-            "qwen/qwen3.7-plus",
-            "tencent/hunyuan-a13b",
-            "poolside/laguna-s-2.1",
-        ] {
-            assert!(
-                catalog.get(model).is_some(),
-                "missing Devo-local builtin model {model}"
-            );
-        }
-        assert!(
-            catalog
-                .list_providers()
-                .iter()
-                .any(|provider| provider.id == "ollama"),
-            "missing builtin ollama provider"
-        );
-        for oauth_provider in ["openai-codex", "anthropic", "github-copilot", "xai"] {
-            assert!(
-                catalog
-                    .list_providers()
-                    .iter()
-                    .any(|provider| provider.id == oauth_provider),
-                "missing builtin OAuth provider {oauth_provider}"
-            );
-            assert!(
-                !catalog.list_provider_models(oauth_provider).is_empty(),
-                "oauth provider {oauth_provider} must ship at least one model"
-            );
-        }
-        assert!(
-            catalog
-                .list_providers()
-                .iter()
-                .any(|provider| provider.id == "openai"),
-            "missing builtin OpenAI API provider"
-        );
-        assert!(
-            catalog.list_provider_models("ollama").is_empty(),
-            "ollama template must not ship placeholder models"
-        );
-
-        let zai_models = catalog
-            .list_visible()
-            .into_iter()
-            .filter(|model| model.slug.starts_with("zai/"))
-            .map(|model| model.slug.clone())
-            .collect::<Vec<_>>();
-        assert!(
-            zai_models.iter().any(|slug| slug == "zai/glm-5.3-flash"),
-            "expected zai/glm-5.3-flash in {zai_models:?}"
-        );
-
-        let zhipu_models = catalog
-            .list_visible()
-            .into_iter()
-            .filter(|model| model.slug.starts_with("zhipu/"))
-            .map(|model| model.slug.clone())
-            .collect::<Vec<_>>();
-        assert_eq!(zhipu_models, ["zhipu/glm-5.3", "zhipu/glm-5.3-flash"]);
-
-        assert_eq!(
-            catalog
-                .get("deepseek/deepseek-v4-flash")
-                .expect("deepseek model")
-                .provider,
-            ProviderWireApi::OpenAIChatCompletions
-        );
-
-        let providers = catalog.list_providers();
-        assert_eq!(
-            providers
-                .iter()
-                .find(|provider| provider.id == "zhipu")
-                .cloned(),
-            Some(ProviderInfo {
-                id: "zhipu".to_string(),
-                name: "Zhipu AI".to_string(),
-                description: Some("China BigModel GLM API".to_string()),
-                base_url: Some("https://open.bigmodel.cn/api/paas/v4".to_string()),
-                credential: None,
-                headers: BTreeMap::new(),
-                options: None,
-                request: None,
-                compat: None,
-                wire_apis: vec![ProviderWireApi::OpenAIChatCompletions],
-                model_overrides: BTreeMap::new(),
-                models: BTreeMap::new(),
-                enabled: true,
-            })
-        );
-        assert_eq!(
-            providers
-                .iter()
-                .find(|provider| provider.id == "deepseek")
-                .map(|provider| provider.wire_apis.clone()),
-            Some(vec![ProviderWireApi::OpenAIChatCompletions])
-        );
-    }
-
-    #[test]
-    fn provider_catalog_materializes_a_minimal_referenced_custom_model() {
-        let config = crate::ProviderConfigFile {
-            model: Some("local/qwen3".to_string()),
-            providers: BTreeMap::from([(
-                "local".to_string(),
-                crate::ProviderConfigEntry::default(),
-            )]),
-            ..crate::ProviderConfigFile::default()
-        };
-
-        let catalog =
-            PresetModelCatalog::load_from_provider_config(&config).expect("load provider catalog");
-
-        assert_eq!(
-            catalog.get("local/qwen3").expect("referenced custom model"),
-            &Model {
-                slug: "local/qwen3".to_string(),
-                display_name: "qwen3".to_string(),
-                default_reasoning_effort: None,
-                base_instructions: default_base_instructions().to_string(),
-                ..Model::default()
-            }
-        );
+    fn explicitly_referenced_custom_model_is_materialized_offline() {
+        let config: ProviderConfigFile = serde_json::from_value(json!({
+            "model": "local/custom", "provider": {"local": {}}
+        }))
+        .unwrap();
+        let catalog = PresetModelCatalog::load_from_provider_config(&config).unwrap();
+        assert_eq!(catalog.resolve_for_turn(None).unwrap().slug, "local/custom");
     }
 }

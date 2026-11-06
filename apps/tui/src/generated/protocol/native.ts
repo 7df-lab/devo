@@ -811,7 +811,15 @@ origin?: ProviderModelOrigin | null, name?: string | null, family?: string | nul
  * as OpenCode/models.dev (for example tools, input/output, attachment,
  * and interleaved reasoning support).
  */
-capabilities?: JsonValue | null, wireApi?: ProviderWireApi | null, contextWindow?: number | null, effectiveContextWindowPercent?: number | null, maxTokens?: number | null, temperature?: number | null, topP?: number | null, topK?: number | null, reasoningCapability?: ReasoningCapability | null,
+capabilities?: JsonValue | null, wireApi?: ProviderWireApi | null,
+/**
+ * Explicit per-model endpoint, independent of the provider default.
+ */
+baseUrl?: string | null,
+/**
+ * Wire model id when this entry is a user-named alias.
+ */
+requestModel?: string | null, contextWindow?: number | null, effectiveContextWindowPercent?: number | null, maxTokens?: number | null, temperature?: number | null, topP?: number | null, topK?: number | null, reasoningCapability?: ReasoningCapability | null,
 /**
  * pi-ai-compatible flag: model supports configurable thinking.
  */

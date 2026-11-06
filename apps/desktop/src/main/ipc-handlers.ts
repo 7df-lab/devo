@@ -122,7 +122,7 @@ async function persistDesktopOAuthCredential(
 		onSaving()
 		await requestNative(
 			"credential/set",
-			credentialSetParamsFromDesktopOAuth(providerId, credential),
+			{ ...credentialSetParamsFromDesktopOAuth(providerId, credential), configureConnection: true },
 		)
 	} finally {
 		release()

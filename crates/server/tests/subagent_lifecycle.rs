@@ -178,12 +178,14 @@ async fn spawn_agent_honors_requested_nickname_and_rejects_duplicates() -> Resul
     Ok(())
 }
 
+/// An empty catalog must preserve the injected provider's default model through
+/// workspace loading and return a valid, nonempty model in the Python handle.
 #[tokio::test]
 async fn rlm_spawn_via_ipython_returns_without_waiting_for_child_completion() -> Result<()> {
     let data_root = TempDir::new()?;
     let provider = Arc::new(ScriptedProvider::new([
         ScriptedProvider::ipython_code_tool_call(
-            "child = await rlm.spawn('verify parent spawn returns', name='spawn-worker')\nprint(child.name)",
+            "child = await rlm.spawn('verify parent spawn returns', name='spawn-worker')\nprint(child.name, child.model)",
         ),
         ScriptedProvider::completed("child finished"),
         ScriptedProvider::completed("spawn result observed"),
@@ -206,6 +208,7 @@ async fn rlm_spawn_via_ipython_returns_without_waiting_for_child_completion() ->
 
     let requests = provider.requests();
     assert_model_request_exposes_only_ipython(&requests[0]);
+    assert_spawn_models_and_output(&requests, "spawn-worker test-model\n")?;
     let agents = request_agent_list(&runtime, connection_id, parent_session_id).await?;
     assert_eq!(agents.agents.len(), 1);
     assert_eq!(agents.agents[0].agent_nickname, "spawn-worker");
@@ -222,7 +225,7 @@ async fn two_rlm_spawns_in_one_ipython_cell_do_not_deadlock_parent_turn() -> Res
     let data_root = TempDir::new()?;
     let provider = Arc::new(ScriptedProvider::new([
         ScriptedProvider::ipython_code_tool_call(
-            "first = await rlm.spawn('first delegated worker task', name='worker-one')\nsecond = await rlm.spawn('second delegated worker task', name='worker-two')\nprint(first.name, second.name)",
+            "first = await rlm.spawn('first delegated worker task', name='worker-one')\nsecond = await rlm.spawn('second delegated worker task', name='worker-two')\nprint(first.name, first.model, second.name, second.model)",
         ),
         ScriptedProvider::completed("first child finished"),
         ScriptedProvider::completed("second child finished"),
@@ -246,6 +249,7 @@ async fn two_rlm_spawns_in_one_ipython_cell_do_not_deadlock_parent_turn() -> Res
 
     let requests = provider.requests();
     assert_model_request_exposes_only_ipython(&requests[0]);
+    assert_spawn_models_and_output(&requests, "worker-one test-model worker-two test-model\n")?;
     let agents = request_agent_list(&runtime, connection_id, parent_session_id).await?;
     assert_eq!(agents.agents.len(), 2);
     assert!(
@@ -1116,4 +1120,41 @@ fn text_index_containing(texts: &[String], needle: &str) -> usize {
         .iter()
         .position(|text| text.contains(needle))
         .unwrap_or_else(|| panic!("expected text containing {needle:?}: {texts:?}"))
+}
+
+fn assert_spawn_models_and_output(requests: &[ModelRequest], expected_stdout: &str) -> Result<()> {
+    assert_eq!(
+        requests
+            .iter()
+            .map(|request| request.model.as_str())
+            .collect::<Vec<_>>(),
+        vec!["test-model"; requests.len()],
+    );
+    let spawn_results = requests
+        .iter()
+        .flat_map(|request| &request.messages)
+        .flat_map(|message| &message.content)
+        .filter_map(|content| {
+            if let devo_protocol::RequestContent::ToolResult {
+                content, is_error, ..
+            } = content
+            {
+                Some((content, is_error))
+            } else {
+                None
+            }
+        })
+        .map(|(content, is_error)| {
+            let output: serde_json::Value = serde_json::from_str(content)?;
+            Ok((
+                is_error.unwrap_or(false),
+                output["details"]["stdout"].clone(),
+            ))
+        })
+        .collect::<Result<Vec<_>>>()?;
+    assert_eq!(
+        spawn_results,
+        vec![(false, serde_json::json!(expected_stdout))],
+    );
+    Ok(())
 }

@@ -5,6 +5,7 @@
  * is projected inside this adapter (see native-to-pi/events.ts).
  */
 
+import { ExplicitLoginModels } from "./explicit-login-models.js";
 import { ModelCatalogRefresh } from "./model-catalog-refresh.js";
 import { randomUUID } from "node:crypto";
 import fs from "node:fs";
@@ -276,6 +277,7 @@ export class NativeAgentConnection implements AgentConnection {
    */
   private deferredReverseEmits: Array<() => void> = [];
   private readonly modelCatalogRefresh: ModelCatalogRefresh;
+  private readonly explicitLoginModels: ExplicitLoginModels;
   private disposed = false;
   private trafficLog: NativeTrafficLog | undefined;
   private idleWaiters = new Set<() => void>();
@@ -297,6 +299,7 @@ export class NativeAgentConnection implements AgentConnection {
       },
     );
     this.modelCatalogRefresh = new ModelCatalogRefresh(this.rpc);
+    this.explicitLoginModels = new ExplicitLoginModels(this.rpc);
     this.cwd = options.cwd ?? process.cwd();
     this.nativeApiVersion = options.nativeApiVersion ?? DEFAULT_NATIVE_API_VERSION;
 
@@ -1441,6 +1444,9 @@ export class NativeAgentConnection implements AgentConnection {
       }
     } catch {
       // optional enrichment
+    }
+    for (const model of this.explicitLoginModels.models()) {
+      if (!byKey.has(`${model.provider}/${model.id}`)) add(normalizeAgentModel(model));
     }
     const models = [...byKey.values()];
     if (models.length === 0 && this.model) {
@@ -2657,6 +2663,7 @@ export class NativeAgentConnection implements AgentConnection {
   }
 
   async setModel(provider: string, modelId: string): Promise<AgentConnectionModel> {
+    await this.explicitLoginModels.pinSelected(provider, modelId);
     await this.updateSessionMetadata({
       model: { provider, model: modelId },
     });
@@ -3389,12 +3396,29 @@ export class NativeAgentConnection implements AgentConnection {
     return this.rpc.request("credential/set", params);
   }
 
+  /** Explicit user login, never invoked by startup sync or token refresh. */
+  async completeExplicitOAuthLogin(provider: string, credential: AuthCredentialLike): Promise<void> {
+    if (credential.type !== "oauth" || provider.startsWith("mcp:")) return;
+    await this.rpc.request("credential/set", {
+      ...credentialSetParamsFromAuth(provider, credential),
+      configureConnection: true,
+    });
+    this.explicitLoginModels.clear(provider);
+    const catalog = await this.getAvailableModels();
+    if (!catalog.some((model) => model.provider === provider && model.id !== "unknown")) {
+      await this.explicitLoginModels.discover(provider);
+    }
+  }
+
   async listCredentials(): Promise<{ credentials: unknown[] }> {
     return (await this.rpc.request("credential/list", {})) as { credentials: unknown[] };
   }
 
   async deleteCredential(credentialId: string): Promise<void> {
+    const listed = await this.listCredentials();
     await this.rpc.request("credential/delete", { credentialId });
+    const credential = listed.credentials.find((entry) => (entry as { id?: string }).id === credentialId) as { provider?: string } | undefined;
+    if (credential?.provider) this.explicitLoginModels.clear(credential.provider);
   }
 
   /**

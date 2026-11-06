@@ -106,7 +106,7 @@ pub struct ProviderConfigEntry {
     /// Optional provider-hosted web fetch behavior.
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub web_fetch: Option<WebFetchConfig>,
-    /// Sparse patches applied to inherited models before `models`.
+    /// Explicit user patches applied after this layer's `models`.
     #[serde(default, skip_serializing_if = "BTreeMap::is_empty")]
     pub model_overrides: BTreeMap<String, ProviderModelConfig>,
     /// Models keyed by the model id sent to the provider.
@@ -121,6 +121,12 @@ pub struct ProviderConfigEntry {
 /// description field is needed in the persisted format.
 #[derive(Debug, Clone, Default, PartialEq, Serialize, Deserialize)]
 pub struct ProviderModelConfig {
+    /// Explicit endpoint for this model, taking precedence over the provider endpoint.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub base_url: Option<String>,
+    /// Wire model identifier when different from the catalog map key.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub request_model: Option<String>,
     /// Persisted ownership; missing provenance is conservatively read-only.
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub origin: Option<devo_protocol::ProviderModelOrigin>,
@@ -280,6 +286,28 @@ impl ProviderConfigFile {
             });
         }
 
+        // Session settings can retain a selected model id even when discovery
+        // is unavailable after restart. An explicit pinned connection can send
+        // that id without needing a persisted directory snapshot.
+        if !requested_model_id.is_empty()
+            && !provider.models.contains_key(requested_model_id)
+            && !requested_model_id
+                .rsplit_once('/')
+                .is_some_and(|(model, _)| provider.models.contains_key(model))
+            && provider
+                .base_url
+                .as_deref()
+                .is_some_and(|url| !url.trim().is_empty())
+            && let Some(wire_api) = provider.wire_api
+        {
+            return Ok(ProviderModelSelection {
+                provider_id: provider_id.to_string(),
+                model_id: requested_model_id.to_string(),
+                variant_id: None,
+                wire_api,
+            });
+        }
+
         let (model_id, variant_id) = if provider.models.contains_key(requested_model_id) {
             (requested_model_id, None)
         } else if let Some((model_id, variant_id)) = requested_model_id.rsplit_once('/') {
@@ -410,6 +438,15 @@ impl ProviderConfigFile {
         };
 
         for (provider_id, provider) in &self.providers {
+            let mut provider = provider.clone();
+            for (model_id, patch) in provider.model_overrides.clone() {
+                provider
+                    .models
+                    .entry(model_id)
+                    .or_default()
+                    .apply_overlay(patch);
+            }
+
             let wire_api = provider
                 .wire_api
                 .unwrap_or(ProviderWireApi::OpenAIChatCompletions);
@@ -439,7 +476,10 @@ impl ProviderConfigFile {
                     LegacyModelBindingConfig {
                         model_slug: model_ref.clone(),
                         provider: provider_id.clone(),
-                        request_model: model_id.clone(),
+                        request_model: model
+                            .request_model
+                            .clone()
+                            .unwrap_or_else(|| model_id.clone()),
                         display_name: model.name.clone(),
                         invocation_method: model_wire_api,
                         default_reasoning_effort: model
@@ -457,7 +497,7 @@ impl ProviderConfigFile {
                 );
                 section
                     .model_overrides
-                    .insert(model_ref, model.to_model_override(model_wire_api));
+                    .insert(model_ref, model.to_model_override());
             }
         }
 
@@ -719,6 +759,8 @@ impl ProviderModelConfig {
             };
         }
         replace_some!(name);
+        replace_some!(base_url);
+        replace_some!(request_model);
         replace_some!(wire_api);
         replace_some!(context_window);
         replace_some!(effective_context_window_percent);
@@ -768,7 +810,7 @@ impl ProviderModelConfig {
         replace_some!(default_variant);
     }
 
-    fn to_model_override(&self, provider_wire_api: ProviderWireApi) -> ModelOverrideConfig {
+    fn to_model_override(&self) -> ModelOverrideConfig {
         ModelOverrideConfig {
             display_name: self.name.clone(),
             context_window: self.context_window,
@@ -777,7 +819,8 @@ impl ProviderModelConfig {
             temperature: self.temperature,
             top_p: self.top_p,
             top_k: self.top_k,
-            provider: Some(self.wire_api.unwrap_or(provider_wire_api)),
+            // Inherited provider defaults are not authored model overrides.
+            provider: self.wire_api,
             reasoning_capability: self.reasoning_capability.clone(),
             reasoning: self.reasoning,
             thinking_level_map: self.thinking_level_map.clone(),
@@ -844,6 +887,9 @@ fn merge_provider_entry(base: &mut ProviderConfigEntry, overlay: ProviderConfigE
     }
     replace_some!(web_search);
     replace_some!(web_fetch);
+    for (model_id, overlay_model) in overlay.models {
+        merge_model_entry(base.models.entry(model_id).or_default(), overlay_model);
+    }
     for (model_id, model_override) in overlay.model_overrides {
         merge_model_entry(
             base.models.entry(model_id.clone()).or_default(),
@@ -853,9 +899,6 @@ fn merge_provider_entry(base: &mut ProviderConfigEntry, overlay: ProviderConfigE
             base.model_overrides.entry(model_id).or_default(),
             model_override,
         );
-    }
-    for (model_id, overlay_model) in overlay.models {
-        merge_model_entry(base.models.entry(model_id).or_default(), overlay_model);
     }
 }
 

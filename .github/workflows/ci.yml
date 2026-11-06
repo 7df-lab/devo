@@ -194,7 +194,7 @@ jobs:
           mock_pid=$!
           trap 'kill "$mock_pid" 2>/dev/null || true' EXIT
           printf '%s\n' \
-            '{"model": "deepseek/deepseek-v4-flash", "provider": {"deepseek": {"credential": "deepseek", "enabled": true, "base_url": "http://127.0.0.1:8801"}}}' \
+            '{"model": "deepseek/deepseek-v4-flash", "provider": {"deepseek": {"credential": "deepseek", "enabled": true, "base_url": "http://127.0.0.1:8801", "wire_api": "openai_chat_completions"}}}' \
             > "$home/providers.json"
           printf '%s\n' '{"deepseek": {"type": "api_key", "key": "ci-mock-key"}}' > "$home/auth.json"
           chmod 600 "$home/auth.json"

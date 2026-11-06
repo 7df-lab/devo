@@ -191,24 +191,8 @@ pub async fn run_server_process(
             "failed to migrate session defaults into config.toml"
         );
     }
-    // Align on-disk providers.json with sparse overlay semantics before load.
-    if let Err(error) =
-        devo_core::migrate_user_provider_catalog_overlays(&resolver.user_config_dir())
-    {
-        tracing::warn!(
-            error = %error,
-            "failed to sparsify user provider catalog overlays"
-        );
-    }
-    if let Ok(builtin) = devo_core::builtin_provider_config()
-        && let Err(error) =
-            devo_core::migrate_custom_providers_file(&resolver.user_config_dir(), &builtin)
-    {
-        tracing::warn!(
-            error = %error,
-            "failed to split custom providers into custom-providers.json"
-        );
-    }
+    // Existing connection files are kept verbatim; never remove authored
+    // routing data or rebind credentials using remote catalog defaults.
 
     // Migrate legacy auth.json envelope → provider-keyed AuthStorage shape.
     let auth_path = resolver
@@ -265,7 +249,10 @@ pub async fn run_server_process(
             &config.provider.model_overrides,
             Some(resolver.user_config_dir().as_path()),
         )?);
-    let default_model = model_catalog.resolve_for_turn(None)?.slug.clone();
+    let default_model = model_catalog
+        .resolve_for_turn(None)
+        .map(|model| model.slug.clone())
+        .unwrap_or_default();
     if !config.has_provider_configuration() {
         tracing::warn!(
             "No provider configured. Run `devo onboard` to complete setup; continuing with onboarding-capable server"
@@ -309,14 +296,14 @@ pub async fn run_server_process(
         ServerRuntimeDependencies::new(process_context, db),
         args.protocols.clone(),
     );
-    // Serve cached/embedded models immediately; network updates never delay startup.
+    // Serve user-configured models immediately; network updates never delay startup.
     {
         let runtime = runtime.clone();
         let catalog = config.catalog.clone();
         tokio::spawn(async move {
             let outcome = runtime.refresh_remote_catalog(&catalog).await;
             if let devo_core::CatalogRefreshOutcome::Failed { stage, message } = outcome {
-                tracing::warn!(?stage, error = %message, "catalog refresh failed; retaining cached models");
+                tracing::warn!(?stage, error = %message, "catalog refresh failed; retaining user configuration and last in-memory catalog");
             }
         });
     }

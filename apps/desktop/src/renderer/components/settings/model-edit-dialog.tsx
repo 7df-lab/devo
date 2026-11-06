@@ -39,7 +39,7 @@ import { Switch } from "@devo/ui/components/switch"
 import { Textarea } from "@devo/ui/components/textarea"
 import { cn } from "@devo/ui/lib/utils"
 import { ChevronDownIcon, PlusIcon, Trash2Icon } from "lucide-react"
-import { useCallback, useId, useMemo, useState } from "react"
+import { useCallback, useId, useMemo, useRef, useState } from "react"
 import { getBaseClient } from "../../services/connection-manager"
 import { effectiveContextWindowTokens, contextWindowPercentFromAbsolute } from "../../lib/providers"
 
@@ -230,7 +230,7 @@ export function ModelEditDialog({
 	const [modelId, setModelId] = useState(originalModelId)
 	const [displayName, setDisplayName] = useState(model.name ?? "")
 	const [wireApi, setWireApi] = useState<CatalogWireApi>(
-		isCreate ? providerDefaultWire : effectiveWireApi(model, provider),
+		effectiveWireApi(model, provider),
 	)
 	const [enabled, setEnabled] = useState(model.enabled !== false)
 	const [advancedOpen, setAdvancedOpen] = useState(false)
@@ -271,6 +271,19 @@ export function ModelEditDialog({
 			return next
 		},
 	)
+
+	// Compare editor controls, not normalized output, so untouched defaults do
+	// not become user overrides merely because the dialog was opened.
+	const metadataDraft = {
+		name: displayName, enabled, contextWindow,
+		effectiveContextWindowPercent: contextWindow,
+		maxTokens, temperature, topP, topK, inputModalities: modalities,
+		headers, request: requestBody, options: optionsBody,
+		reasoningCapability: [reasoningMode, reasoningLevels],
+		defaultReasoningSelection, defaultReasoningEffort: defaultReasoningSelection,
+		variants: effortEncodings,
+	}
+	const initialMetadataDraft = useRef(metadataDraft)
 
 	const [saving, setSaving] = useState(false)
 	const [error, setError] = useState<string | null>(null)
@@ -445,8 +458,24 @@ export function ModelEditDialog({
 				? provider.wireApis
 				: [...provider.wireApis, wireApi]
 
+			const editingRemote = !isCreate && model.origin === "remote"
+			const editedMetadata: CatalogModelInfo = Object.fromEntries(
+				Object.entries(metadataDraft)
+					.filter(([key, value]) =>
+						JSON.stringify(value) !== JSON.stringify(
+							initialMetadataDraft.current[key as keyof typeof metadataDraft],
+						) && JSON.stringify(nextModel[key as keyof CatalogModelInfo]) !==
+							JSON.stringify(model[key as keyof CatalogModelInfo]),
+					)
+					.map(([key]) => [key, nextModel[key as keyof CatalogModelInfo]]),
+			)
 			const updatedModels: Record<string, CatalogModelInfo> = {
-				[nextId]: nextModel,
+				[nextId]: editingRemote ? {
+					origin: "remote",
+					baseUrl: nextModel.baseUrl,
+					wireApi: nextModel.wireApi,
+					requestModel: nextModel.requestModel,
+				} : nextModel,
 			}
 
 			await client.provider.upsert({
@@ -456,6 +485,9 @@ export function ModelEditDialog({
 					// Server merges models by insert; send only this model so we
 					// do not copy the full template+connection catalog into the overlay.
 					models: updatedModels,
+					modelOverrides: editingRemote && Object.keys(editedMetadata).length > 0
+						? { [nextId]: editedMetadata }
+						: {},
 				},
 			})
 
@@ -475,6 +507,7 @@ export function ModelEditDialog({
 			setSaving(false)
 		}
 	}, [
+		metadataDraft,
 		modelId,
 		originalModelId,
 		existingModels,

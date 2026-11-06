@@ -20,7 +20,7 @@ static DISCOVERY_CACHE: OnceLock<DiscoveryCache> = OnceLock::new();
 
 impl ServerRuntime {
     /// Discovers models from a connected provider standard /models endpoint
-    /// and persists the result into that Connection directory.
+    /// and returns transient choices. Discovery never changes user configuration.
     pub(super) async fn handle_native_provider_discover(
         &self,
         request_id: Value,
@@ -124,6 +124,14 @@ impl ServerRuntime {
             );
         }
 
+        if provider
+            .base_url
+            .as_deref()
+            .is_none_or(|endpoint| endpoint.trim().is_empty())
+        {
+            return self.error_response(request_id, ProtocolErrorCode::InvalidParams,
+                "provider has no pinned endpoint; reconnect it with an explicit base URL before discovery");
+        }
         let api_key = match provider_api_key(&mut provider, &user_config_dir).await {
             Ok(api_key) => api_key,
             Err(error) => {
@@ -145,12 +153,18 @@ impl ServerRuntime {
                     );
                 }
             };
-        // Discovery is the live directory: keep prior overlays only for models
-        // that still exist remotely. Stale template / renamed ids must not
-        // remain selectable after a refresh (e.g. Ollama placeholder catalog
-        // entries that 404 on chat completions).
-        let mut next_models = BTreeMap::new();
+        // Keep authored models in the response, but never write discoveries to disk.
+        // A caller can explicitly add a returned model through provider/upsert.
+        let mut next_models = provider
+            .models
+            .iter()
+            .filter(|(_, model)| model.origin == Some(devo_protocol::ProviderModelOrigin::User))
+            .map(|(id, model)| (id.clone(), model.clone()))
+            .collect::<BTreeMap<_, _>>();
         for (model_id, discovered_model) in discovered {
+            if next_models.contains_key(&model_id) {
+                continue;
+            }
             let mut model = match provider.models.remove(&model_id) {
                 Some(existing) => merge_discovered_model(existing, discovered_model),
                 None => discovered_model,
@@ -159,53 +173,6 @@ impl ServerRuntime {
             next_models.insert(model_id, model);
         }
         provider.models = next_models;
-
-        let config_file = {
-            let store = self
-                .deps
-                .config_store
-                .lock()
-                .expect("app config store mutex should not be poisoned");
-            store
-                .user_config_dir()
-                .join(devo_core::PROVIDER_CONFIG_FILE_NAME)
-                .display()
-                .to_string()
-        };
-        if let Some(reason) = self
-            .config_change_hook_block_reason("user_settings", Some(config_file))
-            .await
-        {
-            return self.error_response(
-                request_id,
-                ProtocolErrorCode::PolicyDenied,
-                format!("config change blocked by hook: {reason}"),
-            );
-        }
-
-        let mut store = self
-            .deps
-            .config_store
-            .lock()
-            .expect("app config store mutex should not be poisoned");
-        let builtin = devo_core::builtin_provider_config().ok();
-        let baseline = builtin
-            .as_ref()
-            .and_then(|config| config.providers.get(&provider_id));
-        let provider = match store
-            .upsert_provider_connection_with_baseline(provider, None, None, None, baseline)
-        {
-            Ok(provider) => provider,
-            Err(error) => {
-                return self.error_response(
-                    request_id,
-                    ProtocolErrorCode::InternalError,
-                    error.to_string(),
-                );
-            }
-        };
-        drop(store);
-        self.deps.invalidate_workspace_contexts();
 
         serde_json::to_value(SuccessResponse {
             id: request_id,
@@ -265,6 +232,15 @@ async fn provider_api_key(
     };
     let credential_id =
         crate::provider_config::resolve_provider_credential_id(&provider.id, &config, &auth);
+    let auth_kind = credential_id
+        .as_deref()
+        .and_then(|id| auth.credentials.get(id))
+        .map(|credential| credential.kind);
+    crate::oauth_refresh::apply_oauth_adapter_headers(
+        &provider.id,
+        auth_kind,
+        &mut provider.headers,
+    );
     if provider.id == "openai-codex"
         && let Some(account_id) = credential_id
             .as_deref()
@@ -317,6 +293,7 @@ async fn fetch_discovered_models(
 ) -> anyhow::Result<BTreeMap<String, ProviderModelInfo>> {
     let client = reqwest::Client::builder()
         .timeout(std::time::Duration::from_secs(15))
+        .redirect(reqwest::redirect::Policy::none())
         .build()
         .context("failed to build model discovery client")?;
     let mut headers = HeaderMap::new();
@@ -355,8 +332,7 @@ async fn fetch_discovered_models(
         }
         if response.status() != reqwest::StatusCode::NOT_FOUND {
             let status = response.status();
-            let body = response.text().await.unwrap_or_default();
-            anyhow::bail!("model discovery failed with {status}: {body}");
+            anyhow::bail!("model discovery failed with {status}");
         }
     }
     anyhow::bail!("model discovery endpoint not found (last status: {last_status:?})")
@@ -366,7 +342,7 @@ fn discovery_urls(provider: &devo_protocol::ProviderInfo) -> Vec<String> {
     let base = provider
         .base_url
         .clone()
-        .unwrap_or_else(|| "https://api.openai.com/v1".to_string())
+        .unwrap_or_default()
         .trim_end_matches('/')
         .to_string();
     if provider.id == "openai-codex" {
@@ -537,6 +513,8 @@ fn merge_discovered_model(
     fill_if_missing!(status);
     fill_if_missing!(capabilities);
     fill_if_missing!(wire_api);
+    fill_if_missing!(base_url);
+    fill_if_missing!(request_model);
     fill_if_missing!(context_window);
     fill_if_missing!(effective_context_window_percent);
     fill_if_missing!(max_tokens);
@@ -603,7 +581,13 @@ mod tests {
 
     #[test]
     fn codex_directory_uses_authenticated_backend_and_slug_metadata() {
-        let catalog = devo_core::PresetModelCatalog::load().expect("builtin catalog");
+        let config = serde_json::from_value(serde_json::json!({"provider": {"openai-codex": {
+            "name": "ChatGPT", "base_url": "https://chatgpt.com/backend-api/codex",
+            "wire_api": "openai_responses", "models": {"qa-codex": {}}
+        }}}))
+        .unwrap();
+        let catalog = devo_core::PresetModelCatalog::load_from_provider_config(&config)
+            .expect("authored catalog fixture");
         let sparse = devo_protocol::ProviderInfo {
             id: "openai-codex".to_string(),
             name: "ChatGPT".to_string(),
@@ -707,9 +691,17 @@ mod tests {
             ),
             (
                 Some("qa-access".to_string()),
-                [("chatgpt-account-id".to_string(), "qa-account".to_string())]
-                    .into_iter()
-                    .collect()
+                [
+                    ("chatgpt-account-id".to_string(), "qa-account".to_string()),
+                    (
+                        "OpenAI-Beta".to_string(),
+                        "responses=experimental".to_string()
+                    ),
+                    ("originator".to_string(), "pi".to_string()),
+                    ("User-Agent".to_string(), "pi (linux x64)".to_string()),
+                ]
+                .into_iter()
+                .collect()
             )
         );
     }

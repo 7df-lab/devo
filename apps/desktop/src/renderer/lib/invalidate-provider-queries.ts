@@ -2,7 +2,7 @@ import { invalidateConfigOptionCaches } from "../services/connection-manager"
 import { queryClient } from "./query-client"
 
 /**
- * After provider/model catalog mutations (connect, discover, enable, upsert),
+ * After provider/model catalog mutations (connect, enable, upsert),
  * refresh both the Settings catalog and the composer ModelSelector data path
  * (`config.providers` → React Query `providers` / `config`).
  *

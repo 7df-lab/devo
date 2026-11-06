@@ -35,19 +35,21 @@ fn provider_runtime_fields_changed(
         || current.headers != inherited.headers
         || current.wire_api != inherited.wire_api
         || current.enabled != inherited.enabled
-        || model_wire_apis(current) != model_wire_apis(inherited)
+        || model_routes(current) != model_routes(inherited)
 }
 
-fn model_wire_apis(provider: &ProviderConfigEntry) -> Vec<String> {
-    let mut wire_apis = provider
+fn model_routes(provider: &ProviderConfigEntry) -> Vec<(&str, Option<&str>, Option<&str>)> {
+    provider
         .models
-        .values()
-        .filter_map(|model| model.wire_api)
-        .map(|wire_api| wire_api.as_str().to_string())
-        .collect::<Vec<_>>();
-    wire_apis.sort();
-    wire_apis.dedup();
-    wire_apis
+        .iter()
+        .map(|(id, model)| {
+            (
+                id.as_str(),
+                model.base_url.as_deref(),
+                model.wire_api.map(|api| api.as_str()),
+            )
+        })
+        .collect()
 }
 
 #[cfg(test)]
@@ -98,6 +100,34 @@ mod tests {
         };
 
         assert_eq!(provider_runtime_config_changed(&current, &inherited), false);
+    }
+
+    #[test]
+    fn detects_model_endpoint_changes() {
+        let base = ProviderConfigFile {
+            providers: [(
+                "custom".to_string(),
+                ProviderConfigEntry {
+                    models: [("model".to_string(), ProviderModelConfig::default())]
+                        .into_iter()
+                        .collect(),
+                    ..ProviderConfigEntry::default()
+                },
+            )]
+            .into_iter()
+            .collect(),
+            ..ProviderConfigFile::default()
+        };
+        let mut changed = base.clone();
+        changed
+            .providers
+            .get_mut("custom")
+            .unwrap()
+            .models
+            .get_mut("model")
+            .unwrap()
+            .base_url = Some("https://model.example/v1".to_string());
+        assert_eq!(provider_runtime_config_changed(&changed, &base), true);
     }
 
     #[test]

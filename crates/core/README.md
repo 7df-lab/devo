@@ -1,70 +1,46 @@
 # devo-core
 
-## Built-in provider catalog (`providers.json`)
+## Model data sources
 
-`crates/core/providers.json` is the git-tracked built-in provider/model
-directory. It is embedded at compile time via `include_str!` in
-`src/model_catalog.rs` and is always available offline.
+There are exactly two sources: the live [models.dev](https://models.dev/api.json)
+directory and user configuration. The server fetches and converts models.dev in
+memory. No provider/model directory is embedded and no remote snapshot is written
+to or restored from disk.
 
-### Runtime refresh from models.dev
+Public metadata is refreshed at startup and on demand through
+`model/catalog/refresh`, respecting `catalog.refresh_interval_hours` unless forced.
+Failed refreshes retain the same process's last successful directory. A fresh
+offline process has only configured providers/models, not an offline public catalog.
 
-At server startup Devo can download
-[https://models.dev/api.json](https://models.dev/api.json) into:
+User configuration is layered from `$DEVO_HOME/providers.json` and
+`custom-providers.json`, workspace `.devo` equivalents, and explicit overrides.
+Connections pin endpoint, wire API and model IDs; remote metadata cannot silently
+change their request routing. Credentials stay separate in `auth.json`.
+models.dev SDK packages without a supported adapter are omitted, not guessed.
+Native OpenAI/Anthropic/Google endpoint defaults belong to their adapters, not a
+separate catalog; explicit connect pins the resolved `base_url`.
+Provider discovery, including authenticated Codex discovery, is explicit and
+read-only. Results become user configuration only when explicitly saved.
 
-```text
-$DEVO_HOME/cache/models.dev-api.json   # raw dump (source of truth)
-$DEVO_HOME/cache/models.dev-meta.json  # fetch time + counts (refresh interval)
-```
-
-On catalog load, Devo **converts `models.dev-api.json` in memory** into a
-provider overlay and merges it onto the embedded builtin. There is no separate
-converted cache file.
-
-Effective merge order:
-
-1. Embedded `crates/core/providers.json`
-2. Converted overlay from cached `models.dev-api.json`
-3. User `providers.json` (builtin Connection overlays)
-4. User `custom-providers.json` (user-owned providers/models)
-5. Workspace `.devo/providers.json` / `.devo/custom-providers.json`
-6. CLI / `[model.*]` overrides
-
-### Why not only `models.dev-api.json`?
-
-That **is** the durable network artifact. Devo does not keep a second converted
-JSON for correctness — conversion runs when the catalog loads. `meta.json` only
-records when the dump was fetched so refresh can honor
-`catalog.refresh_interval_hours`.
-
-### DeepSeek V4.1 Flash naming
-
-Under the official `deepseek` provider, models.dev uses id `deepseek-flash`
-with display name "DeepSeek V4.1 Flash". Other gateways may list a different
-model id such as `deepseek-v4.1-flash`. Those are separate catalog entries —
-Devo persists whichever `provider/model` id the user selects, with no remap.
-
-### Offline / no-internet configuration
-
-In `$DEVO_HOME/config.toml`:
+## Offline or local source
 
 ```toml
 [catalog]
-# Never fetch over the network.
 offline = true
-# Optional local dump of models.dev api.json (still works when offline).
-source = "C:/path/to/models.dev-api.json"
+# Optional explicit local models.dev-format source, usable offline.
+# source = "/path/to/models.dev-api.json"
 refresh_on_startup = true
-refresh_interval_hours = 24
+refresh_interval_hours = 1
 ```
 
-### User-owned providers/models
+Offline mode blocks catalog and provider-discovery network requests. An explicit
+local source is an input, not an automatically maintained cache.
 
-Put custom providers in `$DEVO_HOME/custom-providers.json` (same JSON shape as
-`providers.json`). Builtin Connection credentials/overlays stay in
-`providers.json`.
+## Migration and tradeoffs
 
-### Build-time regeneration
-
-```bash
-node --experimental-strip-types scripts/import-pi-ai-catalog.mjs --refresh-snapshot
-```
+Existing configuration files are preserved. Sparse legacy connections that relied
+on built-in endpoint defaults must be explicitly reconnected or configured with
+an endpoint. Old `cache/models.dev-api.json`, `cache/models.dev-meta.json` and
+provider snapshot files are ignored, not deleted. There is no build-time catalog
+regeneration step. Live metadata and stable configured routes take priority over
+first-run offline browsing.

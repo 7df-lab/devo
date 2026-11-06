@@ -61,8 +61,9 @@ export function createDevoUiServices(options: {
 
   const authPath = path.join(home, "auth.json");
   const authStorage = AuthStorage.create(authPath, { usePrimeCliConfig: false });
-  const modelsJsonPath = path.join(home, "models.json");
-  const modelRegistry = ModelRegistry.create(authStorage, modelsJsonPath);
+  // Native owns the model directory. Retain auth helpers without loading legacy
+  // models.json or adjacent provider snapshots as a competing catalog.
+  const modelRegistry = ModelRegistry.inMemory(authStorage);
   const settingsManager = SettingsManager.create(cwd, home);
 
   return {
@@ -140,6 +141,12 @@ function createInteractiveMode(
     brandSplash: {
       logo: DEVO_COMPACT_ORBIT_LOGO,
       title: DEVO_SPLASH_TITLE,
+    },
+    onProviderAuthenticated: async (provider, authType, kind) => {
+      if (authType !== "oauth" || kind !== "provider" || provider.startsWith("mcp:")) return;
+      const credential = uiServices.modelRegistry.authStorage.get(provider);
+      if (!credential || credential.type !== "oauth") throw new Error(`Missing OAuth credential for ${provider}`);
+      await connection.completeExplicitOAuthLogin(provider, credential);
     },
     excludedLoginProviderIds: ["prime-inference"],
     excludedBuiltinCommands: DEVO_EXCLUDED_BUILTIN_COMMANDS,

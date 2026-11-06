@@ -75,7 +75,12 @@ fn model_preferences_from_config_options(
         .effective_config()
         .provider_catalog_config()
         .providers;
-    for model in runtime_context.model_catalog.list_visible() {
+    let live = runtime_context.live_model_catalog();
+    let catalog: &dyn ModelCatalog = live
+        .as_ref()
+        .map(|catalog| catalog as &dyn ModelCatalog)
+        .unwrap_or(runtime_context.model_catalog.as_ref());
+    for model in catalog.list_visible() {
         let Some((provider_id, model_id)) = model.slug.split_once('/') else {
             continue;
         };
@@ -94,19 +99,31 @@ fn model_preferences_from_config_options(
             available_efforts: Vec::new(),
         });
     }
-    enrich_available_models_with_efforts(&mut preferences, runtime_context);
+    enrich_available_models_with_efforts(&mut preferences, runtime_context, catalog);
     preferences
 }
 
 fn enrich_available_models_with_efforts(
     preferences: &mut ModelPreferences,
     runtime_context: &SessionRuntimeContext,
+    catalog: &dyn ModelCatalog,
 ) {
     for model_option in &mut preferences.available_models {
         // Effort choices are catalog metadata. Resolving a complete turn here
         // rereads the remote overlay and credentials for every row, making a
         // large catalog block preference saves and unrelated Native requests.
-        let model = runtime_context.resolve_turn_model(Some(model_option.value.as_str()));
+        let model = catalog
+            .get(&model_option.value)
+            .or_else(|| {
+                model_option
+                    .value
+                    .rsplit_once('/')
+                    .and_then(|(base, _)| catalog.get(base))
+            })
+            .cloned()
+            .unwrap_or_else(|| {
+                runtime_context.resolve_turn_model(Some(model_option.value.as_str()))
+            });
         model_option.available_efforts = model
             .effective_reasoning_capability()
             .options()
@@ -268,6 +285,32 @@ impl ServerRuntime {
                     .config_store
                     .lock()
                     .expect("app config store mutex should not be poisoned");
+                if config_id == ACP_MODEL_CONFIG_ID {
+                    let configured = store.effective_config().provider_catalog_config();
+                    let home = store.user_config_dir().to_path_buf();
+                    let pin =
+                        devo_core::effective_provider_catalog_with_home(&configured, Some(&home))
+                            .map_err(anyhow::Error::from)
+                            .and_then(|catalog| {
+                                let selection = catalog.resolve_model(Some(value))?;
+                                let model = catalog.providers[&selection.provider_id]
+                                    .models
+                                    .get(&selection.model_id)
+                                    .cloned()
+                                    .unwrap_or_default();
+                                Ok((selection, model))
+                            });
+                    let pinned = pin.and_then(|(selection, model)| {
+                        store.pin_provider_model(&selection.provider_id, &selection.model_id, model)
+                    });
+                    if let Err(error) = pinned {
+                        return self.error_response(
+                            request_id,
+                            ProtocolErrorCode::InvalidParams,
+                            error.to_string(),
+                        );
+                    }
+                }
                 if let Err(error) = store.set_model_config_option(config_id, value) {
                     return self.error_response(
                         request_id,

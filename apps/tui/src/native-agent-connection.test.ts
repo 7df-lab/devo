@@ -2122,3 +2122,65 @@ test("token-only usage events retain the known server window", async () => {
   assert.deepEqual(updates.at(-1), { tokens: 200, contextWindow: 1000, percent: 20 });
   await conn.dispose();
 });
+
+test("OAuth startup and refresh sync never configure connections or discover models", async () => {
+  const { conn, fake } = await bootConnection();
+  const credential = { type: "oauth" as const, access: "test-access", refresh: "test-refresh", expires: 123 };
+  fake.requests.length = 0;
+  await conn.syncAuthStorage({ list: () => ["openai-codex"], get: () => credential });
+  await conn.setCredentialFromAuth("openai-codex", credential);
+  await conn.refreshModelCatalog();
+  assert.deepEqual(fake.requests.filter(({ method }) => method === "credential/set"), [
+    { method: "credential/set", params: { provider: "openai-codex", kind: "oauth", access: "test-access", refresh: "test-refresh", expiresAt: 123 } },
+    { method: "credential/set", params: { provider: "openai-codex", kind: "oauth", access: "test-access", refresh: "test-refresh", expiresAt: 123 } },
+  ]);
+  assert.deepEqual(fake.requests.filter(({ method }) => method === "provider/discover" || method === "provider/upsert"), []);
+  await conn.dispose();
+});
+
+test("explicit OAuth discovers transient models and pins only the selected transport before session change", async () => {
+  const { conn, fake } = await bootConnection([
+    (method, _params, respond) => {
+      if (method === "provider/list") {
+        respond({ providers: [{ id: "openai-codex", name: "Codex", baseUrl: "https://pinned.example", wireApis: ["openai_responses"], enabled: true }] });
+      } else if (method === "provider/discover") {
+        respond({ providerId: "openai-codex", models: {
+          "chosen": { name: "Live chosen", contextWindow: 123456, cost: { input: 2 }, capabilities: { tools: true } },
+          "other": { name: "Do not persist", cost: { input: 3 } },
+        } });
+      } else if (method === "provider/upsert") {
+        respond({});
+      } else return false;
+      return true;
+    },
+  ]);
+  fake.requests.length = 0;
+  await conn.completeExplicitOAuthLogin("openai-codex", { type: "oauth", access: "test-access" });
+  assert.deepEqual(fake.requests.filter(({ method }) => method === "credential/set" || method === "provider/discover"), [
+    { method: "credential/set", params: { provider: "openai-codex", kind: "oauth", access: "test-access", configureConnection: true } },
+    { method: "provider/discover", params: { providerId: "openai-codex", forceRefresh: true } },
+  ]);
+  assert.deepEqual(fake.requests.filter(({ method }) => method === "provider/upsert"), []);
+  assert.deepEqual((await conn.getAvailableModels()).filter(m => m.provider === "openai-codex").map(m => m.id).sort(), ["chosen", "other"]);
+  fake.requests.length = 0;
+  await conn.setModel("openai-codex", "chosen");
+  assert.deepEqual(fake.requests.filter(({ method }) => method === "provider/upsert"), [{
+    method: "provider/upsert", params: { provider: {
+      id: "openai-codex", name: "Codex", baseUrl: "https://pinned.example", wireApis: ["openai_responses"], enabled: true,
+      models: { chosen: { origin: "user", baseUrl: "https://pinned.example", wireApi: "openai_responses", requestModel: "chosen" } },
+      modelOverrides: {},
+    } },
+  }]);
+  assert.ok(fake.requests.findIndex(r => r.method === "provider/upsert") < fake.requests.findIndex(r => r.method === "session/metadata/update"));
+  assert.deepEqual(fake.requests.filter(({ method }) => method === "provider/discover"), []);
+  await conn.dispose();
+});
+
+test("explicit login setup ignores API keys and MCP OAuth", async () => {
+  const { conn, fake } = await bootConnection();
+  fake.requests.length = 0;
+  await conn.completeExplicitOAuthLogin("openai", { type: "api_key", key: "test-key" });
+  await conn.completeExplicitOAuthLogin("mcp:test", { type: "oauth", access: "test-access" });
+  assert.deepEqual(fake.requests, []);
+  await conn.dispose();
+});

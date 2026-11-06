@@ -630,6 +630,8 @@ export interface InteractiveModeOptions {
 	 * Devo sets this to exclude hosted-provider branding from the login surface.
 	 */
 	excludedLoginProviderIds?: ReadonlyArray<string>;
+	/** Host connection setup performed only after an explicit successful login. */
+	onProviderAuthenticated?(providerId: string, authType: "oauth" | "api_key", kind: "provider" | "service"): Promise<void>;
 	/**
 	 * Builtin slash command names the host serves itself. Excluded builtins are
 	 * hidden from autocomplete and skipped by the local command dispatch, so they
@@ -8888,6 +8890,7 @@ export class InteractiveMode {
 			showError: (message) => this.showError(message),
 			getAvailableModels: () => this.getConnectionAvailableModels(),
 			excludedLoginProviderIds: this.options.excludedLoginProviderIds,
+			onProviderAuthenticated: this.options.onProviderAuthenticated,
 			onAuthChanged: async () => {
 				await this.refreshConnectionModelsAfterAuthChange();
 				await this.updateAvailableProviderCount();

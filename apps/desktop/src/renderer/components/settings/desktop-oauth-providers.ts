@@ -33,3 +33,10 @@ export function resolveProviderAuthMethods(
 ): ProviderAuthMethod[] {
 	return DESKTOP_OAUTH_METHODS[providerId] ?? pluginMethods ?? [{ type: "api", label: "API Key" }]
 }
+
+/** Retained adapter actions, not entries in the live model directory. */
+export const desktopOAuthActions = Object.entries(DESKTOP_OAUTH_METHODS).flatMap(
+	([providerId, methods]) => methods
+		.filter((method) => method.type === "oauth")
+		.map((method) => ({ providerId, label: method.label })),
+)
