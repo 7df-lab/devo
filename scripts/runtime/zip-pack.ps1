@@ -10,7 +10,21 @@ Add-Type -AssemblyName System.IO.Compression.FileSystem
 
 $rootFull = [IO.Path]::GetFullPath($Root)
 $manifestText = [IO.File]::ReadAllText($Manifest, [Text.Encoding]::UTF8)
-$paths = @(ConvertFrom-Json -InputObject $manifestText)
+$parsed = ConvertFrom-Json -InputObject $manifestText
+$paths = @()
+if ($null -eq $parsed) {
+    # Windows PowerShell 5.1 may unwrap an empty JSON array to $null.
+} elseif ($parsed -is [System.Array]) {
+    foreach ($item in $parsed) {
+        if ($item -isnot [string]) { throw "Pack paths must be a flat JSON array of strings" }
+        $paths += $item
+    }
+} elseif ($parsed -is [string]) {
+    # Windows PowerShell 5.1 unwraps a one-element JSON array to a scalar.
+    $paths = @($parsed)
+} else {
+    throw "Pack paths must be a flat JSON array of strings"
+}
 if ($paths.Count -eq 0) { throw "No pack paths were provided" }
 
 $entries = [System.Collections.Generic.List[object]]::new()

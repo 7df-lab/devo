@@ -59,6 +59,18 @@ test.skipIf(process.platform !== "win32")("Windows ZIP rejects reparse points", 
   } finally { rmSync(root, { recursive: true, force: true }); }
 });
 
+test.skipIf(process.platform !== "win32")("Windows ZIP pack handles zero, one and multiple paths", async () => {
+  const root = mkdtempSync(join(tmpdir(), "devo Windows zip path counts "));
+  try {
+    const source = fixture(root);
+    await expect(archiveTreeZip(source, [], join(root, "zero.zip"))).rejects.toThrow("No pack paths");
+    await archiveTreeZip(source, ["runtime/python"], join(root, "one.zip"));
+    expect(existsSync(join(root, "one.zip"))).toBe(true);
+    await archiveTreeZip(source, ["runtime/python", "runtime/node"], join(root, "many.zip"));
+    expect(existsSync(join(root, "many.zip"))).toBe(true);
+  } finally { rmSync(root, { recursive: true, force: true }); }
+});
+
 test("Linux public pack names omit the vendor while retaining canonical manifest targets", async () => {
   const root = mkdtempSync(join(tmpdir(), "devo Linux asset names "));
   try {
