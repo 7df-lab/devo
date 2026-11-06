@@ -70,7 +70,7 @@ $sorted = foreach ($name in $names) { $byName[$name] }
 
 $stream = [IO.File]::Open($Output, [IO.FileMode]::Create, [IO.FileAccess]::Write, [IO.FileShare]::None)
 try {
-    $utf8 = [System.Text.UTF8Encoding]::new($false)
+    $utf8 = [System.Text.Encoding]::UTF8
     $archive = New-Object -TypeName System.IO.Compression.ZipArchive -ArgumentList @($stream, [IO.Compression.ZipArchiveMode]::Create, $true, $utf8)
     try {
         # Fixed DOS timestamp keeps repeated Windows pack builds byte-identical

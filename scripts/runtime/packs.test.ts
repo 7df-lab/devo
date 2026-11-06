@@ -107,7 +107,9 @@ test.skipIf(process.platform !== "win32")("Windows ZIP codepoint diagnostics", a
       console.log("PYTHON_ZIP_NAMES unavailable");
     }
     expect(text).toContain(`MANIFEST_UTF8_HEX=${expectedHex}`);
+    expect(text).toContain(`DEFAULT_NAME=${expected}`);
     expect(text).toContain(`UTF8_NAME=${expected}`);
+    expect(text).toContain("RAW_FLAGS=0x0800");
     expect(text).toContain(`RAW_NAME_HEX=${expectedHex}`);
     if (pythonNames) expect(pythonNames).toContain(expected);
   } finally { rmSync(root, { recursive: true, force: true }); }
