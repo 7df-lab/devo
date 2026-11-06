@@ -304,7 +304,6 @@ mod tests {
         assert_eq!(record.record_kind(), "turn_workspace_restore_completed");
     }
 
-    /// Trace: L2-DES-APP-003
     /// Verifies: safe workspace restore accepts unchanged post-turn file content.
     #[test]
     fn safe_restore_accepts_matching_post_turn_hash() {
@@ -313,7 +312,6 @@ mod tests {
         assert!(is_safe_to_restore("post-turn content", &expected_hash));
     }
 
-    /// Trace: L2-DES-APP-003
     /// Verifies: safe workspace restore rejects files that diverged after the superseded turn.
     #[test]
     fn safe_restore_rejects_diverged_content() {
@@ -322,7 +320,6 @@ mod tests {
         assert!(!is_safe_to_restore("user changed content", &expected_hash));
     }
 
-    /// Trace: L2-DES-APP-003
     /// Verifies: safe workspace restore accepts explicit sha256-prefixed hashes.
     #[test]
     fn safe_restore_accepts_sha256_prefixed_hash() {
@@ -331,7 +328,6 @@ mod tests {
         assert!(is_safe_to_restore("post-turn content", &expected_hash));
     }
 
-    /// Trace: L2-DES-APP-003
     /// Verifies: safe workspace restore fails closed when no usable post-turn hash exists.
     #[test]
     fn safe_restore_rejects_empty_or_malformed_hash() {

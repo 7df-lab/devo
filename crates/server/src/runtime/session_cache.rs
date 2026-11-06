@@ -110,6 +110,15 @@ impl ServerRuntime {
         self: &Arc<Self>,
         session_id: SessionId,
     ) -> Result<SessionHandle, LoadSessionError> {
+        let _lifecycle_admission =
+            self.begin_lifecycle_operation(session_id)
+                .await
+                .map_err(|error| match error {
+                    crate::runtime::session_deletion::LifecycleRootError::MissingEvidence {
+                        ..
+                    } => LoadSessionError::SessionNotFound,
+                    other => LoadSessionError::RestoreFailed(other.to_string()),
+                })?;
         if let Some(handle) = self.session(session_id).await {
             self.touch_root_session_lru_if_needed(&handle).await;
             return Ok(handle);
@@ -135,15 +144,31 @@ impl ServerRuntime {
         let is_subagent = index.session.agent_path.is_some();
 
         let stored_rollout_path = index.rollout_path.clone();
-        let rollout_path = match stored_rollout_path {
-            Some(ref path) if path.exists() => path.clone(),
-            Some(_) | None => self
-                .rollout_store
-                .find_rollout_by_session_id(&session_id)
-                .map_err(|error| LoadSessionError::RestoreFailed(error.to_string()))?
-                .filter(|path| path.exists())
-                .ok_or(LoadSessionError::RolloutMissing)?,
-        };
+        let rollout_path = self
+            .rollout_store
+            .resolve_session_journal(
+                &session_id,
+                stored_rollout_path.as_deref(),
+                crate::persistence::JournalVisibility::IncludeDeleted,
+            )
+            .map_err(|error| LoadSessionError::RestoreFailed(error.to_string()))?
+            .or_else(|| {
+                self.rollout_store
+                    .find_rollout_by_session_id(&session_id)
+                    .ok()
+                    .flatten()
+            })
+            .filter(|path| path.exists())
+            .ok_or(LoadSessionError::RolloutMissing)?;
+
+        if self.rollout_store.journal_is_closed(&rollout_path) {
+            return Err(LoadSessionError::SessionNotFound);
+        }
+        if let Err(devo_core::HistoryReadError::SessionDeleted { .. }) =
+            devo_core::read_rollout_session_meta_for_session(&rollout_path, &session_id)
+        {
+            return Err(LoadSessionError::SessionNotFound);
+        }
 
         if stored_rollout_path.as_ref() != Some(&rollout_path)
             && let Err(error) = self
@@ -154,18 +179,20 @@ impl ServerRuntime {
             tracing::warn!(
                 session_id = %session_id,
                 error = %error,
-                "failed to backfill rollout_path after suffix lookup"
+                "failed to backfill rollout_path after journal lookup"
             );
         }
 
         // Cross-process exclusivity: refuse to hydrate a rollout another live
         // Devo process owns. Concurrent turns from two processes interleave
         // items/turn records into one corrupt history.
-        let session_lock = SessionFileLock::acquire(&rollout_path).map_err(|contention| {
-            LoadSessionError::SessionLocked {
-                holder_pid: contention.holder_pid,
+        let session_lock = match SessionFileLock::acquire(&rollout_path) {
+            Ok(lock) => lock,
+            Err(crate::runtime::session_file_lock::SessionLockError::Contention { holder_pid }) => {
+                return Err(LoadSessionError::SessionLocked { holder_pid });
             }
-        })?;
+            Err(error) => return Err(LoadSessionError::RestoreFailed(error.to_string())),
+        };
 
         let runtime_session = self
             .hydrate_runtime_session(session_id, &rollout_path)

@@ -59,12 +59,12 @@ Terminal bundles include Node.js and Python. On Windows, install
 [Git for Windows](https://gitforwindows.org/) for shell commands and approve
 the one-time sandbox setup prompt.
 
-> **Temporarily disabled.** OS sandboxing and the permission picker are
-> disabled repo-wide: every process runs with full user permissions and new
-> sessions default to full-access. Revert by flipping
-> `SANDBOX_ENFORCEMENT_TEMPORARILY_DISABLED` (Rust, `crates/sandbox/src/lib.rs`),
-> `PERMISSIONS_COMMAND_ENABLED` (TUI), `PERMISSION_PICKER_ENABLED` (desktop),
-> and the default-preset literals back to their asking defaults.
+> Shell and terminal execution follow the configured sandbox profile; there is
+> no global sandbox-disable switch. Python kernels are trusted user-privileged
+> processes, not OS-isolated environments. See
+> [the execution boundary](docs/trusted-kernel-host-shell.md).
+> Permission-picker UI flags and new-session permission defaults are separate
+> settings; removing the global switch does not change them.
 
 ## Configuration
 
@@ -74,11 +74,11 @@ DeepSeek, Qwen, Kimi, GLM, and MiniMax. Use `/model` to switch models or
 `devo onboard` to revisit provider setup.
 
 For manual configuration, credentials, MCP, offline installation, and release
-mirrors, see the [user guide](./docs/usage.md).
+mirrors, see the [user guide](./docs/user-guide.md).
 
 ## Docs and contributing
 
-- [User guide](./docs/usage.md) — installation, providers, configuration, and offline use.
+- [User guide](./docs/user-guide.md) — installation, providers, configuration, and offline use.
 - [TUI guide](./apps/tui/README.md) — terminal controls and commands.
 - [Contributing](./CONTRIBUTING.md) — issues, documentation, and focused fixes welcome.
 

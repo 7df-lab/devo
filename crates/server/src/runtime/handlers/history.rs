@@ -125,12 +125,22 @@ impl ServerRuntime {
         request_id: &serde_json::Value,
         session_id: devo_protocol::native::ids::SessionId,
     ) -> Result<Arc<devo_core::CanonicalHistory>, serde_json::Value> {
-        let Some(rollout_path) = self.resolve_rollout_path(&session_id).await else {
-            return Err(self.error_response(
-                request_id.clone(),
-                ProtocolErrorCode::SessionNotFound,
-                "session does not exist",
-            ));
+        let rollout_path = match self.resolve_rollout_path(&session_id).await {
+            Ok(Some(path)) => path,
+            Ok(None) => {
+                return Err(self.error_response(
+                    request_id.clone(),
+                    ProtocolErrorCode::SessionNotFound,
+                    "session does not exist",
+                ));
+            }
+            Err(error) => {
+                return Err(self.error_response(
+                    request_id.clone(),
+                    ProtocolErrorCode::InternalError,
+                    error,
+                ));
+            }
         };
         self.history_cache
             .load(session_id, rollout_path)
@@ -151,26 +161,29 @@ impl ServerRuntime {
     pub(crate) async fn resolve_rollout_path(
         &self,
         session_id: &devo_protocol::native::ids::SessionId,
-    ) -> Option<PathBuf> {
-        if let Ok(Some(index)) = self.deps.db.get_session_index(session_id)
-            && let Some(path) = index.rollout_path
-        {
-            return Some(path);
-        }
-        if let Some(path) = self
-            .rollout_store
-            .find_rollout_by_session_id(session_id)
+    ) -> Result<Option<PathBuf>, String> {
+        let indexed_path = self
+            .deps
+            .db
+            .get_session_index(session_id)
             .ok()
             .flatten()
-        {
-            return Some(path);
+            .and_then(|index| index.rollout_path);
+        match self.rollout_store.resolve_session_journal(
+            session_id,
+            indexed_path.as_deref(),
+            crate::persistence::JournalVisibility::Live,
+        ) {
+            Ok(Some(path)) => return Ok(Some(path)),
+            Ok(None) => {}
+            Err(error) => return Err(format!("resolve session journal: {error}")),
         }
         if let Some(handle) = self.session(*session_id).await
             && let Some(path) = handle.rollout_path().await.flatten()
         {
-            return Some(path);
+            return Ok(Some(path));
         }
-        None
+        Ok(None)
     }
 }
 

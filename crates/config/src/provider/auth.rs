@@ -426,7 +426,6 @@ mod tests {
     use super::*;
     use crate::AuthCredentialKind;
 
-    /// Trace: L2-DES-AUTH-001
     /// Verifies: API key upsert/read roundtrip stores under the provider id and
     /// writes the pi AuthStorage wire shape.
     #[test]
@@ -456,7 +455,6 @@ mod tests {
         assert!(raw.contains("\"key\": \"sk-test\""));
     }
 
-    /// Trace: L2-DES-AUTH-001
     /// Verifies: legacy `*_api_key` ids migrate to provider keys on upsert.
     #[test]
     fn upsert_legacy_api_key_id_normalizes_to_provider() {
@@ -467,7 +465,6 @@ mod tests {
         assert!(!auth.credentials.contains_key("deepseek_api_key"));
     }
 
-    /// Trace: L2-DES-AUTH-001
     /// Verifies: OAuth upsert/read roundtrip persists access and optional fields.
     #[test]
     fn upsert_oauth_roundtrips() {
@@ -507,7 +504,6 @@ mod tests {
         assert!(raw.contains("\"accountId\""));
     }
 
-    /// Trace: L2-DES-AUTH-001
     /// Verifies: empty OAuth access is rejected on upsert.
     #[test]
     fn upsert_oauth_rejects_empty_access() {
@@ -527,7 +523,6 @@ mod tests {
         assert!(error.to_string().contains("empty OAuth access"));
     }
 
-    /// Trace: L2-DES-AUTH-001
     /// Verifies: empty API key value is rejected on upsert.
     #[test]
     fn upsert_api_key_rejects_empty_value() {
@@ -536,7 +531,6 @@ mod tests {
         assert!(error.to_string().contains("empty API key value"));
     }
 
-    /// Trace: L2-DES-AUTH-001
     /// Verifies: API key and OAuth credentials can coexist in one auth.json.
     #[test]
     fn api_key_and_oauth_coexist() {
@@ -561,7 +555,6 @@ mod tests {
         assert_eq!(auth.credentials["xai"].kind, AuthCredentialKind::Oauth);
     }
 
-    /// Trace: L2-DES-AUTH-001
     /// Verifies: legacy envelope auth.json migrates to provider-keyed pi shape.
     #[test]
     fn migrates_legacy_envelope_on_read() {
@@ -588,7 +581,6 @@ mod tests {
         assert!(raw.contains("\"key\": \"sk-legacy\""));
     }
 
-    /// Trace: L2-DES-AUTH-001
     /// Verifies: auth.json is written with mode 0600 on Unix.
     #[cfg(unix)]
     #[test]

@@ -7,7 +7,7 @@ use std::collections::HashMap;
 use std::path::PathBuf;
 use std::time::Instant;
 
-use super::{RolloutStore, read_rollout_index_fields, session_index_row_from_record};
+use super::{RolloutStore, read_rollout_index_scan, session_index_row_from_record};
 use crate::db::Database;
 use devo_core::SessionRecord;
 use devo_protocol::native::ids::SessionId;
@@ -34,9 +34,11 @@ fn rollout_index_refresh_phase_probe() -> anyhow::Result<()> {
         Vec::with_capacity(paths.len());
     let mut skipped = 0usize;
     for path in &paths {
-        match read_rollout_index_fields(path) {
-            Ok((record, last_activity_at)) => {
-                scanned.push((path.clone(), record, last_activity_at));
+        match read_rollout_index_scan(path) {
+            Ok(scan) => {
+                for entry in scan.sessions {
+                    scanned.push((path.clone(), entry.record, entry.last_activity_at));
+                }
             }
             Err(_) => skipped += 1,
         }

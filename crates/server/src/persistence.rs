@@ -2,6 +2,7 @@ use std::collections::{HashMap, HashSet};
 use std::fs::File;
 use std::io::BufRead;
 use std::io::BufReader;
+use std::io::Read;
 use std::io::Write;
 use std::path::Path;
 use std::path::PathBuf;
@@ -46,7 +47,6 @@ use devo_core::legacy_lines_from_internal;
 use devo_core::legacy_rollback_line_from_native;
 use devo_core::legacy_title_line_from_native;
 use devo_core::parse_rollout_line;
-use devo_core::read_canonical_history;
 use devo_core::rollout::InternalRecord;
 use devo_core::rollout::SessionPersistenceExtras;
 use devo_core::rollout::TurnPersistenceExtras;
@@ -100,13 +100,9 @@ pub(crate) fn invent_session_persistence_extras() -> SessionPersistenceExtras {
 pub(crate) struct RolloutStore {
     /// Root data directory that contains `sessions/` and `session-artifacts/`.
     data_root: PathBuf,
-    /// Per-file locks that serialise concurrent writes to the same rollout file,
-    /// preventing interleaved JSON lines.
-    file_locks: Arc<StdMutex<HashMap<PathBuf, Arc<StdMutex<()>>>>>,
-    /// Per-file write-path state (v2 single-write, 05 §2.2). One instance per
-    /// rollout path, hydrated from the on-disk history on first append so
-    /// item seqs and approval folds never collide with it.
-    write_states: Arc<StdMutex<HashMap<PathBuf, WritePathState>>>,
+    /// Strong per-store cache of the process-global journal engines. Clones
+    /// share it; distinct stores converge through the global weak registry.
+    journals: Arc<StdMutex<HashMap<PathBuf, Arc<JournalShared>>>>,
     /// Delivery-log sink (08 §5/§7): after each fsynced append, derived
     /// events are projected into the SQLite `event_log` (best effort; the
     /// startup reconciler backfills anything missed). `None` in tests that
@@ -114,12 +110,191 @@ pub(crate) struct RolloutStore {
     event_log: Option<Arc<Database>>,
 }
 
-/// Per-file write-path state: seq/approval/settings tracking plus the index
-/// of the next JSONL row to be written (used as the `source_fact_id` line
-/// index).
+#[derive(Clone, Copy, Debug, PartialEq, Eq)]
+pub(crate) enum JournalVisibility {
+    /// Only sessions whose latest lifecycle marker is not a tombstone.
+    Live,
+    /// Include sessions whose latest marker is a tombstone (delete cleanup).
+    IncludeDeleted,
+}
+
+/// One process-wide engine per canonical physical journal. The state mutex is
+/// both the in-process append serialization and the per-session state owner.
+struct JournalShared {
+    state: StdMutex<JournalState>,
+}
+
+#[derive(Default)]
+struct JournalState {
+    write: Option<WritePathState>,
+    /// Set before a journal is unlinked. Any later append/import to this
+    /// canonical path fails instead of recreating the deleted root.
+    closed: bool,
+}
+
+static JOURNAL_REGISTRY: std::sync::OnceLock<
+    StdMutex<HashMap<PathBuf, std::sync::Weak<JournalShared>>>,
+> = std::sync::OnceLock::new();
+
+fn journal_registry() -> &'static StdMutex<HashMap<PathBuf, std::sync::Weak<JournalShared>>> {
+    JOURNAL_REGISTRY.get_or_init(|| StdMutex::new(HashMap::new()))
+}
+
+impl RolloutStore {
+    /// True when this canonical journal has been durably closed/deleted.
+    pub(crate) fn journal_is_closed(&self, rollout_path: &Path) -> bool {
+        let Ok(key) = crate::journal_path::canonical_journal_key(rollout_path) else {
+            return false;
+        };
+        let shared = {
+            let local = self
+                .journals
+                .lock()
+                .expect("rollout journal cache poisoned");
+            local.get(&key).cloned()
+        }
+        .or_else(|| {
+            journal_registry()
+                .lock()
+                .expect("rollout journal registry poisoned")
+                .get(&key)
+                .and_then(std::sync::Weak::upgrade)
+        });
+        shared.is_some_and(|shared| {
+            shared
+                .state
+                .lock()
+                .expect("rollout journal state mutex poisoned")
+                .closed
+        })
+    }
+
+    fn shared_journal(&self, rollout_path: &Path) -> Result<Arc<JournalShared>> {
+        let key = crate::journal_path::canonical_journal_key(rollout_path)?;
+        {
+            let local = self
+                .journals
+                .lock()
+                .expect("rollout journal cache poisoned");
+            if let Some(shared) = local.get(&key) {
+                return Ok(Arc::clone(shared));
+            }
+        }
+        let shared = {
+            let mut registry = journal_registry()
+                .lock()
+                .expect("rollout journal registry poisoned");
+            registry.retain(|_, weak| weak.strong_count() > 0);
+            match registry.get(&key).and_then(std::sync::Weak::upgrade) {
+                Some(shared) => shared,
+                None => {
+                    let shared = Arc::new(JournalShared {
+                        state: StdMutex::new(JournalState::default()),
+                    });
+                    registry.insert(key.clone(), Arc::downgrade(&shared));
+                    shared
+                }
+            }
+        };
+        let mut local = self
+            .journals
+            .lock()
+            .expect("rollout journal cache poisoned");
+        Ok(Arc::clone(local.entry(key).or_insert(shared)))
+    }
+}
+
+/// Per-file write-path state: the physical line index plus one
+/// [`RolloutWriteState`] per logical session in the journal. Item `seq`,
+/// settings epochs, approval folds, and cwd are session-scoped; the line index
+/// and the event-log watermark remain file-scoped.
+#[derive(Clone, Copy, Debug, PartialEq, Eq)]
+enum JournalWriteMode {
+    /// Explicit creation of a new root/fork journal.
+    CreateIfMissing,
+    /// Ordinary append/settings/tombstone: never recreate a missing journal.
+    ExistingOnly,
+}
+
 pub(crate) struct WritePathState {
-    write_state: RolloutWriteState,
+    sessions: HashMap<SessionId, RolloutWriteState>,
+    /// Last merged persistence extras per session. A later `SessionMeta` that
+    /// passes `None` (cwd/ACP updates) must not erase agent path/nickname/mode.
+    session_extras: HashMap<SessionId, SessionPersistenceExtras>,
     next_line_index: u64,
+    /// Physical identity/length last observed/committed. A mismatch means an
+    /// external append/truncate/recreate happened; the state rehydrates.
+    observed: JournalStamp,
+}
+
+#[derive(Clone, Copy, Debug, PartialEq, Eq)]
+struct JournalStamp {
+    len: u64,
+    modified: Option<std::time::SystemTime>,
+    #[cfg(unix)]
+    dev: u64,
+    #[cfg(unix)]
+    ino: u64,
+    #[cfg(windows)]
+    creation_time: u64,
+    #[cfg(windows)]
+    last_write_time: u64,
+}
+
+impl JournalStamp {
+    fn missing() -> Self {
+        Self {
+            len: 0,
+            modified: None,
+            #[cfg(unix)]
+            dev: 0,
+            #[cfg(unix)]
+            ino: 0,
+            #[cfg(windows)]
+            creation_time: 0,
+            #[cfg(windows)]
+            last_write_time: 0,
+        }
+    }
+}
+
+fn journal_stamp(path: &Path) -> JournalStamp {
+    let Ok(metadata) = std::fs::metadata(path) else {
+        return JournalStamp::missing();
+    };
+    #[cfg(unix)]
+    {
+        use std::os::unix::fs::MetadataExt;
+        JournalStamp {
+            len: metadata.len(),
+            modified: metadata.modified().ok(),
+            dev: metadata.dev(),
+            ino: metadata.ino(),
+        }
+    }
+    #[cfg(windows)]
+    {
+        use std::os::windows::fs::MetadataExt;
+        JournalStamp {
+            len: metadata.len(),
+            modified: metadata.modified().ok(),
+            creation_time: metadata.creation_time(),
+            last_write_time: metadata.last_write_time(),
+        }
+    }
+    #[cfg(not(any(unix, windows)))]
+    {
+        JournalStamp {
+            len: metadata.len(),
+            modified: metadata.modified().ok(),
+        }
+    }
+}
+
+impl WritePathState {
+    fn session_state_mut(&mut self, session_id: SessionId) -> &mut RolloutWriteState {
+        self.sessions.entry(session_id).or_default()
+    }
 }
 
 impl std::fmt::Debug for RolloutStore {
@@ -134,8 +309,7 @@ impl Clone for RolloutStore {
     fn clone(&self) -> Self {
         Self {
             data_root: self.data_root.clone(),
-            file_locks: Arc::clone(&self.file_locks),
-            write_states: Arc::clone(&self.write_states),
+            journals: Arc::clone(&self.journals),
             event_log: self.event_log.as_ref().map(Arc::clone),
         }
     }
@@ -146,8 +320,7 @@ impl RolloutStore {
     pub(crate) fn new(data_root: PathBuf, event_log: Option<Arc<Database>>) -> Self {
         Self {
             data_root,
-            file_locks: Arc::new(StdMutex::new(HashMap::new())),
-            write_states: Arc::new(StdMutex::new(HashMap::new())),
+            journals: Arc::new(StdMutex::new(HashMap::new())),
             event_log,
         }
     }
@@ -160,23 +333,6 @@ impl RolloutStore {
         session_id: &devo_protocol::native::ids::SessionId,
     ) -> PathBuf {
         self.root_rollout_path(session_id)
-    }
-
-    /// Allocates a nested subagent rollout under the parent's artifact tree.
-    ///
-    /// Roots nest under `session-artifacts/<root_id>/sub-xxxxxxxx/<child_id>.jsonl`.
-    /// Children nest further: `…/sub-xxxxxxxx/sub-yyyyyyyy/<grandchild_id>.jsonl`.
-    pub(crate) fn allocate_child_rollout_path(
-        &self,
-        parent_rollout_path: Option<&Path>,
-        parent_session_id: &devo_protocol::native::ids::SessionId,
-        child_session_id: &devo_protocol::native::ids::SessionId,
-    ) -> Result<PathBuf> {
-        let nest_dir = self.nesting_dir_for_parent(parent_rollout_path, parent_session_id)?;
-        std::fs::create_dir_all(&nest_dir)
-            .with_context(|| format!("create session nest dir {}", nest_dir.display()))?;
-        let child_dir = create_unique_sub_dir(&nest_dir)?;
-        Ok(child_dir.join(format!("{child_session_id}.jsonl")))
     }
 
     /// Invents rollout path + [`SessionPersistenceExtras`] at origin for a root/fork.
@@ -195,41 +351,62 @@ impl RolloutStore {
         }
     }
 
-    /// Invents a nested subagent rollout path + extras (session-artifacts tree).
-    pub(crate) fn invent_child_session_persistence(
-        &self,
-        parent_rollout_path: Option<&Path>,
-        parent_session_id: &devo_protocol::native::ids::SessionId,
-        child_session_id: &devo_protocol::native::ids::SessionId,
-    ) -> Result<InventedSessionPersistence> {
-        Ok(InventedSessionPersistence {
-            rollout_path: self.allocate_child_rollout_path(
-                parent_rollout_path,
-                parent_session_id,
-                child_session_id,
-            )?,
-            extras: invent_session_persistence_extras(),
-        })
-    }
-
-    /// Appends the mandatory session header line (path-first Native).
+    /// Appends a session header to an already-established journal. Ordinary
+    /// metadata/archive updates must never recreate a missing root.
     pub(crate) fn append_session_meta_at(
         &self,
         rollout_path: &Path,
         session: &devo_protocol::native::session::Session,
         extras: Option<devo_core::SessionPersistenceExtras>,
     ) -> Result<()> {
-        self.append_rollout_lines(
+        self.append_session_meta_with_mode(
             rollout_path,
-            vec![devo_core::session_line(session.clone(), extras, Utc::now())],
+            session,
+            extras,
+            JournalWriteMode::ExistingOnly,
         )
+    }
+
+    /// Explicit root/fork/journal creation: allowed to create the physical file.
+    pub(crate) fn append_session_meta_create_at(
+        &self,
+        rollout_path: &Path,
+        session: &devo_protocol::native::session::Session,
+        extras: Option<devo_core::SessionPersistenceExtras>,
+    ) -> Result<()> {
+        self.append_session_meta_with_mode(
+            rollout_path,
+            session,
+            extras,
+            JournalWriteMode::CreateIfMissing,
+        )
+    }
+
+    fn append_session_meta_with_mode(
+        &self,
+        rollout_path: &Path,
+        session: &devo_protocol::native::session::Session,
+        extras: Option<devo_core::SessionPersistenceExtras>,
+        mode: JournalWriteMode,
+    ) -> Result<()> {
+        let session_id = session.id;
+        self.append_rollout_lines_with(rollout_path, session_id, mode, |state| {
+            let merged =
+                merge_session_extras(state.session_extras.get(&session_id), extras.as_ref());
+            state.session_extras.insert(session_id, merged.clone());
+            Ok(vec![devo_core::session_line(
+                session.clone(),
+                Some(merged),
+                Utc::now(),
+            )])
+        })
     }
 
     /// Test / migrate boundary: SessionRecord → Native SessionMeta append.
     /// Live create paths must use [`Self::append_session_meta_at`].
     #[cfg(test)]
     pub(crate) fn append_session_meta(&self, record: &SessionRecord) -> Result<()> {
-        self.append_session_meta_at(
+        self.append_session_meta_create_at(
             &record.rollout_path,
             &devo_core::native_session_from_record(record)
                 .context("build native session from record")?,
@@ -346,22 +523,28 @@ impl RolloutStore {
         _settings_epoch: u64,
         settings: &[(SessionSettingsField, serde_json::Value)],
     ) -> Result<()> {
-        self.append_rollout_lines_with(rollout_path, |state| {
-            let native_session_id = devo_core::native_session_id(session_id)
-                .context("native session id for settings")?;
-            let mut lines = Vec::with_capacity(settings.len());
-            for (field, value) in settings {
-                let epoch = state.write_state.allocate_settings_epoch();
-                lines.push(devo_core::settings_line(
-                    Utc::now(),
-                    native_session_id,
-                    *field,
-                    value.clone(),
-                    epoch,
-                ));
-            }
-            Ok(lines)
-        })
+        let native_session_id =
+            devo_core::native_session_id(session_id).context("native session id for settings")?;
+        self.append_rollout_lines_with(
+            rollout_path,
+            native_session_id,
+            JournalWriteMode::ExistingOnly,
+            |state| {
+                let session_state = state.session_state_mut(native_session_id);
+                let mut lines = Vec::with_capacity(settings.len());
+                for (field, value) in settings {
+                    let epoch = session_state.allocate_settings_epoch();
+                    lines.push(devo_core::settings_line(
+                        Utc::now(),
+                        native_session_id,
+                        *field,
+                        value.clone(),
+                        epoch,
+                    ));
+                }
+                Ok(lines)
+            },
+        )
     }
 
     /// Appends one turn line (path-first Native).
@@ -396,18 +579,79 @@ impl RolloutStore {
     /// server tests/fixtures that still feed packed records.
     #[cfg_attr(not(test), allow(dead_code))]
     pub(crate) fn append_item_at(&self, rollout_path: &Path, item: ItemRecord) -> Result<()> {
-        self.append_rollout_lines_with(rollout_path, |state| {
-            state
-                .write_state
-                .item_lines_from_record(&item, Utc::now())
-                .context("expand item record to v2 lines")
-        })
+        let session_id = item.session_id;
+        self.append_rollout_lines_with(
+            rollout_path,
+            session_id,
+            JournalWriteMode::ExistingOnly,
+            |state| {
+                state
+                    .session_state_mut(session_id)
+                    .item_lines_from_record(&item, Utc::now())
+                    .context("expand item record to v2 lines")
+            },
+        )
     }
 
     /// Narrow packed-ItemRecord helper for migrate / tests that still hold a SessionRecord.
     #[cfg_attr(not(test), allow(dead_code))]
     pub(crate) fn append_item(&self, record: &SessionRecord, item: ItemRecord) -> Result<()> {
         self.append_item_at(&record.rollout_path, item)
+    }
+
+    /// Drops cached append state after a caller rewrites a rollout file
+    /// outside [`Self::append_rollout_lines`] (for example session/import).
+    /// Runs a raw file mutation under the canonical journal's state mutex.
+    /// Used by import and other out-of-band rewrites so no cached append state
+    /// can survive the mutation. The caller must hold the SessionFileLock lease.
+    pub(crate) fn with_journal_state<T>(
+        &self,
+        rollout_path: &Path,
+        mutate: impl FnOnce() -> Result<T>,
+    ) -> Result<T> {
+        let _lease = crate::runtime::session_file_lock::SessionFileLock::acquire(rollout_path)
+            .map_err(|error| anyhow::anyhow!("acquire journal lease: {error}"))?;
+        let shared = self.shared_journal(rollout_path)?;
+        let mut guard = shared
+            .state
+            .lock()
+            .expect("rollout journal state mutex poisoned");
+        if guard.closed {
+            anyhow::bail!("journal {} was deleted", rollout_path.display());
+        }
+        guard.write = None;
+        let original_len = journal_stamp(rollout_path).len;
+        let result = mutate();
+        if result.is_err() && journal_stamp(rollout_path).len > original_len {
+            let _ = truncate_rollout(rollout_path, original_len);
+        }
+        guard.write = None;
+        result
+    }
+
+    /// Appends a durable session-deletion marker. The enclosing Internal line
+    /// carries the native session id; scoped readers reject the session and
+    /// index rebuilds omit it.
+    pub(crate) fn append_session_deleted_at(
+        &self,
+        rollout_path: &Path,
+        session_id: SessionId,
+        deleted_at: chrono::DateTime<Utc>,
+    ) -> Result<()> {
+        self.append_rollout_lines(
+            rollout_path,
+            vec![RolloutLine::Internal {
+                v: 2,
+                timestamp: deleted_at,
+                session_id,
+                turn_id: None,
+                seq: 0,
+                entry: InternalRecord::SessionDeleted {
+                    schema_version: 1,
+                    deleted_at,
+                },
+            }],
+        )
     }
 
     /// Appends one session-title update line to the durable rollout journal.
@@ -663,51 +907,90 @@ impl RolloutStore {
     ) -> Result<HashMap<devo_protocol::native::ids::SessionId, RuntimeSession>> {
         let mut sessions = HashMap::new();
         for rollout_path in self.rollout_paths()? {
-            match self.load_session_from_rollout(&rollout_path, deps).await {
-                Ok(recovered) => {
-                    sessions.insert(recovered.summary.session_id(), recovered);
-                }
+            let indexed = match read_rollout_index_sessions(&rollout_path) {
+                Ok(indexed) => indexed,
                 Err(error) => {
                     tracing::warn!(
                         rollout_path = %rollout_path.display(),
                         error = %error,
-                        "failed to replay rollout; skipping persisted session"
+                        "failed to index rollout for bulk restore; skipping journal"
                     );
+                    continue;
+                }
+            };
+            for entry in indexed {
+                let session_id = entry.record.id;
+                match self
+                    .load_session_from_rollout_for_session(
+                        &rollout_path,
+                        session_id,
+                        deps,
+                        /*history*/ None,
+                    )
+                    .await
+                {
+                    Ok(recovered) => {
+                        sessions.insert(recovered.summary.session_id(), recovered);
+                    }
+                    Err(error) => {
+                        tracing::warn!(
+                            rollout_path = %rollout_path.display(),
+                            session_id = %session_id,
+                            error = %error,
+                            "failed to replay session from journal; skipping"
+                        );
+                    }
                 }
             }
         }
         Ok(sessions)
     }
 
-    /// Indexes rollout SessionMeta headers into SQLite without replaying turns.
+    /// Indexes every logical session in every rollout journal into SQLite
+    /// without replaying turns. A shared root journal contributes one index row
+    /// per `SessionMeta`; a legacy independent child journal contributes one.
     pub(crate) fn index_rollout_metadata(&self, db: &crate::db::Database) -> Result<()> {
         let mut canonical =
             HashMap::<SessionId, (chrono::DateTime<Utc>, PathBuf, SessionRecord)>::new();
+        let mut deleted_session_ids = std::collections::HashSet::new();
         for rollout_path in self.rollout_paths()? {
-            match read_rollout_index_fields(&rollout_path) {
-                Ok((record, last_activity_at)) => match canonical.get(&record.id) {
-                    Some((existing_activity, existing_path, _)) => {
-                        if last_activity_at > *existing_activity {
-                            tracing::warn!(
-                                session_id = %record.id,
-                                kept_rollout_path = %rollout_path.display(),
-                                replaced_rollout_path = %existing_path.display(),
-                                "duplicate rollout for session id; keeping newest last_activity_at"
-                            );
-                            canonical.insert(record.id, (last_activity_at, rollout_path, record));
-                        } else {
-                            tracing::warn!(
-                                session_id = %record.id,
-                                kept_rollout_path = %existing_path.display(),
-                                ignored_rollout_path = %rollout_path.display(),
-                                "duplicate rollout for session id; keeping newest last_activity_at"
-                            );
+            match read_rollout_index_scan(&rollout_path) {
+                Ok(scan) => {
+                    deleted_session_ids.extend(scan.deleted);
+                    for indexed in scan.sessions {
+                        let record = indexed.record;
+                        let last_activity_at = indexed.last_activity_at;
+                        match canonical.get(&record.id) {
+                            Some((existing_activity, existing_path, _)) => {
+                                if last_activity_at > *existing_activity {
+                                    tracing::warn!(
+                                        session_id = %record.id,
+                                        kept_rollout_path = %rollout_path.display(),
+                                        replaced_rollout_path = %existing_path.display(),
+                                        "duplicate rollout for session id; keeping newest last_activity_at"
+                                    );
+                                    canonical.insert(
+                                        record.id,
+                                        (last_activity_at, rollout_path.clone(), record),
+                                    );
+                                } else {
+                                    tracing::warn!(
+                                        session_id = %record.id,
+                                        kept_rollout_path = %existing_path.display(),
+                                        ignored_rollout_path = %rollout_path.display(),
+                                        "duplicate rollout for session id; keeping newest last_activity_at"
+                                    );
+                                }
+                            }
+                            None => {
+                                canonical.insert(
+                                    record.id,
+                                    (last_activity_at, rollout_path.clone(), record),
+                                );
+                            }
                         }
                     }
-                    None => {
-                        canonical.insert(record.id, (last_activity_at, rollout_path, record));
-                    }
-                },
+                }
                 Err(error) => {
                     tracing::warn!(
                         rollout_path = %rollout_path.display(),
@@ -719,6 +1002,9 @@ impl RolloutStore {
         }
 
         for (session_id, (last_activity_at, rollout_path, record)) in canonical {
+            if deleted_session_ids.contains(&session_id) {
+                continue;
+            }
             let index_row = session_index_row_from_record(&record, last_activity_at);
             if let Err(error) =
                 db.upsert_rollout_index_session(index_row, Some(rollout_path.as_path()))
@@ -728,6 +1014,18 @@ impl RolloutStore {
                     error = %error,
                     "failed to upsert indexed session metadata"
                 );
+            }
+        }
+        // A durable tombstone wins over any live row from another journal.
+        for session_id in deleted_session_ids {
+            if let Err(error) = db.clear_pending(&session_id, crate::db::QueueType::Turn) {
+                tracing::warn!(%session_id, %error, "failed to clear tombstoned turn queue");
+            }
+            if let Err(error) = db.clear_pending(&session_id, crate::db::QueueType::Steer) {
+                tracing::warn!(%session_id, %error, "failed to clear tombstoned steer queue");
+            }
+            if let Err(error) = db.delete_session(&session_id) {
+                tracing::warn!(%session_id, %error, "failed to delete tombstoned session row");
             }
         }
         Ok(())
@@ -750,6 +1048,124 @@ impl RolloutStore {
         Ok(None)
     }
 
+    /// Finds a journal containing the session even when its latest lifecycle
+    /// marker is a tombstone. Delete retries use this to remove files left by a
+    /// crash between durable marking and unlink; resume/read paths must use the
+    /// tombstone-excluding lookup instead.
+    pub(crate) fn find_journal_containing_session_including_deleted(
+        &self,
+        session_id: &devo_protocol::native::ids::SessionId,
+    ) -> Result<Option<PathBuf>> {
+        self.find_journal_containing_session_strict(session_id, JournalVisibility::IncludeDeleted)
+    }
+
+    /// Strict journal lookup. Unlike the lenient index/read fallback, a damaged
+    /// or unreadable journal is an error, not a missing session.
+    pub(crate) fn find_journal_containing_session_strict(
+        &self,
+        session_id: &devo_protocol::native::ids::SessionId,
+        visibility: JournalVisibility,
+    ) -> Result<Option<PathBuf>> {
+        for rollout_path in self.rollout_paths()? {
+            let (live, tombstoned) = self.journal_session_membership(&rollout_path, session_id)?;
+            let deleted = visibility == JournalVisibility::IncludeDeleted && tombstoned;
+            if live || deleted {
+                return Ok(Some(rollout_path));
+            }
+        }
+        Ok(None)
+    }
+
+    /// Strict membership scan for one journal/session using the same fail-closed
+    /// rollout visitor as resume. Returns `(live, tombstoned)`.
+    pub(crate) fn journal_session_membership(
+        &self,
+        rollout_path: &Path,
+        session_id: &devo_protocol::native::ids::SessionId,
+    ) -> Result<(bool, bool)> {
+        let mut live = false;
+        let mut deleted = false;
+        visit_rollout_lines(rollout_path, "journal membership", |line| {
+            match line {
+                RolloutLine::SessionMeta { session, .. } if session.id == *session_id => {
+                    live = true;
+                }
+                RolloutLine::Internal {
+                    session_id: owner,
+                    entry: InternalRecord::SessionDeleted { .. },
+                    ..
+                } if owner == *session_id => {
+                    deleted = true;
+                }
+                _ => {}
+            }
+            Ok(())
+        })?;
+        Ok((live, deleted))
+    }
+
+    /// Single shared resolver for consumers that hold an indexed path: trust it
+    /// only when it exists and proves membership; otherwise scan strictly.
+    pub(crate) fn resolve_session_journal(
+        &self,
+        session_id: &devo_protocol::native::ids::SessionId,
+        indexed_path: Option<&Path>,
+        visibility: JournalVisibility,
+    ) -> Result<Option<PathBuf>> {
+        if let Some(path) = indexed_path.filter(|path| path.exists()) {
+            let (live, tombstoned) = self.journal_session_membership(path, session_id)?;
+            let deleted = visibility == JournalVisibility::IncludeDeleted && tombstoned;
+            if live || deleted {
+                return Ok(Some(path.to_path_buf()));
+            }
+        }
+        self.find_journal_containing_session_strict(session_id, visibility)
+    }
+
+    /// Raw persisted agent lineage, ignoring tombstone state and index rows.
+    /// Delete retries need the parent edge even after the live scoped readers
+    /// intentionally reject a tombstoned session.
+    pub(crate) fn raw_session_parent(
+        &self,
+        rollout_path: &Path,
+        session_id: &SessionId,
+    ) -> Result<Option<Option<SessionId>>> {
+        let mut found = None;
+        visit_rollout_lines(rollout_path, "lineage read", |line| {
+            if let RolloutLine::SessionMeta { session, .. } = line
+                && session.id == *session_id
+            {
+                found = Some(session.parent.as_ref().map(|parent| {
+                    let devo_protocol::native::session::SessionParent::Agent { session_id, .. } =
+                        parent;
+                    *session_id
+                }));
+            }
+            Ok(())
+        })?;
+        Ok(found)
+    }
+
+    /// Every persisted agent edge, including sessions whose latest marker is a
+    /// tombstone and sessions absent from the rebuildable SQLite index.
+    pub(crate) fn persisted_agent_edges(&self) -> Result<Vec<(SessionId, SessionId)>> {
+        let mut edges = Vec::new();
+        for rollout_path in self.rollout_paths()? {
+            visit_rollout_lines(&rollout_path, "lineage read", |line| {
+                if let RolloutLine::SessionMeta { session, .. } = line
+                    && let Some(devo_protocol::native::session::SessionParent::Agent {
+                        session_id: parent,
+                        ..
+                    }) = session.parent.as_ref()
+                {
+                    edges.push((session.id, *parent));
+                }
+                Ok(())
+            })?;
+        }
+        Ok(edges)
+    }
+
     /// Resolves a session cwd from the SQLite index, falling back to rollout SessionMeta.
     pub(crate) fn resolve_indexed_session_cwd(
         &self,
@@ -759,96 +1175,216 @@ impl RolloutStore {
         if let Some(index) = db.get_session_index(session_id)? {
             return Ok(Some(index.session.cwd));
         }
-        if let Some(rollout_path) = self.find_rollout_by_session_id(session_id)? {
-            let (record, _) = read_rollout_index_fields(&rollout_path)?;
-            return Ok(Some(record.cwd));
+        if let Some(rollout_path) =
+            self.resolve_session_journal(session_id, None, JournalVisibility::Live)?
+            && let Some(indexed) = read_rollout_index_sessions(&rollout_path)?
+                .into_iter()
+                .find(|entry| entry.record.id == *session_id)
+        {
+            return Ok(Some(indexed.record.cwd));
         }
         Ok(None)
     }
 
-    /// Deletes canonical rollout files for a session.
+    /// Deletes the durable storage owned by one session.
     ///
-    /// Root sessions also remove `session-artifacts/<session_id>/` (nested children).
-    pub(crate) fn delete_session_rollouts(&self, session_id: &SessionId) -> Result<bool> {
-        let exact = format!("{session_id}.jsonl");
+    /// The journal is unlinked only when it is the target session's own file
+    /// (root journal or legacy independent child journal). A child sharing the
+    /// root journal never unlinks it; the caller must persist a tombstone first.
+    /// `delete_root_tree` removes `session-artifacts/<root_id>/` entirely.
+    pub(crate) fn delete_session_journal(
+        &self,
+        session_id: &SessionId,
+        journal_path: Option<&Path>,
+        session_dir: Option<&Path>,
+        delete_root_tree: bool,
+    ) -> Result<bool> {
         let mut deleted = false;
         let mut output_candidates = Vec::new();
-        for rollout_path in self.rollout_paths()? {
-            let Some(file_name) = rollout_path.file_name().and_then(|name| name.to_str()) else {
-                continue;
-            };
-            if file_name != exact {
-                continue;
-            }
-            output_candidates.extend(devo_core::output_replay::read_output_references(
-                &rollout_path,
-            )?);
-            let file_lock = {
-                let mut locks = self
-                    .file_locks
-                    .lock()
-                    .expect("rollout file-locks table poisoned");
-                locks
-                    .entry(rollout_path.clone())
-                    .or_insert_with(|| Arc::new(StdMutex::new(())))
-                    .clone()
-            };
-            let _guard = file_lock.lock().expect("rollout per-file lock poisoned");
-            match std::fs::remove_file(&rollout_path) {
-                Ok(()) => deleted = true,
-                Err(error) if error.kind() == std::io::ErrorKind::NotFound => {}
-                Err(error) => {
-                    return Err(error)
-                        .with_context(|| format!("delete rollout {}", rollout_path.display()));
+        let mut removed_journal = false;
+
+        let own_journal_path = journal_path.filter(|path| {
+            path.file_stem()
+                .and_then(|stem| stem.to_str())
+                .is_some_and(|stem| stem == session_id.as_str())
+        });
+        let should_unlink_journal =
+            own_journal_path.is_some() || (delete_root_tree && journal_path.is_none());
+        if should_unlink_journal {
+            if let Some(rollout_path) = journal_path {
+                if self.unlink_journal_file(rollout_path, &mut output_candidates)? {
+                    deleted = true;
+                    removed_journal = true;
+                }
+            } else {
+                // Compatibility fallback for callers without an indexed path.
+                let exact = format!("{session_id}.jsonl");
+                for rollout_path in self.rollout_paths()? {
+                    if rollout_path.file_name().and_then(|name| name.to_str())
+                        != Some(exact.as_str())
+                    {
+                        continue;
+                    }
+                    if self.unlink_journal_file(&rollout_path, &mut output_candidates)? {
+                        deleted = true;
+                        removed_journal = true;
+                    }
                 }
             }
         }
-        let artifacts = self
-            .data_root
-            .join("session-artifacts")
-            .join(session_id.to_string());
-        if artifacts.is_dir() {
-            match std::fs::remove_dir_all(&artifacts) {
+
+        if delete_root_tree {
+            let artifacts = self.root_session_dir(session_id);
+            if artifacts.is_dir() {
+                match std::fs::remove_dir_all(&artifacts) {
+                    Ok(()) => deleted = true,
+                    Err(error) if error.kind() == std::io::ErrorKind::NotFound => {}
+                    Err(error) => {
+                        return Err(error).with_context(|| {
+                            format!("delete session artifacts {}", artifacts.display())
+                        });
+                    }
+                }
+            }
+        } else if let Some(session_dir) = session_dir
+            && self.is_child_artifact_dir(session_dir)
+            && session_dir.is_dir()
+        {
+            match std::fs::remove_dir_all(session_dir) {
                 Ok(()) => deleted = true,
                 Err(error) if error.kind() == std::io::ErrorKind::NotFound => {}
                 Err(error) => {
                     return Err(error).with_context(|| {
-                        format!("delete session artifacts {}", artifacts.display())
+                        format!("delete child session dir {}", session_dir.display())
                     });
                 }
             }
         }
-        if let Err(error) = self.collect_unreferenced_outputs(&output_candidates) {
+
+        if removed_journal && let Err(error) = self.collect_unreferenced_outputs(&output_candidates)
+        {
             tracing::warn!(%error, "output cleanup deferred to preserve session references");
         }
         Ok(deleted)
     }
 
+    /// Unlinks one physical journal while its JournalShared state stays locked
+    /// against same-process appends. The caller holds / will acquire the
+    /// cross-process SessionFileLock lease.
+    fn unlink_journal_file(
+        &self,
+        rollout_path: &Path,
+        output_candidates: &mut Vec<devo_core::tools::output_store::OutputArtifact>,
+    ) -> Result<bool> {
+        let _lease = crate::runtime::session_file_lock::SessionFileLock::acquire(rollout_path)
+            .map_err(|error| anyhow::anyhow!("acquire journal lease before unlink: {error}"))?;
+        let key = crate::journal_path::canonical_journal_key(rollout_path)?;
+        let shared = self.shared_journal(rollout_path)?;
+        let mut guard = shared
+            .state
+            .lock()
+            .expect("rollout journal state mutex poisoned");
+        if !key.exists() {
+            guard.closed = true;
+            guard.write = None;
+            return Ok(false);
+        }
+        output_candidates.extend(devo_core::output_replay::read_output_references(&key)?);
+        let removed = match std::fs::remove_file(&key) {
+            Ok(()) => true,
+            Err(error) if error.kind() == std::io::ErrorKind::NotFound => false,
+            Err(error) => {
+                return Err(error).with_context(|| format!("delete rollout {}", key.display()));
+            }
+        };
+        // Keep the JournalShared (and its local strong Arc) alive with
+        // closed=true. Straggler/new appends through this store hit the same
+        // mutex and fail instead of recreating the root. No second global set.
+        guard.closed = true;
+        guard.write = None;
+        drop(guard);
+        Ok(removed)
+    }
+
+    /// True when `dir` is a strict descendant of `<data_root>/session-artifacts`.
+    /// A root artifact dir (`session-artifacts/<root>`) is not a child dir and
+    /// must only be removed by a root-tree delete.
+    pub(crate) fn is_child_artifact_dir(&self, dir: &Path) -> bool {
+        let artifacts_root = self.data_root.join("session-artifacts");
+        let artifacts_root = std::fs::canonicalize(&artifacts_root).unwrap_or(artifacts_root);
+        let dir = std::fs::canonicalize(dir).unwrap_or_else(|_| dir.to_path_buf());
+        let Ok(relative) = dir.strip_prefix(&artifacts_root) else {
+            return false;
+        };
+        relative.components().count() >= 2
+    }
+
+    #[cfg(test)]
     pub(crate) async fn load_session_from_rollout(
         &self,
         rollout_path: &Path,
         deps: &ServerRuntimeDependencies,
     ) -> Result<RuntimeSession> {
-        self.load_session_from_rollout_with_history(rollout_path, deps, /*history*/ None)
-            .await
+        let mut session_id = None;
+        visit_rollout_lines(rollout_path, "resume", |line| {
+            if session_id.is_none()
+                && let RolloutLine::SessionMeta { session, .. } = line
+            {
+                session_id = Some(session.id);
+            }
+            Ok(())
+        })?;
+        let session_id = session_id.with_context(|| {
+            format!(
+                "missing SessionMeta line in rollout {}",
+                rollout_path.display()
+            )
+        })?;
+        self.load_session_from_rollout_for_session(
+            rollout_path,
+            session_id,
+            deps,
+            /*history*/ None,
+        )
+        .await
     }
 
-    /// [`Self::load_session_from_rollout`] with a caller-provided canonical
-    /// history: hydrate reads the journal once and feeds both the
-    /// active-path scoping here and the downstream restores. `None` performs
-    /// the history read internally (callers that hold no history yet).
-    pub(crate) async fn load_session_from_rollout_with_history(
+    /// Loads one logical session from a journal that may contain many.
+    ///
+    /// `history` must already be scoped to `session_id`; `None` performs the
+    /// scoped read internally.
+    pub(crate) async fn load_session_from_rollout_for_session(
         &self,
         rollout_path: &Path,
+        session_id: SessionId,
         deps: &ServerRuntimeDependencies,
         history: Option<&devo_core::CanonicalHistory>,
     ) -> Result<RuntimeSession> {
         let mut replay = ReplayState::default();
+        let mut deleted_at = None;
         visit_rollout_lines(rollout_path, "resume", |v2| {
+            if v2.session_id() != Some(session_id) {
+                return Ok(());
+            }
+            if let RolloutLine::Internal {
+                entry:
+                    InternalRecord::SessionDeleted {
+                        deleted_at: deleted,
+                        ..
+                    },
+                ..
+            } = &v2
+            {
+                deleted_at = Some(*deleted);
+                return Ok(());
+            }
             replay
                 .apply_rollout_line(v2)
                 .with_context(|| format!("apply v2 line from {}", rollout_path.display()))
         })?;
+        if let Some(deleted_at) = deleted_at {
+            anyhow::bail!("session {session_id} was deleted at {deleted_at} and cannot be resumed");
+        }
         // Captured before `into_runtime_session` consumes the replay state:
         // the path-scoping block below needs it to keep the compacted prompt.
         let compaction_snapshot = replay.latest_compaction_snapshot.clone();
@@ -857,9 +1393,18 @@ impl RolloutStore {
             .into_runtime_session(deps)
             .await
             .with_context(|| format!("replay rollout {}", rollout_path.display()))?;
+        if recovered.summary.session_id() != session_id {
+            anyhow::bail!(
+                "rollout session id mismatch: expected {session_id}, got {}",
+                recovered.summary.session_id()
+            );
+        }
         if let Some(turn) = &recovered.latest_turn {
-            let execution =
-                devo_core::durable_execution::read_execution_replay(rollout_path, &turn.turn_id())?;
+            let execution = devo_core::durable_execution::read_execution_replay_for_session(
+                rollout_path,
+                &turn.turn_id(),
+                &session_id,
+            )?;
             if execution.has_checkpoint {
                 recovered.core_session.lock().await.set_prompt_messages(
                     devo_core::history::response_items_to_messages(&execution.items),
@@ -868,12 +1413,14 @@ impl RolloutStore {
         }
         // Absolute path is actor-owned; Native Session does not expose it.
         recovered.rollout_path = Some(rollout_path.to_path_buf());
+        recovered.summary.session_dir = self.session_dir_for(rollout_path, &session_id);
         // Restrict model context to the active transcript-tree path (root→leaf).
         let owned_history;
         let scoped_history = match history {
             Some(history) => Some(history),
             None => {
-                owned_history = read_canonical_history(rollout_path).ok();
+                owned_history =
+                    devo_core::read_canonical_history_for_session(rollout_path, &session_id).ok();
                 owned_history.as_ref()
             }
         };
@@ -928,9 +1475,13 @@ impl RolloutStore {
     pub(crate) fn workspace_checkpoints_at(
         &self,
         rollout_path: &Path,
+        session_id: &SessionId,
     ) -> Result<Vec<TurnWorkspaceCheckpointRecordedRecord>> {
         let mut checkpoints = Vec::new();
         visit_rollout_lines(rollout_path, "checkpoint read", |v2| {
+            if v2.session_id() != Some(*session_id) {
+                return Ok(());
+            }
             if let RolloutLine::WorkspaceCheckpoint { record, .. } = v2 {
                 checkpoints.push(record);
             }
@@ -959,58 +1510,50 @@ impl RolloutStore {
             .join(format!("{session_id}.jsonl"))
     }
 
-    /// RLM session artifact directory for harness / refine.
-    ///
-    /// Root rollouts live at `sessions/<id>.jsonl`; harness state must not sit
-    /// beside them (that would share one store across all roots). Instead use
-    /// `session-artifacts/<id>/` — the same tree child sessions nest under.
-    /// Nested child rollouts already live under `session-artifacts/…/sub-…/`,
-    /// so their parent directory is the artifact dir.
-    pub(crate) fn rlm_session_dir_for_rollout(rollout_path: &Path) -> Option<PathBuf> {
-        let parent = rollout_path.parent()?;
-        let stem = rollout_path.file_stem()?.to_str()?;
-        if parent.file_name().and_then(|s| s.to_str()) == Some("sessions") {
-            let data_root = parent.parent()?;
-            return Some(data_root.join("session-artifacts").join(stem));
-        }
-        Some(parent.to_path_buf())
+    /// Root session artifact directory for a durable root session.
+    pub(crate) fn root_session_dir(&self, root_id: &SessionId) -> PathBuf {
+        self.data_root
+            .join("session-artifacts")
+            .join(root_id.to_string())
     }
 
-    /// Directory under which the next `sub-xxxxxxxx/` child folder is created.
-    fn nesting_dir_for_parent(
+    /// Deterministic child/grandchild artifact directory under the true root.
+    ///
+    /// New descendants share the root journal, so they must not derive their
+    /// artifact directory from the journal's parent (`sessions/`). The id is
+    /// stable and independent for every child at any depth.
+    pub(crate) fn child_session_dir(&self, root_id: &SessionId, child_id: &SessionId) -> PathBuf {
+        self.root_session_dir(root_id)
+            .join("agents")
+            .join(child_id.to_string())
+    }
+
+    /// Artifact directory for a loaded session, derived from its journal path
+    /// and session id. Used at hydration time when no live spawn computed it.
+    pub(crate) fn session_dir_for(
         &self,
-        parent_rollout_path: Option<&Path>,
-        parent_session_id: &devo_protocol::native::ids::SessionId,
-    ) -> Result<PathBuf> {
-        let Some(parent_rollout_path) = parent_rollout_path else {
-            // Ephemeral parent (no file): still nest under artifacts by parent id.
-            return Ok(self
-                .data_root
-                .join("session-artifacts")
-                .join(parent_session_id.to_string()));
-        };
+        rollout_path: &Path,
+        session_id: &SessionId,
+    ) -> Option<PathBuf> {
+        let canonical = crate::journal_path::canonical_journal_key(rollout_path).ok()?;
+        let parent = canonical.parent()?;
+        let stem = canonical.file_stem()?.to_str()?;
         let sessions_dir = self.data_root.join("sessions");
-        let parent_dir = parent_rollout_path.parent().ok_or_else(|| {
-            anyhow::anyhow!(
-                "parent rollout path has no directory: {}",
-                parent_rollout_path.display()
-            )
-        })?;
-        if parent_dir == sessions_dir {
-            // Root session file → session-artifacts/<root_id>
-            let stem = parent_rollout_path
-                .file_stem()
-                .and_then(|s| s.to_str())
-                .ok_or_else(|| {
-                    anyhow::anyhow!(
-                        "invalid root rollout file name: {}",
-                        parent_rollout_path.display()
-                    )
-                })?;
-            return Ok(self.data_root.join("session-artifacts").join(stem));
+        let sessions_dir = std::fs::canonicalize(&sessions_dir).unwrap_or(sessions_dir);
+        if parent == sessions_dir {
+            if stem == session_id.as_str() {
+                return Some(self.root_session_dir(session_id));
+            }
+            let root_id = SessionId::from_string(stem.to_owned());
+            return Some(self.child_session_dir(&root_id, session_id));
         }
-        // Already under session-artifacts/…/sub-xxx/ → nest further in that dir.
-        Ok(parent_dir.to_path_buf())
+        if stem == session_id.as_str() {
+            // Legacy independent child journal: its parent is the child dir.
+            return Some(parent.to_path_buf());
+        }
+        // A child sharing a non-root journal (legacy branch). Keep the
+        // artifact dir independent of the shared file.
+        Some(parent.join("agents").join(session_id.to_string()))
     }
 
     /// Appends one canonical Native item envelope as a v2 rollout line
@@ -1084,31 +1627,6 @@ impl RolloutStore {
         )
     }
 
-    /// RLM kernel fence outcome at spawn (design doc §5.3): audit trail for
-    /// fenced/downgraded-unfenced kernels. Only downgrades need to be audited,
-    /// but recording fenced spawns keeps the trail complete.
-    pub(crate) fn append_kernel_fence_state(
-        &self,
-        rollout_path: &Path,
-        session_id: SessionId,
-        state: &str,
-    ) -> Result<()> {
-        self.append_rollout_lines(
-            rollout_path,
-            vec![RolloutLine::Internal {
-                v: 2,
-                timestamp: Utc::now(),
-                session_id,
-                turn_id: None,
-                seq: 0,
-                entry: devo_core::InternalRecord::KernelFence {
-                    schema_version: 1,
-                    state: state.to_string(),
-                },
-            }],
-        )
-    }
-
     pub(crate) fn append_usage_record(
         &self,
         rollout_path: &Path,
@@ -1148,7 +1666,13 @@ impl RolloutStore {
         )
     }
 
-    fn append_rollout_lines_with<F>(&self, rollout_path: &Path, build: F) -> Result<()>
+    fn append_rollout_lines_with<F>(
+        &self,
+        rollout_path: &Path,
+        session_id: SessionId,
+        mode: JournalWriteMode,
+        build: F,
+    ) -> Result<()>
     where
         F: FnOnce(&mut WritePathState) -> Result<Vec<RolloutLine>>,
     {
@@ -1156,35 +1680,69 @@ impl RolloutStore {
             std::fs::create_dir_all(parent)
                 .with_context(|| format!("create rollout directory {}", parent.display()))?;
         }
-        let file_lock = {
-            let mut locks = self
-                .file_locks
-                .lock()
-                .expect("rollout file-locks table poisoned");
-            locks
-                .entry(rollout_path.to_path_buf())
-                .or_insert_with(|| Arc::new(StdMutex::new(())))
-                .clone()
-        };
-        let _guard = file_lock.lock().expect("rollout per-file lock poisoned");
-        let mut write_states = self
-            .write_states
+        // Central lease enforcement: every write path takes the same-process
+        // reusable / cross-process exclusive SessionFileLock before the journal
+        // state mutex. Actor callers already hold it; this is a cheap same-
+        // process reacquire, not a second lock scheme.
+        let _lease = crate::runtime::session_file_lock::SessionFileLock::acquire(rollout_path)
+            .map_err(|error| anyhow::anyhow!("acquire journal lease: {error}"))?;
+        let shared = self.shared_journal(rollout_path)?;
+        let mut guard = shared
+            .state
             .lock()
-            .expect("rollout write-state table poisoned");
-        let state = match write_states.get_mut(rollout_path) {
-            Some(state) => state,
-            None => {
-                let state = hydrate_write_state(rollout_path)?;
-                write_states
-                    .entry(rollout_path.to_path_buf())
-                    .or_insert(state)
-            }
-        };
-        let rollout_lines = build(state)?;
-        for line in &rollout_lines {
-            state.write_state.observe_rollout_line(line);
+            .expect("rollout journal state mutex poisoned");
+        if guard.closed {
+            anyhow::bail!("journal {} was deleted", rollout_path.display());
         }
-        self.write_rollout_lines(rollout_path, state, &rollout_lines)
+        // Existence is checked under the same state mutex that unlink holds,
+        // so an ordinary append cannot recreate a journal being deleted.
+        if mode == JournalWriteMode::ExistingOnly && !rollout_path.exists() {
+            anyhow::bail!(
+                "journal {} is missing; refusing to recreate an established journal",
+                rollout_path.display()
+            );
+        }
+        let observed = journal_stamp(rollout_path);
+        let mut state = match guard.write.take() {
+            Some(state) if state.observed == observed => state,
+            _ => hydrate_write_state(rollout_path)?,
+        };
+        // Hydration may repair a crash tail; the rollback length must be the
+        // repaired length, never the pre-repair observed length.
+        let original_len = state.observed.len;
+        let result = (|| -> Result<()> {
+            let rollout_lines = build(&mut state)?;
+            for line in &rollout_lines {
+                if rollout_line_session_id(line) != Some(session_id) {
+                    anyhow::bail!("rollout append batch mixes sessions: expected {session_id}");
+                }
+                if let RolloutLine::SessionMeta { extras, .. } = line {
+                    let merged = merge_session_extras(
+                        state.session_extras.get(&session_id),
+                        extras.as_deref(),
+                    );
+                    state.session_extras.insert(session_id, merged);
+                }
+            }
+            {
+                let session_state = state.session_state_mut(session_id);
+                for line in &rollout_lines {
+                    session_state.observe_rollout_line(line);
+                }
+            }
+            self.write_rollout_lines(rollout_path, &mut state, &rollout_lines)?;
+            state.observed = journal_stamp(rollout_path);
+            Ok(())
+        })();
+        if let Err(error) = result {
+            if journal_stamp(rollout_path).len > original_len {
+                let _ = truncate_rollout(rollout_path, original_len);
+            }
+            guard.write = None;
+            return Err(error);
+        }
+        guard.write = Some(state);
+        Ok(())
     }
 
     pub(crate) fn append_rollout_lines(
@@ -1192,7 +1750,21 @@ impl RolloutStore {
         rollout_path: &Path,
         rollout_lines: Vec<RolloutLine>,
     ) -> Result<()> {
-        self.append_rollout_lines_with(rollout_path, |_| Ok(rollout_lines))
+        let Some(session_id) = rollout_lines.iter().find_map(rollout_line_session_id) else {
+            return Ok(());
+        };
+        if rollout_lines
+            .iter()
+            .any(|line| rollout_line_session_id(line) != Some(session_id))
+        {
+            anyhow::bail!("rollout append batch mixes sessions: expected {session_id}");
+        }
+        self.append_rollout_lines_with(
+            rollout_path,
+            session_id,
+            JournalWriteMode::ExistingOnly,
+            |_| Ok(rollout_lines),
+        )
     }
 
     fn write_rollout_lines(
@@ -1201,6 +1773,8 @@ impl RolloutStore {
         state: &mut WritePathState,
         rollout_lines: &[RolloutLine],
     ) -> Result<()> {
+        let canonical_journal = crate::journal_path::canonical_journal_key(rollout_path)?;
+        let rollout_path = canonical_journal.as_path();
         let mut file = std::fs::OpenOptions::new()
             .create(true)
             .append(true)
@@ -1278,6 +1852,8 @@ pub(crate) fn event_log_rows_for_rollout_line(
     rollout_line: &RolloutLine,
 ) -> Result<Vec<NewEventLogRow>> {
     let timestamp = rollout_line_timestamp(rollout_line);
+    let canonical_journal = crate::journal_path::canonical_journal_key(rollout_path)
+        .with_context(|| format!("resolve canonical journal {}", rollout_path.display()))?;
     let mut rows = Vec::new();
     for derived in events_from_rollout_line(rollout_line) {
         let envelope = EventEnvelope {
@@ -1295,7 +1871,7 @@ pub(crate) fn event_log_rows_for_rollout_line(
             notification: derived.notification,
         };
         rows.push(NewEventLogRow {
-            source_fact_id: source_fact_id(rollout_path, line_index, sub_index),
+            source_fact_id: source_fact_id(&canonical_journal, line_index, sub_index),
             event_kind: derived.event_kind.to_owned(),
             stream_id: derived.stream_id,
             event_id: envelope.meta.event_id.to_string(),
@@ -1323,6 +1899,50 @@ fn rollout_line_timestamp(line: &RolloutLine) -> chrono::DateTime<Utc> {
     }
 }
 
+/// Session attribution for one v2 line. This mirrors the core
+/// `RolloutLine::session_id` contract while the core helper is being landed by
+/// the storage worker; server write-state routing and index grouping use it.
+fn rollout_line_session_id(line: &RolloutLine) -> Option<SessionId> {
+    line.session_id()
+}
+
+fn merge_session_extras(
+    existing: Option<&SessionPersistenceExtras>,
+    incoming: Option<&SessionPersistenceExtras>,
+) -> SessionPersistenceExtras {
+    let mut merged = existing
+        .cloned()
+        .unwrap_or_else(invent_session_persistence_extras);
+    let Some(incoming) = incoming else {
+        return merged;
+    };
+    if incoming.session_context.is_some() {
+        merged.session_context = incoming.session_context.clone();
+    }
+    if !incoming.cli_version.is_empty() {
+        merged.cli_version = incoming.cli_version.clone();
+    }
+    if !incoming.source.is_empty() {
+        merged.source = incoming.source.clone();
+    }
+    if incoming.collaboration_mode.is_some() {
+        merged.collaboration_mode = incoming.collaboration_mode;
+    }
+    if incoming.permission_preset.is_some() {
+        merged.permission_preset = incoming.permission_preset;
+    }
+    if incoming.agent_path.is_some() {
+        merged.agent_path = incoming.agent_path.clone();
+    }
+    if incoming.agent_nickname.is_some() {
+        merged.agent_nickname = incoming.agent_nickname.clone();
+    }
+    if incoming.kernel_snapshot_path.is_some() {
+        merged.kernel_snapshot_path = incoming.kernel_snapshot_path.clone();
+    }
+    merged
+}
+
 /// Walks a rollout JSONL file, skipping blanks and stopping at a crash tail.
 /// Returns whether a truncated final line was seen.
 fn visit_rollout_lines(
@@ -1341,7 +1961,24 @@ fn visit_open_rollout_lines(
     refuse_verb: &str,
     visit: &mut impl FnMut(RolloutLine) -> Result<()>,
 ) -> Result<bool> {
-    let reader = BufReader::new(file);
+    // Snapshot the opened file length so a concurrent append cannot turn an
+    // in-flight truncated tail into a seemingly damaged middle line. Only the
+    // final row of this snapshot may be tolerated as a crash tail.
+    let snapshot_len = file
+        .metadata()
+        .with_context(|| format!("stat rollout file {}", rollout_path.display()))?
+        .len();
+    visit_open_rollout_lines_snapshot(rollout_path, file, snapshot_len, refuse_verb, visit)
+}
+
+fn visit_open_rollout_lines_snapshot(
+    rollout_path: &Path,
+    file: File,
+    snapshot_len: u64,
+    refuse_verb: &str,
+    visit: &mut impl FnMut(RolloutLine) -> Result<()>,
+) -> Result<bool> {
+    let reader = BufReader::new(file.take(snapshot_len));
     let mut lines = reader.lines().enumerate().peekable();
     while let Some((line_index, line)) = lines.next() {
         let line = line.with_context(|| format!("read line from {}", rollout_path.display()))?;
@@ -1452,15 +2089,16 @@ fn truncate_rollout(rollout_path: &Path, keep_len: u64) -> Result<()> {
 /// Fails closed on any damaged or unsupported line: appending onto history
 /// the write state could not fully read would fork the session's history.
 fn hydrate_write_state(rollout_path: &Path) -> Result<WritePathState> {
-    let mut write_state = RolloutWriteState::new();
-    let mut next_line_index = 0u64;
+    let mut state = WritePathState {
+        sessions: HashMap::new(),
+        session_extras: HashMap::new(),
+        next_line_index: 0,
+        observed: JournalStamp::missing(),
+    };
     let file = match File::open(rollout_path) {
         Ok(file) => file,
         Err(error) if error.kind() == std::io::ErrorKind::NotFound => {
-            return Ok(WritePathState {
-                write_state,
-                next_line_index,
-            });
+            return Ok(state);
         }
         Err(error) => {
             return Err(error)
@@ -1468,8 +2106,19 @@ fn hydrate_write_state(rollout_path: &Path) -> Result<WritePathState> {
         }
     };
     let saw_crash_tail = visit_open_rollout_lines(rollout_path, file, "append", &mut |v2| {
-        write_state.observe_rollout_line(&v2);
-        next_line_index += 1;
+        if let Some(session_id) = rollout_line_session_id(&v2) {
+            if let RolloutLine::SessionMeta { extras, .. } = &v2 {
+                let merged =
+                    merge_session_extras(state.session_extras.get(&session_id), extras.as_deref());
+                state.session_extras.insert(session_id, merged);
+            }
+            state
+                .sessions
+                .entry(session_id)
+                .or_default()
+                .observe_rollout_line(&v2);
+        }
+        state.next_line_index += 1;
         Ok(())
     })?;
     if saw_crash_tail {
@@ -1478,10 +2127,10 @@ fn hydrate_write_state(rollout_path: &Path) -> Result<WritePathState> {
         // is closed (Windows cannot truncate an open file).
         discard_rollout_crash_tail(rollout_path)?;
     }
-    Ok(WritePathState {
-        write_state,
-        next_line_index,
-    })
+    // Refresh after the optional repair: the pre-repair length must never
+    // become the rollback length for a later failed append.
+    state.observed = journal_stamp(rollout_path);
+    Ok(state)
 }
 
 /// Resume hydrate state. Session/Turn lines are stored as Native (+ extras).
@@ -2352,6 +3001,7 @@ impl ReplayState {
             agent_path: replayed.agent_path.clone(),
             agent_nickname: replayed.agent_nickname.clone(),
             agent_role: replayed.agent_role(),
+            session_dir: None,
             prompt_token_estimate: core_session.prompt_token_estimate,
             last_query_usage: self.latest_query_usage.clone(),
             last_query_total_tokens,
@@ -2912,12 +3562,33 @@ pub(crate) fn apply_turn_item(
     }
 }
 
-fn read_rollout_index_fields(path: &Path) -> Result<(SessionRecord, chrono::DateTime<Utc>)> {
+/// One session recovered from a journal's `SessionMeta` and per-session
+/// activity lines. A shared journal returns one entry per logical session.
+pub(crate) struct IndexedJournalSession {
+    pub(crate) record: SessionRecord,
+    pub(crate) last_activity_at: chrono::DateTime<Utc>,
+}
+
+/// One journal scan: live session entries plus ids whose latest lifecycle
+/// marker is a tombstone. Tombstoned ids stay visible to the index rebuild so
+/// stale SQLite rows can be deleted.
+pub(crate) struct RolloutIndexScan {
+    pub(crate) sessions: Vec<IndexedJournalSession>,
+    pub(crate) deleted: std::collections::HashSet<SessionId>,
+}
+
+/// Reads every logical session header in one rollout journal.
+///
+/// The index is a rebuildable cache, so unreadable or unmappable lines are
+/// skipped. Per-session activity is computed from that session's own lines;
+/// title updates fold into the matching session only.
+pub(crate) fn read_rollout_index_scan(path: &Path) -> Result<RolloutIndexScan> {
     let file = File::open(path).with_context(|| format!("open rollout file {}", path.display()))?;
     let reader = BufReader::new(file);
-    let mut session: Option<SessionRecord> = None;
-    let mut last_activity_at: Option<chrono::DateTime<Utc>> = None;
-    // The index is a rebuildable cache, so unreadable or unmappable lines are skipped.
+    let mut records: HashMap<SessionId, SessionRecord> = HashMap::new();
+    let mut session_extras: HashMap<SessionId, SessionPersistenceExtras> = HashMap::new();
+    let mut activity: HashMap<SessionId, chrono::DateTime<Utc>> = HashMap::new();
+    let mut deleted: std::collections::HashSet<SessionId> = std::collections::HashSet::new();
     for line in reader.lines() {
         let line = line.with_context(|| format!("read line from {}", path.display()))?;
         if line.trim().is_empty() {
@@ -2926,32 +3597,46 @@ fn read_rollout_index_fields(path: &Path) -> Result<(SessionRecord, chrono::Date
         let Ok(line) = parse_rollout_line(&line) else {
             continue;
         };
+        let Some(session_id) = rollout_line_session_id(&line) else {
+            continue;
+        };
         let timestamp = rollout_line_timestamp(&line);
-        last_activity_at =
-            Some(last_activity_at.map_or(timestamp, |current| current.max(timestamp)));
+        activity
+            .entry(session_id)
+            .and_modify(|current| *current = (*current).max(timestamp))
+            .or_insert(timestamp);
         match line {
             RolloutLine::SessionMeta {
                 session: native,
                 extras,
                 ..
             } => {
-                let Ok(mut record) = session_record_from_native(&native, extras.as_deref()) else {
+                let merged =
+                    merge_session_extras(session_extras.get(&session_id), extras.as_deref());
+                session_extras.insert(session_id, merged.clone());
+                let Ok(mut record) = session_record_from_native(&native, Some(&merged)) else {
                     continue;
                 };
                 if record.last_activity_at.is_none() {
                     record.last_activity_at = Some(record.created_at);
                 }
-                session = Some(record);
+                records.insert(record.id, record);
             }
             RolloutLine::SessionTitleUpdated {
                 timestamp, title, ..
             } => {
-                if let Some(record) = session.as_mut() {
+                if let Some(record) = records.get_mut(&session_id) {
                     record.title = Some(title);
                     record.title_state =
                         SessionTitleState::Final(SessionTitleFinalSource::ExplicitCreate);
                     record.updated_at = timestamp;
                 }
+            }
+            RolloutLine::Internal {
+                entry: InternalRecord::SessionDeleted { .. },
+                ..
+            } => {
+                deleted.insert(session_id);
             }
             RolloutLine::Turn { .. }
             | RolloutLine::Item { .. }
@@ -2965,12 +3650,32 @@ fn read_rollout_index_fields(path: &Path) -> Result<(SessionRecord, chrono::Date
         }
     }
 
-    let session = session
-        .with_context(|| format!("missing SessionMeta line in rollout {}", path.display()))?;
-    let last_activity_at = last_activity_at
-        .or(session.last_activity_at)
-        .unwrap_or(session.created_at);
-    Ok((session, last_activity_at))
+    for session_id in &deleted {
+        records.remove(session_id);
+    }
+    let mut indexed = Vec::with_capacity(records.len());
+    for (session_id, record) in records {
+        let last_activity_at = activity
+            .get(&session_id)
+            .copied()
+            .or(record.last_activity_at)
+            .unwrap_or(record.created_at);
+        indexed.push(IndexedJournalSession {
+            record,
+            last_activity_at,
+        });
+    }
+    indexed.sort_by_key(|entry| entry.record.id.to_string());
+    Ok(RolloutIndexScan {
+        sessions: indexed,
+        deleted,
+    })
+}
+
+/// Live sessions only. Use [`read_rollout_index_scan`] when stale DB rows must
+/// also be removed for tombstones.
+pub(crate) fn read_rollout_index_sessions(path: &Path) -> Result<Vec<IndexedJournalSession>> {
+    Ok(read_rollout_index_scan(path)?.sessions)
 }
 
 pub(crate) fn session_index_row_from_record(
@@ -3020,26 +3725,6 @@ fn collect_rollout_files(root: &Path, files: &mut Vec<PathBuf>) -> Result<()> {
         }
     }
     Ok(())
-}
-
-/// Creates `sub-<8 hex chars>/` under `parent_dir` (RLM child dirs).
-fn create_unique_sub_dir(parent_dir: &Path) -> Result<PathBuf> {
-    for _ in 0..100 {
-        let name = format!("sub-{}", &uuid::Uuid::new_v4().simple().to_string()[..8]);
-        let child_dir = parent_dir.join(name);
-        match std::fs::create_dir(&child_dir) {
-            Ok(()) => return Ok(child_dir),
-            Err(error) if error.kind() == std::io::ErrorKind::AlreadyExists => continue,
-            Err(error) => {
-                return Err(error)
-                    .with_context(|| format!("create child session dir {}", child_dir.display()));
-            }
-        }
-    }
-    anyhow::bail!(
-        "unable to create unique subagent session directory under {}",
-        parent_dir.display()
-    )
 }
 
 /// Builds path-first turn persistence extras from Native-first runtime state.

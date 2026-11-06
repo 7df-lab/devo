@@ -229,13 +229,8 @@ pub fn run_windows_sandbox_capture_with_filesystem_overrides(
     }
     let capability_roots =
         legacy_session_capability_roots(&permissions, &current_dir, &env_map, devo_home);
-    let security = prepare_legacy_session_security(
-        uses_write_capabilities,
-        devo_home,
-        cwd,
-        capability_roots,
-        /*session_credential_sid*/ None,
-    )?;
+    let security =
+        prepare_legacy_session_security(uses_write_capabilities, devo_home, cwd, capability_roots)?;
     allow_null_device_for_workspace_write(uses_write_capabilities);
     apply_legacy_session_acl_rules(
         &permissions,

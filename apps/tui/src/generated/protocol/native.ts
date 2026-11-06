@@ -490,9 +490,11 @@ model: ModelBinding, settings: SessionSettings,
  */
 gitInfo?: GitInfo | null, preview: string, lastActivityAt: string,
 /**
- * Current on-disk size of the durable JSONL transcript. This is a
- * list-view cache: servers may omit it from non-list responses or when
- * the session has no readable rollout file.
+ * Current on-disk size of the owning physical journal, when known.
+ * Root sessions report the shared journal size; a child sharing that
+ * journal reports `None` so the tree size is never presented as the
+ * child's transcript size. This is a list-view cache: servers may omit
+ * it from non-list responses or when no readable rollout exists.
  */
 transcriptSizeBytes?: bigint | null,
 /**

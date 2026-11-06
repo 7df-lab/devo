@@ -3,7 +3,6 @@ import { credentialSetParamsFromDesktopOAuth } from "./provider-oauth-credential
 
 describe("credentialSetParamsFromDesktopOAuth", () => {
 	/**
-	 * Trace: L2-DES-AUTH-001
 	 * Verifies: Desktop OAuth login persists via Native credential/set oauth params.
 	 */
 	test("maps OAuth credential into credential/set params", () => {

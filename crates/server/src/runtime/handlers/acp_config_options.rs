@@ -129,14 +129,17 @@ impl ServerRuntime {
                             "session actor unavailable".to_string(),
                         )
                     })?;
-                if let Some(rollout_path) = updated_snapshot.rollout_path.as_ref()
-                    && let Err(error) = self.rollout_store.append_session_meta_at(
+                if let Some(rollout_path) = updated_snapshot.rollout_path.as_ref() {
+                    let _lease =
+                        crate::runtime::session_file_lock::SessionFileLock::acquire(rollout_path)
+                            .map_err(|error| (AcpErrorCode::ServerError, error.to_string()))?;
+                    if let Err(error) = self.rollout_store.append_session_meta_at(
                         rollout_path,
                         &updated_snapshot.summary.native,
                         /*extras*/ None,
-                    )
-                {
-                    return Err((AcpErrorCode::ServerError, error.to_string()));
+                    ) {
+                        return Err((AcpErrorCode::ServerError, error.to_string()));
+                    }
                 }
 
                 (
@@ -202,14 +205,17 @@ impl ServerRuntime {
                             "session actor unavailable".to_string(),
                         )
                     })?;
-                if let Some(rollout_path) = updated_snapshot.rollout_path.as_ref()
-                    && let Err(error) = self.rollout_store.append_session_meta_at(
+                if let Some(rollout_path) = updated_snapshot.rollout_path.as_ref() {
+                    let _lease =
+                        crate::runtime::session_file_lock::SessionFileLock::acquire(rollout_path)
+                            .map_err(|error| (AcpErrorCode::ServerError, error.to_string()))?;
+                    if let Err(error) = self.rollout_store.append_session_meta_at(
                         rollout_path,
                         &updated_snapshot.summary.native,
                         /*extras*/ None,
-                    )
-                {
-                    return Err((AcpErrorCode::ServerError, error.to_string()));
+                    ) {
+                        return Err((AcpErrorCode::ServerError, error.to_string()));
+                    }
                 }
 
                 (

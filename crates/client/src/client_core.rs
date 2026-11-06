@@ -1365,7 +1365,6 @@ mod tests {
     use super::SERVER_RESPONSE_TIMEOUT;
     use super::ServerResponseWait;
 
-    /// Trace: L2-DES-TUI-001, L1-REQ-TUI-010
     /// Verifies: stdio initialize waits for a cold-started server instead of
     /// the default 10s RPC budget used by later requests.
     #[test]

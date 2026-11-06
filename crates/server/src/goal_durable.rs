@@ -328,6 +328,9 @@ impl GoalDurableStore {
                 Err(error) => return Err(anyhow::anyhow!("parse goal rollout: {error}")),
             };
             let line = parsed;
+            if line.session_id() != Some(session_id) {
+                continue;
+            }
             if let devo_core::RolloutLine::Internal {
                 entry:
                     devo_core::InternalRecord::GoalState {
@@ -361,6 +364,8 @@ impl GoalDurableStore {
         let rollout_path = index
             .rollout_path
             .context("session rollout path missing while persisting goal")?;
+        let _lease = crate::runtime::session_file_lock::SessionFileLock::acquire(&rollout_path)
+            .map_err(|error| anyhow::anyhow!("acquire goal journal lock: {error}"))?;
         let goal = goal.map(serde_json::to_value).transpose()?;
         rollout_store.append_goal_state(&rollout_path, session_id, goal)?;
         Ok(true)
@@ -479,7 +484,6 @@ mod tests {
 
     #[tokio::test]
     async fn goal_durable_store_replays_current_goal_projection() {
-        // Trace: L2-DES-GOAL-001
         let temp = TempDir::new().expect("temp dir");
         let store = GoalDurableStore::new(temp.path().to_path_buf());
         let session_id = SessionId::new();
@@ -525,7 +529,6 @@ mod tests {
 
     #[tokio::test]
     async fn goal_durable_store_replays_clear_as_no_goal() {
-        // Trace: L2-DES-GOAL-001
         let temp = TempDir::new().expect("temp dir");
         let store = GoalDurableStore::new(temp.path().to_path_buf());
         let session_id = SessionId::new();
@@ -547,7 +550,6 @@ mod tests {
 
     #[tokio::test]
     async fn goal_durable_store_replays_paused_reason_as_blocker() {
-        // Trace: L2-DES-GOAL-001
         let temp = TempDir::new().expect("temp dir");
         let store = GoalDurableStore::new(temp.path().to_path_buf());
         let session_id = SessionId::new();

@@ -18,7 +18,7 @@ export type HostRequestHandlers = Record<string, HostRequestHandler>;
 /** Extra import labels advertised to the model alongside the Python skills (inert on the Native path). */
 export const DEFAULT_RLM_EXTRA_IMPORT_LABELS: string[] = [];
 
-/** One file edit, captured from a `application/vnd.devo.diff+json` display payload. */
+/** One file edit, captured from a `application/vnd.diff+json` display payload. */
 export interface KernelDiffDisplay {
 	path: string;
 	oldStr: string;

@@ -46,7 +46,6 @@ mod tests {
         }
     }
 
-    /// Trace: prompt-payload audit (R27)
     /// Verifies: no sentence is stated twice verbatim — the "Assumptions-first
     /// execution" section used to repeat the grouping rule and the
     /// no-reaction-means-accepted rule that the "Use reasonable assumptions"

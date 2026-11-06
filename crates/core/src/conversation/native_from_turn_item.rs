@@ -139,7 +139,6 @@ mod tests {
     use super::*;
     use crate::conversation::TextItem;
 
-    /// Trace: L2-DES-APP-008
     /// Verifies: empty assistant TurnItems are omitted from Native history.
     #[test]
     fn omits_empty_agent_message() {
@@ -153,7 +152,6 @@ mod tests {
         );
     }
 
-    /// Trace: L2-DES-APP-008
     /// Verifies: user TurnItems become Native UserMessage items.
     #[test]
     fn user_message_projects_to_native() {

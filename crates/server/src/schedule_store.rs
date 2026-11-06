@@ -259,9 +259,9 @@ impl ScheduleStore {
         if job.status != ScheduleJobStatus::Active
             || job.last_run_at != claimed.last_run_at
             || job.updated_at != claimed.updated_at
-            || !job
+            || job
                 .next_run_at
-                .is_none_or(|next_run_at| next_run_at > retry_at)
+                .is_some_and(|next_run_at| next_run_at <= retry_at)
         {
             return Ok(());
         }
@@ -413,7 +413,6 @@ mod tests {
 
     use super::*;
 
-    /// Trace: L2-DES-APP-012
     /// Verifies: schedule upsert/list/delete round-trips through schedules.json.
     #[test]
     fn upsert_list_delete_round_trip() {

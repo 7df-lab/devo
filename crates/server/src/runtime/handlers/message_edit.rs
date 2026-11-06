@@ -54,10 +54,20 @@ impl ServerRuntime {
         let target_item_id = devo_protocol::ItemId::from(params.item_id.as_str());
 
         if params.expected_revision > 0 {
-            match self
+            let revision = match self
                 .native_item_revision(legacy_session_id, params.item_id.as_str())
                 .await
             {
+                Ok(revision) => revision,
+                Err(error) => {
+                    return self.error_response(
+                        request_id,
+                        ProtocolErrorCode::InternalError,
+                        error,
+                    );
+                }
+            };
+            match revision {
                 Some(revision) if revision == params.expected_revision => {}
                 Some(_) => {
                     return self.error_response(
@@ -158,26 +168,36 @@ impl ServerRuntime {
     }
 
     /// Current revision of one item in the rollout-backed canonical history.
-    async fn native_item_revision(&self, session_id: SessionId, item_id: &str) -> Option<u32> {
-        let rollout_path = self
+    async fn native_item_revision(
+        &self,
+        session_id: SessionId,
+        item_id: &str,
+    ) -> Result<Option<u32>, String> {
+        let indexed_path = self
             .deps
             .db
             .get_session_index(&session_id)
             .ok()
             .flatten()
-            .and_then(|index| index.rollout_path)
-            .or_else(|| {
-                self.rollout_store
-                    .find_rollout_by_session_id(&session_id)
-                    .ok()
-                    .flatten()
-            })?;
-        let history = devo_core::read_canonical_history(&rollout_path).ok()?;
-        history
+            .and_then(|index| index.rollout_path);
+        let Some(rollout_path) = self
+            .rollout_store
+            .resolve_session_journal(
+                &session_id,
+                indexed_path.as_deref(),
+                crate::persistence::JournalVisibility::Live,
+            )
+            .map_err(|error| format!("resolve session journal: {error}"))?
+        else {
+            return Ok(None);
+        };
+        let history = devo_core::read_canonical_history_for_session(&rollout_path, &session_id)
+            .map_err(|error| format!("read session history: {error}"))?;
+        Ok(history
             .items
             .iter()
             .find(|item| item.id.as_str() == item_id)
-            .map(|item| item.revision)
+            .map(|item| item.revision))
     }
 
     /// Interrupts the session's active turn before message edit takes the

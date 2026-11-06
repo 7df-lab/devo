@@ -901,7 +901,6 @@ mod tests {
         )
     }
 
-    /// Trace: L2-DES-SAFETY-002
     /// Verifies: sandbox escalation fields are advertised on exec_command, shell_command, and bash.
     #[test]
     fn registry_adds_permission_fields_for_shell_family_command_tools() {
@@ -914,7 +913,6 @@ mod tests {
         }
     }
 
-    /// Trace: L2-DES-SAFETY-002
     /// Verifies: write_stdin and non-command tools do not advertise sandbox escalation fields.
     #[test]
     fn registry_omits_permission_fields_for_non_spawn_tools() {

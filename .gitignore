@@ -2,6 +2,7 @@
 .DS_Store
 .claude
 __pycache__/
+.venv/
 node_modules
 /apps/desktop/out/
 /apps/desktop/resources/runtime/

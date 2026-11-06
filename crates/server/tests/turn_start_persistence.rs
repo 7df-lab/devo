@@ -131,6 +131,7 @@ async fn turn_start_append_failure_does_not_launch_model_turn_or_leave_session_a
     let (connection_id, _notifications_rx) = initialize_connection(&runtime).await?;
     let session = start_session(&runtime, connection_id, data_root.path()).await?;
     let rollout_path = rollout_path_for_session(data_root.path(), &session);
+    let original_journal = std::fs::read(&rollout_path)?;
 
     std::fs::remove_file(&rollout_path)?;
     std::fs::create_dir(&rollout_path)?;
@@ -164,6 +165,10 @@ async fn turn_start_append_failure_does_not_launch_model_turn_or_leave_session_a
     );
 
     std::fs::remove_dir(&rollout_path)?;
+    // ExistingOnly intentionally refuses to recreate a missing established
+    // journal. Restore the exact valid journal to model a transient write
+    // failure, then retry.
+    std::fs::write(&rollout_path, &original_journal)?;
     let successful_start = runtime
         .handle_incoming(
             connection_id,
@@ -196,7 +201,6 @@ async fn turn_start_append_failure_does_not_launch_model_turn_or_leave_session_a
     Ok(())
 }
 
-/// Trace: L2-DES-SERVER-title-generation
 /// Verifies: turn/start returns with a heuristic title before LLM polish;
 /// polish waits until after the turn merges and may park on a slow provider.
 #[tokio::test]
@@ -379,7 +383,6 @@ async fn message_edit_previous_accepts_skip_restore_and_replaces_prompt_branch()
     Ok(())
 }
 
-/// Trace: L2-DES-APP-003, L1-REQ-CONV-005
 /// Verifies: omitted workspace_restore_policy uses default safe restore and emits restore lifecycle records/events.
 #[tokio::test]
 async fn message_edit_previous_default_safe_restore_records_and_broadcasts() -> Result<()> {

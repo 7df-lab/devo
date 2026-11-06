@@ -6,7 +6,7 @@ from unittest.mock import patch
 
 from rlm.windows_shell import find_windows_bash
 
-bash_module = import_module("rlm.bash")
+bash_module = import_module("rlm.local_bash")
 
 
 class WindowsShellTests(unittest.TestCase):

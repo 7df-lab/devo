@@ -136,7 +136,7 @@ pub(crate) mod refine_planner;
 mod session_actor;
 mod session_cache;
 mod session_deletion;
-mod session_file_lock;
+pub(crate) mod session_file_lock;
 mod session_interactive;
 mod session_title;
 mod skills;
@@ -175,6 +175,9 @@ pub struct ServerRuntime {
     pub(crate) usage_ledger: UsageLedger,
     /// Per-session actor handles; map lock must not be held across await.
     sessions: Mutex<HashMap<SessionId, SessionHandle>>,
+    /// Synchronous lifecycle admission: active spawn/resume reservations and
+    /// in-progress delete trees. Guards hold reservations across the operation.
+    lifecycle_admission: Arc<std::sync::Mutex<session_deletion::LifecycleAdmission>>,
     /// Interactive approval and user-input waits outside session actors.
     session_interactive: SessionInteractiveLanes,
     /// New-style (`subscription/*`) subscriptions keyed by subscription id
@@ -421,6 +424,9 @@ impl ServerRuntime {
             goal_durable_store,
             usage_ledger,
             sessions: Mutex::new(HashMap::new()),
+            lifecycle_admission: Arc::new(std::sync::Mutex::new(
+                session_deletion::LifecycleAdmission::default(),
+            )),
             session_interactive: SessionInteractiveLanes::default(),
             event_subscriptions: Mutex::new(HashMap::new()),
             sessions_by_cwd_subscriptions: std::sync::atomic::AtomicUsize::new(0),

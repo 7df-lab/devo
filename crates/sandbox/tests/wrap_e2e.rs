@@ -34,6 +34,7 @@ fn bwrap_usable() -> bool {
 #[cfg(target_os = "linux")]
 fn bwrap_user_namespace_unavailable(stderr: &str) -> bool {
     [
+        "bwrap: No permissions to create a new namespace",
         "bwrap: unshare user ns: Permission denied",
         "bwrap: unshare user ns: Operation not permitted",
         "bwrap: unshare user ns: No space left on device",
@@ -43,6 +44,23 @@ fn bwrap_user_namespace_unavailable(stderr: &str) -> bool {
     ]
     .iter()
     .any(|message| stderr.contains(message))
+}
+
+#[test]
+#[cfg(target_os = "linux")]
+fn namespace_unavailability_does_not_hide_other_bwrap_failures() {
+    for (stderr, expected) in [
+        (
+            "bwrap: No permissions to create a new namespace, likely because the kernel does not allow non-privileged user namespaces.",
+            true,
+        ),
+        ("bwrap: unshare user ns: Operation not permitted", true),
+        ("bwrap: setting up uid map: Permission denied", true),
+        ("bwrap: Can't bind mount /denied: Permission denied", false),
+        ("No permissions to create a new namespace", false),
+    ] {
+        pretty_assertions::assert_eq!(bwrap_user_namespace_unavailable(stderr), expected);
+    }
 }
 
 fn temp_workspace(tag: &str, profile_toml: &str) -> PathBuf {

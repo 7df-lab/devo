@@ -1554,8 +1554,9 @@ mod tests {
     #[test]
     fn unix_symlinked_roots_preserve_runtime_paths() {
         let cwd = TempDir::new().expect("tempdir");
-        let real_root = cwd.path().join("real");
-        let link_root = cwd.path().join("link");
+        let cwd_path = cwd.path().canonicalize().expect("canonicalize tempdir");
+        let real_root = cwd_path.join("real");
+        let link_root = cwd_path.join("link");
         fs::create_dir_all(real_root.join("blocked")).expect("create blocked");
         fs::create_dir_all(real_root.join(".codex")).expect("create .codex");
         fs::create_dir_all(real_root.join(".agents")).expect("create .agents");
@@ -1568,12 +1569,12 @@ mod tests {
             path_entry(link_blocked.clone(), FileSystemAccessMode::Deny),
         ]);
         assert_eq!(
-            policy.get_unreadable_roots_with_cwd(cwd.path()),
+            policy.get_unreadable_roots_with_cwd(cwd_path.as_path()),
             vec![link_blocked.clone()]
         );
         assert_single_writable_root(
             &policy,
-            cwd.path(),
+            cwd_path.as_path(),
             &link_root,
             &[
                 link_root.join(".agents"),
@@ -1609,7 +1610,7 @@ mod tests {
             &[],
         );
 
-        let root = cwd.path().join("root");
+        let root = cwd_path.join("root");
         let decoy = root.join("decoy-legacy-agent");
         fs::create_dir_all(&decoy).expect("create decoy");
         symlink_dir(&decoy, &root.join(".codex")).expect("create .codex symlink");
@@ -1624,7 +1625,7 @@ mod tests {
                 root.clone(),
                 FileSystemAccessMode::Write,
             )]),
-            cwd.path(),
+            cwd_path.as_path(),
             &root,
             &[expected_codex],
             &[abs(&decoy.canonicalize().expect("canonicalize decoy"))],
@@ -1640,12 +1641,13 @@ mod tests {
             ("alias-root", true),
         ] {
             let cwd = TempDir::new().expect("tempdir");
-            let real_root = cwd.path().join("real");
-            let link_root = cwd.path().join("link");
+            let cwd_path = cwd.path().canonicalize().expect("canonicalize tempdir");
+            let real_root = cwd_path.join("real");
+            let link_root = cwd_path.join("link");
             let decoy = if symlink_under_root {
                 real_root.join(decoy_parent)
             } else {
-                cwd.path().join(decoy_parent)
+                cwd_path.join(decoy_parent)
             };
             let linked_private = real_root.join("linked-private");
             if symlink_under_root && decoy_parent == "alias-root" {
@@ -1686,7 +1688,7 @@ mod tests {
             };
             assert_single_writable_root(
                 &policy,
-                cwd.path(),
+                cwd_path.as_path(),
                 &expected_root,
                 std::slice::from_ref(&link_private),
                 &excluded,

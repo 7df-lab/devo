@@ -16,25 +16,6 @@ pub(crate) fn prepare_launch(req: &WindowsSandboxRequest) -> anyhow::Result<Wind
     let mut inner_command = vec![req.shell_program.clone()];
     inner_command.extend(req.shell_args.iter().cloned());
     inner_command.push(req.command.clone());
-    prepare_direct_argv_launch_with_env(req, inner_command, env::vars().collect())
-}
-
-/// Direct-argv variant for callers that exec a specific argv (not a shell
-/// command string), e.g. the RLM kernel host spawning `python -m rlm.repl`.
-pub(crate) fn prepare_direct_argv_launch(
-    req: &WindowsSandboxRequest,
-    inner_command: Vec<String>,
-) -> anyhow::Result<WindowsSandboxLaunch> {
-    prepare_direct_argv_launch_with_env(req, inner_command, env::vars().collect())
-}
-
-/// A caller-supplied inherited environment is necessary for the kernel: its
-/// credential filter must run BEFORE we serialize this map in wrapper argv.
-pub(crate) fn prepare_direct_argv_launch_with_env(
-    req: &WindowsSandboxRequest,
-    inner_command: Vec<String>,
-    inherited_env: Vec<(String, String)>,
-) -> anyhow::Result<WindowsSandboxLaunch> {
     let permission_profile = permission_profile_from_request(req)?;
     let workspace_roots = workspace_roots_from_request(req)?;
     let command_cwd = workspace_roots
@@ -44,7 +25,7 @@ pub(crate) fn prepare_direct_argv_launch_with_env(
     let deny_read_paths_override = deny_read_overrides(req)?;
     let devo_home = find_devo_home()?;
 
-    let env_map = compose_launch_env(inherited_env, &req.env_extra);
+    let env_map = compose_launch_env(env::vars().collect(), &req.env_extra);
     let current_exe = env::current_exe()?;
     // Library integration tests live in Cargo's `debug/deps` directory and do
     // not implement the CLI's sandbox early-dispatch hook. Use the adjacent
@@ -62,11 +43,8 @@ pub(crate) fn prepare_direct_argv_launch_with_env(
         workspace_roots.as_slice(),
         &env_map,
         &permission_profile,
-        // Network-restricted fences need the elevated backend: the legacy
-        // restricted token carries no account-level firewall, so outbound
-        // stays open (verified: fenced kernel reached 1.1.1.1:443). The
-        // elevated backend runs the child as DevoSandboxOffline, whose
-        // firewall rules block non-loopback outbound.
+        // Network restriction requires the elevated backend's account-level
+        // firewall; a legacy restricted token alone does not block outbound.
         if req.restrict_network {
             WindowsSandboxLevel::Elevated
         } else {
@@ -81,7 +59,6 @@ pub(crate) fn prepare_direct_argv_launch_with_env(
         deny_read_paths_override.as_slice(),
         &[],
         devo_home.as_path(),
-        req.session_credential_sid.as_deref(),
     );
 
     Ok(WindowsSandboxLaunch {
@@ -96,8 +73,7 @@ fn compose_launch_env(
     extra_env: &[(String, String)],
 ) -> HashMap<String, String> {
     let mut env_map = inherited_env.into_iter().collect::<HashMap<_, _>>();
-    // Explicit kernel overrides remain intentional, including values whose
-    // names resemble secrets. The kernel host filters only inherited values.
+    // Explicit child overrides take precedence over inherited values.
     for (key, value) in extra_env {
         env_map.insert(key.clone(), value.clone());
     }
@@ -107,19 +83,23 @@ fn compose_launch_env(
 #[cfg(test)]
 mod tests {
     use super::compose_launch_env;
+    use pretty_assertions::assert_eq;
 
     #[test]
-    fn filtered_kernel_env_is_not_restored_from_parent() {
-        // `OPENAI_API_KEY` was filtered out by the kernel before this boundary.
+    fn explicit_child_env_overrides_inherited_values() {
         let env_map = compose_launch_env(
-            vec![("PATH".into(), r"C:\Python".into())],
-            &[("PYTHONUTF8".into(), "1".into())],
+            vec![
+                ("PATH".into(), r"C:\Python".into()),
+                ("MODE".into(), "old".into()),
+            ],
+            &[("MODE".into(), "new".into())],
         );
-        assert_eq!(env_map.get("PATH").map(String::as_str), Some(r"C:\Python"));
-        assert_eq!(env_map.get("PYTHONUTF8").map(String::as_str), Some("1"));
-        assert!(!env_map.contains_key("OPENAI_API_KEY"));
-        // The exact map is also serialized into wrapper --env-json argv.
-        let serialized = serde_json::to_string(&env_map).expect("env JSON");
-        assert!(!serialized.contains("OPENAI_API_KEY"));
+        assert_eq!(
+            env_map,
+            std::collections::HashMap::from([
+                ("PATH".into(), r"C:\Python".into()),
+                ("MODE".into(), "new".into()),
+            ])
+        );
     }
 }

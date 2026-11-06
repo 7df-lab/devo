@@ -5,6 +5,12 @@ use process_wrap::tokio::ChildWrapper;
 pub(super) struct PipeChild(pub(super) Box<dyn ChildWrapper>);
 
 impl PipeChild {
+    /// OS process id of the direct child while it is still live.
+    #[cfg(unix)]
+    pub(super) fn process_id(&self) -> Option<u32> {
+        self.0.id()
+    }
+
     pub(super) fn terminate_tree(&mut self) {
         #[cfg(unix)]
         if let Some(pid) = self.0.id() {

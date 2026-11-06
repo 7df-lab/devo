@@ -543,7 +543,6 @@ fn command_prefix_rejects_complex_shell_features() {
     }
 }
 
-/// Trace: L2-DES-SAFETY-002
 /// Verifies: prefix_rule on exec_command, shell_command, and bash overrides the derived command prefix.
 #[test]
 fn shell_family_prefix_rule_overrides_derived_prefix() {
@@ -563,7 +562,6 @@ fn shell_family_prefix_rule_overrides_derived_prefix() {
     }
 }
 
-/// Trace: L2-DES-SAFETY-002
 /// Verifies: a banned prefix_rule is not offered for exec_command, shell_command, or bash.
 #[test]
 fn shell_family_banned_prefix_rule_is_not_offered() {
@@ -690,7 +688,6 @@ fn command_pattern_match_cases() {
     }
 }
 
-/// Trace: L2-DES-SAFETY-002
 /// Verifies: sandbox permission inputs are classified into explicit tiers.
 #[test]
 fn explicit_sandbox_permissions_are_classified() {
@@ -748,7 +745,6 @@ fn explicit_sandbox_permissions_are_classified() {
     );
 }
 
-/// Trace: L2-DES-SAFETY-002
 /// Verifies: an all-unchanged additional_permissions object (codex-style
 /// clients always echo the full object) is semantically Default, not an
 /// error — with `use_default` mode, no mode at all, or an empty object.
@@ -781,7 +777,6 @@ fn all_unchanged_additional_permissions_are_default() {
     }
 }
 
-/// Trace: L2-DES-SAFETY-002
 /// Verifies: malformed or ambiguous sandbox requests fail closed.
 #[test]
 fn sandbox_permission_request_rejects_invalid_inputs() {
@@ -805,7 +800,6 @@ fn sandbox_permission_request_rejects_invalid_inputs() {
     }
 }
 
-/// Trace: L2-DES-SAFETY-002
 /// Verifies: permission-cache keys use normalized tiers and path sets.
 #[test]
 fn sandbox_permission_cache_key_normalizes_additional_permissions() {
@@ -950,15 +944,79 @@ fn sandbox_runtime(
     (runtime, attempts)
 }
 
+#[test]
+fn shell_permission_request_uses_resolved_child_cwd() {
+    let workspace = tempfile::tempdir().expect("workspace");
+    let child = workspace.path().join("child");
+    std::fs::create_dir(&child).expect("child cwd");
+    let outside = tempfile::tempdir().expect("outside cwd");
+    let attempts = Arc::new(std::sync::Mutex::new(Vec::new()));
+    let mut builder = ToolRegistryBuilder::new();
+    let shell = shell_spec();
+    register(
+        &mut builder,
+        "shell_command",
+        Arc::new(SandboxAwareTool {
+            spec: shell.clone(),
+            attempts,
+            succeed_outside: true,
+        }),
+        shell,
+    );
+    let mut runtime = ToolRuntime::new_without_permissions(Arc::new(builder.build()));
+    runtime.context.cwd = workspace.path().to_path_buf();
+
+    let relative = runtime
+        .permission_request_for_call(
+            &call(
+                "relative",
+                "shell_command",
+                serde_json::json!({"command": "echo hi", "workdir": "child"}),
+            ),
+            "shell_command",
+        )
+        .expect("relative request")
+        .expect("mutating shell request");
+    assert_eq!(
+        relative.cwd,
+        std::fs::canonicalize(&child).expect("child canonical")
+    );
+
+    let absolute = runtime
+        .permission_request_for_call(
+            &call(
+                "absolute",
+                "shell_command",
+                serde_json::json!({
+                    "command": "echo hi",
+                    "workdir": outside.path().to_str().expect("utf8 outside path")
+                }),
+            ),
+            "shell_command",
+        )
+        .expect("absolute request")
+        .expect("mutating shell request");
+    assert_eq!(
+        absolute.cwd,
+        std::fs::canonicalize(outside.path()).expect("outside canonical")
+    );
+
+    let invalid = runtime.permission_request_for_call(
+        &call(
+            "invalid",
+            "shell_command",
+            serde_json::json!({"command": "echo hi", "workdir": "missing"}),
+        ),
+        "shell_command",
+    );
+    assert!(
+        invalid.is_err(),
+        "missing workdir must fail before approval"
+    );
+}
+
 #[tokio::test]
 async fn execute_single_retries_without_sandbox_when_already_approved() {
-    if devo_sandbox::SANDBOX_ENFORCEMENT_TEMPORARILY_DISABLED {
-        // The router never profiles spawns while the sandbox is disabled, so
-        // the SANDBOX_DENIED retry ladder cannot be exercised. Kept for the
-        // post-revert contract.
-        eprintln!("skip: OS sandbox temporarily disabled");
-        return;
-    }
     let permission_checks = Arc::new(std::sync::atomic::AtomicUsize::new(0));
     let permission_checks_for_checker = Arc::clone(&permission_checks);
     let attempts = Arc::new(std::sync::Mutex::new(Vec::new()));
@@ -1008,11 +1066,6 @@ async fn execute_single_retries_without_sandbox_when_already_approved() {
 
 #[tokio::test]
 async fn execute_single_does_not_silent_unsandbox_without_approval() {
-    if devo_sandbox::SANDBOX_ENFORCEMENT_TEMPORARILY_DISABLED {
-        // See execute_single_retries_without_sandbox_when_already_approved.
-        eprintln!("skip: OS sandbox temporarily disabled");
-        return;
-    }
     let (runtime, attempts) = sandbox_runtime(false, false, "workspace", None);
     let result = runtime
         .execute_single(
@@ -1038,11 +1091,6 @@ async fn execute_single_does_not_silent_unsandbox_without_approval() {
 
 #[tokio::test]
 async fn execute_single_skips_unsandbox_retry_when_profile_has_deny_read() {
-    if devo_sandbox::SANDBOX_ENFORCEMENT_TEMPORARILY_DISABLED {
-        // See execute_single_retries_without_sandbox_when_already_approved.
-        eprintln!("skip: OS sandbox temporarily disabled");
-        return;
-    }
     let temp = tempfile::tempdir().expect("tempdir");
     let workspace = temp.path();
     let config_dir = workspace.join(".devo");

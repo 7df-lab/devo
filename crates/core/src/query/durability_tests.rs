@@ -55,7 +55,6 @@ impl ToolHandler for CountedTool {
     }
 }
 
-/// Trace: L2-DES-CONTEXT-004. Persistence failure never causes automatic retry.
 #[tokio::test]
 async fn journal_failures_stop_dispatch_or_model_continuation() {
     for (fault, expected_calls) in [(Fault::Intent, 0), (Fault::Outcome, 1)] {
@@ -109,7 +108,6 @@ async fn journal_failures_stop_dispatch_or_model_continuation() {
     }
 }
 
-/// Trace: L2-DES-CONTEXT-004. Finalization after a crash does not call a model.
 #[tokio::test]
 async fn acknowledged_final_response_only_finishes_bookkeeping() {
     let messages = vec![

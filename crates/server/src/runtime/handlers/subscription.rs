@@ -514,7 +514,7 @@ impl ServerRuntime {
         let stream_id = selector_stream_id(selector);
         match selector {
             StreamSelector::Session { session_id } => {
-                let Some(rollout_path) = self.snapshot_rollout_path(session_id).await else {
+                let Some(rollout_path) = self.snapshot_rollout_path(session_id).await? else {
                     return Ok(None);
                 };
                 let history = self
@@ -587,24 +587,29 @@ impl ServerRuntime {
     async fn snapshot_rollout_path(
         &self,
         session_id: &NativeSessionId,
-    ) -> Option<std::path::PathBuf> {
+    ) -> Result<Option<std::path::PathBuf>, String> {
         let session_id = *session_id;
         if let Some(stream) = self.active_stream_state(session_id).await
             && let Ok(stream) = stream.try_lock()
             && let Some(inline) = stream.turn_inline.as_ref()
             && let Some(path) = inline.rollout_path.clone()
         {
-            return Some(path);
+            return Ok(Some(path));
         }
-        if let Ok(Some(index)) = self.deps.db.get_session_index(&session_id)
-            && let Some(path) = index.rollout_path
-        {
-            return Some(path);
-        }
-        self.rollout_store
-            .find_rollout_by_session_id(&session_id)
+        let indexed_path = self
+            .deps
+            .db
+            .get_session_index(&session_id)
             .ok()
             .flatten()
+            .and_then(|index| index.rollout_path);
+        self.rollout_store
+            .resolve_session_journal(
+                &session_id,
+                indexed_path.as_deref(),
+                crate::persistence::JournalVisibility::Live,
+            )
+            .map_err(|error| format!("resolve session journal: {error}"))
     }
 
     /// Queue source for session snapshots: the session's in-memory turn

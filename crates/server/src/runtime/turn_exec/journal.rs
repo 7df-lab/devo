@@ -5,7 +5,7 @@ use std::sync::Arc;
 
 use async_trait::async_trait;
 use devo_core::durable_execution::{
-    ExecutionRecord, ExecutionReplay, ToolIntentJournal, read_execution_replay,
+    ExecutionRecord, ExecutionReplay, ToolIntentJournal, read_execution_replay_for_session,
 };
 use devo_core::{InternalRecord, RolloutLine};
 use devo_protocol::native::ids::{SessionId, TurnId};
@@ -43,7 +43,11 @@ impl ToolIntentJournal for RolloutToolJournal {
     async fn replay(&self) -> anyhow::Result<ExecutionReplay> {
         let path = self.path.clone();
         let turn_id = self.turn_id;
-        tokio::task::spawn_blocking(move || read_execution_replay(&path, &turn_id)).await?
+        let session_id = self.session_id;
+        tokio::task::spawn_blocking(move || {
+            read_execution_replay_for_session(&path, &turn_id, &session_id)
+        })
+        .await?
     }
 
     async fn commit(&self, record: ExecutionRecord) -> anyhow::Result<()> {
@@ -51,9 +55,12 @@ impl ToolIntentJournal for RolloutToolJournal {
         if committed.is_none() {
             let path = self.path.clone();
             let turn_id = self.turn_id;
+            let session_id = self.session_id;
             *committed = Some(
-                tokio::task::spawn_blocking(move || read_execution_replay(&path, &turn_id))
-                    .await??,
+                tokio::task::spawn_blocking(move || {
+                    read_execution_replay_for_session(&path, &turn_id, &session_id)
+                })
+                .await??,
             );
         }
         let previous = committed.as_ref().expect("journal initialized");

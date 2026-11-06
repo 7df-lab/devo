@@ -17,6 +17,7 @@ async fn execute_shell_command_non_tty_sends_progress() {
             output_capture: None,
             command: cmd.to_string(),
             workdir: std::env::current_dir().unwrap_or_default(),
+            sandbox_workspace: None,
             description: "test".into(),
             shell_override: None,
             tty: false,
@@ -24,6 +25,7 @@ async fn execute_shell_command_non_tty_sends_progress() {
             timeout_ms: 5000,
             yield_time_ms: 100,
             max_output_tokens: 100,
+            progress_limit_bytes: None,
             sandbox_profile: None,
             sandbox_permission_overlay: None,
         },
@@ -47,6 +49,7 @@ async fn execute_shell_command_progress_none_does_not_crash() {
             output_capture: None,
             command: cmd.to_string(),
             workdir: std::env::current_dir().unwrap_or_default(),
+            sandbox_workspace: None,
             description: "test".into(),
             shell_override: None,
             tty: false,
@@ -54,6 +57,7 @@ async fn execute_shell_command_progress_none_does_not_crash() {
             timeout_ms: 5000,
             yield_time_ms: 100,
             max_output_tokens: 100,
+            progress_limit_bytes: None,
             sandbox_profile: None,
             sandbox_permission_overlay: None,
         },
@@ -80,6 +84,7 @@ async fn execute_shell_command_cancels_non_tty_process() {
             output_capture: None,
             command: "echo cancelled_output; sleep 5; echo should_not_print".to_string(),
             workdir: std::env::current_dir().unwrap_or_default(),
+            sandbox_workspace: None,
             description: "cancel test".into(),
             shell_override: None,
             tty: false,
@@ -87,6 +92,7 @@ async fn execute_shell_command_cancels_non_tty_process() {
             timeout_ms: 10_000,
             yield_time_ms: 100,
             max_output_tokens: 100,
+            progress_limit_bytes: None,
             sandbox_profile: None,
             sandbox_permission_overlay: None,
         },
@@ -132,6 +138,7 @@ async fn execute_shell_command_cancels_tty_process() {
             output_capture: None,
             command: "echo cancelled_output; sleep 5; echo should_not_print".to_string(),
             workdir: std::env::current_dir().unwrap_or_default(),
+            sandbox_workspace: None,
             description: "pty cancel test".into(),
             shell_override: Some("bash".to_string()),
             tty: true,
@@ -139,6 +146,7 @@ async fn execute_shell_command_cancels_tty_process() {
             timeout_ms: 10_000,
             yield_time_ms: 100,
             max_output_tokens: 100,
+            progress_limit_bytes: None,
             sandbox_profile: None,
             sandbox_permission_overlay: None,
         },
@@ -177,6 +185,7 @@ async fn execute_shell_command_pty_times_out_reports_decision_instant_duration()
             output_capture: None,
             command: "echo before_timeout; sleep 5".to_string(),
             workdir: std::env::current_dir().unwrap_or_default(),
+            sandbox_workspace: None,
             description: "pty timeout test".into(),
             shell_override: Some("bash".to_string()),
             tty: true,
@@ -184,6 +193,7 @@ async fn execute_shell_command_pty_times_out_reports_decision_instant_duration()
             timeout_ms: 200,
             yield_time_ms: 50,
             max_output_tokens: 100,
+            progress_limit_bytes: None,
             sandbox_profile: None,
             sandbox_permission_overlay: None,
         },
@@ -247,6 +257,7 @@ async fn aborting_tty_command_kills_pty_child() {
             output_capture: None,
             command,
             workdir: temp_dir.path().to_path_buf(),
+            sandbox_workspace: None,
             description: "abort PTY test".into(),
             shell_override: Some("bash".to_string()),
             tty: true,
@@ -254,6 +265,7 @@ async fn aborting_tty_command_kills_pty_child() {
             timeout_ms: 10_000,
             yield_time_ms: 100,
             max_output_tokens: 100,
+            progress_limit_bytes: None,
             sandbox_profile: None,
             sandbox_permission_overlay: None,
         },
@@ -286,6 +298,7 @@ async fn execute_shell_command_success_metadata_is_mixed() {
             output_capture: None,
             command: "echo metadata_test".to_string(),
             workdir: std::env::current_dir().unwrap_or_default(),
+            sandbox_workspace: None,
             description: "metadata test".into(),
             shell_override: None,
             tty: false,
@@ -293,6 +306,7 @@ async fn execute_shell_command_success_metadata_is_mixed() {
             timeout_ms: 5000,
             yield_time_ms: 100,
             max_output_tokens: 100,
+            progress_limit_bytes: None,
             sandbox_profile: None,
             sandbox_permission_overlay: None,
         },
@@ -341,6 +355,7 @@ async fn execute_shell_command_error_output_is_text_only() {
             output_capture: None,
             command: "exit 7".to_string(),
             workdir: std::env::current_dir().unwrap_or_default(),
+            sandbox_workspace: None,
             description: "error test".into(),
             shell_override: None,
             tty: false,
@@ -348,6 +363,7 @@ async fn execute_shell_command_error_output_is_text_only() {
             timeout_ms: 5000,
             yield_time_ms: 100,
             max_output_tokens: 100,
+            progress_limit_bytes: None,
             sandbox_profile: None,
             sandbox_permission_overlay: None,
         },
@@ -392,6 +408,7 @@ async fn execute_shell_command_pipe_times_out() {
             output_capture: None,
             command: "echo before_timeout; sleep 5".to_string(),
             workdir: std::env::current_dir().unwrap_or_default(),
+            sandbox_workspace: None,
             description: "timeout test".into(),
             shell_override: None,
             tty: false,
@@ -399,6 +416,7 @@ async fn execute_shell_command_pipe_times_out() {
             timeout_ms: 200,
             yield_time_ms: 50,
             max_output_tokens: 100,
+            progress_limit_bytes: None,
             sandbox_profile: None,
             sandbox_permission_overlay: None,
         },
@@ -450,11 +468,25 @@ fn macos_pipe_and_pty_launch_plans_wrap_via_sandbox_exec() {
     for (label, plan) in [
         (
             "pipe",
-            SandboxLaunchPlan::prepare_pipe(Some("wrapdeny"), None, &workspace, &shell, "echo hi"),
+            SandboxLaunchPlan::prepare_pipe(
+                Some("wrapdeny"),
+                None,
+                &workspace,
+                &workspace,
+                &shell,
+                "echo hi",
+            ),
         ),
         (
             "pty",
-            SandboxLaunchPlan::prepare_pty(Some("wrapdeny"), None, &workspace, &shell, "echo hi"),
+            SandboxLaunchPlan::prepare_pty(
+                Some("wrapdeny"),
+                None,
+                &workspace,
+                &workspace,
+                &shell,
+                "echo hi",
+            ),
         ),
     ] {
         let plan = plan.unwrap_or_else(|error| panic!("{label} prepare failed: {error}"));
@@ -477,7 +509,7 @@ fn macos_pipe_and_pty_launch_plans_wrap_via_sandbox_exec() {
 fn windows_inactive_profile_prepare_pipe_builds_direct_command() {
     let workdir = std::env::current_dir().unwrap_or_default();
     let shell = resolve_shell(None, false);
-    let plan = SandboxLaunchPlan::prepare_pipe(None, None, &workdir, &shell, "echo hi")
+    let plan = SandboxLaunchPlan::prepare_pipe(None, None, &workdir, &workdir, &shell, "echo hi")
         .expect("inactive profile should prepare");
     assert!(matches!(plan.wrap(), devo_sandbox::SandboxWrap::None));
     let _cmd = plan.build_tokio_command(&shell, "echo hi");
@@ -488,7 +520,7 @@ fn windows_inactive_profile_prepare_pipe_builds_direct_command() {
 fn windows_inactive_profile_prepare_pty_builds_builder() {
     let workdir = std::env::current_dir().unwrap_or_default();
     let shell = resolve_shell(None, false);
-    let plan = SandboxLaunchPlan::prepare_pty(None, None, &workdir, &shell, "echo hi")
+    let plan = SandboxLaunchPlan::prepare_pty(None, None, &workdir, &workdir, &shell, "echo hi")
         .expect("inactive profile should prepare");
     assert!(matches!(plan.wrap(), devo_sandbox::SandboxWrap::None));
     let _builder = plan.build_pty_command_builder(&shell, "echo hi");
@@ -610,4 +642,41 @@ fn merge_streams_combines_stdout_and_stderr() {
 #[test]
 fn merge_streams_no_output() {
     assert_eq!(super::pipe::merge_streams("", ""), "");
+}
+
+#[test]
+fn resolve_shell_dirs_keeps_workspace_trusted_for_relative_and_absolute_cwd() {
+    let workspace = tempfile::tempdir().expect("workspace");
+    let nested = workspace.path().join("nested");
+    std::fs::create_dir(&nested).expect("nested cwd");
+    let outside = tempfile::tempdir().expect("outside cwd");
+    let workspace_canonical = std::fs::canonicalize(workspace.path()).expect("workspace canonical");
+    let nested_canonical = std::fs::canonicalize(&nested).expect("nested canonical");
+    let outside_canonical = std::fs::canonicalize(outside.path()).expect("outside canonical");
+
+    let relative = super::resolve_shell_dirs(workspace.path(), Some("nested"))
+        .expect("relative workdir resolves");
+    assert_eq!(relative.workspace, workspace_canonical);
+    assert_eq!(relative.cwd, nested_canonical);
+
+    let absolute = super::resolve_shell_dirs(
+        workspace.path(),
+        Some(outside.path().to_str().expect("utf8 outside path")),
+    )
+    .expect("absolute workdir resolves");
+    assert_eq!(absolute.workspace, workspace_canonical);
+    assert_eq!(absolute.cwd, outside_canonical);
+}
+
+#[test]
+fn requested_workdir_rejects_non_string_values() {
+    assert_eq!(super::requested_workdir(&serde_json::json!({})), Ok(None));
+    assert_eq!(
+        super::requested_workdir(&serde_json::json!({"workdir": "child"})),
+        Ok(Some("child"))
+    );
+    assert_eq!(
+        super::requested_workdir(&serde_json::json!({"workdir": 42})),
+        Err("workdir must be a string".to_string())
+    );
 }

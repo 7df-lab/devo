@@ -1,7 +1,7 @@
 use devo_protocol::approx_bytes_for_tokens;
 use devo_protocol::approx_tokens_from_byte_count;
 use std::collections::HashMap;
-use std::path::Path;
+use std::path::{Path, PathBuf};
 use std::sync::Arc;
 use std::sync::Mutex;
 use std::sync::atomic::{AtomicBool, AtomicI32, Ordering};
@@ -163,6 +163,9 @@ pub struct SandboxExecutionOptions {
     pub sandbox_profile: Option<String>,
     /// Per-invocation permissions merged into the named profile.
     pub sandbox_overlay: Option<SandboxPermissionOverlay>,
+    /// Trusted session workspace used for profile/overlay resolution.
+    /// `None` preserves legacy callers by falling back to the execution cwd.
+    pub sandbox_workspace: Option<PathBuf>,
 }
 
 impl UnifiedExecProcess {
@@ -197,6 +200,7 @@ impl UnifiedExecProcess {
                 output_capture: None,
                 sandbox_profile,
                 sandbox_overlay: None,
+                sandbox_workspace: None,
             },
         )
         .await
@@ -211,29 +215,29 @@ impl UnifiedExecProcess {
         tty: bool,
         sandbox: SandboxExecutionOptions,
     ) -> Result<(Self, broadcast::Receiver<Vec<u8>>), String> {
-        let SandboxExecutionOptions {
-            output_capture,
-            sandbox_profile,
-            sandbox_overlay,
-        } = sandbox;
+        let mut sandbox = sandbox;
+        let output_capture = sandbox.output_capture.take();
+        let sandbox_workspace = sandbox
+            .sandbox_workspace
+            .clone()
+            .unwrap_or_else(|| cwd.to_path_buf());
         let shell_spec = resolve_shell(shell, login);
         let command = command_for_shell(cmd, &shell_spec);
         let mut args = shell_spec.args.clone();
         args.push(command);
-        let env = unified_exec_env(cwd, sandbox_profile.as_deref());
+        let env = unified_exec_env(cwd, &sandbox_workspace, sandbox.sandbox_profile.as_deref());
 
         let spawned = if tty {
             spawn_pty_with_sandbox_wrap(
                 &shell_spec.program,
                 &args,
                 cwd,
+                &sandbox,
                 &env,
                 TerminalSize {
                     rows: PTY_ROWS,
                     cols: PTY_COLS,
                 },
-                sandbox_profile.as_deref(),
-                sandbox_overlay.as_ref(),
             )
             .await?
         } else {
@@ -245,8 +249,9 @@ impl UnifiedExecProcess {
                 /*arg0*/ &None,
                 &[],
                 SandboxProcessOptions {
-                    sandbox_profile,
-                    sandbox_overlay,
+                    sandbox_profile: sandbox.sandbox_profile,
+                    sandbox_overlay: sandbox.sandbox_overlay,
+                    sandbox_workspace,
                 },
             )
             .await
@@ -275,8 +280,12 @@ impl UnifiedExecProcess {
             shell,
             login,
             size,
-            sandbox_profile,
-            None,
+            SandboxExecutionOptions {
+                output_capture: None,
+                sandbox_profile,
+                sandbox_overlay: None,
+                sandbox_workspace: None,
+            },
         )
         .await
     }
@@ -287,24 +296,26 @@ impl UnifiedExecProcess {
         shell: Option<&str>,
         login: bool,
         size: Option<TerminalSize>,
-        sandbox_profile: Option<String>,
-        sandbox_overlay: Option<SandboxPermissionOverlay>,
+        sandbox: SandboxExecutionOptions,
     ) -> Result<(Self, broadcast::Receiver<Vec<u8>>), String> {
+        let sandbox_workspace = sandbox
+            .sandbox_workspace
+            .clone()
+            .unwrap_or_else(|| cwd.to_path_buf());
         let shell_spec = resolve_shell(shell, login);
         let args = interactive_shell_args(&shell_spec.program, login);
-        let env = unified_exec_env(cwd, sandbox_profile.as_deref());
+        let env = unified_exec_env(cwd, &sandbox_workspace, sandbox.sandbox_profile.as_deref());
 
         let spawned = spawn_pty_with_sandbox_wrap(
             &shell_spec.program,
             &args,
             cwd,
+            &sandbox,
             &env,
             size.unwrap_or(TerminalSize {
                 rows: PTY_ROWS,
                 cols: PTY_COLS,
             }),
-            sandbox_profile.as_deref(),
-            sandbox_overlay.as_ref(),
         )
         .await?;
 
@@ -435,17 +446,17 @@ async fn spawn_pty_with_sandbox_wrap(
     program: &str,
     args: &[String],
     cwd: &Path,
+    sandbox: &SandboxExecutionOptions,
     env: &HashMap<String, String>,
     size: TerminalSize,
-    sandbox_profile: Option<&str>,
-    sandbox_overlay: Option<&SandboxPermissionOverlay>,
 ) -> Result<SpawnedProcess, String> {
+    let sandbox_workspace = sandbox.sandbox_workspace.as_deref().unwrap_or(cwd);
     let wrap = devo_sandbox::wrap_command_for_profile_with_overlay(
-        sandbox_profile,
-        cwd,
+        sandbox.sandbox_profile.as_deref(),
+        sandbox_workspace,
         devo_sandbox::WrapMode::PtyOnly,
         &devo_sandbox::SandboxLogger::new(),
-        sandbox_overlay,
+        sandbox.sandbox_overlay.as_ref(),
     )
     .map_err(|error| format!("failed to set up sandbox: {error}"))?;
     let (program, args) = match &wrap {
@@ -474,7 +485,11 @@ async fn spawn_pty_with_sandbox_wrap(
     Ok(spawned)
 }
 
-fn unified_exec_env(cwd: &Path, sandbox_profile: Option<&str>) -> HashMap<String, String> {
+fn unified_exec_env(
+    _cwd: &Path,
+    sandbox_workspace: &Path,
+    sandbox_profile: Option<&str>,
+) -> HashMap<String, String> {
     let mut env = std::env::vars().collect::<HashMap<_, _>>();
     for (key, value) in UNIFIED_EXEC_ENV {
         env.insert(key.to_string(), value.to_string());
@@ -483,11 +498,13 @@ fn unified_exec_env(cwd: &Path, sandbox_profile: Option<&str>) -> HashMap<String
         env.insert("PYTHONUTF8".to_string(), "1".to_string());
     }
     #[cfg(unix)]
-    for (key, value) in devo_sandbox::proxy_env_for_sandbox_profile(sandbox_profile, cwd) {
+    for (key, value) in
+        devo_sandbox::proxy_env_for_sandbox_profile(sandbox_profile, sandbox_workspace)
+    {
         env.insert(key, value);
     }
     #[cfg(not(unix))]
-    let _ = (cwd, sandbox_profile);
+    let _ = (_cwd, sandbox_workspace, sandbox_profile);
     env
 }
 
@@ -1036,6 +1053,44 @@ mod tests {
         assert!(
             output.output.contains("Hello, Alice"),
             "missing greeting in output: {:?}",
+            output.output
+        );
+    }
+
+    #[cfg(unix)]
+    #[tokio::test]
+    async fn pipe_spawn_uses_requested_cwd_with_distinct_sandbox_workspace() {
+        let cwd = tempfile::tempdir().expect("cwd");
+        let workspace = tempfile::tempdir().expect("workspace");
+        let expected = std::fs::canonicalize(cwd.path()).expect("canonical cwd");
+        let (proc, mut rx) = UnifiedExecProcess::spawn_with_sandbox_overlay(
+            1,
+            "pwd",
+            cwd.path(),
+            /*shell*/ None,
+            /*login*/ false,
+            /*tty*/ false,
+            SandboxExecutionOptions {
+                output_capture: None,
+                sandbox_profile: Some("workspace".to_string()),
+                sandbox_overlay: None,
+                sandbox_workspace: Some(workspace.path().to_path_buf()),
+            },
+        )
+        .await
+        .expect("spawn with distinct workspace");
+
+        let output = collect_output(&mut rx, &proc, 5_000, 1_000).await;
+        assert_eq!(output.exit_code, Some(0));
+        assert!(
+            output.output.trim().ends_with(
+                expected
+                    .file_name()
+                    .expect("cwd basename")
+                    .to_string_lossy()
+                    .as_ref()
+            ),
+            "child cwd did not match requested cwd: {}",
             output.output
         );
     }

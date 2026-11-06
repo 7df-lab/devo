@@ -4550,6 +4550,7 @@ async fn metadata_update_auto_refine_settings_reach_live_actor() -> Result<()> {
         .runtime
         .native_session_snapshot(session_id)
         .await
+        .expect("session snapshot result")
         .expect("session snapshot");
     assert_eq!(snapshot.settings.auto_refine_enabled, Some(true));
     assert_eq!(snapshot.settings.auto_refine_turn_interval, Some(2));
@@ -6374,21 +6375,24 @@ async fn native_task_start_agent_spawns_child_session() -> Result<()> {
     let child_rollout = child_index
         .rollout_path
         .expect("durable child must have rollout_path");
-    let rel = child_rollout
-        .strip_prefix(env.cwd())
-        .expect("child under data root");
-    let parts: Vec<_> = rel
-        .iter()
-        .map(|s| s.to_string_lossy().into_owned())
-        .collect();
-    assert_eq!(parts[0], "session-artifacts");
-    assert_eq!(parts[1], session_id.to_string());
+    let root_journal = env
+        .cwd()
+        .join("sessions")
+        .join(format!("{session_id}.jsonl"));
+    assert_eq!(child_rollout, root_journal);
+    let child_dir = env
+        .cwd()
+        .join("session-artifacts")
+        .join(session_id.to_string())
+        .join("agents")
+        .join(child_session_id.to_string());
+    assert!(child_dir.is_dir(), "child artifact dir must exist");
     assert!(
-        parts[2].starts_with("sub-") && parts[2].len() == 12,
-        "expected sub-xxxxxxxx, got {}",
-        parts[2]
+        !child_dir
+            .with_file_name(format!("{child_session_id}.jsonl"))
+            .exists(),
+        "child must not have its own journal"
     );
-    assert_eq!(parts[3], format!("{child_session_id}.jsonl"));
     Ok(())
 }
 

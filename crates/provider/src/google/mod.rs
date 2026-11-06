@@ -337,7 +337,6 @@ mod tests {
 
     use super::*;
 
-    /// Trace: L2-DES-MODEL-002
     /// Verifies: Google requests use the v1beta model endpoint and API-key header.
     #[test]
     fn google_request_uses_model_url_and_api_key_header() {

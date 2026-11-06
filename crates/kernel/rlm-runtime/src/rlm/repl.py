@@ -29,7 +29,7 @@ from collections.abc import Awaitable, Callable
 from typing import Any
 
 from ._snapshot_files import create_snapshot_temp
-from .bash import _kill_live_handles
+from .local_bash import _kill_live_handles
 
 PROTOCOL_VERSION = 3
 
@@ -51,6 +51,7 @@ class _CellExecution:
     def __init__(self) -> None:
         self.finished = asyncio.Event()
         self.owner: asyncio.Task[Any] | None = None
+        self.bash_admissions: list[asyncio.Future[None]] = []
 
 
 # Asyncio tasks copy cell context at creation, so detached tasks retain their
@@ -114,6 +115,13 @@ def current_cell_completion_context() -> tuple[asyncio.Event, asyncio.Task[Any] 
     if execution is None:
         return None
     return execution.finished, execution.owner
+
+
+def register_bash_admission(admission: asyncio.Future[None]) -> None:
+    """Keep the creating cell alive until its scheduled host start is admitted."""
+    execution = _current_cell_execution.get()
+    if execution is not None and execution.owner is asyncio.current_task():
+        execution.bash_admissions.append(admission)
 
 
 def active_cell_task() -> asyncio.Task[Any] | None:
@@ -539,11 +547,24 @@ def _compile_cell(code: str, filename: str) -> tuple[list[types.CodeType], bool]
 
 async def _run_codes(codes: list[types.CodeType], ns: dict[str, Any]) -> Any:
     value: Any = None
-    for code_obj in codes:
-        value = eval(code_obj, ns)  # noqa: S307 - executing the model's cell is the runtime's job
-        if code_obj.co_flags & inspect.CO_COROUTINE:
-            value = await value
-    return value
+    try:
+        for code_obj in codes:
+            value = eval(code_obj, ns)  # noqa: S307 - executing the model's cell is the runtime's job
+            if code_obj.co_flags & inspect.CO_COROUTINE:
+                value = await value
+        return value
+    finally:
+        execution = _current_cell_execution.get()
+        if execution is not None and execution.bash_admissions:
+            # The owner must remain live, not merely the protocol request: that
+            # live owner is the capability used to tag a host start with cell_id.
+            outcomes = await asyncio.gather(
+                *(asyncio.shield(admission) for admission in execution.bash_admissions),
+                return_exceptions=True,
+            )
+            for outcome in outcomes:
+                if isinstance(outcome, BaseException):
+                    raise outcome
 
 
 async def _run_guarded(task: asyncio.Task[Any], rid: str) -> tuple[str, Any, dict[str, Any] | None]:

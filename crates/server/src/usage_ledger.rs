@@ -87,6 +87,19 @@ impl UsageLedger {
             estimated_cost: None,
             recorded_at: Utc::now(),
         };
+        let _lease =
+            match crate::runtime::session_file_lock::SessionFileLock::acquire(&rollout_path) {
+                Ok(lease) => lease,
+                Err(error) => {
+                    warn!(
+                        session_id = %context.session_id,
+                        purpose = ?context.call.purpose,
+                        %error,
+                        "failed to acquire usage journal lock"
+                    );
+                    return;
+                }
+            };
         if let Err(error) =
             self.rollout_store
                 .append_usage_record(&rollout_path, context.session_id, record)

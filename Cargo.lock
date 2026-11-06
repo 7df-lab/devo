@@ -1557,10 +1557,7 @@ name = "devo-kernel"
 version = "0.2.16"
 dependencies = [
  "anyhow",
- "devo-sandbox",
  "devo-util-paths",
- "devo-util-process",
- "devo-windows-sandbox",
  "dunce",
  "futures",
  "libc",
@@ -1570,6 +1567,7 @@ dependencies = [
  "tempfile",
  "thiserror 2.0.18",
  "tokio",
+ "tokio-util",
  "tracing",
  "uuid",
 ]

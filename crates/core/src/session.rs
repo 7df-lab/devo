@@ -546,7 +546,6 @@ mod tests {
 
     #[test]
     fn goal_context_prompt_escapes_untrusted_objective_xml() {
-        // Trace: L2-DES-GOAL-001
         let state = SessionGoalState::new(active_thread_goal(
             "finish <goal> & report \"done\"",
             Some(100),
@@ -561,7 +560,6 @@ mod tests {
 
     #[test]
     fn goal_context_prompt_does_not_fabricate_default_budget() {
-        // Trace: L2-DES-GOAL-001
         let state = SessionGoalState::new(active_thread_goal("finish goal", None));
 
         let prompt = state.context_prompt().expect("active goal prompt");
@@ -572,7 +570,6 @@ mod tests {
 
     #[test]
     fn plan_mode_session_suppresses_goal_context_prompt() {
-        // Trace: L2-DES-GOAL-001
         let mut session = SessionState::new(SessionConfig::default(), std::env::temp_dir());
         session.set_active_goal(active_thread_goal("plan should not pursue goal", None));
         session.collaboration_mode = CollaborationMode::Plan;

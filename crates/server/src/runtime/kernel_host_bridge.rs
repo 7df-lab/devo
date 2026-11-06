@@ -21,11 +21,10 @@ use super::ServerRuntime;
 use devo_core::McpManager;
 use devo_core::tools::contracts::ToolBudgets;
 mod shell;
-pub(crate) use shell::handle_bash;
+pub(crate) use shell::{handle_bash, handle_bash_start};
 
 use devo_core::tools::handlers::{
-    EditHandler, PlanHandler, QuestionHandler, ShellCommandHandler, WebFetchHandler,
-    WebSearchHandler, WriteHandler,
+    EditHandler, PlanHandler, QuestionHandler, WebFetchHandler, WebSearchHandler, WriteHandler,
 };
 use devo_core::tools::{
     ClientFilesystem, FileReadLedger, PermissionChecker, SandboxPermissionRequest, ToolAgentScope,
@@ -52,6 +51,7 @@ pub(crate) struct HostBridge {
     pub file_read_ledger: Arc<FileReadLedger>,
     pub sandbox_profile: Option<String>,
     pub cancel_token: CancellationToken,
+    pub kernel_lifetime: Option<CancellationToken>,
     pub mcp_manager: Option<Arc<dyn McpManager>>,
     pub agent_scope: ToolAgentScope,
     pub local_web_search: Option<Value>,
@@ -80,6 +80,7 @@ impl HostBridge {
             file_read_ledger: Arc::new(FileReadLedger::new()),
             sandbox_profile: None,
             cancel_token: CancellationToken::new(),
+            kernel_lifetime: None,
             mcp_manager: None,
             agent_scope: ToolAgentScope::Parent,
             local_web_search: None,

@@ -658,7 +658,6 @@ mod tests {
         assert_eq!(message.content.len(), 1);
     }
 
-    /// Trace: L2-DES-CONTEXT-001
     /// Verifies: Turn context diffs include collaboration-mode changes without full mode prompts.
     #[test]
     fn turn_context_diff_reports_collaboration_mode_changes_without_prompt() {

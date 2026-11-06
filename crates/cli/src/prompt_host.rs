@@ -24,6 +24,26 @@ pub(crate) fn host_request_handler(runtime: Arc<ToolRuntime>) -> HostRequestHand
     })
 }
 
+/// Keep detached handle polling available between Python cells, without allowing new work.
+pub(crate) fn idle_host_request_handler(session_id: String) -> HostRequestHandler {
+    Arc::new(move |_request_id, data| {
+        let session_id = session_id.clone();
+        Box::pin(async move {
+            let (action, params) = devo_kernel::parse_host_request_data(&data);
+            match action.as_str() {
+                "bash.poll" | "bash.kill" | "bash.forget" => {
+                    devo_core::tools::host_bash::control(&session_id, &action, &params)
+                }
+                // One-shot prompts have no persisted completion-notice inbox.
+                "bash.completed" | "bash.consumed" => {
+                    json!({"status":"ok", "result":{"accepted":true}})
+                }
+                _ => error_reply(format!("idle host request denied: {action}")),
+            }
+        })
+    })
+}
+
 async fn dispatch_host_request(runtime: &ToolRuntime, request_id: String, data: Value) -> Value {
     let Some(action) = data
         .get("type")
@@ -33,8 +53,25 @@ async fn dispatch_host_request(runtime: &ToolRuntime, request_id: String, data: 
         return error_reply("host request is missing a type");
     };
 
+    if matches!(action, "bash.poll" | "bash.kill" | "bash.forget") {
+        return runtime.control_host_bash(action, &data);
+    }
+    if action == "bash.start" {
+        let mut input = data.as_object().cloned().unwrap_or_default();
+        input.remove("type");
+        input.remove("action");
+        let result = runtime
+            .start_host_bash(request_id, Value::Object(input))
+            .await;
+        return if result.is_error {
+            error_reply(result.content.into_string())
+        } else {
+            json!({ "status": "ok", "result": content_as_json(result.content) })
+        };
+    }
+
     let (tool_name, input) = match action {
-        "bash" | "bash.start" => {
+        "bash" => {
             let mut input = data.as_object().cloned().unwrap_or_default();
             input.remove("type");
             input.remove("action");
@@ -205,7 +242,7 @@ mod tests {
         builder.register_handler("bash", Arc::new(ShellInputProbe { spec }));
         builder.restrict_model_exposure_to(&["ipython"]);
         let runtime = ToolRuntime::new_without_permissions(Arc::new(builder.build()));
-        for action in ["bash", "bash.start"] {
+        for action in ["bash"] {
             assert_eq!(
                 dispatch_host_request(
                     &runtime,
@@ -234,6 +271,112 @@ mod tests {
         }
     }
 
+    #[tokio::test]
+    async fn prompt_host_start_preserves_runtime_permission_denial() {
+        let mut builder = ToolRegistryBuilder::new();
+        let handler = devo_core::tools::handlers::ShellCommandHandler::new();
+        let mut spec = handler.spec().clone();
+        spec.name = "bash".to_string();
+        builder.push_spec(spec);
+        builder.register_handler("bash", Arc::new(handler));
+        let runtime = ToolRuntime::new(
+            Arc::new(builder.build()),
+            devo_core::tools::PermissionChecker::new(|request| {
+                Box::pin(async move {
+                    assert_eq!(request.input["command"], json!("echo denied"));
+                    Err("declined".to_string())
+                })
+            }),
+        );
+        assert_eq!(
+            dispatch_host_request(
+                &runtime,
+                "denied".to_string(),
+                json!({"type":"bash.start", "command":"echo denied"})
+            )
+            .await,
+            json!({"status":"error", "error":"permission denied: declined"}),
+        );
+    }
+
+    #[cfg(unix)]
+    #[tokio::test]
+    async fn prompt_host_shell_handles_complete_fail_and_cancel() {
+        let mut builder = ToolRegistryBuilder::new();
+        let handler = devo_core::tools::handlers::ShellCommandHandler::new();
+        let mut spec = handler.spec().clone();
+        spec.name = "bash".to_string();
+        builder.push_spec(spec);
+        builder.register_handler("bash", Arc::new(handler));
+        let runtime = ToolRuntime::new_with_context(
+            Arc::new(builder.build()),
+            permission_checker(),
+            devo_core::tools::ToolRuntimeContext {
+                session_id: "ses_cli_lifecycle".into(),
+                cwd: std::env::current_dir().expect("test cwd"),
+                ..Default::default()
+            },
+        );
+        for (command, expected_exit) in [
+            ("printf cli-ok", Some(0)),
+            ("exit 7", Some(7)),
+            ("sleep 30", None),
+        ] {
+            let start = dispatch_host_request(
+                &runtime,
+                "start".to_string(),
+                json!({"type":"bash.start", "command":command}),
+            )
+            .await;
+            assert_eq!(start["status"], json!("ok"), "{start}");
+            let handle_id = start["result"]["handle_id"].clone();
+            if expected_exit.is_none() {
+                let killed = dispatch_host_request(
+                    &runtime,
+                    "kill".to_string(),
+                    json!({"type":"bash.kill", "handle_id":handle_id}),
+                )
+                .await;
+                assert_eq!(killed["status"], json!("ok"));
+            }
+            let final_reply = tokio::time::timeout(std::time::Duration::from_secs(10), async {
+                loop {
+                    let reply = dispatch_host_request(
+                        &runtime,
+                        "poll".to_string(),
+                        json!({"type":"bash.poll", "handle_id":handle_id}),
+                    )
+                    .await;
+                    if reply["result"]["running"] == false {
+                        break reply;
+                    }
+                    tokio::time::sleep(std::time::Duration::from_millis(10)).await;
+                }
+            })
+            .await
+            .expect("shell completion");
+            if let Some(exit) = expected_exit {
+                assert_eq!(
+                    final_reply["result"]["exit_code"],
+                    json!(exit),
+                    "{final_reply}"
+                );
+            } else {
+                assert!(final_reply["result"]["error"].is_string(), "{final_reply}");
+            }
+            assert_eq!(
+                dispatch_host_request(
+                    &runtime,
+                    "forget".to_string(),
+                    json!({"type":"bash.forget", "handle_id":handle_id})
+                )
+                .await,
+                json!({"status":"ok", "result":{"forgotten":true}})
+            );
+        }
+        devo_core::tools::host_bash::cancel_session("ses_cli_lifecycle");
+    }
+
     #[test]
     fn mixed_tool_content_preserves_text_and_metadata_for_python() {
         assert_eq!(
@@ -246,6 +389,93 @@ mod tests {
                 "title": "Docs",
                 "mime": "text/html"
             })
+        );
+    }
+
+    #[cfg(unix)]
+    #[tokio::test]
+    async fn prompt_kernel_detached_bash_completes_while_idle() {
+        let cwd = std::env::current_dir().expect("cwd");
+        let kernel = devo_core::tools::handlers::ensure_kernel(
+            &None,
+            &cwd,
+            None,
+            devo_protocol::CollaborationMode::Build,
+        )
+        .await
+        .expect("kernel");
+        let registry = devo_core::tools::handlers::build_registry_from_plan(&Default::default());
+        let runtime = Arc::new(ToolRuntime::new_with_context(
+            Arc::new(registry),
+            permission_checker(),
+            devo_core::tools::ToolRuntimeContext {
+                session_id: "ses_cli_kernel_idle".into(),
+                cwd,
+                kernel: Some(Arc::clone(&kernel)),
+                ..Default::default()
+            },
+        ));
+        kernel
+            .set_host_handler(Some(super::host_request_handler(runtime)))
+            .await;
+        let idle = super::idle_host_request_handler("ses_cli_kernel_idle".to_string());
+        let completed = Arc::new(tokio::sync::Notify::new());
+        let observed = Arc::clone(&completed);
+        kernel
+            .set_idle_bash_completion_handler(Some(Arc::new(move |id, data| {
+                let idle = Arc::clone(&idle);
+                let observed = Arc::clone(&observed);
+                Box::pin(async move {
+                    let (action, _) = devo_kernel::parse_host_request_data(&data);
+                    let result = idle(id, data).await;
+                    if action == "bash.completed" {
+                        observed.notify_one();
+                    }
+                    result
+                })
+            })))
+            .await;
+        let start = kernel
+            .execute("h = bash('sleep 0.2; printf detached-ok')")
+            .await
+            .expect("start cell");
+        assert_eq!(start.status, "ok", "{start:?}");
+        tokio::time::timeout(std::time::Duration::from_secs(10), completed.notified())
+            .await
+            .expect("idle completion");
+        let cached = kernel
+            .execute("import json; print(json.dumps([h.running, h.poll().exit_code, h.output()]))")
+            .await
+            .expect("cached cell");
+        assert_eq!(cached.status, "ok", "{cached:?}");
+        let value: serde_json::Value =
+            serde_json::from_str(cached.stdout.trim()).expect("cached result");
+        assert_eq!(value, json!([false, 0, "detached-ok"]));
+        kernel.shutdown().await.expect("shutdown");
+    }
+
+    #[tokio::test]
+    async fn idle_prompt_host_rejects_starts_but_routes_scoped_controls() {
+        let handler = super::idle_host_request_handler("ses_cli_idle".to_string());
+        assert_eq!(
+            handler(
+                "start".to_string(),
+                json!({"type":"bash.start", "command":"echo forbidden"})
+            )
+            .await,
+            json!({"status":"error", "error":"idle host request denied: bash.start"})
+        );
+        assert_eq!(
+            handler(
+                "poll".to_string(),
+                json!({"type":"bash.poll", "params":{"handle_id":"missing"}})
+            )
+            .await,
+            json!({"status":"error", "error":"unknown bash handle"})
+        );
+        assert_eq!(
+            handler("notice".to_string(), json!({"type":"bash.completed"})).await,
+            json!({"status":"ok", "result":{"accepted":true}})
         );
     }
 

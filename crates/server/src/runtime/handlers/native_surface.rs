@@ -107,16 +107,28 @@ impl ServerRuntime {
         };
         session.cwd = cwd.clone();
         session.version = session.version.saturating_add(1);
-        if let Some(rollout_path) = handle.rollout_path().await.flatten()
-            && let Err(error) =
+        if let Some(rollout_path) = handle.rollout_path().await.flatten() {
+            let _lease =
+                match crate::runtime::session_file_lock::SessionFileLock::acquire(&rollout_path) {
+                    Ok(lease) => lease,
+                    Err(error) => {
+                        return self.error_response(
+                            request_id,
+                            ProtocolErrorCode::SessionLocked,
+                            format!("cannot lock session cwd journal: {error}"),
+                        );
+                    }
+                };
+            if let Err(error) =
                 self.rollout_store
                     .append_session_meta_at(&rollout_path, &session, None)
-        {
-            return self.error_response(
-                request_id,
-                ProtocolErrorCode::InternalError,
-                format!("failed to persist session cwd change: {error}"),
-            );
+            {
+                return self.error_response(
+                    request_id,
+                    ProtocolErrorCode::InternalError,
+                    format!("failed to persist session cwd change: {error}"),
+                );
+            }
         }
         if let Some(summary) = handle.summary().await {
             self.persist_session_summary_if_persistent(params.session_id, &summary)
@@ -175,18 +187,39 @@ impl ServerRuntime {
                 "session does not exist",
             );
         };
-        if let Some(rollout_path) = handle.rollout_path().await.flatten()
-            && let Err(error) =
+        let summary = handle.summary().await;
+        let extras = summary.as_ref().map(|summary| {
+            let mut extras = crate::persistence::invent_session_persistence_extras();
+            extras.collaboration_mode = Some(summary.collaboration_mode);
+            extras.permission_preset = summary.permission_preset();
+            extras.agent_path = summary.agent_path.clone();
+            extras.agent_nickname = summary.agent_nickname.clone();
+            extras
+        });
+        if let Some(rollout_path) = handle.rollout_path().await.flatten() {
+            let _lease =
+                match crate::runtime::session_file_lock::SessionFileLock::acquire(&rollout_path) {
+                    Ok(lease) => lease,
+                    Err(error) => {
+                        return self.error_response(
+                            request_id,
+                            ProtocolErrorCode::SessionLocked,
+                            format!("cannot lock session archive journal: {error}"),
+                        );
+                    }
+                };
+            if let Err(error) =
                 self.rollout_store
-                    .append_session_meta_at(&rollout_path, &session, None)
-        {
-            return self.error_response(
-                request_id,
-                ProtocolErrorCode::InternalError,
-                format!("failed to persist session archive: {error}"),
-            );
+                    .append_session_meta_at(&rollout_path, &session, extras)
+            {
+                return self.error_response(
+                    request_id,
+                    ProtocolErrorCode::InternalError,
+                    format!("failed to persist session archive: {error}"),
+                );
+            }
         }
-        if let Some(summary) = handle.summary().await {
+        if let Some(summary) = summary {
             self.persist_session_summary_if_persistent(params.session_id, &summary)
                 .await;
         }

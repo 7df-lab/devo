@@ -103,16 +103,18 @@ impl ServerRuntime {
         }
         session_arc.update_summary(updated_summary.clone()).await;
 
-        if let Some(rollout_path) = snapshot.rollout_path.as_ref()
-            && let Err(error) = self.rollout_store.append_session_meta_at(
+        if let Some(rollout_path) = snapshot.rollout_path.as_ref() {
+            let _lease = crate::runtime::session_file_lock::SessionFileLock::acquire(rollout_path)
+                .map_err(|error| format!("lock ACP session journal: {error}"))?;
+            if let Err(error) = self.rollout_store.append_session_meta_at(
                 rollout_path,
                 &updated_summary.native,
                 /*extras*/ None,
-            )
-        {
-            return Err(format!(
-                "failed to persist ACP session additional directories: {error}"
-            ));
+            ) {
+                return Err(format!(
+                    "failed to persist ACP session additional directories: {error}"
+                ));
+            }
         }
 
         if !updated_summary.ephemeral

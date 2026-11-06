@@ -531,7 +531,6 @@ statusMessage = "Checking tool use"
     );
 }
 
-/// Trace: L2-DES-APP-005
 /// Verifies: provider HTTP proxy settings and provider header fields follow user/workspace merge precedence.
 #[test]
 fn loader_merges_provider_sections_with_provider_overlay_rules() {
@@ -609,7 +608,6 @@ invocation_method = "openai_responses"
     );
 }
 
-/// Trace: L2-DES-APP-005
 /// Verifies: omitted defaulted provider fields in a higher-priority partial overlay do not overwrite lower-priority values.
 #[test]
 fn loader_provider_overlay_preserves_absent_defaulted_provider_fields() {
@@ -798,7 +796,6 @@ max_tokens = 4096
     );
 }
 
-/// Trace: L2-DES-APP-005
 /// Verifies: CLI provider overrides participate in the same provider merge precedence as other CLI config.
 #[test]
 fn loader_applies_cli_provider_overrides_to_provider_section() {
@@ -858,7 +855,6 @@ enabled = false
     );
 }
 
-/// Trace: L2-DES-APP-005
 /// Verifies: provider upsert persists custom provider header JSON in user config and projections.
 #[test]
 fn provider_upsert_writes_user_config_when_workspace_is_active() {

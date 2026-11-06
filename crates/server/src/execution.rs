@@ -685,12 +685,6 @@ invocation_method = "openai_chat_completions"
         let _ = std::fs::remove_dir_all(workspace);
     }
 
-    /// Trace: provider connections can change while the server is running
-    /// (provider/upsert, OAuth login writing auth.json). Sessions capture
-    /// their router at creation, so a connection added after session start
-    /// failed every turn with "provider route not configured" until a server
-    /// restart. `reload_provider_router` must materialize the new connection
-    /// on an already-live context.
     #[tokio::test]
     async fn reload_provider_router_picks_up_new_connection_without_restart() {
         let deps = test_deps("");

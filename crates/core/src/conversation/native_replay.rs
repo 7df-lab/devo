@@ -626,7 +626,8 @@ pub fn legacy_lines_from_internal(
         | InternalRecord::UsageRecord { .. }
         | InternalRecord::TurnApprovalCheckpoint(_)
         | InternalRecord::SessionLeaf { .. }
-        | InternalRecord::TreeEdge { .. } => Ok(Vec::new()),
+        | InternalRecord::TreeEdge { .. }
+        | InternalRecord::SessionDeleted { .. } => Ok(Vec::new()),
     }
 }
 

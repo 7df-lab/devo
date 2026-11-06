@@ -549,8 +549,8 @@ async def call_tool(server: str, tool: str, arguments: dict[str, Any] | None = N
     First asks the host via ``mcp.call`` (plan-mode denial + permission
     cascade + grant cache). Only when the host has no handler for the
     action (older host / standalone kernel) does it fall back to the
-    kernel-local registry — the OS fence still bounds that fallback's
-    effects, and the fallback logs loudly rather than passing silently.
+    kernel-local registry with the trusted Python process's user privileges.
+    The fallback logs rather than passing silently.
     """
     _validate_name(tool, "tool")
     if arguments is not None and not isinstance(arguments, dict):
@@ -573,7 +573,7 @@ async def call_tool(server: str, tool: str, arguments: dict[str, Any] | None = N
 
         print(
             f"mcp.call_tool: host mediation unavailable ({no_host}); "
-            "falling back to kernel-local registry (fence still bounds effects)",
+            "falling back to trusted kernel-local registry",
             file=_sys.stderr,
         )
         return await _dispatch(lambda: _registry.call(server, tool, args))

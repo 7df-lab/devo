@@ -1,7 +1,6 @@
 //! Host helper that loads H and formats the prompt digest.
 //!
 //! Call sites: cold prompt assembly (after catalog skills, before hidden goal).
-//! See L2-DES-HARNESS-001 DD-5 and docs/rlm-native-api.md section 7.
 
 use std::path::Path;
 
@@ -60,7 +59,6 @@ mod tests {
     use chrono::Utc;
     use pretty_assertions::assert_eq;
 
-    /// Trace: L2-DES-HARNESS-001
     /// Verifies: injector returns digest content after a successful state write.
     #[test]
     fn injector_loads_digest_for_prompt_site() {
@@ -96,7 +94,6 @@ mod tests {
         assert!(digest.contains("Continual harness") || digest.contains("harness-digest"));
     }
 
-    /// Trace: bug #46 — global harness entries must surface in every digest.
     /// Verifies: merged digest includes both scopes, labels global entries,
     /// and prefers the session entry on id collision.
     #[test]
@@ -157,7 +154,6 @@ mod tests {
         assert!(!digest.contains("Global shadowed"));
     }
 
-    /// Trace: bug #46 — missing global store degrades to the local digest.
     #[test]
     fn merged_digest_without_global_store_is_local_only() {
         let session_dir = tempfile::tempdir().unwrap();

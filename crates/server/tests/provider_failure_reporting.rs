@@ -490,7 +490,6 @@ fn model_response(text: &str) -> ModelResponse {
     }
 }
 
-/// Trace: L2-DES-CONTEXT-004. Recovery preserves the request and turn identity.
 /// Real wall-clock timing — same reasoning as the exhausted-retries test.
 #[tokio::test]
 async fn continue_failed_turn_reuses_context_and_is_idempotent() -> Result<()> {

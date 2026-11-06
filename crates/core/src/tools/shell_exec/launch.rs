@@ -48,7 +48,10 @@ pub(crate) struct SandboxLaunchPlan {
     child_apply_plan: Option<devo_sandbox::ResolvedEnforcementPlan>,
     #[cfg_attr(not(unix), allow(dead_code))]
     sandbox_profile: Option<String>,
+    /// Trusted workspace root used for profile/overlay resolution.
     #[cfg_attr(not(unix), allow(dead_code))]
+    sandbox_workspace: PathBuf,
+    /// Requested child working directory.
     workdir: PathBuf,
 }
 
@@ -57,6 +60,7 @@ impl SandboxLaunchPlan {
     pub(crate) fn prepare_pipe(
         sandbox_profile: Option<&str>,
         sandbox_permission_overlay: Option<&devo_sandbox::SandboxPermissionOverlay>,
+        sandbox_workspace: &Path,
         workdir: &Path,
         shell: &ShellSpec,
         command: &str,
@@ -64,11 +68,11 @@ impl SandboxLaunchPlan {
         Self::prepare(
             sandbox_profile,
             sandbox_permission_overlay,
+            sandbox_workspace,
             workdir,
             shell,
             command,
             devo_sandbox::WrapMode::PipeComposed,
-            /*attach_child_apply*/ true,
         )
     }
 
@@ -76,6 +80,7 @@ impl SandboxLaunchPlan {
     pub(crate) fn prepare_pty(
         sandbox_profile: Option<&str>,
         sandbox_permission_overlay: Option<&devo_sandbox::SandboxPermissionOverlay>,
+        sandbox_workspace: &Path,
         workdir: &Path,
         shell: &ShellSpec,
         command: &str,
@@ -83,23 +88,26 @@ impl SandboxLaunchPlan {
         Self::prepare(
             sandbox_profile,
             sandbox_permission_overlay,
+            sandbox_workspace,
             workdir,
             shell,
             command,
             devo_sandbox::WrapMode::PtyOnly,
-            /*attach_child_apply*/ false,
         )
     }
 
     fn prepare(
         sandbox_profile: Option<&str>,
         sandbox_permission_overlay: Option<&devo_sandbox::SandboxPermissionOverlay>,
+        sandbox_workspace: &Path,
         workdir: &Path,
         shell: &ShellSpec,
         command: &str,
         mode: devo_sandbox::WrapMode,
-        attach_child_apply: bool,
     ) -> Result<Self, String> {
+        // PTY wrappers carry the full policy; pipe spawns apply the child plan.
+        #[cfg(unix)]
+        let attach_child_apply = matches!(mode, devo_sandbox::WrapMode::PipeComposed);
         // Platform wrap decision (details in module docs):
         // - macOS → sandbox-exec / Seatbelt
         // - Linux → optional bwrap / linux-sandbox helper (composes with pre_exec)
@@ -107,7 +115,7 @@ impl SandboxLaunchPlan {
         #[cfg(unix)]
         let wrap = match devo_sandbox::wrap_command_for_profile_with_overlay(
             sandbox_profile,
-            workdir,
+            sandbox_workspace,
             mode,
             &devo_sandbox::SandboxLogger::new(),
             sandbox_permission_overlay,
@@ -125,14 +133,13 @@ impl SandboxLaunchPlan {
         let windows_launch = try_windows_sandbox_launch(
             sandbox_profile,
             sandbox_permission_overlay,
+            sandbox_workspace,
             workdir,
             shell,
             command,
         )?;
         #[cfg(unix)]
         let _ = (shell, command);
-        #[cfg(not(unix))]
-        let _ = attach_child_apply;
 
         #[cfg(unix)]
         let child_apply_plan = if attach_child_apply && wrap.requires_child_apply() {
@@ -141,7 +148,7 @@ impl SandboxLaunchPlan {
             // policy. Otherwise resolve Landlock/seccomp for `pre_exec`.
             match devo_util_process::sandbox::resolve_profile_for_spawn_with_overlay(
                 sandbox_profile,
-                workdir,
+                sandbox_workspace,
                 sandbox_permission_overlay,
             ) {
                 Ok(plan) => plan,
@@ -160,6 +167,7 @@ impl SandboxLaunchPlan {
             #[cfg(unix)]
             child_apply_plan,
             sandbox_profile: sandbox_profile.map(str::to_string),
+            sandbox_workspace: sandbox_workspace.to_path_buf(),
             workdir: workdir.to_path_buf(),
         })
     }
@@ -246,11 +254,12 @@ impl SandboxLaunchPlan {
         #[cfg(unix)]
         for (key, value) in devo_sandbox::proxy_env_for_sandbox_profile(
             self.sandbox_profile.as_deref(),
-            &self.workdir,
+            &self.sandbox_workspace,
         ) {
             child.env(key, value);
         }
 
+        child.current_dir(&self.workdir);
         child
     }
 
@@ -305,11 +314,12 @@ impl SandboxLaunchPlan {
         #[cfg(unix)]
         for (key, value) in devo_sandbox::proxy_env_for_sandbox_profile(
             self.sandbox_profile.as_deref(),
-            &self.workdir,
+            &self.sandbox_workspace,
         ) {
             builder.env(key, value);
         }
 
+        builder.cwd(&self.workdir);
         builder
     }
 }
@@ -324,6 +334,7 @@ impl SandboxLaunchPlan {
 fn try_windows_sandbox_launch(
     sandbox_profile: Option<&str>,
     sandbox_permission_overlay: Option<&devo_sandbox::SandboxPermissionOverlay>,
+    sandbox_workspace: &Path,
     workdir: &Path,
     shell: &ShellSpec,
     command: &str,
@@ -336,10 +347,10 @@ fn try_windows_sandbox_launch(
     let profile_name = profile
         .parse::<devo_sandbox::ProfileName>()
         .map_err(|error| format!("invalid sandbox profile '{profile}': {error}"))?;
-    let config = devo_sandbox::load_sandbox_config(workdir)
+    let config = devo_sandbox::load_sandbox_config(sandbox_workspace)
         .map_err(|error| format!("failed to set up Windows sandbox: {error}"))?;
     let mut resolved = profile_name
-        .resolve_profile(workdir, &config)
+        .resolve_profile(sandbox_workspace, &config)
         .map_err(|error| format!("failed to set up Windows sandbox: {error}"))?;
     if let Some(overlay) = sandbox_permission_overlay {
         resolved
@@ -364,7 +375,6 @@ fn try_windows_sandbox_launch(
         writable_roots: resolved.read_write,
         deny_read: resolved.deny,
         restrict_network: resolved.restrict_network,
-        session_credential_sid: None,
         env_extra: Vec::new(),
     };
     match devo_windows_sandbox::prepare_windows_sandbox_launch(&request) {
@@ -386,5 +396,30 @@ fn try_windows_sandbox_launch(
             Ok(None)
         }
         Err(error) => Err(format!("failed to set up Windows sandbox: {error}")),
+    }
+}
+
+#[cfg(test)]
+mod tests {
+    #[cfg(unix)]
+    use super::*;
+
+    #[cfg(unix)]
+    #[test]
+    fn sandbox_workspace_is_independent_of_child_cwd() {
+        let workspace = tempfile::tempdir().expect("workspace");
+        let child = tempfile::tempdir().expect("child cwd");
+        let shell = crate::shell_exec::resolve::resolve_shell(Some("bash"), false);
+        let plan = SandboxLaunchPlan::prepare_pipe(
+            Some("workspace"),
+            None,
+            workspace.path(),
+            child.path(),
+            &shell,
+            "echo hi",
+        )
+        .expect("prepare pipe plan");
+        assert_eq!(plan.sandbox_workspace, workspace.path());
+        assert_eq!(plan.workdir, child.path());
     }
 }

@@ -45,8 +45,8 @@ async def run(path: str, old_str: str, new_str: str) -> str:
     return f"Edited {resolved_path}"
 
 
-# Keep in sync with DIFF_DISPLAY_MIME in src/core/kernel/index.ts.
-_DIFF_DISPLAY_MIME = "application/vnd.devo.diff+json"
+# Keep in sync with DIFF_DISPLAY_MIME in crates/kernel/src/session.rs.
+_DIFF_DISPLAY_MIME = "application/vnd.diff+json"
 
 
 def _emit_diff(path: str, old_str: str, new_str: str, start_line: int) -> None:

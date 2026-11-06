@@ -84,7 +84,6 @@ mod tests {
     use crate::state::HarnessKind;
     use pretty_assertions::assert_eq;
 
-    /// Trace: L2-DES-HARNESS-001
     /// Verifies: refinements.jsonl appends one JSON object per line.
     #[test]
     fn append_writes_jsonl_line() {

@@ -1,6 +1,6 @@
 //! Continual Harness \(H = (\rho, G, K, M)\) — types and shared-file IO.
 //!
-//! See `L2-DES-HARNESS-001`. Full refine planning lives in the server host.
+//! Full refine planning lives in the server host.
 
 mod apply;
 mod auto;

@@ -1,6 +1,4 @@
 /**
- * Trace: shell "$(...)" / "$var" pairs must not lex as inline math.
- *
  * Live symptom (round 56): a user message pasting
  *   for i in $(seq 1 200); do echo line-$i; done
  * rendered as "for i in (seq 1 200); do echo line-i; done" — the two dollars

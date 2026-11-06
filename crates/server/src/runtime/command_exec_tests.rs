@@ -1,5 +1,10 @@
 use super::*;
+use std::fs;
+use std::sync::Arc;
+
+use crate::test_support::TestRuntime;
 use pretty_assertions::assert_eq;
+use serde_json::json;
 
 #[tokio::test]
 async fn terminal_snapshots_wait_for_retained_output_and_do_not_duplicate_live_entries() {
@@ -69,4 +74,104 @@ async fn terminal_snapshots_wait_for_retained_output_and_do_not_duplicate_live_e
         manager.task_snapshots_for_session(session_id).await,
         vec![expected]
     );
+}
+
+async fn create_session(runtime: &Arc<ServerRuntime>, cwd: &std::path::Path) -> SessionId {
+    let response = runtime
+        .handle_native_session_new(
+            1,
+            json!(1),
+            json!({
+                "cwd": cwd,
+                "idempotencyKey": format!("exec-context-{}", cwd.display()),
+            }),
+        )
+        .await;
+    let native = serde_json::from_value::<
+        crate::SuccessResponse<devo_protocol::native::rpc_session::SessionNewResult>,
+    >(response.clone())
+    .unwrap_or_else(|error| panic!("session/new result: {error}; response={response}"));
+    SessionId::from(native.result.session.id.as_str())
+}
+
+#[tokio::test]
+async fn unknown_explicit_session_is_not_found_even_with_cwd() {
+    let home = tempfile::tempdir().expect("tempdir");
+    let runtime = TestRuntime::noop().runtime(home.path());
+    let execution = home.path().join("execution");
+    fs::create_dir_all(&execution).expect("create execution cwd");
+
+    let response = runtime
+        .handle_command_exec_translated(
+            1,
+            json!(1),
+            CommandExecParams {
+                session_id: Some(SessionId::from_string("ses_missing".to_string())),
+                process_id: "unknown-session".to_string(),
+                cwd: Some(execution),
+                program: CommandExecProgram::OneShot {
+                    command: "echo must-not-run".to_string(),
+                },
+                size: None,
+            },
+        )
+        .await;
+
+    assert_eq!(response["error"]["code"], json!("SessionNotFound"));
+}
+
+#[tokio::test]
+async fn sessionless_command_exec_requires_explicit_cwd() {
+    let home = tempfile::tempdir().expect("tempdir");
+    let runtime = TestRuntime::noop().runtime(home.path());
+
+    let error = runtime
+        .command_exec_context(None, None)
+        .await
+        .expect_err("sessionless exec without cwd must fail");
+
+    assert_eq!(error.0, ProtocolErrorCode::InvalidParams);
+}
+
+#[tokio::test]
+async fn sessionless_command_exec_keeps_explicit_cwd_without_sandbox_workspace() {
+    let home = tempfile::tempdir().expect("tempdir");
+    let runtime = TestRuntime::noop().runtime(home.path());
+    let execution = home.path().join("execution");
+    fs::create_dir_all(&execution).expect("create execution cwd");
+
+    let context = runtime
+        .command_exec_context(None, Some(execution.clone()))
+        .await
+        .expect("sessionless context");
+
+    assert_eq!(
+        context,
+        CommandExecContext {
+            cwd: execution,
+            sandbox_workspace: None,
+            sandbox_profile: None,
+        }
+    );
+}
+
+#[tokio::test]
+async fn explicit_session_resolves_sandbox_workspace_from_session() {
+    let home = tempfile::tempdir().expect("tempdir");
+    let workspace = home.path().join("workspace");
+    let execution = home.path().join("execution");
+    fs::create_dir_all(&workspace).expect("create session workspace");
+    fs::create_dir_all(&execution).expect("create execution cwd");
+    let runtime = TestRuntime::noop().runtime(home.path());
+    let session_id = create_session(&runtime, &workspace).await;
+
+    let context = runtime
+        .command_exec_context(Some(session_id), Some(execution.clone()))
+        .await
+        .expect("session context");
+
+    // Execution may use the client cwd, but sandbox roots remain tied to the
+    // trusted session workspace.
+    assert_eq!(context.cwd, execution);
+    assert_eq!(context.sandbox_workspace, Some(workspace));
 }

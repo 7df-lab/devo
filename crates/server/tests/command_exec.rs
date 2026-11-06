@@ -49,7 +49,6 @@ impl ModelProviderSDK for UnusedProvider {
 }
 
 #[cfg(unix)]
-/// Trace: L2-DES-APP-003
 /// Verifies: sessionless command execution starts with explicit cwd, streams to the owning connection, and does not create a session.
 #[tokio::test]
 async fn sessionless_command_exec_streams_to_owner_without_session() -> Result<()> {
@@ -168,7 +167,6 @@ async fn session_interrupt_stops_sessionless_command_without_a_turn() -> Result<
     Ok(())
 }
 
-/// Trace: L2-DES-APP-003
 /// Verifies: sessionless command execution rejects requests that omit explicit cwd.
 #[tokio::test]
 async fn sessionless_command_exec_requires_explicit_cwd() -> Result<()> {
@@ -207,7 +205,6 @@ async fn sessionless_command_exec_requires_explicit_cwd() -> Result<()> {
 }
 
 #[cfg(unix)]
-/// Trace: L2-DES-APP-003
 /// Verifies: session-bound command execution can resolve cwd from the existing session.
 #[tokio::test]
 async fn session_bound_command_exec_resolves_session_cwd() -> Result<()> {
@@ -253,6 +250,47 @@ async fn session_bound_command_exec_resolves_session_cwd() -> Result<()> {
     )
     .await?;
     assert!(output.contains("session-bound"));
+
+    Ok(())
+}
+
+#[cfg(unix)]
+/// Verifies: an explicit but unknown session is rejected before cwd handling,
+/// so a client-supplied cwd cannot bypass session resolution.
+#[tokio::test]
+async fn unknown_session_with_cwd_is_session_not_found() -> Result<()> {
+    let data_root = TempDir::new()?;
+    let runtime = build_runtime(data_root.path())?;
+    let (connection_id, _notifications_rx) =
+        initialize_connection(&runtime, "command-exec-unknown-session").await?;
+
+    let response = runtime
+        .handle_incoming(
+            connection_id,
+            serde_json::json!({
+                "id": 25,
+                "method": "command/exec",
+                "params": {
+                    "session_id": SessionId::from_string("ses_unknown_command_exec".to_string()),
+                    "process_id": "unknown-session-1",
+                    "cwd": data_root.path(),
+                    "program": {
+                        "type": "one_shot",
+                        "command": "printf 'must-not-run\n'"
+                    },
+                    "size": null
+                }
+            }),
+        )
+        .await
+        .context("command/exec response")?;
+    let response: devo_server::ErrorResponse = serde_json::from_value(response)?;
+
+    assert_eq!(response.error.code, ProtocolErrorCode::SessionNotFound);
+    assert_eq!(
+        response.error.message,
+        "session not found: ses_unknown_command_exec"
+    );
 
     Ok(())
 }

@@ -123,7 +123,18 @@ impl ServerRuntime {
         });
         native_session.fork_from_id = None;
         native_session.at_turn_id = None;
-        native_session.ephemeral = params.ephemeral;
+        // Persistent children of an ephemeral parent inherit the ephemeral
+        // policy. Creating a durable root journal for a parent that has no
+        // durable root would silently orphan a root session.
+        let child_ephemeral = params.ephemeral || parent_summary.ephemeral;
+        if params.ephemeral != child_ephemeral {
+            tracing::warn!(
+                parent_session_id = %parent_session_id,
+                child_session_id = %child_session_id,
+                "persistent child of an ephemeral parent inherits ephemeral policy"
+            );
+        }
+        native_session.ephemeral = child_ephemeral;
         native_session.created_at = now;
         native_session.status = devo_protocol::native::session::SessionStatus::Idle;
         native_session.flags.clear();
@@ -157,37 +168,72 @@ impl ServerRuntime {
             updated_at: now,
         };
 
-        let rollout_path = if params.ephemeral {
-            None
+        let lifecycle_root = match self
+            .resolve_lifecycle_root(parent_session_id, Some(&parent_summary))
+            .await
+        {
+            Ok(root) => root,
+            Err(crate::runtime::session_deletion::LifecycleRootError::MissingEvidence {
+                ..
+            }) => {
+                return Err(ToolCallError::InvalidInput(format!(
+                    "parent session has no lifecycle evidence: {parent_session_id}"
+                )));
+            }
+            Err(error) => return Err(ToolCallError::InternalError(error.to_string())),
+        };
+        let _lifecycle_admission = self
+            .begin_lifecycle_operation_for_root(lifecycle_root)
+            .map_err(ToolCallError::InvalidInput)?;
+        let (rollout_path, child_session_dir_path, session_file_lock) = if child_ephemeral {
+            (None, None, None)
         } else {
-            let parent_rollout = parent_handle.rollout_path().await.flatten();
-            let mut invented = self
+            let root_journal = self.rollout_store.allocate_rollout_path(&lifecycle_root);
+            let child_session_dir = self
                 .rollout_store
-                .invent_child_session_persistence(
-                    parent_rollout.as_deref(),
-                    &parent_session_id,
-                    &child_session_id,
-                )
-                .map_err(|error| ToolCallError::InternalError(error.to_string()))?;
-            invented.extras.collaboration_mode = Some(parent_summary.collaboration_mode);
-            invented.extras.permission_preset = parent_summary.permission_preset();
-            invented.extras.agent_path = Some(agent_path.clone());
-            invented.extras.agent_nickname = Some(nickname.clone());
+                .child_session_dir(&lifecycle_root, &child_session_id);
+            std::fs::create_dir_all(&child_session_dir).map_err(|error| {
+                ToolCallError::InternalError(format!(
+                    "create child session dir {}: {error}",
+                    child_session_dir.display()
+                ))
+            })?;
+            if let Some(parent) = root_journal.parent() {
+                std::fs::create_dir_all(parent).map_err(|error| {
+                    ToolCallError::InternalError(format!(
+                        "create root journal dir {}: {error}",
+                        parent.display()
+                    ))
+                })?;
+            }
+            if self.rollout_store.journal_is_closed(&root_journal) {
+                return Err(ToolCallError::InvalidInput(format!(
+                    "parent root journal {} was deleted; refusing to spawn",
+                    root_journal.display()
+                )));
+            }
+            let lease = crate::runtime::session_file_lock::SessionFileLock::acquire(&root_journal)
+                .map_err(|error| {
+                    ToolCallError::InternalError(format!(
+                        "acquire root journal lock for {child_session_id}: {error}"
+                    ))
+                })?;
+            let mut extras = crate::persistence::invent_session_persistence_extras();
+            extras.collaboration_mode = Some(parent_summary.collaboration_mode);
+            extras.permission_preset = parent_summary.permission_preset();
+            extras.agent_path = Some(agent_path.clone());
+            extras.agent_nickname = Some(nickname.clone());
             self.rollout_store
-                .append_session_meta_at(
-                    &invented.rollout_path,
-                    &native_session,
-                    Some(invented.extras),
-                )
+                .append_session_meta_at(&root_journal, &native_session, Some(extras))
                 .map_err(|error| ToolCallError::InternalError(error.to_string()))?;
-            Some(invented.rollout_path)
+            (Some(root_journal), Some(child_session_dir), Some(lease))
         };
 
-        // Child artifact directory (rollout parent dir): surfaced on the spawn
-        // result and subagent registry so RLM handles can address child files.
-        let child_session_dir = rollout_path
+        // Independent child artifact directory; surfaced on the spawn result
+        // and subagent registry so RLM handles can address child files. It is
+        // never the shared journal parent (`sessions/`).
+        let child_session_dir = child_session_dir_path
             .as_ref()
-            .and_then(|path| path.parent())
             .map(|dir| dir.display().to_string());
         let rollout_path_for_db = rollout_path.clone();
         let mut core_session = runtime_context.new_session_state(
@@ -230,6 +276,7 @@ impl ServerRuntime {
         summary.agent_path = Some(agent_path.clone());
         summary.agent_nickname = Some(nickname.clone());
         summary.agent_role = Some(role.clone());
+        summary.session_dir = child_session_dir_path.clone();
         summary.prompt_token_estimate = core_session.prompt_token_estimate;
         let child_session = RuntimeSession {
             runtime_context,
@@ -258,7 +305,8 @@ impl ServerRuntime {
             turn_approval_cache: crate::execution::ApprovalGrantCache::default(),
             session_context_recorded: false,
         };
-        let child_state = SessionActorState::from_runtime_session(child_session);
+        let mut child_state = SessionActorState::from_runtime_session(child_session);
+        child_state.session_file_lock = session_file_lock;
         let child_handle = self.insert_session_actor(child_state).await;
         self.agent_mailboxes
             .lock()
@@ -490,9 +538,9 @@ impl ServerRuntime {
             .map(|turn| terminal_subagent_status_from_turn(turn.native.status, false))
             .unwrap_or(SubagentStatus::Running);
         let session_dir = runtime_session
-            .rollout_path
-            .as_deref()
-            .and_then(|path| path.parent())
+            .summary
+            .session_dir
+            .as_ref()
             .map(|dir| dir.display().to_string());
         self.register_child_agent(
             parent_session_id,
@@ -608,6 +656,13 @@ impl ServerRuntime {
             ToolCallError::InvalidInput(format!("session not found: {session_id}"))
         })?;
         let _state_change_guard = session_handle.lock_state_change().await;
+        if let Some(rollout_path) = session_handle.rollout_path().await.flatten()
+            && self.rollout_store.journal_is_closed(&rollout_path)
+        {
+            return Err(ToolCallError::InvalidInput(format!(
+                "session journal for {session_id} was deleted"
+            )));
+        }
 
         let reservation = self
             .session_turn_reservation_snapshot(session_id)
@@ -617,6 +672,31 @@ impl ServerRuntime {
                     "failed to snapshot session reservation: {session_id}"
                 ))
             })?;
+        // Resolve admission without round-tripping this actor's own mailbox:
+        // the reservation snapshot already carries the parent/root identity.
+        let lifecycle_root = if reservation.ephemeral {
+            match reservation.parent_session_id {
+                Some(parent_session_id) => self
+                    .resolve_lifecycle_root(parent_session_id, None)
+                    .await
+                    .map_err(|error| ToolCallError::InternalError(error.to_string()))?,
+                None => session_id,
+            }
+        } else {
+            self.resolve_lifecycle_root(session_id, None)
+                .await
+                .map_err(|error| match error {
+                    crate::runtime::session_deletion::LifecycleRootError::MissingEvidence {
+                        ..
+                    } => ToolCallError::InvalidInput(format!(
+                        "session has no lifecycle evidence: {session_id}"
+                    )),
+                    other => ToolCallError::InternalError(other.to_string()),
+                })?
+        };
+        let _lifecycle_admission = self
+            .begin_lifecycle_operation_for_root(lifecycle_root)
+            .map_err(ToolCallError::InvalidInput)?;
 
         if reservation.max_turns.is_some_and(|max_turns| {
             max_turns == 0

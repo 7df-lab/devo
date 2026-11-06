@@ -7,7 +7,7 @@
 use std::collections::HashMap;
 use std::io;
 use std::io::ErrorKind;
-use std::path::Path;
+use std::path::{Path, PathBuf};
 use std::process::Stdio;
 use std::sync::Arc;
 use std::sync::Mutex as StdMutex;
@@ -102,6 +102,7 @@ async fn spawn_process_with_stdin_mode(
     program: &str,
     args: &[String],
     cwd: &Path,
+    sandbox_workspace: &Path,
     env: &HashMap<String, String>,
     arg0: &Option<String>,
     stdin_mode: PipeStdinMode,
@@ -122,7 +123,7 @@ async fn spawn_process_with_stdin_mode(
     #[cfg(unix)]
     let sandbox_wrap = devo_sandbox::wrap_command_for_profile_with_overlay(
         sandbox_profile.as_deref(),
-        cwd,
+        sandbox_workspace,
         devo_sandbox::WrapMode::PipeComposed,
         &devo_sandbox::SandboxLogger::new(),
         sandbox_overlay.as_ref(),
@@ -154,12 +155,10 @@ async fn spawn_process_with_stdin_mode(
     #[cfg(unix)]
     let inherited_fds = inherited_fds.to_vec();
     #[cfg(unix)]
-    let sandbox_workspace = cwd.to_path_buf();
-    #[cfg(unix)]
     let sandbox_plan = if sandbox_wrap.requires_child_apply() {
         crate::sandbox::resolve_profile_for_spawn_with_overlay(
             sandbox_profile.as_deref(),
-            &sandbox_workspace,
+            sandbox_workspace,
             sandbox_overlay.as_ref(),
         )?
     } else {
@@ -177,7 +176,7 @@ async fn spawn_process_with_stdin_mode(
         });
     }
     #[cfg(not(unix))]
-    let _ = (arg0, sandbox_profile, sandbox_overlay);
+    let _ = (arg0, sandbox_profile, sandbox_overlay, sandbox_workspace);
     command.current_dir(cwd);
     command.env_clear();
     for (key, value) in env {
@@ -186,7 +185,8 @@ async fn spawn_process_with_stdin_mode(
     // Restricted profiles get ProxyOnly capability via wrap, but the child
     // still needs HTTP(S)_PROXY pointing at the managed localhost proxy.
     #[cfg(unix)]
-    for (key, value) in devo_sandbox::proxy_env_for_sandbox_profile(sandbox_profile.as_deref(), cwd)
+    for (key, value) in
+        devo_sandbox::proxy_env_for_sandbox_profile(sandbox_profile.as_deref(), sandbox_workspace)
     {
         command.env(key, value);
     }
@@ -325,6 +325,7 @@ pub async fn spawn_process(
         program,
         args,
         cwd,
+        cwd,
         env,
         arg0,
         PipeStdinMode::Piped,
@@ -348,6 +349,7 @@ pub async fn spawn_process_sandboxed(
     spawn_process_with_stdin_mode(
         program,
         args,
+        cwd,
         cwd,
         env,
         arg0,
@@ -384,6 +386,7 @@ pub async fn spawn_process_no_stdin_with_inherited_fds(
         program,
         args,
         cwd,
+        cwd,
         env,
         arg0,
         PipeStdinMode::Null,
@@ -416,17 +419,23 @@ pub async fn spawn_process_no_stdin_sandboxed(
         SandboxProcessOptions {
             sandbox_profile,
             sandbox_overlay: None,
+            sandbox_workspace: cwd.to_path_buf(),
         },
     )
     .await
 }
 
-/// Optional sandbox settings for a pipe-backed process.
+/// Sandbox settings for a pipe-backed process.
 pub struct SandboxProcessOptions {
     /// Named sandbox profile applied before the child process starts.
     pub sandbox_profile: Option<String>,
     /// Per-invocation permissions merged into the named profile.
     pub sandbox_overlay: Option<devo_sandbox::SandboxPermissionOverlay>,
+    /// Trusted workspace used for profile, overlay, pre_exec, and proxy
+    /// resolution. The child still starts in `cwd`. Legacy wrappers that do not
+    /// know a session workspace pass `cwd`; model-facing callers must pass the
+    /// trusted session root.
+    pub sandbox_workspace: PathBuf,
 }
 
 /// Spawn a pipe process with a named sandbox profile and per-invocation overlay.
@@ -443,6 +452,7 @@ pub async fn spawn_process_no_stdin_sandboxed_with_overlay(
         program,
         args,
         cwd,
+        &options.sandbox_workspace,
         env,
         arg0,
         PipeStdinMode::Null,

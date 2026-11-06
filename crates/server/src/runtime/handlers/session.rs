@@ -233,6 +233,18 @@ impl ServerRuntime {
             Default::default(),
         );
         summary.settings.effective_context_window = Some(applied_compaction_limit);
+        summary.session_dir = invented_persistence
+            .as_ref()
+            .map(|_| self.rollout_store.root_session_dir(&session_id));
+        if let Some(session_dir) = summary.session_dir.as_ref()
+            && let Err(error) = std::fs::create_dir_all(session_dir)
+        {
+            return self.error_response(
+                request_id,
+                ProtocolErrorCode::InternalError,
+                format!("create session artifact dir: {error}"),
+            );
+        }
         let mut core_session = runtime_context.new_session_state(
             session_id,
             params.cwd.clone(),
@@ -244,8 +256,50 @@ impl ServerRuntime {
         if let Some(invented) = invented_persistence.as_mut() {
             invented.extras.permission_preset = Some(permission_preset);
         }
+        // Fresh sessions must hold their cross-process lock before the first
+        // durable line. A contention here means another live process somehow
+        // created the same id — refuse.
+        let session_file_lock = match invented_persistence
+            .as_ref()
+            .map(|entry| entry.rollout_path.as_path())
+        {
+            Some(path) => {
+                if let Some(parent) = path.parent()
+                    && let Err(error) = std::fs::create_dir_all(parent)
+                {
+                    return self.error_response(
+                        request_id,
+                        ProtocolErrorCode::InternalError,
+                        format!("create session journal parent: {error}"),
+                    );
+                }
+                match crate::runtime::session_file_lock::SessionFileLock::acquire(path) {
+                    Ok(lock) => Some(lock),
+                    Err(crate::runtime::session_file_lock::SessionLockError::Contention {
+                        holder_pid,
+                    }) => {
+                        return self.error_response(
+                            request_id,
+                            ProtocolErrorCode::SessionLocked,
+                            format!(
+                                "session rollout is already locked by another Devo process \
+                                 (pid {holder_pid}); refusing to create a conflicting session"
+                            ),
+                        );
+                    }
+                    Err(error) => {
+                        return self.error_response(
+                            request_id,
+                            ProtocolErrorCode::InternalError,
+                            format!("cannot acquire session journal lock: {error}"),
+                        );
+                    }
+                }
+            }
+            None => None,
+        };
         if let Some(invented) = &invented_persistence
-            && let Err(error) = self.rollout_store.append_session_meta_at(
+            && let Err(error) = self.rollout_store.append_session_meta_create_at(
                 &invented.rollout_path,
                 &summary.native,
                 Some(invented.extras.clone()),
@@ -268,28 +322,6 @@ impl ServerRuntime {
             .as_ref()
             .map(|entry| entry.rollout_path.clone());
         let rollout_path_for_db = rollout_path.clone();
-        // Fresh sessions must hold their cross-process lock from creation:
-        // a brand-new id cannot collide with an EXISTING session, but another
-        // process can `devo resume` this id any time after this response, and
-        // concurrent ownership would corrupt the rollout. A contention here
-        // means another live process somehow created the same id — refuse.
-        let session_file_lock = match rollout_path.as_deref() {
-            Some(path) => match crate::runtime::session_cache::SessionFileLock::acquire(path) {
-                Ok(lock) => Some(lock),
-                Err(contention) => {
-                    return self.error_response(
-                        request_id,
-                        ProtocolErrorCode::SessionLocked,
-                        format!(
-                            "session rollout is already locked by another Devo process \
-                             (pid {}); refusing to create a conflicting session",
-                            contention.holder_pid
-                        ),
-                    );
-                }
-            },
-            None => None,
-        };
         let actor_state = SessionActorState {
             runtime_context,
             rollout_path,
@@ -659,7 +691,10 @@ impl ServerRuntime {
             session_additional_dirs,
             mut current,
         ) = if let Some(rollout_path) = &rollout_path {
-            let history = match devo_core::read_canonical_history(rollout_path) {
+            let history = match devo_core::read_canonical_history_for_session(
+                rollout_path,
+                &legacy_session_id,
+            ) {
                 Ok(history) => history,
                 Err(error) => {
                     return self.error_response(
@@ -948,6 +983,22 @@ impl ServerRuntime {
                 serde_json::to_value(model_binding_id).expect("serialize model binding setting"),
             ));
         }
+        let _settings_lease = if let Some(path) = rollout_path.as_ref()
+            && !settings_changes.is_empty()
+        {
+            match crate::runtime::session_file_lock::SessionFileLock::acquire(path) {
+                Ok(lease) => Some(lease),
+                Err(error) => {
+                    return self.error_response(
+                        request_id,
+                        ProtocolErrorCode::SessionLocked,
+                        format!("cannot lock session metadata journal: {error}"),
+                    );
+                }
+            }
+        } else {
+            None
+        };
         if let Some(path) = rollout_path.as_ref()
             && !settings_changes.is_empty()
             && let Err(error) = self.rollout_store.append_session_settings_batch_at(
@@ -1174,7 +1225,8 @@ impl ServerRuntime {
         // index with the applied patch.
         let mut session = if let Some(path) = rollout_path.as_ref()
             && !settings_changes.is_empty()
-            && let Ok(history) = devo_core::read_canonical_history(path)
+            && let Ok(history) =
+                devo_core::read_canonical_history_for_session(path, &legacy_session_id)
             && let Some(persisted) = history.session
         {
             // Post-write re-read so `version` includes the settings-epoch bump
@@ -1297,7 +1349,17 @@ impl ServerRuntime {
         request_id: serde_json::Value,
         session_id: SessionId,
     ) -> Option<serde_json::Value> {
-        let session = self.native_session_snapshot(session_id).await?;
+        let session = match self.native_session_snapshot(session_id).await {
+            Ok(Some(session)) => session,
+            Ok(None) => return None,
+            Err(error) => {
+                return Some(self.error_response(
+                    request_id,
+                    ProtocolErrorCode::InternalError,
+                    error,
+                ));
+            }
+        };
         Some(
             serde_json::to_value(SuccessResponse {
                 id: request_id,
@@ -1321,14 +1383,13 @@ impl ServerRuntime {
         session_id: SessionId,
         indexed_rollout_path: Option<std::path::PathBuf>,
     ) -> Result<Option<std::path::PathBuf>, String> {
-        Ok(match indexed_rollout_path.filter(|path| path.exists()) {
-            Some(path) => Some(path),
-            _ => self
-                .rollout_store
-                .find_rollout_by_session_id(&session_id)
-                .map_err(|error| format!("failed to locate session rollout: {error}"))?
-                .filter(|path| path.exists()),
-        })
+        self.rollout_store
+            .resolve_session_journal(
+                &session_id,
+                indexed_rollout_path.as_deref(),
+                crate::persistence::JournalVisibility::Live,
+            )
+            .map_err(|error| format!("failed to locate session rollout: {error}"))
     }
 
     /// Reads the rollout-backed canonical session snapshot; `None` when the
@@ -1336,19 +1397,26 @@ impl ServerRuntime {
     pub(crate) async fn native_session_snapshot(
         &self,
         session_id: SessionId,
-    ) -> Option<devo_protocol::native::session::Session> {
-        let rollout_path = self
-            .resolve_existing_rollout_path(session_id, self.indexed_rollout_path(session_id))
-            .ok()
-            .flatten();
+    ) -> Result<Option<devo_protocol::native::session::Session>, String> {
+        let rollout_path =
+            self.resolve_existing_rollout_path(session_id, self.indexed_rollout_path(session_id))?;
         // Only the metadata header is needed here; the filtered meta reader
         // skips the typed parse of every non-meta line, which dominates a
         // full canonical-history read on large journals.
-        let history_session = rollout_path.as_ref().and_then(|path| {
-            devo_core::read_rollout_session_meta(path)
-                .ok()?
-                .map(|session| *session)
-        });
+        let history_session = match rollout_path {
+            Some(path) => {
+                match devo_core::read_rollout_session_meta_for_session(&path, &session_id) {
+                    Ok(session) => session.map(|session| *session),
+                    Err(devo_core::HistoryReadError::SessionDeleted { .. }) => return Ok(None),
+                    Err(error) => {
+                        return Err(format!(
+                            "failed to read session metadata for {session_id}: {error}"
+                        ));
+                    }
+                }
+            }
+            None => None,
+        };
         if let Some(handle) = self.session(session_id).await
             && let Some(mut session) = handle.native_session().await
         {
@@ -1358,14 +1426,16 @@ impl ServerRuntime {
             if let Some(history) = history_session.as_ref() {
                 session.version = session.version.max(history.version);
             }
-            return Some(session);
+            return Ok(Some(session));
         }
-        let mut session = history_session?;
+        let Some(mut session) = history_session else {
+            return Ok(None);
+        };
         if let Some(model) = self.deps.model_catalog.get(&session.model.model) {
             session.settings.effective_context_window =
                 Some(crate::runtime::context_occupancy::resolved_compaction_limit(model));
         }
-        Some(session)
+        Ok(Some(session))
     }
 
     /// Overlays live runtime pointers onto a durable session snapshot.
@@ -1404,8 +1474,12 @@ impl ServerRuntime {
                 Err(error) => return error,
             };
         let session_id = params.session_id;
-        let Some(mut session) = self.native_session_snapshot(session_id).await else {
-            return self.session_missing(request_id);
+        let mut session = match self.native_session_snapshot(session_id).await {
+            Ok(Some(session)) => session,
+            Ok(None) => return self.session_missing(request_id),
+            Err(error) => {
+                return self.error_response(request_id, ProtocolErrorCode::InternalError, error);
+            }
         };
         self.apply_live_session_runtime_fields(session_id, &mut session)
             .await;
@@ -1585,8 +1659,15 @@ impl ServerRuntime {
             // Indexed path only — no suffix walk. Metadata is best-effort; a
             // missing file leaves the list-cache field unset.
             if let Some(path) = rollout_paths.get(&session_id) {
-                session.transcript_size_bytes =
-                    std::fs::metadata(path).ok().map(|metadata| metadata.len());
+                // A shared child reports the whole root journal size otherwise.
+                // Keep the field honest: only a session that owns its journal
+                // reports its physical transcript size.
+                session.transcript_size_bytes = path
+                    .file_stem()
+                    .and_then(|stem| stem.to_str())
+                    .filter(|stem| *stem == session_id.as_str())
+                    .and_then(|_| std::fs::metadata(path).ok())
+                    .map(|metadata| metadata.len());
             }
             if session.message_count.is_none() {
                 session.message_count = turn_counts.get(&session_id).copied();
@@ -1693,7 +1774,17 @@ impl ServerRuntime {
         request_id: serde_json::Value,
         session_id: SessionId,
     ) -> Option<serde_json::Value> {
-        let session = self.native_session_snapshot(session_id).await?;
+        let session = match self.native_session_snapshot(session_id).await {
+            Ok(Some(session)) => session,
+            Ok(None) => return None,
+            Err(error) => {
+                return Some(self.error_response(
+                    request_id,
+                    ProtocolErrorCode::InternalError,
+                    error,
+                ));
+            }
+        };
         let stats = self.deps.db.get_stats(&session_id).ok().flatten();
         // Occupancy preference: persisted stats first, then the resident
         // actor summary, and only then the rollout — the rollout scan is a
@@ -1743,7 +1834,7 @@ impl ServerRuntime {
             .resolve_existing_rollout_path(session_id, self.indexed_rollout_path(session_id))
             .ok()
             .flatten()?;
-        devo_core::read_canonical_history(&rollout_path)
+        devo_core::read_canonical_history_for_session(&rollout_path, &session_id)
             .ok()
             .and_then(|history| history.latest_context_occupancy)
     }
@@ -2048,8 +2139,9 @@ impl ServerRuntime {
                 )
             }
         };
+        let source_session_id = source.summary.session_id();
         let path_scoped_items = source.rollout_path.as_deref().and_then(|rollout_path| {
-            match devo_core::read_canonical_history(rollout_path) {
+            match devo_core::read_canonical_history_for_session(rollout_path, &source_session_id) {
                 Ok(history) => filter_items_to_active_path(
                     &source.persisted_turn_items,
                     &history,

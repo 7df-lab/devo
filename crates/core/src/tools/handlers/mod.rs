@@ -44,7 +44,7 @@ pub use mcp::{McpToolHandler, mcp_search_text, mcp_tool_spec};
 pub use plan::PlanHandler;
 pub use question::QuestionHandler;
 pub use read::ReadHandler;
-pub use shell_command::ShellCommandHandler;
+pub use shell_command::{ShellCommandHandler, ShellExecutionMode};
 pub use skill::SkillHandler;
 pub use tool_search::{ToolSearchHandler, tool_search_spec};
 pub use webfetch::WebFetchHandler;
@@ -381,7 +381,6 @@ mod tests {
 
     #[test]
     fn default_registry_exposes_update_goal_tool() {
-        // Trace: L2-DES-GOAL-001
         let registry = build_registry_from_plan(&ToolPlanConfig::default());
 
         assert!(registry.spec("update_goal").is_some());

@@ -9,7 +9,7 @@ use devo_protocol::native::ids::SessionId;
 
 use super::ServerRuntime;
 
-/// Handles only `bash.completed` and PID-scoped `bash.consumed`; all other idle requests are denied.
+/// Handles notices and session-scoped handle controls; idle process starts are denied.
 pub(crate) fn for_session(
     runtime: Weak<ServerRuntime>,
     session_id: SessionId,
@@ -37,13 +37,20 @@ pub(crate) fn for_session(
                     }
                 }
                 "bash.consumed" => {
-                    let Some(pid) = params.get("pid").and_then(Value::as_i64) else {
+                    let Some(identity) = params
+                        .get("handle_id")
+                        .filter(|value| value.is_string())
+                        .or_else(|| params.get("pid").filter(|value| value.is_i64()))
+                    else {
                         return json!({
                             "status": "error",
-                            "error": "bash.consumed requires a pid",
+                            "error": "bash.consumed requires a handle_id or pid",
                         });
                     };
-                    super::kernel_host::consume_bash_notice(&session_key, pid);
+                    super::kernel_host::consume_bash_notice(&session_key, identity);
+                }
+                "bash.poll" | "bash.kill" | "bash.forget" => {
+                    return devo_core::tools::host_bash::control(&session_key, &action, &params);
                 }
                 _ => {
                     return json!({
@@ -165,6 +172,41 @@ mod tests {
         .await;
         assert_eq!(denied["status"], "error");
         assert!(take_bash_notices(&session_key).is_empty());
+    }
+
+    #[tokio::test]
+    async fn idle_controls_are_scoped_and_start_stays_denied() {
+        let session_id = SessionId::new();
+        let handler = for_session(Weak::new(), session_id);
+        for action in ["bash.poll", "bash.kill", "bash.forget"] {
+            assert_eq!(
+                handler(
+                    "control".into(),
+                    json!({"type":action, "params":{"handle_id":"missing"}})
+                )
+                .await,
+                json!({"status":"error", "error":"unknown bash handle"})
+            );
+        }
+        assert_eq!(
+            handler(
+                "start".into(),
+                json!({"type":"bash.start", "params":{"command":"echo nope"}})
+            )
+            .await,
+            json!({"status":"error", "error":"idle host request denied: bash.start"})
+        );
+        handler(
+            "done".into(),
+            json!({"type":"bash.completed", "params":{"handle_id":"opaque"}}),
+        )
+        .await;
+        handler(
+            "consumed".into(),
+            json!({"type":"bash.consumed", "params":{"handle_id":"opaque"}}),
+        )
+        .await;
+        assert_eq!(take_bash_notices(session_id.as_str()), Vec::<Value>::new());
     }
 
     #[tokio::test]

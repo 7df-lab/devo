@@ -522,8 +522,6 @@ mod tests {
         );
     }
 
-    /// Trace: sparse Connection overlays omit builtin base_url; adapters must
-    /// still inherit https://api.deepseek.com instead of defaulting to OpenAI.
     #[test]
     fn sparse_deepseek_connection_inherits_builtin_base_url_for_adapter() {
         let sparse = ProviderConfigEntry {
@@ -595,7 +593,6 @@ mod tests {
         );
     }
 
-    /// Trace: L2-DES-APP-005, L2-DES-MODEL-001
     /// Verifies: server provider construction validates provider custom header configuration.
     #[tokio::test]
     async fn load_server_provider_rejects_invalid_custom_headers() {
@@ -666,7 +663,6 @@ mod tests {
         );
     }
 
-    /// Trace: L2-DES-AUTH-001
     /// Verifies: oauth credentials are discoverable for builtins without an explicit providers.json binding.
     #[test]
     fn resolve_provider_credential_id_discovers_oauth_convention() {

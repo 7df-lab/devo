@@ -264,6 +264,46 @@ pub enum InternalRecord {
         child_id: devo_protocol::native::ids::ItemId,
         parent_id: Option<devo_protocol::native::ids::ItemId>,
     },
+    /// Hard-delete marker for one logical session inside a shared journal.
+    ///
+    /// Shared root journals contain many sessions, so a child delete cannot
+    /// unlink the file without destroying the root and siblings. This marker
+    /// is append-only and session-scoped: the enclosing [`RolloutLine::Internal`]
+    /// carries the owning `session_id`. Scoped readers fail with
+    /// `SessionDeleted`; index rebuilds omit tombstoned sessions; event
+    /// projection and legacy projection emit nothing for it.
+    SessionDeleted {
+        /// Schema version for persisted tombstone lines.
+        schema_version: u32,
+        /// Wall-clock time the delete became durable.
+        deleted_at: DateTime<Utc>,
+    },
+}
+
+impl RolloutLine {
+    /// The logical session that owns this line, when the line is
+    /// session-attributed.
+    ///
+    /// Every v2 variant currently carries an owner, either on the canonical
+    /// payload (`SessionMeta`, `Turn`, `Item`), on the envelope (`Internal`,
+    /// title, compaction, rollback), or on the workspace record. Returning
+    /// `Option` keeps the API explicit and lets future line kinds opt out
+    /// without silently mis-attributing records.
+    pub fn session_id(&self) -> Option<SessionId> {
+        match self {
+            Self::SessionMeta { session, .. } => Some(session.id),
+            Self::Turn { turn, .. } => Some(turn.session_id),
+            Self::Item { item, .. } => Some(item.session_id),
+            Self::Internal { session_id, .. } => Some(*session_id),
+            Self::SessionTitleUpdated { session_id, .. } => Some(*session_id),
+            Self::CompactionSnapshot { session_id, .. } => Some(*session_id),
+            Self::SessionRollback { session_id, .. } => Some(*session_id),
+            Self::WorkspaceCheckpoint { record, .. } => Some(record.session_id),
+            Self::WorkspaceChange { record, .. } => Some(record.session_id),
+            Self::WorkspaceRestoreStarted { record, .. } => Some(record.session_id),
+            Self::WorkspaceRestoreCompleted { record, .. } => Some(record.session_id),
+        }
+    }
 }
 
 /// Errors from reading a single rollout line. Unknown format versions must
@@ -447,5 +487,35 @@ mod tests {
     fn dispatch_flags_well_formed_json_with_wrong_shape_as_damaged() {
         let error = parse_rollout_line(r#"{"v":2,"kind":"nonsense"}"#).expect_err("must fail");
         assert!(matches!(error, RolloutLineReadError::Damaged { .. }));
+    }
+    #[test]
+    fn session_deleted_internal_line_shape_is_stable() {
+        let line = RolloutLine::Internal {
+            v: ROLLOUT_FORMAT_VERSION,
+            timestamp: fixed_ts(),
+            session_id: SessionId::from_string("ses_1".into()),
+            turn_id: None,
+            seq: 0,
+            entry: InternalRecord::SessionDeleted {
+                schema_version: 1,
+                deleted_at: fixed_ts(),
+            },
+        };
+        assert_eq!(
+            serde_json::to_value(&line).expect("serialize"),
+            serde_json::json!({
+                "v": 2,
+                "kind": "internal",
+                "timestamp": "2026-08-01T00:00:00Z",
+                "sessionId": "ses_1",
+                "turnId": null,
+                "seq": 0,
+                "entry": {
+                    "type": "sessionDeleted",
+                    "schemaVersion": 1,
+                    "deletedAt": "2026-08-01T00:00:00Z"
+                }
+            })
+        );
     }
 }

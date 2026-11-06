@@ -99,7 +99,6 @@ mod tests {
 
     #[test]
     fn continuation_prompt_escapes_untrusted_objective_xml() {
-        // Trace: L2-DES-GOAL-001
         let goal = active_goal("finish <goal> & report \"done\"", Some(100));
 
         let prompt = render_goal_continuation_prompt(&goal).expect("active goal prompt");
@@ -112,7 +111,6 @@ mod tests {
 
     #[test]
     fn continuation_prompt_does_not_fabricate_default_budget() {
-        // Trace: L2-DES-GOAL-001
         let goal = active_goal("finish goal", None);
 
         let prompt = render_goal_continuation_prompt(&goal).expect("active goal prompt");
@@ -123,7 +121,6 @@ mod tests {
 
     #[test]
     fn exhausted_goal_budget_renders_budget_limit_prompt() {
-        // Trace: L2-DES-GOAL-001
         let mut goal = active_goal("finish goal", Some(17));
         goal.tokens_used = 17;
 

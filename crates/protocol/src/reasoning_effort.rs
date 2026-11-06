@@ -594,7 +594,6 @@ mod tests {
         );
     }
 
-    /// Trace: L2-DES-MODEL-003
     /// Verifies: on/enabled select first non-off available thinking level.
     #[test]
     fn normalize_model_thinking_level_selection_maps_on_to_first_non_off() {

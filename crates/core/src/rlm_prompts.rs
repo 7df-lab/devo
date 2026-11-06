@@ -186,20 +186,17 @@ pub fn build_rlm_base_prompt(options: &RlmPromptOptions) -> String {
     );
 
     if has_ipython {
-        // Design doc rlm-permissions.md §6.2: guidance, not a boundary — steer
-        // the model to the front door when raw syscalls hit the OS fence.
         parts.push(String::new());
         parts.push(
-            "The Python kernel runs inside an OS sandbox fence: file access outside the working directory and granted roots is refused by the OS itself. When direct access (`open()`, `os.*`) raises `PermissionError`/`OSError` (including `ENOENT` for hidden paths), retry through the front door: `await rlm.read(path)`, `await rlm.write(path, content)` — the host routes those through the approval pipeline and executes them for you. Do not report a sandbox refusal as a hard failure without trying the front door."
+            "The Python kernel is a trusted orchestration process with user-level OS access, not a sandbox for untrusted code. Plan mode does not OS-confine Python; respect its no-mutation policy. Use host-mediated APIs for shell execution and approval requests. Never use direct Python process or filesystem APIs to bypass a denied host operation."
                 .to_string(),
         );
     }
 
     if can_run_shell_skills {
-        // Local bash stays fenced; rlm.shell mediates explicit grants through the host.
         parts.push(String::new());
         parts.push(
-            "Sandbox and approvals: ordinary Python `bash()` runs inside the kernel fence. If a command needs additional access, use `await rlm.shell(command, sandbox_permissions=\"with_additional_permissions\", additional_permissions={\"network\": {\"enabled\": True}}, justification=\"May I ...?\")` for narrow grants, or `await rlm.shell(command, sandbox_permissions=\"require_escalated\", justification=\"May I ...?\")` for an approved unsandboxed command. This calls the host shell approval pipeline; the kernel stays fenced and denial is final. Do not retry a denied approval through another route. Never attach these fields to an `ipython` call itself. The command uses the host platform shell (PowerShell on Windows), so use native shell syntax rather than nesting another shell. The result is a dict with command output and status."
+            "Sandbox and approvals: Python `bash()` requests host-owned shell execution under the session's configured sandbox profile and approval policy. For additional access, use `await rlm.shell(command, sandbox_permissions=\"with_additional_permissions\", additional_permissions={\"network\": {\"enabled\": True}}, justification=\"May I ...?\")` for narrow grants, or `await rlm.shell(command, sandbox_permissions=\"require_escalated\", justification=\"May I ...?\")` for an approved unsandboxed command. Denial is final; do not retry through another route. Never attach these fields to an `ipython` call itself. Commands use the host platform shell (PowerShell on Windows). `rlm.shell` returns a dict with command output and status."
                 .to_string(),
         );
     }
@@ -443,7 +440,6 @@ mod tests {
 
     use super::*;
 
-    /// Trace: L1-REQ-RLM-001, L2-DES-RLM-001
     /// Verifies: root RLM base prompt carries Devo doctrine strings and denies create_session.
     #[test]
     fn build_rlm_base_prompt_contains_key_doctrine() {
@@ -481,7 +477,6 @@ mod tests {
         assert!(!prompt.contains("Each skill is also available as a shell command"));
     }
 
-    /// Trace: L1-REQ-RLM-001, L2-DES-RLM-001
     /// Verifies: child prompt differs from root (parent messaging, no auto-refine, own kernel).
     #[test]
     fn child_prompt_differs_from_root() {
@@ -505,7 +500,6 @@ mod tests {
         assert!(child.contains("Recursive agent depth: 1"));
     }
 
-    /// Trace: L2-DES-SKILLS-001, L2-DES-RLM-001
     /// Verifies: catalog skills render as XML progressive disclosure.
     #[test]
     fn format_catalog_skills_xml_escapes_and_lists_fields() {

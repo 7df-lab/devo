@@ -895,7 +895,6 @@ mod tests {
         assert!(!provider_spec_names.contains(&"webfetch"));
     }
 
-    /// Trace: kernel-tools-only design (user direction, R27)
     /// Verifies: the stale host-side file tools (read/write/edit/find/grep)
     /// are gone from every registry plan — file work goes through the shell
     /// tool (and the python kernel's rlm front door on the kernel surface).
@@ -919,7 +918,6 @@ mod tests {
         }
     }
 
-    /// Trace: prompt-payload audit (R27)
     /// Verifies: the shell description never steers the model toward the
     /// removed file tools — it used to instruct "Use Read (NOT cat/head/tail)"
     /// in kernel sessions where no such tool exists, sending the model on
@@ -959,7 +957,6 @@ mod tests {
         }
     }
 
-    /// Trace: L2-DES-RLM-001
     /// Verifies: the internal RLM plan retains Python, shell, plan, and question handlers.
     #[test]
     fn rlm_runtime_plan_includes_ipython_and_bash_handlers() {
@@ -987,7 +984,6 @@ mod tests {
         );
     }
 
-    /// Trace: L2-DES-RLM-001
     /// Verifies: the discrete internal plan retains shell and patch handlers; the
     /// registry exposure policy hides their schemas from model requests.
     #[test]
@@ -1012,7 +1008,6 @@ mod tests {
         );
     }
 
-    /// Trace: L2-DES-RLM-001
     /// Verifies: Rlm execution_surface selects the RLM root plan.
     #[test]
     fn rlm_surface_selects_rlm_root_plan() {

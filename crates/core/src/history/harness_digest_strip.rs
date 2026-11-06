@@ -97,7 +97,6 @@ mod tests {
     use super::*;
     use pretty_assertions::assert_eq;
 
-    /// Trace: L2-DES-CONTEXT-002, L2-DES-HARNESS-001
     /// Verifies: summarizer input drops harness digest messages.
     #[test]
     fn excludes_digest_only_messages() {

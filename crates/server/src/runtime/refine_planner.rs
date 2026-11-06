@@ -345,7 +345,6 @@ mod tests {
         }
     }
 
-    /// Trace: L2-DES-HARNESS-001
     /// Verifies: LLM JSON parses into a memory Create RefineProposal.
     #[test]
     fn parse_refine_proposal_text_memory_create() {
@@ -377,7 +376,6 @@ mod tests {
         );
     }
 
-    /// Trace: L2-DES-HARNESS-001
     /// Verifies: base_system_prompt edits are rejected.
     #[test]
     fn parse_rejects_immutable_base_prompt() {
@@ -393,7 +391,6 @@ mod tests {
         assert!(parse_refine_proposal_text(&pending(Some("x")), raw).is_none());
     }
 
-    /// Trace: L2-DES-HARNESS-001
     /// Verifies: fenced / noisy model output still extracts JSON.
     #[test]
     fn parse_extracts_json_object_from_noise() {
@@ -402,7 +399,6 @@ mod tests {
         assert_eq!(proposal.summary, "ok");
         assert!(proposal.edits.is_empty());
     }
-    /// Trace: global refine scope must reach the applied entries.
     /// Verifies: LLM-emitted per-entry scope never overrides the requested
     /// target store (bug #45 — global refinements landed in the local store).
     #[test]
@@ -429,7 +425,6 @@ mod tests {
         assert_eq!(entry.scope, Some(HarnessScope::Global));
     }
 
-    /// Trace: L2-DES-HARNESS-001
     /// Verifies: the auto-interval scheduling sentinel never reaches the
     /// planner prompt as instructions (the model used to store the sentinel
     /// itself as a durable memory), while real guidance passes verbatim and

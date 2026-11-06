@@ -400,6 +400,19 @@ function Receive-DevoAsset {
     }
 }
 
+function Expand-DevoArchive {
+    param(
+        [Parameter(Mandatory = $true)][string]$Archive,
+        [Parameter(Mandatory = $true)][string]$Destination
+    )
+    if ($Archive -like "*.zip") {
+        [IO.Compression.ZipFile]::ExtractToDirectory($Archive, $Destination)
+    } else {
+        & "$env:SystemRoot\System32\tar.exe" -xzf $Archive -C $Destination
+        if ($LASTEXITCODE -ne 0) { throw "Failed to extract $Archive" }
+    }
+}
+
 function Get-CachedDevoRuntime {
     param([string]$Kind, [string]$Digest, [string]$Asset, [string]$BaseUrl)
     $cache = if ($env:DEVO_RUNTIME_CACHE) { $env:DEVO_RUNTIME_CACHE } else { Join-Path $env:LOCALAPPDATA "devo\runtimes" }
@@ -427,12 +440,12 @@ function Get-CachedDevoRuntime {
             }
         }
         New-Item -ItemType Directory -Path $stage | Out-Null
-        $archive = Join-Path $stage "pack.tar.gz"
+        $archiveName = if ($Asset -like "*.zip") { "pack.zip" } else { "pack.tar.gz" }
+        $archive = Join-Path $stage $archiveName
         Write-Host "Downloading $Kind runtime ..."
         Receive-DevoAsset -Url "$BaseUrl/$Asset" -Destination $archive
         if ((Get-Sha256Hex $archive) -ine $Digest) { throw "Runtime SHA-256 verification failed: $Asset" }
-        & "$env:SystemRoot\System32\tar.exe" -xzf $archive -C $stage
-        if ($LASTEXITCODE -ne 0) { throw "Failed to extract $Asset" }
+        Expand-DevoArchive -Archive $archive -Destination $stage
         Remove-Item -LiteralPath $archive
         $extractedBinary = Join-Path $stage "runtime\$Kind\$Kind.exe"
         if (-not (Test-Path -LiteralPath $extractedBinary -PathType Leaf)) { throw "Incomplete $Kind runtime pack" }
@@ -473,7 +486,7 @@ function Install-DevoOnline {
         for ($i = 1; $i -le 3; $i++) {
             $kind = @("app", "node", "python")[$i - 1]
             $parts = $lines[$i] -split ' '
-            if ($parts.Count -ne 3 -or $parts[0] -ne $kind -or $parts[1] -cnotmatch '^[a-f0-9]{64}$' -or $parts[2] -cnotmatch '^[a-zA-Z0-9_.-]+\.tar\.gz$') { throw "Invalid $kind runtime index entry" }
+            if ($parts.Count -ne 3 -or $parts[0] -ne $kind -or $parts[1] -cnotmatch '^[a-f0-9]{64}$' -or $parts[2] -cnotmatch '^[a-zA-Z0-9_.-]+\.(tar\.gz|zip)$') { throw "Invalid $kind runtime index entry" }
             $packs[$kind] = @{ Digest = $parts[1]; Asset = $parts[2] }
         }
         # A version tag can be rebuilt; compare its verified app digest before
@@ -491,15 +504,15 @@ function Install-DevoOnline {
                 # Function definitions live only in this runspace; the worker
                 # runspaces get them re-declared, including the PS 3.0-safe
                 # SHA-256 helper used by Get-CachedDevoRuntime.
-                $workerScript = "param(`$Kind, `$Digest, `$Asset, `$BaseUrl)`n`$ErrorActionPreference = 'Stop'`nfunction Get-Sha256Hex { $((Get-Command Get-Sha256Hex).Definition) }`nfunction Receive-DevoAsset { $((Get-Command Receive-DevoAsset).Definition) }`nfunction Get-CachedDevoRuntime { $((Get-Command Get-CachedDevoRuntime).Definition) }`nGet-CachedDevoRuntime -Kind `$Kind -Digest `$Digest -Asset `$Asset -BaseUrl `$BaseUrl"
+                $workerScript = "param(`$Kind, `$Digest, `$Asset, `$BaseUrl)`n`$ErrorActionPreference = 'Stop'`nAdd-Type -AssemblyName System.IO.Compression.FileSystem`nfunction Get-Sha256Hex { $((Get-Command Get-Sha256Hex).Definition) }`nfunction Receive-DevoAsset { $((Get-Command Receive-DevoAsset).Definition) }`nfunction Expand-DevoArchive { $((Get-Command Expand-DevoArchive).Definition) }`nfunction Get-CachedDevoRuntime { $((Get-Command Get-CachedDevoRuntime).Definition) }`nGet-CachedDevoRuntime -Kind `$Kind -Digest `$Digest -Asset `$Asset -BaseUrl `$BaseUrl"
                 [void]$shell.AddScript($workerScript).AddArgument($kind).AddArgument($packs[$kind].Digest).AddArgument($packs[$kind].Asset).AddArgument($runtimeBase)
                 $workers += @{ Kind = $kind; Shell = $shell; Handle = $shell.BeginInvoke() }
             }
-            $appArchive = Join-Path $TempRoot "app.tar.gz"
+            $appArchiveName = if ($packs.app.Asset -like "*.zip") { "app.zip" } else { "app.tar.gz" }
+            $appArchive = Join-Path $TempRoot $appArchiveName
             Receive-DevoAsset -Url "$baseUrl/$($packs.app.Asset)" -Destination $appArchive
             if ((Get-Sha256Hex $appArchive) -ine $packs.app.Digest) { throw "App SHA-256 verification failed" }
-            & "$env:SystemRoot\System32\tar.exe" -xzf $appArchive -C $extracted
-            if ($LASTEXITCODE -ne 0) { throw "Failed to extract app archive" }
+            Expand-DevoArchive -Archive $appArchive -Destination $extracted
         } catch { $failure = $_ } finally {
             foreach ($worker in $workers) {
                 try {

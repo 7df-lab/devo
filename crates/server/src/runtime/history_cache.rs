@@ -11,7 +11,7 @@ use std::sync::{Arc, Weak};
 use std::time::SystemTime;
 
 use anyhow::Context;
-use devo_core::{CanonicalHistory, read_canonical_history};
+use devo_core::{CanonicalHistory, read_canonical_history_for_session};
 use devo_protocol::native::ids::SessionId;
 use tokio::sync::Mutex;
 
@@ -74,9 +74,11 @@ impl HistoryCache {
         self.parse_count
             .fetch_add(1, std::sync::atomic::Ordering::Relaxed);
         let read_path = path.clone();
-        let history = tokio::task::spawn_blocking(move || read_canonical_history(&read_path))
-            .await
-            .context("join canonical history read")??;
+        let history = tokio::task::spawn_blocking(move || {
+            read_canonical_history_for_session(&read_path, &session_id)
+        })
+        .await
+        .context("join canonical history read")??;
         let history = Arc::new(history);
 
         if let Some(version) = version

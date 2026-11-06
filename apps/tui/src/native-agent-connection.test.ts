@@ -1,5 +1,4 @@
 /**
- * Trace: L2-DES-APP-010
  * Verifies: NativeAgentConnection prompt/abort/snapshot main path over fake stdio.
  */
 

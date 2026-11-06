@@ -118,7 +118,6 @@ mod tests {
 
     #[test]
     fn schema_only_allows_complete_status() {
-        // Trace: L2-DES-GOAL-001
         let schema = goal_update_schema();
         let status_schema = schema
             .properties
@@ -132,7 +131,6 @@ mod tests {
 
     #[tokio::test]
     async fn rejects_non_complete_status() {
-        // Trace: L2-DES-GOAL-001
         let handler = GoalUpdateHandler::new();
         let ctx = ToolContext {
             output_store: None,

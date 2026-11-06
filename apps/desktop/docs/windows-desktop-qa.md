@@ -64,7 +64,7 @@ replaced by scripted browser end-to-end tests.
 | Provider failure | HTTP 402 was visible as “Insufficient provider balance,” with expandable details. |
 | Funded recovery | A new real Electron request produced assistant output, Python output, and a fixture read after balance was replenished. No new 402 occurred. |
 | Funded automatic queue | Enter queued a follow-up during a 60-second Python cell; it drained automatically and produced its own Python result and assistant reply. |
-| Mouse submission during work | Clicked Queue message during a fenced 150-second Python cell. Edited and resubmitted the first queued entry, then queued and steered a second. The steer produced 402; the edited queue drained automatically and produced 301. Stop remains separately available. |
+| Mouse submission during work | Clicked Queue message during a fenced 150-second Python cell (historical: the QA build then sandboxed the Python kernel). Edited and resubmitted the first queued entry, then queued and steered a second. The steer produced 402; the edited queue drained automatically and produced 301. Stop remains separately available. |
 | Completed activity label | Removed the tool suffix: completed activity displays “Worked for 1s,” with Python details inside the disclosure. |
 | Separate inner cells | Clicked Worked to reveal collapsed Thought and Python rows. Opened each independently and collapsed the whole group with Worked. Python source and output stay paired. |
 | Steering visibility after completion | A fresh steer during a 90-second Python wait remained a user bubble after completion, runtime restart, and renderer reload. The assistant applied it and produced 503. The reported disappearance was not reproduced in this checkout; live/replay regression tests preserve it. |
@@ -83,6 +83,16 @@ an outside write was denied, and outbound TCP was denied with Windows error
 a fresh real Electron Python turn reported the token `DevoSandboxOffline`,
 used the fenced kernel, and emitted no new unfenced warning. Historical
 warnings remain attached to their original turns.
+
+Historical note: the Python-turn sentences above (the `DevoSandboxOffline`
+token, the fenced kernel, and the no-new-unfenced-warning result) describe the
+pre-cleanup build, where the Python kernel itself ran in the Windows sandbox.
+Current builds run the Python kernel as a trusted, user-privileged process with
+no OS sandbox (`docs/trusted-kernel-host-shell.md`); only host shell execution
+follows the configured sandbox profile. The earlier write/network probe is
+historical evidence, not validation of the current host-shell path; that path
+requires a fresh Windows runtime check. A current Python turn should not be
+expected to report that token or a fenced-kernel state.
 
 Funded Electron requests now succeed. The earlier 402 checks remain coverage
 of provider failure handling, rather than a current provider-balance blocker.

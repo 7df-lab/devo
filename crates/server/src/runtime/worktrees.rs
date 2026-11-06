@@ -300,9 +300,19 @@ mod tests {
         )
         .await?;
         let listed = execute(home.path(), json!({"cwd": cwd}), WorktreeOperation::List).await?;
-        // Git prints native Windows paths with forward slashes.
+        // Git prints native Windows paths with forward slashes. On Unix,
+        // canonicalize so a tempdir under a symlinked root (for example
+        // /var -> /private/var on macOS) matches `git worktree list`.
+        let created_directory = created["directory"].as_str().unwrap();
+        #[cfg(unix)]
+        let created_directory = std::fs::canonicalize(created_directory)
+            .expect("canonicalize worktree directory")
+            .to_string_lossy()
+            .into_owned();
+        #[cfg(windows)]
+        let created_directory = created_directory.replace('\\', "/");
         let expected = WorktreeInfo {
-            directory: created["directory"].as_str().unwrap().replace('\\', "/"),
+            directory: created_directory,
             name: created["name"].as_str().unwrap().to_string(),
             branch: created["branch"].as_str().unwrap().to_string(),
         };

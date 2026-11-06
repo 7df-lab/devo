@@ -83,11 +83,13 @@ pub(crate) async fn run_with_pty(
         output_capture,
         shell,
         command_to_run,
+        sandbox_workspace,
         workdir,
         description,
         timeout_ms,
         yield_time_ms,
         max_output_tokens,
+        progress_limit_bytes: _,
         sandbox_profile,
         sandbox_permission_overlay,
     } = run;
@@ -107,6 +109,7 @@ pub(crate) async fn run_with_pty(
     let plan = match SandboxLaunchPlan::prepare_pty(
         sandbox_profile.as_deref(),
         sandbox_permission_overlay.as_ref(),
+        &sandbox_workspace,
         &workdir,
         &shell,
         &command_to_run,

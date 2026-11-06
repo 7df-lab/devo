@@ -121,7 +121,6 @@ mod tests {
         ]
     }
 
-    /// Trace: L2-DES-CONTEXT-004
     #[test]
     fn parallel_batch_is_indivisible() {
         let items = batch();
@@ -134,7 +133,6 @@ mod tests {
         assert_eq!(preserve_boundary(&items[..4], 4), 1);
     }
 
-    /// Trace: L2-DES-CONTEXT-004
     #[test]
     fn messages_round_trip_all_tool_items() {
         let items = batch();

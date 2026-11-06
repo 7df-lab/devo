@@ -48,7 +48,6 @@ use upgrade_command::run_upgrade;
 
 /// Top-level `devo` command that dispatches to interactive agent mode or one
 /// of the supporting runtime subcommands.
-///
 #[derive(Debug, Parser)]
 #[command(name = "devo", version, about = "Devo CLI")]
 struct Cli {
@@ -88,6 +87,7 @@ fn main() -> Result<()> {
     )
 }
 
+/// TODO: Move exit related logic into a single file.
 fn format_with_separators(value: usize) -> String {
     let digits = value.to_string();
     let separator_count = digits.len().saturating_sub(1) / 3;
@@ -102,6 +102,7 @@ fn format_with_separators(value: usize) -> String {
     out
 }
 
+/// TODO: Move exit related logic into a single file.
 fn format_token_usage_line(exit: &AppExit, color_enabled: bool) -> Option<String> {
     let total = exit.total_tokens;
     let non_cached_input = exit
@@ -144,6 +145,7 @@ fn format_token_usage_line(exit: &AppExit, color_enabled: bool) -> Option<String
     ))
 }
 
+/// TODO: Move exit related logic into a single file.
 fn exit_messages(exit: &AppExit, color_enabled: bool) -> Vec<String> {
     let mut lines = Vec::new();
     if let Some(line) = format_token_usage_line(exit, color_enabled) {
@@ -245,8 +247,8 @@ async fn run_cli() -> Result<()> {
 fn direct_server_early_dispatch() -> devo_arg0::EarlyDispatch {
     let args: Vec<String> = std::env::args().collect();
     // One-shot Windows sandbox provisioning: `devo sandbox-setup` pops the
-    // UAC consent and provisions the sandbox accounts/firewall/ACLs so the
-    // RLM kernel fence can be raised (design doc §5.3 setup entry).
+    // UAC consent and provisions the sandbox accounts/firewall/ACLs so
+    // host-side sandboxed commands can use the provisioned account.
     if args.get(1).is_some_and(|arg| arg == "sandbox-setup") {
         #[cfg(windows)]
         {
@@ -371,6 +373,7 @@ async fn maybe_print_startup_update(cli: &Cli) {
     }
 }
 
+/// TODO: Rename this function to instll_client_logging
 fn install_logging(cli: &Cli) -> Result<LoggingRuntime> {
     let home_dir = find_devo_home()?;
     let app_config = devo_core::FileSystemAppConfigLoader::new(home_dir.clone())
@@ -420,6 +423,7 @@ fn cli_logging_overrides(cli: &Cli) -> toml::Value {
     )]))
 }
 
+/// TODO: Why there is a simple wrapper function, maybe should be removed.
 /// Launch helper re-exported for tests / clarity — implementation lives in
 /// [`agent_command::launch_interactive_mode_client`].
 #[allow(dead_code)]
@@ -430,6 +434,7 @@ fn launch_interactive_mode_client_for_tests() -> Result<()> {
     )
 }
 
+/// TODO: Move test to another single file.
 #[cfg(test)]
 mod tests {
     use clap::Parser;

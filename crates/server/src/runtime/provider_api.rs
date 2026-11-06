@@ -1054,7 +1054,6 @@ mod tests {
         );
     }
 
-    /// Trace: L2-DES-APP-005, L2-DES-MODEL-001
     /// Verifies: provider validation applies provider custom header parsing before sending a validation request.
     #[tokio::test]
     async fn validate_provider_candidate_rejects_invalid_custom_headers() {

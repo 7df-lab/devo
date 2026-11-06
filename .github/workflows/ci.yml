@@ -70,8 +70,11 @@ jobs:
         if: runner.os == 'Linux'
       - run: cargo check --locked -p devo-kernel --all-targets --target ${{ matrix.target }}
         if: runner.os == 'macOS'
-      - run: cargo test --locked -p devo-kernel credential_unix::tests
+      - name: Test kernel credential environment and host protocol
         if: runner.os == 'macOS'
+        run: |
+          cargo test --locked -p devo-kernel session::credential_env_tests
+          cargo test --locked -p devo-kernel protocol::tests
 
   windows-kernel:
     needs: changes
