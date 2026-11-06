@@ -36,7 +36,6 @@ mod prompt_command;
 mod prompt_host;
 mod upgrade_command;
 
-use agent_command::launch_interactive_mode_client;
 use agent_command::run_agent;
 use app_exit::AppExit;
 use doctor_command::run_doctor;
@@ -421,17 +420,6 @@ fn cli_logging_overrides(cli: &Cli) -> toml::Value {
             toml::Value::String(log_level.to_string()),
         )])),
     )]))
-}
-
-/// TODO: Why there is a simple wrapper function, maybe should be removed.
-/// Launch helper re-exported for tests / clarity — implementation lives in
-/// [`agent_command::launch_interactive_mode_client`].
-#[allow(dead_code)]
-fn launch_interactive_mode_client_for_tests() -> Result<()> {
-    launch_interactive_mode_client(
-        /*resume_session_id*/ None, /*dangerously_skip_permissions*/ false,
-        /*log_level*/ None,
-    )
 }
 
 /// TODO: Move test to another single file.

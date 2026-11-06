@@ -40,9 +40,6 @@ export function applyDevoAgentDirEnv(home = resolveDevoHome()): string {
   if (!process.env.DEVO_CODING_AGENT_DIR) {
     process.env.DEVO_CODING_AGENT_DIR = home;
   }
-  if (!process.env.DEVO_CODING_AGENT_DIR) {
-    process.env.DEVO_CODING_AGENT_DIR = home;
-  }
   if (!process.env.DEVO_HOME) {
     process.env.DEVO_HOME = home;
   }
