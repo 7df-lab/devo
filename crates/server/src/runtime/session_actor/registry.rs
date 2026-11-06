@@ -62,26 +62,6 @@ impl ServerRuntime {
         self.sessions.lock().await.values().cloned().collect()
     }
 
-    #[allow(dead_code)]
-    pub(crate) async fn list_session_summaries_from_actors(
-        &self,
-    ) -> Vec<crate::runtime_session_summary::RuntimeSessionSummary> {
-        let handles = self.list_session_handles().await;
-        let mut summaries = Vec::with_capacity(handles.len());
-        for handle in handles {
-            if let Some(summary) = handle.summary().await {
-                summaries.push(summary);
-            }
-        }
-        summaries.sort_by(|left, right| {
-            right
-                .last_activity_at
-                .cmp(&left.last_activity_at)
-                .then_with(|| right.updated_at.cmp(&left.updated_at))
-        });
-        summaries
-    }
-
     /// Reads turn reservation state, preferring runtime caches while a turn
     /// task holds the working copy (shared queue Arcs stay usable without a
     /// mailbox hop). Callers may mutate `pending_turn_queue` and
@@ -256,30 +236,5 @@ impl ServerRuntime {
         }
         let handle = self.session(session_id).await?;
         handle.collaboration_mode().await
-    }
-
-    /// Reads a session's parent id, preferring the in-flight turn inline snapshot
-    /// and agent-registry hierarchy over a mailbox round-trip.
-    #[allow(dead_code)]
-    pub(crate) async fn session_parent_id_snapshot(
-        &self,
-        session_id: SessionId,
-    ) -> Option<Option<SessionId>> {
-        if let Some(stream) = self.active_stream_state(session_id).await {
-            let stream = stream.lock().await;
-            if let Some(inline) = stream.turn_inline.as_ref() {
-                return Some(inline.summary.parent_session_id());
-            }
-        }
-        {
-            let registries = self.agent_registries.lock().await;
-            for registry in registries.values() {
-                if let Some(parent_id) = registry.child_to_parent.get(&session_id) {
-                    return Some(Some(*parent_id));
-                }
-            }
-        }
-        let handle = self.session(session_id).await?;
-        handle.parent_session_id().await
     }
 }

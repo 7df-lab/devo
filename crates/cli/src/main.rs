@@ -423,17 +423,6 @@ fn cli_logging_overrides(cli: &Cli) -> toml::Value {
     )]))
 }
 
-/// TODO: Why there is a simple wrapper function, maybe should be removed.
-/// Launch helper re-exported for tests / clarity — implementation lives in
-/// [`agent_command::launch_interactive_mode_client`].
-#[allow(dead_code)]
-fn launch_interactive_mode_client_for_tests() -> Result<()> {
-    launch_interactive_mode_client(
-        /*resume_session_id*/ None, /*dangerously_skip_permissions*/ false,
-        /*log_level*/ None,
-    )
-}
-
 /// TODO: Move test to another single file.
 #[cfg(test)]
 mod tests {
