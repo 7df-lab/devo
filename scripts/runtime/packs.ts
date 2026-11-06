@@ -63,10 +63,44 @@ export async function archiveTree(root: string, paths: string[], output: string)
   await pipeline(Readable.from(archive()), createGzip({ level: 9 }), createWriteStream(output));
 }
 
+/**
+ * Create a deterministic Windows runtime pack through the maintained .NET
+ * ZipArchive writer. Windows packs are built only on Windows hosts; a
+ * cross-target Unix build fails explicitly instead of silently depending on
+ * PowerShell.
+ */
+export async function archiveTreeZip(root: string, paths: string[], output: string): Promise<void> {
+  if (process.platform !== "win32") {
+    throw new Error("Windows ZIP runtime packs require a Windows build host with PowerShell/.NET");
+  }
+  const powershell = join(process.env.SystemRoot ?? "C:/Windows", "System32/WindowsPowerShell/v1.0/powershell.exe");
+  const helper = join(import.meta.dir, "zip-pack.ps1");
+  const result = Bun.spawnSync([
+    powershell,
+    "-NoProfile",
+    "-NonInteractive",
+    "-ExecutionPolicy",
+    "Bypass",
+    "-File",
+    helper,
+    "-Root",
+    root,
+    "-Output",
+    output,
+    "-PathsJson",
+    JSON.stringify(paths),
+  ], { stdout: "pipe", stderr: "pipe" });
+  if (result.exitCode !== 0) {
+    throw new Error(`Windows ZIP pack failed (${result.exitCode}): ${result.stderr.toString()}`);
+  }
+}
+
 /** Emit the small online app and independently cacheable interpreter packs. */
 export async function buildPacks(bundle: string, output: string): Promise<string> {
   const manifest = JSON.parse(readFileSync(join(bundle, "runtime/manifest.json"), "utf8"));
   const assetTarget = manifest.target.replace("-unknown-linux-", "-linux-");
+  const windows = manifest.target.includes("-pc-windows-msvc");
+  const extension = windows ? ".zip" : ".tar.gz";
   mkdirSync(output, { recursive: true });
   const lines = ["devo-install-v1"];
   for (const kind of ["app", "node", "python"] as const) {
@@ -76,12 +110,16 @@ export async function buildPacks(bundle: string, output: string): Promise<string
     const paths = kind === "app" ? readdirSync(bundle).filter(name => name !== "runtime")
       .concat(readdirSync(join(bundle, "runtime")).filter(name => !["node", "python", "node.path", "python.path"].includes(name)).map(name => `runtime/${name}`))
       : [`runtime/${kind}`];
-    await archiveTree(bundle, paths, partial);
+    if (windows) {
+      await archiveTreeZip(bundle, paths, partial);
+    } else {
+      await archiveTree(bundle, paths, partial);
+    }
     const hash = createHash("sha256");
     for await (const chunk of createReadStream(partial)) hash.update(chunk);
     const digest = hash.digest("hex");
-    const name = kind === "app" ? `devo-tui-app-v${manifest.version}-${assetTarget}.tar.gz`
-      : `devo-runtime-${kind}-${assetTarget}-${digest}.tar.gz`;
+    const name = kind === "app" ? `devo-tui-app-v${manifest.version}-${assetTarget}${extension}`
+      : `devo-runtime-${kind}-${assetTarget}-${digest}${extension}`;
     const destination = join(output, name);
     // Overwriting the same runtime digest is harmless; app archives are versioned.
     rmSync(destination, { force: true });
