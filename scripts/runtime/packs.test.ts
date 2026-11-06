@@ -71,6 +71,48 @@ test.skipIf(process.platform !== "win32")("Windows ZIP pack handles zero, one an
   } finally { rmSync(root, { recursive: true, force: true }); }
 });
 
+test.skipIf(process.platform !== "win32")("Windows ZIP codepoint diagnostics", async () => {
+  const root = mkdtempSync(join(tmpdir(), "devo Windows zip codepoints "));
+  try {
+    const source = join(root, "source");
+    mkdirSync(source, { recursive: true });
+    writeFileSync(join(source, WINDOWS_LONG_APP_FILE), "unicode payload");
+    const manifest = join(root, "paths.json");
+    writeFileSync(manifest, JSON.stringify([WINDOWS_LONG_APP_FILE]));
+    const zip = join(root, "diagnostic.zip");
+    const powershell = join(process.env.SystemRoot!, "System32/WindowsPowerShell/v1.0/powershell.exe");
+    const packed = Bun.spawnSync([
+      powershell, "-NoProfile", "-NonInteractive", "-ExecutionPolicy", "Bypass",
+      "-File", join(import.meta.dir, "zip-pack.ps1"), "-Root", source, "-Output", zip, "-Manifest", manifest,
+    ], { stdout: "pipe", stderr: "pipe" });
+    expect(packed.exitCode).toBe(0);
+    const diagnostics = join(root, "diagnostics.txt");
+    const diagnosed = Bun.spawnSync([
+      powershell, "-NoProfile", "-NonInteractive", "-ExecutionPolicy", "Bypass",
+      "-File", join(import.meta.dir, "zip-diagnose.ps1"), "-Archive", zip, "-Manifest", manifest, "-OutputFile", diagnostics,
+    ], { stdout: "pipe", stderr: "pipe" });
+    expect(diagnosed.exitCode).toBe(0);
+    const text = readFileSync(diagnostics, "utf8");
+    console.log("ZIP_CODEPOINT_DIAGNOSTICS\n" + text);
+    const expected = WINDOWS_LONG_APP_FILE;
+    const expectedHex = Buffer.from(expected, "utf8").toString("hex").toUpperCase();
+    const python = Bun.which("python") ?? Bun.which("py");
+    let pythonNames: string[] | null = null;
+    if (python) {
+      const listed = Bun.spawnSync([python, "-c", "import json, sys, zipfile; z=zipfile.ZipFile(sys.argv[1]); print(json.dumps([i.filename for i in z.infolist()], ensure_ascii=True))", zip], { stdout: "pipe", stderr: "pipe" });
+      console.log("PYTHON_ZIP_NAMES\n" + listed.stdout.toString());
+      console.log("PYTHON_ZIP_STDERR\n" + listed.stderr.toString());
+      if (listed.exitCode === 0) pythonNames = JSON.parse(listed.stdout.toString());
+    } else {
+      console.log("PYTHON_ZIP_NAMES unavailable");
+    }
+    expect(text).toContain(`MANIFEST_UTF8_HEX=${expectedHex}`);
+    expect(text).toContain(`UTF8_NAME=${expected}`);
+    expect(text).toContain(`RAW_NAME_HEX=${expectedHex}`);
+    if (pythonNames) expect(pythonNames).toContain(expected);
+  } finally { rmSync(root, { recursive: true, force: true }); }
+}, 30_000);
+
 test("Linux public pack names omit the vendor while retaining canonical manifest targets", async () => {
   const root = mkdtempSync(join(tmpdir(), "devo Linux asset names "));
   try {
