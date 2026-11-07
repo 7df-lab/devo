@@ -18,6 +18,7 @@ export function buildAutomationPromptParts(
 				"Automation run guidance (applies to this task):",
 				`Automation name (data): ${JSON.stringify(automationName)}`,
 				"Work autonomously without entering plan mode or asking follow-up questions. If blocked by permissions or missing information, report the blocker rather than bypassing it.",
+				"Respond in the language explicitly requested by the configured task below, or otherwise its primary natural language. Do not infer the response language from this generated guidance, the automation name, or memory contents. Keep the Actionable marker exactly as specified.",
 				"At the END of your response, include a line: `Actionable: yes` or `Actionable: no` to indicate whether your findings require human review.",
 				`Persistent memory file (path data): ${JSON.stringify(memoryPath)}`,
 				"If permitted, read this file for context from previous runs and update it with useful context for future runs. A missing file means there is no prior memory.",
