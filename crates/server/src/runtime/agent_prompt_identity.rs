@@ -31,6 +31,8 @@ impl ServerRuntime {
                 // one, raw Native lineage distinguishes an agent from a fork.
                 let next_parent = if index.session.agent_path.is_some() {
                     index.session.parent_session_id
+                } else if index.session.parent_session_id.is_none() {
+                    None
                 } else {
                     index.rollout_path.as_deref().and_then(|path| {
                         self.rollout_store

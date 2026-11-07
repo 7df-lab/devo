@@ -327,7 +327,7 @@ pub fn build_child_agent_doctrine(options: &RlmPromptOptions) -> Option<String> 
         .unwrap_or("your parent agent");
     let mut lines = vec![
         format!(
-            "You are a child agent spawned by {parent}. Task prompts are labeled `[task from parent]`."
+            "You are a child agent spawned by {parent}. Your delegated task is provided in the session input."
         ),
         "You run in your own RLM kernel namespace; do not assume shared variables with the parent."
             .to_string(),
@@ -335,7 +335,7 @@ pub fn build_child_agent_doctrine(options: &RlmPromptOptions) -> Option<String> 
             .to_string(),
         "Auto-refine is disabled for child sessions (including `/btw`); the host rejects child `refine.run` calls."
             .to_string(),
-        "Ephemeral `/btw` children keep harness state in memory only and are cascade-deleted with the parent."
+        "Ephemeral children, including `/btw`, have no persistent local harness store: local loads return empty state and local writes are rejected. They are cascade-deleted with the parent."
             .to_string(),
     ];
 
@@ -477,7 +477,11 @@ mod tests {
         let child = build_rlm_base_prompt(&child_opts);
 
         assert_ne!(root, child);
-        assert!(child.contains("[task from parent]"));
+        assert!(child.contains("Your delegated task is provided in the session input"));
+        assert!(!child.contains("[task from parent]"));
+        assert!(child.contains("have no persistent local harness store"));
+        assert!(child.contains("local loads return empty state and local writes are rejected"));
+        assert!(!child.contains("keep harness state in memory only"));
         assert!(child.contains("own RLM kernel"));
         assert!(child.contains("Auto-refine is disabled"));
         assert!(child.contains(r#"receiver_role="parent""#));

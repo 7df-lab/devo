@@ -76,7 +76,7 @@ fn assert_identity(prompt: &str, depth: u32, parent: Option<&str>) {
     let mut expected = vec![format!("Recursive agent depth: {depth}")];
     if let Some(parent) = parent {
         expected.push(format!(
-            "You are a child agent spawned by {parent}. Task prompts are labeled `[task from parent]`."
+            "You are a child agent spawned by {parent}. Your delegated task is provided in the session input."
         ));
     }
     assert_eq!(actual, expected);
