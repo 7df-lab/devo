@@ -1,3 +1,4 @@
+/** Legacy TypeScript builder; Native turns use crates/core/src/rlm_prompts.rs. */
 import { DEFAULT_RLM_EXTRA_IMPORT_LABELS } from "../kernel/shared.js";
 
 export interface RlmPromptOptions {

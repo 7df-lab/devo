@@ -88,6 +88,7 @@ use devo_protocol::native::session::SessionStatus;
 
 mod acp_fs;
 mod active_turn;
+mod agent_prompt_identity;
 mod agents;
 mod approval;
 mod approval_checkpoint;

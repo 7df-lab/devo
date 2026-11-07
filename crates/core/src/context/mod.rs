@@ -363,6 +363,7 @@ pub trait ContextCompactor: Send + Sync {
     ) -> Result<ContextSummaryPayload, CompactionError>;
 }
 
+mod agent_identity;
 mod agents_md;
 pub(crate) mod compaction_summary;
 mod context_changes;
@@ -370,6 +371,7 @@ mod execution_context;
 pub(crate) mod turn_aborted;
 pub(crate) mod user_instructions;
 
+pub use agent_identity::*;
 pub use agents_md::*;
 pub use context_changes::*;
 pub use execution_context::*;

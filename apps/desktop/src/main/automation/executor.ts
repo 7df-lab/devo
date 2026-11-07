@@ -12,7 +12,6 @@
  * Modeled after Devo's `run` CLI (packages/devo/src/cli/cmd/run.ts).
  */
 
-import fs from "node:fs"
 import path from "node:path"
 import type { DevoClient, NativeItemEnvelope } from "@devo-ai/sdk/v2/client"
 import { createLogger } from "../logger"
@@ -20,6 +19,7 @@ import { createAutomationClient } from "./devo-client"
 import { extractAutomationItem } from "./item-extract"
 import { getConfigDir } from "./paths"
 import { buildPermissionRuleset } from "./permission-policy"
+import { buildAutomationPromptParts } from "./prompt"
 import type { AutomationConfig, PermissionPreset } from "./types"
 
 export type { AutomationItemExtract } from "./item-extract"
@@ -64,44 +64,6 @@ function withTimeout<T>(promise: Promise<T>, ms: number, label: string): Promise
  */
 function getMemoryFilePath(automationId: string): string {
 	return path.join(getConfigDir(), "automations", automationId, "memory.md")
-}
-
-/**
- * Reads the memory file content, or returns empty string if it doesn't exist.
- */
-function readMemoryFile(automationId: string): string {
-	const memPath = getMemoryFilePath(automationId)
-	try {
-		return fs.readFileSync(memPath, "utf-8")
-	} catch {
-		return ""
-	}
-}
-
-/**
- * Builds the system prompt addendum that tells the agent about the memory file.
- */
-function buildSystemPrompt(automationId: string, automationName: string): string {
-	const memPath = getMemoryFilePath(automationId)
-	const memory = readMemoryFile(automationId)
-
-	const lines = [
-		`You are running as an automated agent for the "${automationName}" automation.`,
-		"",
-		"IMPORTANT RULES:",
-		"- Do NOT ask questions or enter plan mode. You must complete the task autonomously.",
-		"- At the END of your response, include a line: `Actionable: yes` or `Actionable: no`",
-		"  to indicate whether your findings require human review.",
-		"",
-		`You have a persistent memory file at: ${memPath}`,
-		"You can read it and write to it to remember context across runs.",
-	]
-
-	if (memory) {
-		lines.push("", "Current memory file contents:", "```", memory, "```")
-	}
-
-	return lines.join("\n")
 }
 
 // ============================================================
@@ -426,7 +388,7 @@ export async function executeRun(
 		}
 
 		// --- Step 3: Send prompt ---
-		const systemPrompt = buildSystemPrompt(config.id, config.name)
+		const parts = buildAutomationPromptParts(config.prompt, config.name, getMemoryFilePath(config.id))
 
 		// Parse model string (format: "providerID/modelID") if configured
 		const model = config.execution.model ? parseModelRef(config.execution.model) : undefined
@@ -445,8 +407,7 @@ export async function executeRun(
 		await withTimeout(
 			sessionClient.session.promptAsync({
 				sessionId: sessionId,
-				system: systemPrompt,
-				parts: [{ type: "text", text: config.prompt }],
+				parts,
 				model,
 				agent,
 				variant,

@@ -45,6 +45,7 @@ impl ServerRuntime {
             event_tx,
         } = params;
         let session_id = state.session_id();
+        let agent_identity = self.agent_prompt_identity(&state.summary).await;
         // Turn-latency triage: the pre-query phase (kernel spawn, MCP registry
         // build) is the historically silent window between "started turn" and
         // "starting turn"; instrument its sub-phases.
@@ -460,6 +461,7 @@ impl ServerRuntime {
                 &runtime,
                 Some(callback),
                 QueryOptions {
+                    agent_identity,
                     output_store,
                     journal: state.rollout_path.as_ref().map(|path| {
                         Arc::new(super::journal::RolloutToolJournal::new(

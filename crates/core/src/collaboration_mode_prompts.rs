@@ -46,21 +46,37 @@ mod tests {
         }
     }
 
-    /// Verifies: no sentence is stated twice verbatim — the "Assumptions-first
-    /// execution" section used to repeat the grouping rule and the
-    /// no-reaction-means-accepted rule that the "Use reasonable assumptions"
-    /// principle already covers.
     #[test]
-    fn mode_prompt_states_each_assumption_rule_once() {
+    fn build_assumptions_do_not_replace_approval() {
         let prompt = mode_introductions_prompt(devo_protocol::CollaborationMode::Build);
-        for sentence in [
-            "If the user does not react to a proposed suggestion, consider it accepted.",
-            "Group your assumptions logically",
+        assert_eq!(prompt.matches("reasonable assumptions").count(), 1);
+        assert!(prompt.contains("Assumptions never replace required permission or approval"));
+        assert!(prompt.contains("goal, target environment, authorization, or compatibility"));
+        assert!(prompt.contains("low-risk, reversible implementation details"));
+        assert!(!prompt.contains("at least one"));
+        assert!(prompt.contains("await rlm.update_plan"));
+        assert!(!prompt.contains("consider it accepted"));
+        assert!(!prompt.contains("no more than 60 seconds"));
+    }
+
+    #[test]
+    fn plan_preserves_no_mutation_and_finalization_contracts() {
+        let prompt = mode_introductions_prompt(devo_protocol::CollaborationMode::Plan);
+        for constraint in [
+            "<collaboration_mode><current>plan</current>",
+            "do not change the mode",
+            "do not edit or write source files",
+            "must not update tracked snapshots",
+            "do not mutate the session plan",
+            "await rlm.request_user_input",
+            "Do not treat silence as permission",
+            "at most one `<proposed_plan>` block per turn",
+            "replace the entire previous plan",
+            "final response must be plan-only",
         ] {
-            assert_eq!(
-                prompt.matches(sentence).count(),
-                1,
-                "sentence stated more than once: {sentence}"
+            assert!(
+                prompt.contains(constraint),
+                "missing constraint: {constraint}"
             );
         }
     }

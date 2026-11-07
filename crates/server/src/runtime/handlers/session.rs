@@ -1518,10 +1518,14 @@ impl ServerRuntime {
                 "failed to read session state for system prompt".to_string(),
             );
         };
+        let agent_identity = self
+            .runtime_arc()
+            .agent_prompt_identity(&runtime.summary)
+            .await;
         let prompt = {
             let core = runtime.core_session.lock().await;
             if let Some(context) = core.session_context.as_ref() {
-                context.build_system_prompt(core.collaboration_mode)
+                context.build_system_prompt_for_agent(core.collaboration_mode, &agent_identity)
             } else {
                 let summary = session_handle.summary().await;
                 let cwd = summary
@@ -1565,7 +1569,7 @@ impl ServerRuntime {
                     locked_agents_snapshot,
                     core.config.available_skills_instructions.clone(),
                 );
-                context.build_system_prompt(core.collaboration_mode)
+                context.build_system_prompt_for_agent(core.collaboration_mode, &agent_identity)
             }
         };
         serde_json::to_value(SuccessResponse {
