@@ -135,6 +135,8 @@ pub struct ProviderRetryStatus {
 
 #[derive(Clone, Default)]
 pub struct QueryOptions {
+    /// Host-derived ancestry for this turn; never copy the parent's prompt identity.
+    pub agent_identity: crate::AgentPromptIdentity,
     pub output_store: Option<Arc<devo_tools::output_store::OutputStore>>,
     /// Acknowledged journal for durable sessions; absent for ephemeral callers.
     pub journal: Option<Arc<dyn crate::durable_execution::ToolIntentJournal>>,
@@ -196,6 +198,7 @@ impl std::fmt::Debug for QueryOptions {
     fn fmt(&self, formatter: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
         formatter
             .debug_struct("QueryOptions")
+            .field("agent_identity", &self.agent_identity)
             .field("cancel_token", &self.cancel_token)
             .field(
                 "compaction_provider",

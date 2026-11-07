@@ -1,5 +1,7 @@
 /**
- * System prompt construction and project context loading
+ * Legacy TypeScript system prompt construction and project context loading.
+ * Native TUI/Desktop turns use the Rust builder in crates/core/src/rlm_prompts.rs.
+ * Retain these exports for compatibility; extension types still consume them.
  */
 
 import { buildChildAgentDoctrine, buildRlmPrompt, buildSubagentGuidance } from "./prompts/index.js";

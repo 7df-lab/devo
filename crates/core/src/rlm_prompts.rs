@@ -38,13 +38,14 @@ const USER_PROGRESS_PROMPT: &str = concat!(
     "unchanged status or interrupt short work with unnecessary updates."
 );
 
-const SIMPLIFIED_TECHNICAL_ENGLISH_PROMPT: &str = concat!(
-    "Use simplified technical English by default for user-facing prose.\n",
+pub(crate) const LANGUAGE_PREFERENCE_PROMPT: &str = "Follow the user's requested language; otherwise use the primary natural language of their latest message, including plans and goals. Preserve technical terms, code identifiers, file paths, commands, API names, and quoted text unless the user explicitly asks to translate them. Keep <proposed_plan> and <objective> tags unchanged while writing their content in the chosen language.";
+
+const CLEAR_LANGUAGE_PROMPT: &str = concat!(
     "Prefer short sentences, common words, and concrete verbs. State one main ",
     "action or fact per sentence when practical. Use lists for steps or conditions.\n",
     "Keep necessary technical terms, names, commands, code, paths, and exact quoted ",
     "text unchanged. State uncertainty directly.\n",
-    "Treat this as clarity guidance, not a claim of formal ASD-STE100 compliance. ",
+    "Apply this clarity guidance in the chosen language. ",
     "Preserve a user-requested format, tone, terminology, and necessary precision."
 );
 
@@ -153,7 +154,8 @@ pub fn build_rlm_base_prompt(options: &RlmPromptOptions) -> String {
         parts.push(String::new());
     }
 
-    parts.push(SIMPLIFIED_TECHNICAL_ENGLISH_PROMPT.to_string());
+    parts.push(LANGUAGE_PREFERENCE_PROMPT.to_string());
+    parts.push(CLEAR_LANGUAGE_PROMPT.to_string());
     parts.push(String::new());
     parts.push(format!("Working directory: {}", options.cwd));
     parts.push(format!("Conversation log: {}", options.messages_path));
@@ -178,7 +180,7 @@ pub fn build_rlm_base_prompt(options: &RlmPromptOptions) -> String {
     if can_run_shell_skills {
         parts.push(String::new());
         parts.push(
-            "Sandbox and approvals: Python `bash()` requests host-owned shell execution under the session's configured sandbox profile and approval policy. For additional access, use `await rlm.shell(command, sandbox_permissions=\"with_additional_permissions\", additional_permissions={\"network\": {\"enabled\": True}}, justification=\"May I ...?\")` for narrow grants, or `await rlm.shell(command, sandbox_permissions=\"require_escalated\", justification=\"May I ...?\")` for an approved unsandboxed command. Denial is final; do not retry through another route. Never attach these fields to an `ipython` call itself. Commands use the host platform shell (PowerShell on Windows). `rlm.shell` returns a dict with command output and status."
+            "Sandbox and approvals: Python `bash()` requests host-owned shell execution under the session's configured sandbox profile and approval policy. For additional access, use `await rlm.shell(command, sandbox_permissions=\"with_additional_permissions\", additional_permissions={\"network\": {\"enabled\": True}}, justification=\"May I ...?\")` for narrow grants, or `await rlm.shell(command, sandbox_permissions=\"require_escalated\", justification=\"May I ...?\")` for an approved unsandboxed command. Denial is final; do not retry through another route. Never attach these fields to an `ipython` call itself. Commands default to Bash on Unix and PowerShell on Windows; use syntax for the host platform. `rlm.shell` returns a dict with command output and status."
                 .to_string(),
         );
     }
@@ -257,7 +259,7 @@ pub fn build_rlm_base_prompt(options: &RlmPromptOptions) -> String {
                 .to_string(),
         );
         parts.push(
-            "A child inherits your model. If a different model is explicitly requested, use `await rlm.find_models(...)` and an exact returned selector. An unavailable requested model fails spawn; decide whether to retry or omit `model`. Children also inherit your thinking level; the `thinking` option overrides it with any level the resolved child model supports, and an unsupported level fails spawn."
+            "Children inherit your model and thinking level. This host does not support `model` or `thinking` overrides on `rlm.spawn`; omit both options."
                 .to_string(),
         );
         if has_agent_observe {
@@ -273,7 +275,7 @@ pub fn build_rlm_base_prompt(options: &RlmPromptOptions) -> String {
         }
         if has_agent_message {
             parts.push(
-                "Children reply explicitly with `await agent_message.send(message, receiver_role='parent')` when an answer is needed. Replies and follow-ups arrive as ordinary agent messages; not every task requires a reply."
+                "Children report final results in assistant output, which is included in their completion record. For timely progress or a direct reply, use `await agent_message.send(message, receiver_role='parent')`; these arrive as ordinary agent messages."
                     .to_string(),
             );
             parts.push(
@@ -331,7 +333,7 @@ pub fn build_child_agent_doctrine(options: &RlmPromptOptions) -> Option<String> 
             .to_string(),
         "Permission, sandbox, and MCP inheritance never relax relative to the parent."
             .to_string(),
-        "Auto-refine is disabled for child sessions (including `/btw`); do not call `refine.run` expecting host auto-interval behavior."
+        "Auto-refine is disabled for child sessions (including `/btw`); the host rejects child `refine.run` calls."
             .to_string(),
         "Ephemeral `/btw` children keep harness state in memory only and are cascade-deleted with the parent."
             .to_string(),
@@ -339,12 +341,12 @@ pub fn build_child_agent_doctrine(options: &RlmPromptOptions) -> Option<String> 
 
     if options.has_skill("agent_message") && options.has_ipython() {
         lines.push(
-            "When a task calls for an answer, reply explicitly with `await agent_message.send(message, receiver_role=\"parent\")`. Not every message or task needs a reply; continue cleanup after sending and go idle normally."
+            "Report final results in assistant output for the completion record. Send useful progress or time-sensitive answers with `await agent_message.send(message, receiver_role=\"parent\")`; do not send redundant acknowledgments."
                 .to_string(),
         );
     } else {
         lines.push(
-            "When a task calls for an answer, send it to the parent with `await agent_message.send(message, receiver_role=\"parent\")` once that skill is available; otherwise write results to files the parent can read."
+            "Report final results in assistant output for the completion record. Save substantial artifacts to files the parent can read; do not call unavailable messaging skills."
                 .to_string(),
         );
     }
@@ -354,8 +356,8 @@ pub fn build_child_agent_doctrine(options: &RlmPromptOptions) -> Option<String> 
 
 /// Format catalog skills as XML progressive disclosure (name / description / location).
 ///
-/// Prefer this for RLM prompt assembly. Non-RLM markdown listing remains in
-/// [`devo_skills::render_available_skills_body`].
+/// Compatibility helper for callers that need XML. The active Native prompt
+/// pipeline uses [`devo_skills::render_available_skills_body`] instead.
 pub fn format_catalog_skills_xml(skills: &[CatalogSkillEntry]) -> String {
     if skills.is_empty() {
         return String::new();
@@ -484,6 +486,39 @@ mod tests {
         assert!(root.contains(USER_PROGRESS_PROMPT));
         assert!(root.contains("Recursive agent depth: 0"));
         assert!(child.contains("Recursive agent depth: 1"));
+    }
+
+    #[test]
+    fn runtime_guidance_matches_native_contracts() {
+        for options in [
+            RlmPromptOptions::root("/repo", "not persisted"),
+            RlmPromptOptions::child("/repo", "not persisted", 1, "parent"),
+        ] {
+            let prompt = build_rlm_base_prompt(&options);
+            assert!(prompt.contains("primary natural language of their latest message"));
+            assert!(prompt.contains("including plans and goals"));
+            assert!(!prompt.contains("technical English by default"));
+            assert!(prompt.contains("does not itself prune live Python variables"));
+            assert!(prompt.contains("Kernel snapshots are separate"));
+            assert!(prompt.contains("`rlm.shell()` defaults to the session workspace"));
+            assert!(prompt.contains("Bash on Unix and PowerShell on Windows"));
+            assert!(prompt.contains("does not support `model` or `thinking` overrides"));
+            assert!(prompt.contains("never relax relative to the parent") || options.depth == 0);
+            assert!(
+                prompt.contains("Never use direct Python process or filesystem APIs to bypass")
+            );
+        }
+    }
+
+    #[test]
+    fn bundled_skill_docs_use_runtime_apis_without_shell_escapes() {
+        let compact = include_str!("../../skills/assets/bundled/compact/SKILL.md");
+        assert!(compact.contains("does not itself prune the live Python namespace"));
+        assert!(!compact.contains("all remain available"));
+        let edit = include_str!("../../skills/assets/bundled/edit/SKILL.md");
+        assert!(edit.contains("await edit.run(path="));
+        assert!(edit.contains("result = await bash("));
+        assert!(!edit.contains("!edit"));
     }
 
     /// Verifies: catalog skills render as XML progressive disclosure.

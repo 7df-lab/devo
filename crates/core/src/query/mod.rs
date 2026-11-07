@@ -640,7 +640,8 @@ pub async fn query(
 
         // Build system instructions from session-locked context plus the active mode.
         let request_system = {
-            let mut system = session_context.build_system_prompt(session.collaboration_mode);
+            let mut system = session_context
+                .build_system_prompt_for_agent(session.collaboration_mode, &options.agent_identity);
             if turn_config.web_search.is_provider() {
                 if !system.trim().is_empty() {
                     system.push_str("\n\n");

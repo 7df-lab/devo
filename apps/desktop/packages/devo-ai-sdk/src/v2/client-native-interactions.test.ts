@@ -1,4 +1,5 @@
 import { describe, expect, test } from "bun:test"
+import { buildAutomationPromptParts } from "../../../../src/main/automation/prompt"
 import {
 	DESKTOP_INITIALIZE_PARAMS,
 	createDevoClient,
@@ -1136,6 +1137,26 @@ describe("Native desktop SDK interactions", () => {
 			hasRealNewline: true,
 			notJsonBlob: true,
 		})
+	})
+
+	test("delivers automation run guidance and task through the Native queue", async () => {
+		const transport = new FakeNativeTransport()
+		const client = createDevoClient({ directory: "/repo", transport })
+		await client.session.create()
+		const parts = buildAutomationPromptParts("Review today's changes", "Daily review", "memory.md")
+
+		await client.session.promptAsync({ sessionId: "session-1", parts })
+
+		const requests = transport.requests.filter((request) => request.method === "session/queue/push")
+		expect(requests).toEqual([{
+			method: "session/queue/push",
+			params: {
+				sessionId: "session-1",
+				input: [{ type: "text", text: `${parts[0].text}\nReview today's changes` }],
+				idempotencyKey: expect.any(String),
+			},
+			directory: "/repo",
+		}])
 	})
 
 	test("keeps the session busy after turn/start until turn/completed", async () => {

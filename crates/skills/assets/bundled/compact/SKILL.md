@@ -35,8 +35,10 @@ await compact.run("keep the failing test names and the migration checklist")
   (plan, handles, file paths, the concrete next step) and tell the user how
   to pick the work back up. Work continues from the summary on the next
   instruction.
-- The Python kernel persists through compaction — variables, imports, and
-  helpers you defined all remain available.
+- Conversation compaction does not itself prune the live Python namespace.
+  Kernel snapshots and restores are separate: oversized or unserializable
+  values may not be saved (the default per-variable limit is 16 MiB). Keep
+  large or essential source data on disk and record how to reload it.
 - Compact at a natural boundary — a milestone reached, results saved, the
   next step easy to state — rather than mid-analysis. Check
   `await compact.status()` when unsure.

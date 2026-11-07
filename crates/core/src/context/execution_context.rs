@@ -87,7 +87,7 @@ pub struct LanguageContext {
 impl Default for LanguageContext {
     fn default() -> Self {
         Self {
-            language_preference: "Reply in the same natural language as the user's latest message. If the latest user message mixes languages, use the primary language of that message. Preserve technical terms, code identifiers, file paths, commands, API names, and quoted text in their original form unless the user explicitly asks to translate them. This language rule also applies to Proposed Plan and Goal: any content inside <proposed_plan></proposed_plan> and <objective></objective> must follow the same natural language as the user's latest message.".to_string(),
+            language_preference: crate::rlm_prompts::LANGUAGE_PREFERENCE_PROMPT.to_string(),
         }
     }
 }
@@ -154,6 +154,15 @@ impl SessionContext {
     }
 
     pub fn build_system_prompt(&self, collaboration_mode: CollaborationMode) -> String {
+        self.build_system_prompt_for_agent(collaboration_mode, &crate::AgentPromptIdentity::Root)
+    }
+
+    /// Build the shared system contract for the host's current agent identity.
+    pub fn build_system_prompt_for_agent(
+        &self,
+        collaboration_mode: CollaborationMode,
+        identity: &crate::AgentPromptIdentity,
+    ) -> String {
         // Product / RLM path: REPL doctrine (cwd + skills already in
         // the RLM base). Append only the active collaboration-mode instructions
         // to limit prompt tokens. Environment, workspace instructions, and
@@ -164,7 +173,12 @@ impl SessionContext {
             .display()
             .to_string()
             .replace('\\', "/");
-        let mut options = crate::RlmPromptOptions::root(cwd, "not persisted");
+        let mut options = match identity {
+            crate::AgentPromptIdentity::Root => crate::RlmPromptOptions::root(cwd, "not persisted"),
+            crate::AgentPromptIdentity::Child { depth, parent } => {
+                crate::RlmPromptOptions::child(cwd, "not persisted", (*depth).max(1), parent)
+            }
+        };
         options.installed_skills = self.installed_python_skills.clone();
         let mut base = crate::build_rlm_base_prompt(&options);
         // Allow catalog/custom model instructions as additional guidance only
@@ -551,7 +565,10 @@ mod tests {
 
         assert_eq!(
             context.render(),
-            "<language_preference>Reply in the same natural language as the user's latest message. If the latest user message mixes languages, use the primary language of that message. Preserve technical terms, code identifiers, file paths, commands, API names, and quoted text in their original form unless the user explicitly asks to translate them. This language rule also applies to Proposed Plan and Goal: any content inside <proposed_plan></proposed_plan> and <objective></objective> must follow the same natural language as the user's latest message.</language_preference>"
+            format!(
+                "<language_preference>{}</language_preference>",
+                crate::rlm_prompts::LANGUAGE_PREFERENCE_PROMPT
+            )
         );
     }
 
