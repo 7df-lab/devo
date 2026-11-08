@@ -8,7 +8,8 @@ use std::path::{Path, PathBuf};
 use std::os::fd::{AsRawFd, FromRawFd};
 
 pub(super) struct Directory {
-    file: File,
+    // Retained on Windows to prevent replacement even when no descriptor API is used.
+    _file: File,
     pub path: PathBuf,
 }
 
@@ -64,7 +65,7 @@ impl Directory {
                 return Err(io::Error::other("Factory directory changed during open"));
             }
         }
-        Ok(Self { file, path })
+        Ok(Self { _file: file, path })
     }
 
     pub fn child(&self, name: &str) -> io::Result<Self> {
@@ -74,7 +75,7 @@ impl Directory {
             // SAFETY: the parent descriptor is owned and the name is NUL-terminated.
             let fd = unsafe {
                 libc::openat(
-                    self.file.as_raw_fd(),
+                    self._file.as_raw_fd(),
                     name.as_ptr(),
                     libc::O_RDONLY | libc::O_DIRECTORY | libc::O_NOFOLLOW | libc::O_CLOEXEC,
                 )
@@ -85,7 +86,7 @@ impl Directory {
             // SAFETY: openat returned a new owned descriptor.
             let file = unsafe { File::from_raw_fd(fd) };
             Ok(Self {
-                file,
+                _file: file,
                 path: self.path.join(name.to_str().expect("ASCII store name")),
             })
         }
@@ -100,7 +101,7 @@ impl Directory {
         let result = {
             let name = std::ffi::CString::new(name)?;
             // SAFETY: the parent descriptor is owned and the name is NUL-terminated.
-            if unsafe { libc::mkdirat(self.file.as_raw_fd(), name.as_ptr(), 0o700) } < 0 {
+            if unsafe { libc::mkdirat(self._file.as_raw_fd(), name.as_ptr(), 0o700) } < 0 {
                 Err(io::Error::last_os_error())
             } else {
                 Ok(())
@@ -128,7 +129,7 @@ impl Directory {
                 | libc::O_NONBLOCK
                 | libc::O_CLOEXEC;
             // SAFETY: descriptor and C string remain valid; mode applies only to creation.
-            let fd = unsafe { libc::openat(self.file.as_raw_fd(), name.as_ptr(), flags, 0o600) };
+            let fd = unsafe { libc::openat(self._file.as_raw_fd(), name.as_ptr(), flags, 0o600) };
             if fd < 0 {
                 return Err(io::Error::last_os_error());
             }
@@ -193,9 +194,9 @@ impl Directory {
             // SAFETY: directory is owned; both names are validated, NUL-terminated basenames.
             if unsafe {
                 libc::renameat(
-                    self.file.as_raw_fd(),
+                    self._file.as_raw_fd(),
                     source.as_ptr(),
-                    self.file.as_raw_fd(),
+                    self._file.as_raw_fd(),
                     target.as_ptr(),
                 )
             } < 0
@@ -213,7 +214,7 @@ impl Directory {
         {
             let name = std::ffi::CString::new(name)?;
             // SAFETY: directory is owned; only a temporary basename is removed.
-            if unsafe { libc::unlinkat(self.file.as_raw_fd(), name.as_ptr(), 0) } < 0 {
+            if unsafe { libc::unlinkat(self._file.as_raw_fd(), name.as_ptr(), 0) } < 0 {
                 return Err(io::Error::last_os_error());
             }
             Ok(())
@@ -230,7 +231,7 @@ impl Directory {
             // Open a fresh directory description so repeated scans have independent offsets.
             let scan = self.child(".")?;
             use std::os::fd::IntoRawFd;
-            let fd = scan.file.into_raw_fd();
+            let fd = scan._file.into_raw_fd();
             // SAFETY: fd is a fresh owned directory descriptor; fdopendir takes ownership on success.
             let directory = unsafe { libc::fdopendir(fd) };
             if directory.is_null() {
@@ -274,7 +275,7 @@ impl Directory {
 
     fn sync(&self) -> io::Result<()> {
         #[cfg(unix)]
-        self.file.sync_all()?;
+        self._file.sync_all()?;
         Ok(())
     }
 }
