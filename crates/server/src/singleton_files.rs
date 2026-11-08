@@ -43,15 +43,19 @@ pub(crate) fn daemon_home(home: &Path) -> Result<PathBuf> {
 }
 
 fn options() -> OpenOptions {
-    let mut options = OpenOptions::new();
     #[cfg(unix)]
     {
         use std::os::unix::fs::OpenOptionsExt;
+        let mut options = OpenOptions::new();
         options
             .mode(0o600)
             .custom_flags(libc::O_NOFOLLOW | libc::O_CLOEXEC);
+        options
     }
-    options
+    #[cfg(not(unix))]
+    {
+        OpenOptions::new()
+    }
 }
 
 fn validate(file: &File, private: bool) -> Result<()> {
