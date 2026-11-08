@@ -74,6 +74,12 @@ pub trait ProviderRouter: Send + Sync {
         request: ModelRequest,
     ) -> Result<devo_protocol::ModelResponse, ProviderError>;
 
+    /// Checks whether a route has a usable adapter without making a request.
+    /// Custom routers must opt in; unknown routes are never assumed routable.
+    fn has_available_route(&self, _route: &ProviderRoute) -> bool {
+        false
+    }
+
     /// Human-readable name of the router (e.g. "multi-provider", "openai-only").
     fn name(&self) -> &str;
 }
@@ -94,6 +100,10 @@ impl SingleProviderRouter {
 
 #[async_trait]
 impl ProviderRouter for SingleProviderRouter {
+    fn has_available_route(&self, route: &ProviderRoute) -> bool {
+        matches!(route, ProviderRoute::Default) && self.provider.is_available()
+    }
+
     async fn stream(
         &self,
         _route: ProviderRoute,
@@ -170,6 +180,11 @@ impl MultiProviderRouter {
 
 #[async_trait]
 impl ProviderRouter for MultiProviderRouter {
+    fn has_available_route(&self, route: &ProviderRoute) -> bool {
+        self.provider_for_route(route)
+            .is_ok_and(|provider| provider.is_available())
+    }
+
     async fn stream(
         &self,
         route: ProviderRoute,
@@ -222,6 +237,7 @@ mod tests {
     #[derive(Default)]
     struct CapturingProvider {
         requests: Mutex<Vec<String>>,
+        unavailable: bool,
     }
 
     impl CapturingProvider {
@@ -235,6 +251,10 @@ mod tests {
 
     #[async_trait]
     impl ModelProviderSDK for CapturingProvider {
+        fn is_available(&self) -> bool {
+            !self.unavailable
+        }
+
         async fn completion(&self, request: ModelRequest) -> anyhow::Result<ModelResponse> {
             self.requests
                 .lock()
@@ -264,6 +284,25 @@ mod tests {
         fn name(&self) -> &str {
             "capturing-provider"
         }
+    }
+
+    #[test]
+    fn route_availability_checks_adapters_without_sending_requests() {
+        let provider = Arc::new(CapturingProvider::default());
+        let mut router = MultiProviderRouter::new(provider.clone());
+        let route = ProviderRoute::connection("local", ProviderWireApi::OpenAIResponses);
+        assert!(!router.has_available_route(&route));
+        router.insert_route(route.clone(), provider.clone());
+        assert!(router.has_available_route(&route));
+        router.insert_route(
+            route.clone(),
+            Arc::new(CapturingProvider {
+                unavailable: true,
+                ..Default::default()
+            }),
+        );
+        assert!(!router.has_available_route(&route));
+        assert_eq!(provider.requests(), Vec::<String>::new());
     }
 
     fn request(model: &str) -> ModelRequest {

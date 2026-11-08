@@ -602,15 +602,25 @@ impl ServerRuntime {
             })
             .or(snapshot.summary.model_binding_id())
             .or(snapshot.summary.model_name());
+        let selected_with_variant = requested_model
+            .zip(
+                checkpoint
+                    .turn_config
+                    .get("variant")
+                    .and_then(|value| value.as_str()),
+            )
+            .map(|(model, variant)| format!("{model}/{variant}"));
+        let requested_model = selected_with_variant.as_deref().or(requested_model);
         let reasoning_effort = checkpoint
             .turn_config
             .get("reasoningEffortSelection")
             .and_then(|value| value.as_str())
             .map(str::to_string)
             .or(snapshot.summary.settings.reasoning_effort.clone());
-        Ok(snapshot
+        snapshot
             .runtime_context
-            .resolve_turn_config(requested_model, reasoning_effort))
+            .resolve_session_turn_config(&snapshot.summary, requested_model, reasoning_effort)
+            .map_err(|error| error.to_string())
     }
 
     async fn turn_has_tool_result(

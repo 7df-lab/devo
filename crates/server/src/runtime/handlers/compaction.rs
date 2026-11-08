@@ -142,9 +142,20 @@ impl ServerRuntime {
         let requested_model = session_model_selection(&reservation.summary);
         let requested_reasoning_effort_selection =
             reservation.summary.settings.reasoning_effort.clone();
-        let turn_config = reservation
-            .runtime_context
-            .resolve_turn_config(requested_model, requested_reasoning_effort_selection);
+        let turn_config = match reservation.runtime_context.resolve_session_turn_config(
+            &reservation.summary,
+            requested_model,
+            requested_reasoning_effort_selection,
+        ) {
+            Ok(config) => config,
+            Err(error) => {
+                return self.error_response(
+                    request_id,
+                    ProtocolErrorCode::InvalidParams,
+                    error.to_string(),
+                );
+            }
+        };
         let resolved_request = turn_config
             .model
             .resolve_reasoning_effort_selection(turn_config.reasoning_effort_selection.as_deref());
@@ -169,7 +180,7 @@ impl ServerRuntime {
                         .clone()
                         .unwrap_or_else(|| "unknown".to_string()),
                     model: request_model,
-                    variant: None,
+                    variant: turn_config.variant.clone(),
                     reasoning_effort: resolved_request.effective_reasoning_effort,
                 },
                 collaboration_mode: None,
@@ -388,9 +399,22 @@ impl ServerRuntime {
             let requested_model = session_model_selection(&reservation.summary);
             let requested_reasoning_effort_selection =
                 reservation.summary.settings.reasoning_effort.clone();
-            let turn_config = reservation
-                .runtime_context
-                .resolve_turn_config(requested_model, requested_reasoning_effort_selection);
+            let turn_config = match reservation.runtime_context.resolve_session_turn_config(
+                &reservation.summary,
+                requested_model,
+                requested_reasoning_effort_selection,
+            ) {
+                Ok(config) => config,
+                Err(error) => {
+                    tracing::warn!(%session_id, %error, "child compaction model is unavailable");
+                    drop(_state_change_guard);
+                    if let Some(parent) = reservation.summary.parent_session_id() {
+                        self.fail_child_agent_startup(parent, session_id, error.to_string())
+                            .await;
+                    }
+                    return AgentCompactionOutcome::Consumed;
+                }
+            };
             let resolved_request = turn_config.model.resolve_reasoning_effort_selection(
                 turn_config.reasoning_effort_selection.as_deref(),
             );
@@ -415,7 +439,7 @@ impl ServerRuntime {
                             .clone()
                             .unwrap_or_else(|| "unknown".to_string()),
                         model: request_model,
-                        variant: None,
+                        variant: turn_config.variant.clone(),
                         reasoning_effort: resolved_request.effective_reasoning_effort,
                     },
                     collaboration_mode: None,
@@ -616,10 +640,28 @@ impl ServerRuntime {
 
             let model_selection = session_model_selection(&runtime_session.summary)
                 .unwrap_or(&runtime_session.runtime_context.default_model);
-            let turn_config = runtime_session.runtime_context.resolve_turn_config(
+            let turn_config = match runtime_session.runtime_context.resolve_session_turn_config(
+                &runtime_session.summary,
                 Some(model_selection),
-                /*reasoning_effort_selection*/ None,
-            );
+                /*thinking*/ None,
+            ) {
+                Ok(config) => config,
+                Err(error) => {
+                    drop(core_session);
+                    drop(runtime_session);
+                    self.finalize_manual_compaction_turn(
+                        &session_handle,
+                        session_id,
+                        turn,
+                        CompactionTurnOutcome::Failed {
+                            message: error.to_string(),
+                        },
+                        Some(compaction_item_id),
+                    )
+                    .await;
+                    return;
+                }
+            };
             let resolved_request = turn_config.model.resolve_reasoning_effort_selection(None);
             let model_slug = resolved_request.request_model;
             let request_model = turn_config.provider_request_model(&model_slug);

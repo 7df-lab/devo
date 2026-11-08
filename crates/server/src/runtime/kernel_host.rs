@@ -76,94 +76,8 @@ pub async fn dispatch_host_request_with_bridge(bridge: &HostBridge, data: Value)
         a if a.starts_with("rlm_heartbeat") => {
             error_reply(format!("unknown rlm_heartbeat action: {a}"))
         }
-        "rlm.run" => {
-            // Wire action behind kernel `await rlm.spawn(...)`: spawn a real
-            // child session through the agent coordinator. Fresh namespace per
-            // the child doctrine (no parent history fork), caller-named.
-            let prompt = params
-                .get("prompt")
-                .and_then(|v| v.as_str())
-                .map(str::trim)
-                .unwrap_or("");
-            if prompt.is_empty() {
-                return error_reply("rlm.run requires prompt");
-            }
-            let kwargs = params.get("kwargs").cloned().unwrap_or_else(|| json!({}));
-            let name = kwargs
-                .get("name")
-                .and_then(|v| v.as_str())
-                .map(str::trim)
-                .filter(|name| !name.is_empty())
-                .map(str::to_string);
-            if let Some(model) = kwargs
-                .get("model")
-                .and_then(|v| v.as_str())
-                .map(str::trim)
-                .filter(|model| !model.is_empty())
-            {
-                return error_reply(format!(
-                    "model override '{model}' is not supported by this host; children inherit \
-                     the parent model (omit 'model')"
-                ));
-            }
-            if let Some(thinking) = kwargs
-                .get("thinking")
-                .and_then(|v| v.as_str())
-                .map(str::trim)
-                .filter(|thinking| !thinking.is_empty())
-            {
-                return error_reply(format!(
-                    "thinking override '{thinking}' is not supported by this host; children \
-                     inherit the parent level (omit 'thinking')"
-                ));
-            }
-            let Some(runtime) = bridge.runtime() else {
-                return error_reply("runtime not available for rlm.run");
-            };
-            let Some(sid) = parse_session_id(session_id) else {
-                return error_reply("invalid session id");
-            };
-            use devo_core::tools::AgentToolCoordinator;
-            use devo_protocol::AgentToolPolicy;
-            use devo_protocol::SpawnAgentParams;
-            match runtime
-                .spawn_agent(SpawnAgentParams {
-                    session_id: sid,
-                    message: prompt.to_string(),
-                    // RLM children start a fresh namespace ("[task from parent]"
-                    // labeling); forking parent history would leak the parent
-                    // transcript into the child instead.
-                    fork_turns: Some("none".to_string()),
-                    max_turns: None,
-                    tool_policy: AgentToolPolicy::Inherit,
-                    ephemeral: false,
-                    nickname: name,
-                })
-                .await
-            {
-                Ok(result) => {
-                    let session_dir = result.session_dir.clone().unwrap_or_default();
-                    if session_dir.is_empty() {
-                        return error_reply(
-                            "spawned child has no persisted session dir (ephemeral?)",
-                        );
-                    }
-                    ok_result(json!({
-                        "rlm_child_id": result.child_session_id.to_string(),
-                        "name": result.agent_nickname,
-                        "session_dir": session_dir,
-                        "model": result.model.unwrap_or_default(),
-                    }))
-                }
-                Err(error) => error_reply(error.to_string()),
-            }
-        }
-        "rlm.find_models" => {
-            // Valid payload shape for the kernel parser (`models` list). This
-            // host runs children on the inherited parent model, so there is no
-            // alternate-model catalog to offer here.
-            ok_result(json!({ "models": [] }))
-        }
+        "rlm.run" => super::kernel_host_models::spawn(bridge, &params).await,
+        "rlm.find_models" => super::kernel_host_models::find_models(bridge, &params).await,
         "rlm.list_subagents" => {
             let Some(runtime) = bridge.runtime() else {
                 return error_reply("runtime not available for rlm.list_subagents");
@@ -705,16 +619,15 @@ mod tests {
         assert!(
             model_override["error"]
                 .as_str()
-                .is_some_and(|error| error.contains("not supported"))
+                .is_some_and(|error| error.contains("runtime not available"))
         );
 
         let listing = dispatch_host_request(&sid, json!({ "type": "rlm.list_subagents" })).await;
         assert_eq!(listing["status"], "error");
 
-        // find_models must return the `models` list shape the kernel parses.
+        // Discovery cannot claim an empty catalog without a live session.
         let models = dispatch_host_request(&sid, json!({ "type": "rlm.find_models" })).await;
-        assert_eq!(models["status"], "ok");
-        assert!(models["result"]["models"].as_array().is_some());
+        assert_eq!(models["status"], "error");
     }
 
     /// Verifies: bash.completed enqueues an in-memory notice.

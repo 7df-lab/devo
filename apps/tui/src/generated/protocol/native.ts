@@ -1002,7 +1002,15 @@ export type SearchFailedPayload = { searchId: ReferenceSearchId, query: string, 
 
 export type AgentToolPolicy = "inherit" | "deny_all";
 
-export type SpawnAgentParams = { session_id: SessionId, message: string, fork_turns?: string | null, max_turns?: number | null, tool_policy: AgentToolPolicy, ephemeral: boolean,
+export type SpawnAgentParams = { session_id: SessionId, message: string,
+/**
+ * Exact connection/model selector. Omission inherits the immediate parent.
+ */
+model?: string | null,
+/**
+ * Reasoning selection validated against the child model, never clamped.
+ */
+thinking?: string | null, fork_turns?: string | null, max_turns?: number | null, tool_policy: AgentToolPolicy, ephemeral: boolean,
 /**
  * Caller-requested child name. RLM `spawn(name=…)` addressing (messaging,
  * observation, delete) keys off this name, so it must be honored when
@@ -1017,7 +1025,7 @@ export type SpawnAgentResult = { task_id: TaskId, child_session_id: SessionId, a
  */
 session_dir?: string | null,
 /**
- * Model binding the child runs with (inherited from the parent).
+ * Canonical model selector bound to the child session.
  */
 model?: string | null, };
 

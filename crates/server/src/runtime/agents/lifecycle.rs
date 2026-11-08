@@ -102,7 +102,7 @@ impl ServerRuntime {
             .await;
     }
 
-    pub(super) async fn fail_child_agent_startup(
+    pub(in crate::runtime) async fn fail_child_agent_startup(
         &self,
         parent_session_id: SessionId,
         child_session_id: SessionId,
@@ -110,7 +110,8 @@ impl ServerRuntime {
     ) {
         self.set_agent_status(parent_session_id, child_session_id, SubagentStatus::Failed)
             .await;
-        if let Some(session_handle) = self.sessions.lock().await.get(&child_session_id).cloned() {
+        let session_handle = self.sessions.lock().await.get(&child_session_id).cloned();
+        if let Some(session_handle) = session_handle {
             session_handle.set_runtime_session_idle(None).await;
         }
         self.broadcast_notification(
@@ -473,6 +474,8 @@ mod tests {
 
         let child = Arc::clone(&runtime)
             .spawn_agent(SpawnAgentParams {
+                model: None,
+                thinking: None,
                 session_id: parent_session_id,
                 message: "spawn a nested worker".into(),
                 fork_turns: Some("none".into()),
@@ -484,6 +487,8 @@ mod tests {
             .await?;
         let grandchild = Arc::clone(&runtime)
             .spawn_agent(SpawnAgentParams {
+                model: None,
+                thinking: None,
                 session_id: child.child_session_id,
                 message: "verify a nested path".into(),
                 fork_turns: Some("none".into()),

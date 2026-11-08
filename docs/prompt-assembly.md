@@ -33,7 +33,10 @@ available for callers that do not have agent ancestry.
 ## Verified runtime details
 
 - `rlm.spawn` returns admission metadata, not the child's answer. Native
-  `kernel_host.rs` rejects model/thinking overrides; children inherit both.
+  `kernel_host.rs` accepts exact model selectors and supported thinking overrides.
+  Omitted options inherit the immediate parent; unsupported inherited thinking
+  also fails admission. `rlm.find_models` discovers configured routable models,
+  not live health or credit availability. See [the API](rlm-child-models.md).
   Final assistant text is retained as completion detail in `runtime/agents.rs`.
   Explicit `agent_message` updates remain useful for timely delivery; substantial
   artifacts can be shared through files. Child `refine.run` is rejected.

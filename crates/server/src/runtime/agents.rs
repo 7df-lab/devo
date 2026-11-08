@@ -110,9 +110,68 @@ impl ServerRuntime {
             .clone()
             .unwrap_or_else(|| "root".to_string());
         let agent_path = AgentPath::new(parent_path).join(&nickname).0;
-        let model = parent_summary.model_name().map(str::to_string);
-        let model_binding_id = parent_summary.model_binding_id().map(str::to_string);
-        let reasoning_effort_selection = parent_summary.settings.reasoning_effort.clone();
+        // Resolve before persistence/admission. The child owns this binding;
+        // neither the shared context nor its global defaults are changed.
+        // A frozen spawn snapshot supplies history, but a live settings change
+        // may have selected a new parent model since this turn began.
+        let live_parent_config =
+            if let Some(stream) = self.active_stream_state(parent_session_id).await {
+                let stream = stream.lock().await;
+                stream.turn_inline.as_ref().and_then(|inline| {
+                    inline
+                        .live_turn_settings
+                        .lock()
+                        .ok()
+                        .and_then(|live| live.turn_config.clone())
+                })
+            } else {
+                None
+            };
+        let parent_model = live_parent_config
+            .as_ref()
+            .map(|config| {
+                let base = config
+                    .model_binding_id
+                    .as_ref()
+                    .unwrap_or(&config.model.slug);
+                config
+                    .variant
+                    .as_ref()
+                    .map(|variant| format!("{base}/{variant}"))
+                    .unwrap_or_else(|| base.clone())
+            })
+            .or_else(|| session_model_selection(&parent_summary).map(str::to_string))
+            .ok_or_else(|| {
+                ToolCallError::InvalidInput("parent session has no model binding".to_string())
+            })?;
+        let parent_thinking = match live_parent_config.as_ref() {
+            Some(config) => config.reasoning_effort_selection.as_deref(),
+            None => parent_summary.settings.reasoning_effort.as_deref(),
+        };
+        let (_, child_turn_config) = runtime_context
+            .resolve_child_model(
+                params.model.as_deref(),
+                &parent_model,
+                params.thinking.as_deref(),
+                parent_thinking,
+            )
+            .map_err(|error| ToolCallError::InvalidInput(error.to_string()))?;
+        let model = Some(
+            child_turn_config
+                .model_binding_id
+                .clone()
+                .unwrap_or_else(|| child_turn_config.model.slug.clone()),
+        );
+        let persisted_model = child_turn_config
+            .variant
+            .as_ref()
+            .map(|variant| format!("{}/{variant}", model.as_deref().unwrap_or_default()))
+            .unwrap_or_else(|| model.clone().unwrap_or_default());
+        let model_binding_id = child_turn_config
+            .model_binding_id
+            .as_ref()
+            .map(|_| persisted_model.clone());
+        let reasoning_effort_selection = child_turn_config.reasoning_effort_selection.clone();
 
         let mut native_session = parent_summary.native.clone();
         native_session.id = child_session_id;
@@ -146,7 +205,7 @@ impl ServerRuntime {
         native_session.title_state =
             SessionTitleState::Final(SessionTitleFinalSource::ExplicitCreate);
         native_session.model.provider = model_binding_id.unwrap_or_else(|| "unknown".to_string());
-        native_session.model.model = model.clone().unwrap_or_default();
+        native_session.model.model = persisted_model;
         native_session.model.reasoning_effort = None;
         native_session.settings.reasoning_effort = reasoning_effort_selection;
         native_session.settings.mode = Some("build".to_string());
@@ -575,7 +634,7 @@ impl ServerRuntime {
         .await;
     }
 
-    async fn set_agent_status(
+    pub(in crate::runtime) async fn set_agent_status(
         &self,
         parent_session_id: SessionId,
         child_session_id: SessionId,
@@ -776,10 +835,14 @@ impl ServerRuntime {
             return Ok(active_turn);
         }
 
-        let turn_config = reservation.runtime_context.resolve_turn_config(
-            session_model_selection(&reservation.summary),
-            reservation.summary.settings.reasoning_effort.clone(),
-        );
+        let turn_config = reservation
+            .runtime_context
+            .resolve_session_turn_config(
+                &reservation.summary,
+                session_model_selection(&reservation.summary),
+                reservation.summary.settings.reasoning_effort.clone(),
+            )
+            .map_err(|error| ToolCallError::InvalidInput(error.to_string()))?;
         let resolved_request = turn_config
             .model
             .resolve_reasoning_effort_selection(turn_config.reasoning_effort_selection.as_deref());
@@ -806,7 +869,7 @@ impl ServerRuntime {
                         .clone()
                         .unwrap_or_else(|| "unknown".to_string()),
                     model: request_model,
-                    variant: None,
+                    variant: turn_config.variant.clone(),
                     reasoning_effort: resolved_request.effective_reasoning_effort,
                 },
                 collaboration_mode: Some(devo_protocol::CollaborationMode::Build),
@@ -1265,7 +1328,7 @@ impl ServerRuntime {
         .await;
     }
 
-    async fn record_subagent_status_event_with_text(
+    pub(in crate::runtime) async fn record_subagent_status_event_with_text(
         &self,
         parent_session_id: SessionId,
         child_session_id: SessionId,

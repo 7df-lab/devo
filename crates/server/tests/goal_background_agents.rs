@@ -70,6 +70,8 @@ async fn busy_child_mailbox_keeps_goal_waiting_through_followup() -> Result<()> 
     support::wait_for_captured_request_count(&provider.requests, /*expected*/ 1).await?;
     let child = Arc::clone(&runtime)
         .spawn_agent(devo_protocol::SpawnAgentParams {
+            model: None,
+            thinking: None,
             session_id: parent,
             message: "first child task".to_string(),
             fork_turns: Some("none".to_string()),

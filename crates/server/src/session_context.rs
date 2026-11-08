@@ -1,3 +1,5 @@
+mod child_models;
+
 use std::collections::HashSet;
 use std::path::Path;
 use std::path::PathBuf;
@@ -66,6 +68,7 @@ pub(crate) struct SessionRuntimeContext {
     /// creation, and without the slot a connection added after session start
     /// would route through the boot-time table forever.
     pub(crate) provider_router: Arc<StdMutex<Arc<dyn ProviderRouter>>>,
+    child_route_inputs: StdMutex<child_models::ChildRouteInputs>,
     /// Live tool registry. Wrapped so MCP enable/disable can swap the Arc for
     /// the next turn without rebuilding the whole process context graph.
     pub(crate) registry: Arc<StdMutex<Arc<ToolRegistry>>>,
@@ -137,7 +140,7 @@ impl SessionRuntimeContext {
         agents_md: AgentsMdConfig,
         config_store: Arc<std::sync::Mutex<AppConfigStore>>,
     ) -> Self {
-        let (provider_catalog_snapshot, provider_http_snapshot) = {
+        let (provider_catalog_snapshot, provider_http_snapshot, child_route_inputs) = {
             let config_store = config_store
                 .lock()
                 .expect("app config store mutex should not be poisoned");
@@ -145,11 +148,13 @@ impl SessionRuntimeContext {
             (
                 config.provider_catalog_config(),
                 config.provider_http.clone(),
+                child_models::ChildRouteInputs::capture(config, config_store.user_config_dir()),
             )
         };
         Self {
             provider,
             provider_router: Arc::new(StdMutex::new(provider_router)),
+            child_route_inputs: StdMutex::new(child_route_inputs),
             registry: Arc::new(StdMutex::new(registry)),
             mcp_manager,
             default_model,
@@ -187,13 +192,6 @@ impl SessionRuntimeContext {
         )
     }
 
-    pub(crate) fn replace_provider_router(&self, router: Arc<dyn ProviderRouter>) {
-        *self
-            .provider_router
-            .lock()
-            .expect("provider router mutex should not be poisoned") = router;
-    }
-
     /// Rebuilds this context's Connection routes from its current on-disk
     /// provider config and installs them in place.
     ///
@@ -204,7 +202,7 @@ impl SessionRuntimeContext {
     /// default provider is kept so sessions on the Default route keep their
     /// model selection.
     pub(crate) async fn reload_provider_router(&self) -> anyhow::Result<Arc<MultiProviderRouter>> {
-        let (provider_config, provider_http, user_config_dir) = {
+        let (provider_config, provider_http, user_config_dir, route_config) = {
             let mut config_store = self
                 .config_store
                 .lock()
@@ -221,6 +219,7 @@ impl SessionRuntimeContext {
                 config.provider_catalog_config(),
                 config.provider_http.clone(),
                 config_store.user_config_dir().to_path_buf(),
+                config,
             )
         };
         let effective = devo_core::effective_provider_catalog_with_home(
@@ -228,21 +227,42 @@ impl SessionRuntimeContext {
             Some(user_config_dir.as_path()),
         )
         .context("failed to merge live provider catalog with user configuration")?;
-        let auth = read_user_auth_config(&user_config_dir.join(AUTH_CONFIG_FILE_NAME))?;
-        let routes = crate::provider_config::build_connection_route_table(
-            &provider_config,
-            &effective,
-            &provider_http,
-            &auth,
-            &user_config_dir,
-        )
-        .await?;
+        let mut auth = read_user_auth_config(&user_config_dir.join(AUTH_CONFIG_FILE_NAME))?;
+        let mut stable_routes = None;
+        // OAuth refresh may update auth during adapter creation. Rebuild from
+        // that result, rather than claiming an adapter used a later credential.
+        // Continual external edits fail closed instead of publishing stale routes.
+        for _ in 0..3 {
+            let routes = crate::provider_config::build_connection_route_table(
+                &provider_config,
+                &effective,
+                &provider_http,
+                &auth,
+                &user_config_dir,
+            )
+            .await?;
+            let latest_auth = read_user_auth_config(&user_config_dir.join(AUTH_CONFIG_FILE_NAME))?;
+            if latest_auth == auth {
+                stable_routes = Some(routes);
+                break;
+            }
+            auth = latest_auth;
+        }
+        let routes = stable_routes
+            .context("provider authentication changed during reload; retry reconnecting")?;
         let mut router = MultiProviderRouter::new(Arc::clone(&self.provider));
         for (route, provider) in routes {
             router.insert_route(route, provider);
         }
         let router = Arc::new(router);
-        self.replace_provider_router(Arc::clone(&router) as Arc<dyn ProviderRouter>);
+        let mut inputs = child_models::ChildRouteInputs::capture(&route_config, &user_config_dir);
+        inputs.auth = Some(auth);
+        let mut installed = self.provider_router.lock().expect("provider router mutex");
+        *self
+            .child_route_inputs
+            .lock()
+            .expect("child route inputs mutex") = inputs;
+        *installed = Arc::clone(&router) as Arc<dyn ProviderRouter>;
         Ok(router)
     }
 
@@ -321,26 +341,37 @@ impl SessionRuntimeContext {
             .resolve_for_turn(None)
             .ok()
             .map(|model| model.slug.clone());
-        let (provider, provider_router, provider_default_model) = if provider_runtime_config_changed
-        {
-            let provider =
-                load_server_provider(&config, default_model.as_deref(), &user_config_dir)
-                    .await
-                    .context("load server provider for session workspace")?;
-            (
-                provider.provider,
-                provider.provider_router,
-                provider.default_model,
-            )
-        } else {
-            (
-                Arc::clone(&inherited_context.provider),
-                inherited_context.provider_router(),
-                // An empty discovery catalog must not erase the model of the
-                // provider we are retaining (including injected providers).
-                default_model.unwrap_or_else(|| inherited_context.default_model.clone()),
-            )
-        };
+        let (provider, provider_router, provider_default_model, child_route_inputs) =
+            if provider_runtime_config_changed {
+                let provider =
+                    load_server_provider(&config, default_model.as_deref(), &user_config_dir)
+                        .await
+                        .context("load server provider for session workspace")?;
+                (
+                    provider.provider,
+                    provider.provider_router,
+                    provider.default_model,
+                    child_models::ChildRouteInputs::capture(&config, &user_config_dir),
+                )
+            } else {
+                let router = inherited_context
+                    .provider_router
+                    .lock()
+                    .expect("provider router mutex");
+                let inputs = inherited_context
+                    .child_route_inputs
+                    .lock()
+                    .expect("child route inputs mutex")
+                    .clone();
+                (
+                    Arc::clone(&inherited_context.provider),
+                    Arc::clone(&router),
+                    // An empty discovery catalog must not erase the model of the
+                    // provider we are retaining (including injected providers).
+                    default_model.unwrap_or_else(|| inherited_context.default_model.clone()),
+                    inputs,
+                )
+            };
         let skill_workspace_root = workspace_root
             .map(Path::to_path_buf)
             .unwrap_or_else(|| std::env::current_dir().unwrap_or_else(|_| PathBuf::from(".")));
@@ -356,6 +387,7 @@ impl SessionRuntimeContext {
         Ok(Arc::new(Self {
             provider,
             provider_router: Arc::new(StdMutex::new(provider_router)),
+            child_route_inputs: StdMutex::new(child_route_inputs),
             registry,
             mcp_manager,
             default_model: provider_default_model,

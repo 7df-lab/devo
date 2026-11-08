@@ -57,9 +57,22 @@ impl ServerRuntime {
             let requested_model = session_model_selection(&reservation.summary);
             let requested_reasoning_effort_selection =
                 reservation.summary.settings.reasoning_effort.clone();
-            let turn_config = reservation
-                .runtime_context
-                .resolve_turn_config(requested_model, requested_reasoning_effort_selection);
+            let turn_config = match reservation.runtime_context.resolve_session_turn_config(
+                &reservation.summary,
+                requested_model,
+                requested_reasoning_effort_selection,
+            ) {
+                Ok(config) => config,
+                Err(error) => {
+                    tracing::warn!(%session_id, %error, "child goal model is unavailable");
+                    drop(_state_change_guard);
+                    if let Some(parent) = reservation.summary.parent_session_id() {
+                        self.fail_child_agent_startup(parent, session_id, error.to_string())
+                            .await;
+                    }
+                    return;
+                }
+            };
             let resolved_request = turn_config.model.resolve_reasoning_effort_selection(
                 turn_config.reasoning_effort_selection.as_deref(),
             );
@@ -85,7 +98,7 @@ impl ServerRuntime {
                             .clone()
                             .unwrap_or_else(|| "unknown".to_string()),
                         model: request_model,
-                        variant: None,
+                        variant: turn_config.variant.clone(),
                         reasoning_effort: resolved_request.effective_reasoning_effort,
                     },
                     collaboration_mode: None,

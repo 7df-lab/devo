@@ -166,6 +166,8 @@ impl ToolHandler for AgentToolHandler {
                 let input: SpawnAgentInput = parse_input(input)?;
                 let result = coordinator
                     .spawn_agent(SpawnAgentParams {
+                        model: None,
+                        thinking: None,
                         session_id,
                         message: input.message,
                         fork_turns: input.fork_turns,
@@ -707,6 +709,8 @@ mod tests {
         assert_eq!(
             coordinator.spawned.lock().await.as_slice(),
             &[SpawnAgentParams {
+                model: None,
+                thinking: None,
                 session_id,
                 message: "review this".to_string(),
                 fork_turns: Some("all".to_string()),

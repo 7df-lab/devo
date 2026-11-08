@@ -755,6 +755,62 @@ impl ServerRuntime {
                 index_session.settings.clone(),
             )
         };
+        // Indexed children are rejected above. Ephemeral children can reach
+        // this path through the actor-backed metadata fallback; validate their
+        // exact selection before normalizing effort or persisting any settings.
+        let child_session = durable_rollout_session
+            .as_deref()
+            .or(index_session.as_ref())
+            .filter(|session| session.parent.is_some());
+        let validated_child_config = if let Some(session) = child_session
+            && (params.model.is_some()
+                || params.model_binding_id.is_some()
+                || params
+                    .settings
+                    .as_ref()
+                    .is_some_and(|settings| settings.reasoning_effort.is_some()))
+        {
+            let summary = crate::runtime_session_summary::RuntimeSessionSummary::new(
+                session.clone(),
+                Utc::now(),
+                devo_protocol::CollaborationMode::default(),
+            );
+            let model = params.model_binding_id.clone().or_else(|| {
+                params.model.as_ref().map(|binding| {
+                    let mut selection = native_model_slug(binding);
+                    if let Some(variant) = binding.variant.as_deref()
+                        && !selection.ends_with(&format!("/{variant}"))
+                    {
+                        selection = format!("{selection}/{variant}");
+                    }
+                    selection
+                })
+            });
+            let thinking = params
+                .settings
+                .as_ref()
+                .and_then(|settings| settings.reasoning_effort.clone())
+                .or_else(|| session.settings.reasoning_effort.clone());
+            let result = match self.deps.context_for_workspace(&session_cwd).await {
+                Ok(context) => {
+                    context.resolve_session_turn_config(&summary, model.as_deref(), thinking)
+                }
+                Err(error) => Err(error),
+            };
+            match result {
+                Ok(config) => Some(config),
+                Err(error) => {
+                    return self.error_response(
+                        request_id,
+                        ProtocolErrorCode::InvalidParams,
+                        error.to_string(),
+                    );
+                }
+            }
+        } else {
+            None
+        };
+        let is_child_session = child_session.is_some();
         let mut overlay_profile: Option<devo_safety::RuntimePermissionProfile> = None;
         let mut overlay_sandbox: Option<String> = None;
         let mut overlay_effort: Option<String> = None;
@@ -838,21 +894,30 @@ impl ServerRuntime {
                     .as_ref()
                     .map(native_model_slug)
                     .unwrap_or_else(|| session_model_slug.clone());
-                let normalized = match self.deps.context_for_workspace(&session_cwd).await {
-                    Ok(runtime_context) => runtime_context
-                        .resolve_turn_config(Some(&requested_model), Some(effort.clone()))
+                let normalized = if let Some(config) = &validated_child_config {
+                    config
                         .reasoning_effort_selection
-                        .unwrap_or_else(|| {
-                            devo_protocol::normalize_reasoning_effort_literal(effort)
-                        }),
-                    Err(_) => self
-                        .deps
-                        .model_catalog
-                        .get(&requested_model)
-                        .and_then(|model| model.normalize_reasoning_effort_selection(Some(effort)))
-                        .unwrap_or_else(|| {
-                            devo_protocol::normalize_reasoning_effort_literal(effort)
-                        }),
+                        .clone()
+                        .unwrap_or_else(|| effort.clone())
+                } else {
+                    match self.deps.context_for_workspace(&session_cwd).await {
+                        Ok(runtime_context) => runtime_context
+                            .resolve_turn_config(Some(&requested_model), Some(effort.clone()))
+                            .reasoning_effort_selection
+                            .unwrap_or_else(|| {
+                                devo_protocol::normalize_reasoning_effort_literal(effort)
+                            }),
+                        Err(_) => self
+                            .deps
+                            .model_catalog
+                            .get(&requested_model)
+                            .and_then(|model| {
+                                model.normalize_reasoning_effort_selection(Some(effort))
+                            })
+                            .unwrap_or_else(|| {
+                                devo_protocol::normalize_reasoning_effort_literal(effort)
+                            }),
+                    }
                 };
                 if current_effort.as_ref() != Some(&normalized) {
                     if rollout_path.is_some() {
@@ -1017,7 +1082,7 @@ impl ServerRuntime {
         // Mirror session model / effort into user defaults (config.toml).
         // Provider is not a separate preference — it is the `provider/` prefix
         // of the model slug.
-        if overlay_model.is_some() || overlay_effort.is_some() {
+        if !is_child_session && (overlay_model.is_some() || overlay_effort.is_some()) {
             {
                 let mut store = self
                     .deps
@@ -1094,7 +1159,8 @@ impl ServerRuntime {
             || overlay_effort.is_some()
             || overlay_model.is_some()
             || overlay_compact_limit.is_some()
-            || overlay_python_cell_first_wait_ms.is_some())
+            || overlay_python_cell_first_wait_ms.is_some()
+            || validated_child_config.is_some())
             && let Some(stream) = self.active_stream_state(legacy_session_id).await
         {
             let mut stream = stream.lock().await;
@@ -1126,12 +1192,15 @@ impl ServerRuntime {
                 if overlay_effort.is_some()
                     || overlay_model.is_some()
                     || overlay_compact_limit.is_some()
+                    || validated_child_config.is_some()
                 {
                     let mut live = inline
                         .live_turn_settings
                         .lock()
                         .expect("live settings mutex poisoned");
-                    if let Some(model_slug) = &overlay_model {
+                    if let Some(config) = &validated_child_config {
+                        live.turn_config = Some(config.clone());
+                    } else if let Some(model_slug) = &overlay_model {
                         let effort = overlay_effort.clone().or_else(|| {
                             live.turn_config
                                 .as_ref()
