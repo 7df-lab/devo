@@ -11,6 +11,7 @@ from typing import Any
 from .bash import BashHandle, BashResult, bash
 from .shell import shell
 from .harness import HarnessEntry, HarnessScope, HarnessState, RefinementEvent, get_harness_state
+from .factory import FactoryNamespace
 
 _NOT_CALLABLE_MESSAGE = "'rlm' is not callable; spawn a child with: handle = await rlm.spawn('sub-task', name='worker')"
 _RENAMED_RUN_MESSAGE = "rlm.run was renamed; spawn a child with: handle = await rlm.spawn('sub-task', name='worker')"
@@ -438,11 +439,13 @@ class _HarnessProxy:
 
 
 _harness_state = _HarnessProxy()
+factory = FactoryNamespace()
 
 
 class _RLMNamespace:
     shell = staticmethod(shell)
     harness = _harness_state
+    factory = factory
     get_harness_state = staticmethod(get_harness_state)
 
     async def spawn(
@@ -515,6 +518,7 @@ __all__ = [
     "BashHandle",
     "BashResult",
     "HarnessEntry",
+    "FactoryNamespace",
     "HarnessScope",
     "HarnessState",
     "McpIntegration",
@@ -531,6 +535,7 @@ __all__ = [
     "delete_subagent",
     "emit",
     "find_models",
+    "factory",
     "get_harness_state",
     "harness",
     "host_request",
