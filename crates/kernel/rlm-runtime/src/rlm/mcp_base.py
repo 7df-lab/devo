@@ -205,6 +205,7 @@ class McpIntegration:
                 return token
             if _read_auth(self._provider_id) is None:
                 raise NotEnabled(self.server)
+            refresh_failure: str | None = None
             try:
                 await host_request("mcp.refresh", {"server": self.server})
             except RuntimeError as error:
@@ -218,13 +219,18 @@ class McpIntegration:
                         "This Rust host cannot refresh authored integration credentials in auth.json."
                     ) else ""
                 )
-                raise RuntimeError(
+                refresh_failure = (
                     f"Failed to refresh credentials for '{self.server}'. {reason}"
                     "Reconnect using the host that owns this integration's login."
-                ) from None
+                )
+            # A second host may have reconnected while this request failed.
+            # Re-read outside the exception handler: the new grant must pass
+            # the same binding/expiry checks, without chaining a provider body.
             token = self._token()
             if token:
                 return token
+            if refresh_failure is not None:
+                raise RuntimeError(refresh_failure) from None
             # Acknowledgement is not proof of rotation. Do not turn a stale or
             # malformed grant into the misleading 'not enabled' diagnosis.
             raise RuntimeError(

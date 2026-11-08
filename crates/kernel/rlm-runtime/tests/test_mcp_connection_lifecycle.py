@@ -94,6 +94,35 @@ class ConnectionLifecycleTests(unittest.IsolatedAsyncioTestCase):
         self.assertIn("Failed to refresh", str(caught.exception))
         self.assertNotIn("Rust host", str(caught.exception))
 
+    async def test_failed_refresh_rechecks_credentials_written_by_another_host(self):
+        self.write_grant()
+
+        async def concurrent_reconnect(request):
+            self.write_grant(access="reconnected-synthetic-access", expires=(time.time() + 3600) * 1000)
+            return {"status": "error", "error": "old refresh was superseded"}
+
+        host = AsyncMock(side_effect=concurrent_reconnect)
+        with patch.object(repl, "host_request", host):
+            self.assertEqual(await self.integration._resolve_token(), "reconnected-synthetic-access")
+        host.assert_awaited_once()
+
+    async def test_recheck_after_failure_keeps_binding_errors_and_tracebacks_safe(self):
+        self.write_grant()
+
+        async def invalid_reconnect(request):
+            self.write_grant(endpoint="https://another.example/mcp", expires=(time.time() + 3600) * 1000)
+            return {"status": "error", "error": "synthetic-provider-secret"}
+
+        with patch.object(repl, "host_request", AsyncMock(side_effect=invalid_reconnect)):
+            try:
+                await self.integration._resolve_token()
+            except RuntimeError as error:
+                rendered = "".join(traceback.format_exception(error))
+                self.assertIn("another endpoint", rendered)
+                self.assertNotIn("synthetic-provider-secret", rendered)
+            else:
+                self.fail("a retargeted grant must not be returned")
+
     async def test_endpoint_mismatch_never_refreshes_or_transmits(self):
         self.write_grant(endpoint="https://another.example/mcp", expires=(time.time() + 3600) * 1000)
         host = AsyncMock()
