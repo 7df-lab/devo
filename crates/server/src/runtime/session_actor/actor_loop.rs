@@ -187,15 +187,14 @@ pub(super) async fn run_session_actor(
                                 .and_then(|live| live.turn_config.clone())
                         })
                         .or_else(|| {
-                            Some(
-                                state.runtime_context.resolve_turn_config(
-                                    state
-                                        .summary
-                                        .model_binding_id()
-                                        .or(state.summary.model_name()),
+                            state
+                                .runtime_context
+                                .resolve_session_turn_config(
+                                    &state.summary,
+                                    state.summary.model_selection(),
                                     state.summary.settings.reasoning_effort.clone(),
-                                ),
-                            )
+                                )
+                                .ok()
                         });
                     turn_config.map(|turn_config| ApprovalCheckpointSnapshot {
                         messages: state.core.messages.clone(),

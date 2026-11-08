@@ -68,18 +68,22 @@ impl ServerRuntime {
             return false;
         };
         let state_change_guard = session_handle.lock_state_change().await;
-        let Some(queued) = self
-            .pop_next_queued_turn_input(
-                session_id,
-                /*require_idle_session*/ matches!(policy, QueueDrainPolicy::OnlyWhenIdle),
-            )
-            .await
-        else {
-            return false;
-        };
-        let Some((turn, turn_config)) = self.prepare_queued_turn_start(session_id, &queued).await
-        else {
-            return false;
+        let (queued, turn, turn_config) = loop {
+            let Some(queued) = self
+                .pop_next_queued_turn_input(
+                    session_id,
+                    /*require_idle_session*/
+                    matches!(policy, QueueDrainPolicy::OnlyWhenIdle),
+                )
+                .await
+            else {
+                return false;
+            };
+            if let Some((turn, config)) = self.prepare_queued_turn_start(session_id, &queued).await
+            {
+                break (queued, turn, config);
+            }
+            // A rejected binding settles this input, not the remaining queue.
         };
         if let Some((parent_session_id, parent_turn_id)) = queued.subagent_usage_owner {
             self.register_subagent_usage_owner(parent_session_id, session_id, parent_turn_id)
@@ -150,28 +154,22 @@ impl ServerRuntime {
             .await
             .map(|snapshot| snapshot.pending_count)
             .unwrap_or_default();
-        let Some(queued) = self
-            .pop_next_queued_turn_input(session_id, /*require_idle_session*/ false)
-            .await
-        else {
-            if queue_len_before > 0 {
-                tracing::warn!(
-                    session_id = %session_id,
-                    queue_len_before,
-                    "post-turn chain found a non-empty queue but popped nothing (entries un-drainable?)"
-                );
+        let (queued, turn, turn_config) = loop {
+            let Some(queued) = self
+                .pop_next_queued_turn_input(session_id, /*require_idle_session*/ false)
+                .await
+            else {
+                if queue_len_before > 0 {
+                    tracing::debug!(%session_id, queue_len_before, "post-turn queue drain finished without an admissible input");
+                }
+                return false;
+            };
+            tracing::info!(%session_id, queued_input_id = %queued.queued_item_id, queue_len_before,
+                "post-turn chain draining queued follow-up");
+            if let Some((turn, config)) = self.prepare_queued_turn_start(session_id, &queued).await
+            {
+                break (queued, turn, config);
             }
-            return false;
-        };
-        tracing::info!(
-            session_id = %session_id,
-            queued_input_id = %queued.queued_item_id,
-            queue_len_before,
-            "post-turn chain draining queued follow-up"
-        );
-        let Some((turn, turn_config)) = self.prepare_queued_turn_start(session_id, &queued).await
-        else {
-            return false;
         };
         if let Some((parent_session_id, parent_turn_id)) = queued.subagent_usage_owner {
             self.register_subagent_usage_owner(parent_session_id, session_id, parent_turn_id)
@@ -272,10 +270,41 @@ impl ServerRuntime {
             .model_selection
             .as_deref()
             .or_else(|| session_model_selection(&reservation.summary));
-        let turn_config = reservation.runtime_context.resolve_turn_config(
+        let turn_config = match reservation.runtime_context.resolve_session_turn_config(
+            &reservation.summary,
             model_override,
             reservation.summary.settings.reasoning_effort.clone(),
-        );
+        ) {
+            Ok(config) => config,
+            Err(error) => {
+                let message = format!("Queued child turn could not start: {error}");
+                if let Some(parent) = reservation.summary.parent_session_id() {
+                    self.complete_background_work(
+                        parent,
+                        format!("agent:{session_id}:queued:{}", queued.queued_item_id),
+                        message.clone(),
+                    );
+                    self.set_agent_status(parent, session_id, SubagentStatus::Failed)
+                        .await;
+                    self.record_subagent_status_event_with_text(
+                        parent,
+                        session_id,
+                        SubagentStatus::Failed,
+                        TurnId::new(),
+                        Some(message),
+                    )
+                    .await;
+                }
+                self.broadcast_queue_updated(
+                    session_id,
+                    devo_protocol::native::queue::QueueChange::Removed,
+                    queued.queued_item_id,
+                    None,
+                )
+                .await;
+                return None;
+            }
+        };
         let resolved_request = turn_config
             .model
             .resolve_reasoning_effort_selection(turn_config.reasoning_effort_selection.as_deref());
@@ -299,7 +328,7 @@ impl ServerRuntime {
                     .clone()
                     .unwrap_or_else(|| "unknown".to_string()),
                 model: request_model,
-                variant: None,
+                variant: turn_config.variant.clone(),
                 reasoning_effort: turn_config
                     .reasoning_effort_selection
                     .as_deref()
@@ -346,6 +375,13 @@ impl ServerRuntime {
             .await;
             self.add_active_turn_user_text(session_id, turn.turn_id(), display_input.to_string())
                 .await;
+            if let Some((parent, _)) = self.child_parent_and_path(session_id).await {
+                self.set_agent_status(parent, session_id, SubagentStatus::Running)
+                    .await;
+            }
         }
     }
 }
+
+#[cfg(test)]
+mod tests;

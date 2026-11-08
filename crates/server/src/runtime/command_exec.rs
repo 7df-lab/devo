@@ -738,6 +738,8 @@ impl ServerRuntime {
             agent_policies.expect("agent branch always carries policies");
         let result = match Arc::clone(self)
             .spawn_agent(devo_protocol::SpawnAgentParams {
+                model: None,
+                thinking: None,
                 session_id: legacy_session_id,
                 message: input,
                 fork_turns,

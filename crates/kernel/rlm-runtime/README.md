@@ -179,17 +179,28 @@ import rlm
 result = await rlm.bash("cargo test -p devo-kernel")
 print(result.exit_code, result.output)
 
-reviewer = await rlm.spawn(
-    "Review the current diff for concurrency bugs.",
-    name="reviewer",
-    model="openai-codex/gpt-5.4-mini",
-)
-print(reviewer.model)
+models = await rlm.find_models(limit=100)
+chosen = next((m for m in models if "high" in m.thinking_levels), None)
+if chosen is not None:
+    reviewer = await rlm.spawn(
+        "Review the current diff for concurrency bugs.",
+        name="reviewer", model=chosen.selector, thinking="high",
+    )
+    print(reviewer.model)
 ```
 
 `rlm.spawn` returns when the child is admitted, not when it finishes. The child
 runs as a separate session; results arrive through `agent_message` replies or
 files, usually on a later turn.
+
+Omitted `model` and `thinking` (or `None`) inherit the immediate parent's values.
+An unsupported inherited thinking level fails just like an explicit unsupported
+level; there is no silent fallback. `find_models` returns enabled, configured,
+routable models and supported thinking levels without credentials or network
+probes. It does not guarantee provider health or credits. Selectors are exact
+`provider/model` strings, and model IDs can contain slashes. `limit` must be an
+integer from 1 to 100, not a boolean. See the
+[child model API](../../../docs/rlm-child-models.md) for details.
 
 `rlm.read` and `rlm.write` try the direct filesystem call first. On `OSError`
 they ask the host to perform the operation through its approval pipeline. A

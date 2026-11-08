@@ -95,6 +95,12 @@ pub trait ProviderAdapter: ModelProviderSDK {
 #[allow(clippy::double_must_use)]
 #[async_trait]
 pub trait ModelProviderSDK: Send + Sync {
+    /// Whether this adapter is locally configured for requests. This never probes
+    /// the service; unavailable placeholders must override it to return false.
+    fn is_available(&self) -> bool {
+        true
+    }
+
     /// Send a request and get a complete response.
     async fn completion(&self, request: ModelRequest) -> anyhow::Result<ModelResponse>;
 

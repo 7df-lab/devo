@@ -29,6 +29,22 @@ The agent can filter large outputs in Python, reuse earlier work, and delegate
 independent subtasks to child agents with their own sessions and Python state.
 MCP, skills, permissions, and resumable sessions round out the workflow.
 
+Children can independently select a configured model and reasoning level:
+
+```python
+models = await rlm.find_models(limit=100)
+chosen = next((m for m in models if "high" in m.thinking_levels), None)
+if chosen is not None:
+    reviewer = await rlm.spawn(
+        "Review the current diff.", name="reviewer",
+        model=chosen.selector, thinking="high",
+    )
+```
+
+Omitted options inherit the immediate parent. Invalid selections fail without
+fallback. Discovery reflects configuration, not live health or credits. See the
+[child model API](docs/rlm-child-models.md).
+
 ## Quick start
 
 **Desktop:** Download the package for your OS and architecture from

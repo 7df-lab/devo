@@ -287,6 +287,8 @@ pub async fn spawn_child_named(
 ) -> Result<SpawnAgentResult> {
     Ok(Arc::clone(runtime)
         .spawn_agent(SpawnAgentParams {
+            model: None,
+            thinking: None,
             session_id: parent_session_id,
             message: message.to_string(),
             fork_turns: fork_turns.map(str::to_string),

@@ -269,6 +269,7 @@ impl ServerRuntime {
             "modelSlug": snapshot.turn_config.model.slug,
             "requestModel": snapshot.turn_config.request_model,
             "modelBindingId": snapshot.turn_config.model_binding_id,
+            "variant": snapshot.turn_config.variant,
             "reasoningEffortSelection": snapshot.turn_config.reasoning_effort_selection,
             "collaborationMode": format!("{:?}", snapshot.collaboration_mode),
         });

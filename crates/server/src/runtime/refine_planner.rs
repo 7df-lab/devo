@@ -287,10 +287,18 @@ impl ServerRuntime {
             .model_selection
             .unwrap_or_else(|| title_context.runtime_context.default_model.clone());
         let runtime_context = title_context.runtime_context;
-        let turn_config = runtime_context.resolve_turn_config(
+        let snapshot = session_handle.turn_reservation_snapshot().await?;
+        let turn_config = match runtime_context.resolve_session_turn_config(
+            &snapshot.summary,
             Some(primary_selection.as_str()),
             title_context.reasoning_effort_selection.clone(),
-        );
+        ) {
+            Ok(config) => config,
+            Err(error) => {
+                tracing::warn!(%session_id, %error, "refine child model is unavailable");
+                return None;
+            }
+        };
         let resolved_request = turn_config
             .model
             .resolve_reasoning_effort_selection(turn_config.reasoning_effort_selection.as_deref());

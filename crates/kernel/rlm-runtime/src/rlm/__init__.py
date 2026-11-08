@@ -4,7 +4,7 @@ from __future__ import annotations
 
 import sys
 import types
-from dataclasses import dataclass
+from dataclasses import dataclass, field
 from pathlib import Path
 from typing import Any
 
@@ -39,6 +39,7 @@ class RLMModel:
     id: str
     name: str
     selector: str
+    thinking_levels: list[str] = field(default_factory=list)
 
 
 @dataclass(frozen=True)
@@ -268,12 +269,27 @@ async def spawn(
     """Spawn a recursive Devo child and return once its task is admitted.
 
     ``name`` is required and must be unique among siblings.
-    ``model`` selects a child with an exact ``provider/model`` selector.
+    ``model`` selects a child with an exact ``provider/model`` selector from
+    ``find_models`` (model IDs may contain slashes); there is no fallback.
     ``thinking`` sets the child reasoning level (e.g. 'off', 'low', 'medium', 'high');
-    defaults to the parent level; levels invalid for the resolved model fail the spawn.
+    Omitted or None options inherit the immediate parent's model and thinking.
+    Levels invalid for the resolved model, including inherited levels, fail the spawn.
     """
     if not isinstance(prompt, str):
         raise TypeError(f"prompt must be str, got {type(prompt).__name__}")
+    if not prompt.strip():
+        raise ValueError("prompt must be a non-empty string")
+    for label, value in (("name", name), ("model", model), ("thinking", thinking)):
+        if value is None and label != "name":
+            continue
+        if not isinstance(value, str):
+            raise TypeError(f"{label} must be str, got {type(value).__name__}")
+        if not value.strip():
+            raise ValueError(f"{label} must be a non-empty string")
+    if model is not None:
+        provider, separator, model_id = model.partition("/")
+        if not separator or not provider.strip() or not model_id.strip():
+            raise ValueError("model must be an exact provider/model selector")
     kwargs: dict[str, Any] = {"name": name}
     if model is not None:
         kwargs["model"] = model
@@ -293,7 +309,15 @@ def _model_from_payload(payload: Any) -> RLMModel:
     selector = payload.get("selector")
     if not all(isinstance(value, str) and value for value in (provider, model_id, name, selector)):
         raise RuntimeError("rlm.find_models returned an invalid model entry")
-    return RLMModel(provider=provider, id=model_id, name=name, selector=selector)
+    thinking_levels = payload.get("thinking_levels", [])
+    if not isinstance(thinking_levels, list) or not all(
+        isinstance(level, str) and level.strip() for level in thinking_levels
+    ):
+        raise RuntimeError("rlm.find_models returned invalid thinking_levels")
+    return RLMModel(
+        provider=provider, id=model_id, name=name, selector=selector,
+        thinking_levels=thinking_levels,
+    )
 
 
 async def create_session(
@@ -324,12 +348,21 @@ async def create_session(
 
 
 async def find_models(query: str = "", limit: int = 8) -> list[RLMModel]:
-    """Search a bounded list of models backed by active user credentials."""
+    """Search enabled, configured, routable models without network probes.
+
+    Availability describes local configuration, not live health or credit. Each
+    descriptor includes supported thinking levels; older hosts may omit them.
+    ``limit`` must be an integer from 1 to 100 (not bool).
+    """
     if not isinstance(query, str):
         raise TypeError(f"query must be str, got {type(query).__name__}")
-    if not isinstance(limit, int):
+    if isinstance(limit, bool) or not isinstance(limit, int):
         raise TypeError(f"limit must be int, got {type(limit).__name__}")
+    if not 1 <= limit <= 100:
+        raise ValueError("limit must be between 1 and 100")
     payload = await host_request("rlm.find_models", {"query": query, "limit": limit})
+    if not isinstance(payload, dict):
+        raise RuntimeError("rlm.find_models returned an invalid models list")
     models = payload.get("models")
     if not isinstance(models, list):
         raise RuntimeError("rlm.find_models returned an invalid models list")

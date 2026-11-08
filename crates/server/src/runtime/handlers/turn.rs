@@ -549,8 +549,20 @@ impl ServerRuntime {
         let requested_reasoning_effort_selection = params
             .reasoning_effort_selection
             .or_else(|| reservation.summary.settings.reasoning_effort.clone());
-        let turn_config = runtime_context
-            .resolve_turn_config(requested_model, requested_reasoning_effort_selection);
+        let turn_config = match runtime_context.resolve_session_turn_config(
+            &reservation.summary,
+            requested_model,
+            requested_reasoning_effort_selection,
+        ) {
+            Ok(config) => config,
+            Err(error) => {
+                return self.error_response(
+                    request_id,
+                    ProtocolErrorCode::InvalidParams,
+                    error.to_string(),
+                );
+            }
+        };
         let model_binding_id = turn_config
             .model_binding_id
             .clone()
@@ -575,7 +587,7 @@ impl ServerRuntime {
                 model: devo_protocol::native::model::ModelBinding {
                     provider: model_binding_id,
                     model: request_model,
-                    variant: None,
+                    variant: turn_config.variant.clone(),
                     reasoning_effort: resolved_request.effective_reasoning_effort,
                 },
                 collaboration_mode: Some(params.collaboration_mode),

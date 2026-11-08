@@ -778,6 +778,8 @@ async fn ephemeral_deny_all_child_agent_has_no_tools_and_one_turn() -> Result<()
 
     let child = Arc::clone(&runtime)
         .spawn_agent(devo_protocol::SpawnAgentParams {
+            model: None,
+            thinking: None,
             session_id: parent_session_id,
             message: "answer this side question".to_string(),
             fork_turns: Some("all".to_string()),

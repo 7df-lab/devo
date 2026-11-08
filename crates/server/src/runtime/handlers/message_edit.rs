@@ -492,16 +492,27 @@ impl ServerRuntime {
         let requested_reasoning_effort_selection =
             session.summary.settings.reasoning_effort.clone();
         let runtime_context = Arc::clone(&session.runtime_context);
+        let model_summary = session.summary.clone();
         let collaboration_mode = {
             let core_session = session.core_session.lock().await;
             core_session.collaboration_mode
         };
         drop(session);
 
-        let turn_config = runtime_context.resolve_turn_config(
+        let turn_config = match runtime_context.resolve_session_turn_config(
+            &model_summary,
             requested_model.as_deref(),
             requested_reasoning_effort_selection.clone(),
-        );
+        ) {
+            Ok(config) => config,
+            Err(error) => {
+                return self.error_response(
+                    request_id,
+                    ProtocolErrorCode::InvalidParams,
+                    error.to_string(),
+                );
+            }
+        };
         let resolved_request = turn_config
             .model
             .resolve_reasoning_effort_selection(turn_config.reasoning_effort_selection.as_deref());
@@ -580,7 +591,7 @@ impl ServerRuntime {
                         .clone()
                         .unwrap_or_else(|| "unknown".to_string()),
                     model: request_model,
-                    variant: None,
+                    variant: turn_config.variant.clone(),
                     reasoning_effort: resolved_request.effective_reasoning_effort,
                 },
                 collaboration_mode: None,

@@ -173689,6 +173689,13 @@
         "message": {
           "type": "string"
         },
+        "model": {
+          "description": "Exact connection/model selector. Omission inherits the immediate parent.",
+          "type": [
+            "string",
+            "null"
+          ]
+        },
         "nickname": {
           "description": "Caller-requested child name. RLM `spawn(name=…)` addressing (messaging, observation, delete) keys off this name, so it must be honored when present; `None` keeps the generated adjective-noun nickname.",
           "type": [
@@ -173698,6 +173705,13 @@
         },
         "session_id": {
           "$ref": "#/definitions/SessionId"
+        },
+        "thinking": {
+          "description": "Reasoning selection validated against the child model, never clamped.",
+          "type": [
+            "string",
+            "null"
+          ]
         },
         "tool_policy": {
           "default": "inherit",
@@ -173743,7 +173757,7 @@
           "$ref": "#/definitions/SessionId"
         },
         "model": {
-          "description": "Model binding the child runs with (inherited from the parent).",
+          "description": "Canonical model selector bound to the child session.",
           "type": [
             "string",
             "null"

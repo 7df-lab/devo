@@ -147,6 +147,10 @@ struct MissingProvider;
 
 #[async_trait::async_trait]
 impl ModelProviderSDK for MissingProvider {
+    fn is_available(&self) -> bool {
+        false
+    }
+
     async fn completion(&self, _request: ModelRequest) -> Result<ModelResponse> {
         anyhow::bail!(NO_PROVIDER_CONFIGURED_MESSAGE)
     }
@@ -175,6 +179,10 @@ impl UnavailableProvider {
 
 #[async_trait::async_trait]
 impl ModelProviderSDK for UnavailableProvider {
+    fn is_available(&self) -> bool {
+        false
+    }
+
     async fn completion(&self, _request: ModelRequest) -> Result<ModelResponse> {
         anyhow::bail!("{}", self.message)
     }

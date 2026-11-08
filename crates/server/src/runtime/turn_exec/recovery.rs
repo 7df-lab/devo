@@ -299,13 +299,23 @@ impl ServerRuntime {
             .turn_reservation_snapshot()
             .await
             .context("session unavailable")?;
-        let turn_config = snapshot.runtime_context.resolve_turn_config(
-            saved
-                .turn
-                .model_binding_id()
-                .or(Some(saved.turn.logical_model())),
+        let saved_model = saved
+            .turn
+            .model_binding_id()
+            .unwrap_or(saved.turn.logical_model());
+        let saved_selection = saved
+            .turn
+            .native
+            .model
+            .variant
+            .as_ref()
+            .map(|variant| format!("{saved_model}/{variant}"))
+            .unwrap_or_else(|| saved_model.to_string());
+        let turn_config = snapshot.runtime_context.resolve_session_turn_config(
+            &snapshot.summary,
+            Some(&saved_selection),
             saved.turn.reasoning_effort_selection(),
-        );
+        )?;
         let mut turn = saved.turn;
         turn.native.status = devo_protocol::native::turn::TurnStatus::InProgress;
         turn.native.completed_at = None;

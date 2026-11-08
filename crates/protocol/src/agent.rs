@@ -37,6 +37,12 @@ impl AgentOutputEventKind {
 pub struct SpawnAgentParams {
     pub session_id: SessionId,
     pub message: String,
+    /// Exact connection/model selector. Omission inherits the immediate parent.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub model: Option<String>,
+    /// Reasoning selection validated against the child model, never clamped.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub thinking: Option<String>,
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub fork_turns: Option<String>,
     #[serde(default, skip_serializing_if = "Option::is_none")]
@@ -63,7 +69,7 @@ pub struct SpawnAgentResult {
     /// RLM `rlm.spawn` handles require it to address child artifacts.
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub session_dir: Option<String>,
-    /// Model binding the child runs with (inherited from the parent).
+    /// Canonical model selector bound to the child session.
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub model: Option<String>,
 }
@@ -285,6 +291,8 @@ mod tests {
         let child_session_id = SessionId::new();
         let payloads = serde_json::json!({
             "spawn": SpawnAgentParams {
+                    model: None,
+                    thinking: None,
                 session_id,
                 message: "review this".to_string(),
                 fork_turns: Some("all".to_string()),
