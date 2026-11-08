@@ -42,6 +42,7 @@ Limits: 128 nodes, 16 parallel children, 32 retained runs, 32k chars/output,
 This is not Prime machine compatibility: no loops/guards/foreach/residents,
 retries, durable specs/runs, restart resume, UI or background advancement.
 wait timeout leaves children running; call wait/advance again or explicitly stop.
+waiting_for_resume returns from wait immediately; explicitly resume the child or stop.
 Interruption does not imply cancellation. Inspect status and call stop if needed.
 Host/transport failures are surfaced, never converted to success or respawned.
 When status is stopping, inspect cleanup_error and retry stop; do not forget it.
@@ -116,7 +117,7 @@ class FactoryNamespace:
                 return self.status(run_id)
             run.status = "running"
             active = {node.child_id: node for node in run.nodes.values()
-                      if node.status in ("running", "waiting_for_input")}
+                      if node.status in ("running", "waiting_for_input", "waiting_for_resume")}
             if active:
                 # Do not partially apply malformed or incomplete replies. A read
                 # failure leaves all child IDs retained and can be safely retried.
@@ -125,16 +126,21 @@ class FactoryNamespace:
                 if len(ids) != len(active) or set(ids) != set(active):
                     raise RuntimeError("Factory collect returned missing or duplicate children")
                 for item in snapshots:
-                    if item.status not in {"running", "waiting_for_input", "completed", "failed",
+                    if item.status not in {"running", "waiting_for_input", "waiting_for_resume", "completed", "failed",
                                            "interrupted", "canceled", "closed"}:
                         raise RuntimeError(f"Factory collect returned unknown status {item.status!r}")
-                    if type(item.settled) is not bool or item.settled != (
-                        item.status not in {"running", "waiting_for_input"}
-                    ) or not isinstance(item.output, str):
+                    if (type(item.settled) is not bool
+                        or type(item.requires_resume) is not bool
+                        or (item.requires_resume and item.status != "waiting_for_resume")
+                        or (item.status in {"running", "waiting_for_resume"} and item.settled)
+                        or (item.status not in {"running", "waiting_for_input", "waiting_for_resume"} and not item.settled)
+                        or not isinstance(item.output, str)):
                         raise RuntimeError("Factory collect returned inconsistent child state")
                 for item in snapshots:
                     node = active[item.child_id]
-                    if not item.settled:
+                    # The host may settle a turn while its child still waits
+                    # for input. That is not workflow success or a free slot.
+                    if not item.settled or item.status == "waiting_for_input":
                         node.status = item.status
                         continue
                     node.needs_cleanup = False
@@ -201,6 +207,8 @@ class FactoryNamespace:
                 await self._cleanup(run)
             elif all(node.status in {"completed", "failed", "blocked"} for node in run.nodes.values()):
                 run.status = "failed" if run.failed else "completed"
+            elif any(node.status == "waiting_for_resume" for node in run.nodes.values()):
+                run.status = "waiting_for_resume"
             return self.status(run_id)
 
     @staticmethod
@@ -254,7 +262,7 @@ class FactoryNamespace:
         while True:
             result = await self.advance(run_id)
             remaining = deadline - asyncio.get_running_loop().time()
-            if result["status"] in _TERMINAL or result["status"] == "stopping" or remaining <= 0:
+            if result["status"] in _TERMINAL | {"stopping", "waiting_for_resume"} or remaining <= 0:
                 return result
             await asyncio.sleep(min(poll_interval, remaining))
 

@@ -250,9 +250,10 @@ class FactoryTests(unittest.IsolatedAsyncioTestCase):
     async def test_waiting_for_input_holds_capacity_without_blocking_local_status(self):
         run_id = await self.start(dag("a", "b", max_parallel=1))
         await self.factory.advance(run_id)
-        self.backend.children["child-0"] = ChildSnapshot("child-0", "waiting_for_input", False)
-        result = await self.factory.advance(run_id)
-        self.assertEqual((result["nodes"]["a"]["status"], len(self.backend.spawned)), ("waiting_for_input", 1))
+        for settled in (False, True):
+            self.backend.children["child-0"] = ChildSnapshot("child-0", "waiting_for_input", settled)
+            result = await self.factory.advance(run_id)
+            self.assertEqual((result["nodes"]["a"]["status"], len(self.backend.spawned)), ("waiting_for_input", 1))
         await self.factory.stop(run_id)
         self.assertEqual(self.backend.cancelled, ["child-0"])
 
@@ -264,6 +265,22 @@ class FactoryTests(unittest.IsolatedAsyncioTestCase):
             await self.factory.stop(run_id)
             self.factory.forget(run_id)
             await self.start(dag("b"))
+
+    async def test_restored_child_needing_resume_returns_from_wait_without_replaying(self):
+        run_id = await self.start(dag("a", "b", max_parallel=1))
+        await self.factory.advance(run_id)
+        self.backend.children["child-0"] = ChildSnapshot(
+            "child-0", "waiting_for_resume", False, requires_resume=True)
+        # A very long polling budget must return on this actionable state.
+        result = await asyncio.wait_for(self.factory.wait(run_id, timeout=300), timeout=1)
+        self.assertEqual((result["status"], len(self.backend.spawned)), ("waiting_for_resume", 1))
+        with self.assertRaises(ValueError):
+            self.factory.forget(run_id)
+        self.backend.settle("child-0")
+        result = await self.factory.advance(run_id)
+        self.assertEqual((result["status"], len(self.backend.spawned)), ("running", 2))
+        await self.factory.stop(run_id)
+        self.assertEqual(self.backend.cancelled, ["child-1"])
 
 
 class FactoryAdapterTests(unittest.IsolatedAsyncioTestCase):

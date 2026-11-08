@@ -104,6 +104,11 @@ remain visible under each node's `cleanup_error`, and the run remains
   is serialized per run, including concurrent `advance`/`wait` callers.
   `max_parallel` counts admitted children, including those waiting for input.
   This does not increase the host's own global/session child limit.
+- A host child requiring explicit resume is reported as `waiting_for_resume`.
+  `wait` returns that actionable state immediately instead of using its entire
+  polling budget. The child keeps its slot; no automatic replay occurs. Resume
+  the child through the existing session controls, then advance again, or stop
+  the workflow. A settled turn waiting for input also keeps its slot.
 - `fail_fast` stops admission and closes remaining live children after a node
   fails. `continue` allows independent branches to finish; descendants of any
   failed node become blocked. A run with any failed node ends `failed`.
@@ -120,7 +125,7 @@ remain visible under each node's `cleanup_error`, and the run remains
   uncertain admission; the unique child name is retained for cleanup, and the
   node is never automatically respawned. If the host cannot resolve that name,
   cleanup remains unresolved and the run stays `stopping`.
-- Status is a detached local snapshot: `ready`, `running`, `stopping`,
+- Status is a detached local snapshot: `ready`, `running`, `waiting_for_resume`, `stopping`,
   `completed`, `failed`, or `stopped`. Host state may have changed since the last
   advance; status is not a live provider-health or process-liveness promise.
 

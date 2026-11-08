@@ -15,6 +15,7 @@ class ChildSnapshot:
     settled: bool
     output: str = ""
     error: str | None = None
+    requires_resume: bool = False
 
 
 class FactoryBackend(Protocol):
@@ -59,7 +60,8 @@ class RlmFactoryBackend:
 
         results = await rlm.collect(targets=child_ids, timeout_ms=0)
         return [ChildSnapshot(item.rlm_child_id, item.status, item.settled,
-                              item.answer_text or "", item.error) for item in results]
+                              item.answer_text or "", item.error,
+                              getattr(item, "requires_resume", False)) for item in results]
 
     async def cancel(self, target: str) -> None:
         import rlm
