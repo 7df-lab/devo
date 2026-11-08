@@ -167,7 +167,7 @@ The main groups are:
 | `rlm.web_search`, `rlm.web_fetch` | Host-mediated network access. |
 | `rlm.update_plan`, `rlm.request_user_input` | Session UI integration. |
 | `rlm.read`, `rlm.write`, `rlm.read_once`, `rlm.write_once` | Direct file I/O, with host-mediated fallback on OS denial. |
-| `rlm.spawn`, `rlm.create_session`, `rlm.find_models`, `rlm.list_subagents`, `rlm.delete_subagent` | Recursive subagent control. |
+| `rlm.spawn`, `rlm.create_session`, `rlm.find_models`, `rlm.list_subagents`, `rlm.delete_subagent`, `rlm.collect`, `rlm.progress_note`, `rlm.end_turn` | Recursive subagent control. |
 | `rlm.harness`, `rlm.get_harness_state` | Cached reads and async host-owned harness CRUD. |
 | `rlm.emit` | Ship a MIME-keyed display event. |
 
@@ -190,8 +190,12 @@ if chosen is not None:
 ```
 
 `rlm.spawn` returns when the child is admitted, not when it finishes. The child
-runs as a separate session; results arrive through `agent_message` replies or
-files, usually on a later turn.
+runs as a separate session. Use `await rlm.collect(reviewer, timeout_ms=10000)`
+for retained typed results; timeout returns partial snapshots without cancellation.
+Children can report `await rlm.progress_note("running tests")` without steering the
+parent. `await rlm.end_turn()` finishes normally after the current tool batch.
+`create_session` creates a separate durable root in the same workspace. See
+[orchestration semantics](../../../docs/rlm-orchestration.md) for limits and recovery.
 
 Omitted `model` and `thinking` (or `None`) inherit the immediate parent's values.
 An unsupported inherited thinking level fails just like an explicit unsupported

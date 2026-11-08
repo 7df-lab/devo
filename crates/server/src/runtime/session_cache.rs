@@ -209,6 +209,9 @@ impl ServerRuntime {
                 .await;
             let mut state = SessionActorState::from_runtime_session(runtime_session);
             state.session_file_lock = Some(session_lock);
+            // This cold child has no queue scheduler yet. Set under the load
+            // gate before exposing the actor; a real turn admission clears it.
+            self.rlm_lazy_children.lock().await.insert(session_id);
             self.insert_session_actor(state).await
         } else {
             self.insert_root_session_actor(runtime_session, Some(session_lock))
