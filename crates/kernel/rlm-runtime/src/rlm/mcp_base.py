@@ -11,13 +11,16 @@ methods, so the agent writes ordinary Python:
 Credentials live in the host's ``auth.json`` (single store, survives kernel
 rebuilds). This module reads that file directly for the common case; on token
 expiry it asks the host to refresh via ``rlm.host_request("mcp.refresh", ...)``
-and re-reads. Interactive login runs host-side, never here.
+and re-reads. Interactive login runs host-side, never here. The current Rust
+host does not implement this legacy auth.json refresh contract and reports that
+explicitly; a native configured MCP server is instead used through ``rlm.mcp``.
 """
 
 from __future__ import annotations
 
 import asyncio
 import json
+import math
 import os
 import time
 from contextlib import AsyncExitStack
@@ -140,6 +143,7 @@ class McpIntegration:
             raise ValueError(f"{type(self).__name__} must set a non-empty `server`")
         self._tools: dict[str, Any] | None = None
         self._lock = asyncio.Lock()
+        self._refresh_lock = asyncio.Lock()
 
     # -- credentials --------------------------------------------------------
 
@@ -160,15 +164,31 @@ class McpIntegration:
         cred = _read_auth(self._provider_id)
         if cred is None:
             return None
+        # Never refresh or transmit a credential explicitly bound elsewhere.
+        # Legacy built-in grants may lack a binding; their endpoint is authored
+        # in code and cannot be replaced by same-named user MCP configuration.
+        endpoint = cred.get("endpoint")
+        if endpoint is not None and endpoint != self.url:
+            raise RuntimeError(
+                f"Stored credentials for '{self.server}' belong to another endpoint. "
+                "Reconnect the integration; no credential was sent."
+            )
         if cred.get("type") == "api_key":
-            return _resolve_config_value(str(cred.get("key") or "")) or None
-        # OAuth credential: {access, refresh, expires(ms)}.
-        access = str(cred.get("access") or "")
+            key = cred.get("key")
+            return (_resolve_config_value(key) or None) if isinstance(key, str) else None
+        if cred.get("type") != "oauth":
+            return None
+        # OAuth credential: {access, refresh, expires(ms)}. Malformed expiry
+        # (including booleans and infinity) must not make a token immortal.
+        access = cred.get("access")
         expires = cred.get("expires")
-        fresh = isinstance(expires, (int, float)) and (
-            time.time() * 1000 < expires - _EXPIRY_SKEW_SECONDS * 1000
+        fresh = (
+            type(expires) in (int, float)
+            and 0 <= expires <= 2**53 - 1
+            and math.isfinite(expires)
+            and time.time() * 1000 < expires - _EXPIRY_SKEW_SECONDS * 1000
         )
-        if access and fresh:
+        if isinstance(access, str) and access.strip() and fresh:
             return access
         return None  # signal: needs refresh
 
@@ -176,24 +196,40 @@ class McpIntegration:
         token = self._token()
         if token:
             return token
-        # Expired or missing-access: ask the host to refresh, then re-validate via
-        # _token() (which re-checks expiry) rather than trusting any access value.
-        if _read_auth(self._provider_id) is not None:
-            refresh_error: Exception | None = None
-            try:
-                await host_request("mcp.refresh", {"server": self.server})
-            except RuntimeError as exc:
-                refresh_error = exc
+        # Concurrent calls share one refresh and re-read the store afterwards.
+        # This matters for providers that rotate single-use refresh tokens.
+        async with self._refresh_lock:
             token = self._token()
             if token:
                 return token
-            # A refresh that failed (vs. genuinely-absent creds) is a recoverable
-            # error; don't mislabel it as "not enabled / re-login".
-            if refresh_error is not None:
+            if _read_auth(self._provider_id) is None:
+                raise NotEnabled(self.server)
+            try:
+                await host_request("mcp.refresh", {"server": self.server})
+            except RuntimeError as error:
+                # Provider errors may contain response bodies or credentials.
+                # Keep the recovery actionable without leaking them in a
+                # chained traceback. Cancellation is deliberately not caught.
+                reason = (
+                    "The Rust host does not refresh authored auth.json credentials; "
+                    "native configured servers use rlm.mcp instead. "
+                    if str(error).startswith(
+                        "This Rust host cannot refresh authored integration credentials in auth.json."
+                    ) else ""
+                )
                 raise RuntimeError(
-                    f"Failed to refresh credentials for '{self.server}': {refresh_error}"
-                ) from refresh_error
-        raise NotEnabled(self.server)
+                    f"Failed to refresh credentials for '{self.server}'. {reason}"
+                    "Reconnect using the host that owns this integration's login."
+                ) from None
+            token = self._token()
+            if token:
+                return token
+            # Acknowledgement is not proof of rotation. Do not turn a stale or
+            # malformed grant into the misleading 'not enabled' diagnosis.
+            raise RuntimeError(
+                f"Credential refresh for '{self.server}' returned without usable credentials. "
+                "Reconnect the integration using the host that owns its login."
+            )
 
     # -- connection ---------------------------------------------------------
 
@@ -262,31 +298,41 @@ class McpIntegration:
     # -- tools --------------------------------------------------------------
 
     async def list_tools(self) -> list[dict[str, Any]]:
-        """Return the server's tools as ``[{name, description, inputSchema}]``."""
-        await self._ensure_tools()
-        return [dict(t) for t in (self._tools or {}).values()]
+        """Verify the connection and return its current tools and schemas.
+
+        An explicit listing reconnects even when tools are cached. A failed
+        verification clears stale discovery, and never retries a tool call.
+        """
+        async with self._lock:
+            await self._discover_tools()
+            return [dict(t) for t in (self._tools or {}).values()]
 
     async def _ensure_tools(self) -> None:
         if self._tools is not None:
             return
         async with self._lock:
-            if self._tools is not None:
-                return
-            async with AsyncExitStack() as stack:
-                session = await self._open_session(stack)
-                resp = await session.list_tools()
-                tools: dict[str, Any] = {}
-                for t in resp.tools:
-                    # mcp>=2 exposes the pydantic field input_schema; inputSchema is the wire alias.
-                    schema = getattr(t, "input_schema", None)
-                    if schema is None:
-                        schema = getattr(t, "inputSchema", None)
-                    tools[t.name] = {
-                        "name": t.name,
-                        "description": getattr(t, "description", "") or "",
-                        "inputSchema": schema if isinstance(schema, dict) else {},
-                    }
-                self._tools = tools
+            if self._tools is None:
+                await self._discover_tools()
+
+    async def _discover_tools(self) -> None:
+        # Caller holds _lock. Clear first so a failed reconnect never leaves a
+        # stale schema presented as a current, usable connection.
+        self._tools = None
+        async with AsyncExitStack() as stack:
+            session = await self._open_session(stack)
+            resp = await session.list_tools()
+            tools: dict[str, Any] = {}
+            for t in resp.tools:
+                # mcp>=2 exposes input_schema; inputSchema is the wire alias.
+                schema = getattr(t, "input_schema", None)
+                if schema is None:
+                    schema = getattr(t, "inputSchema", None)
+                tools[t.name] = {
+                    "name": t.name,
+                    "description": getattr(t, "description", "") or "",
+                    "inputSchema": schema if isinstance(schema, dict) else {},
+                }
+            self._tools = tools
 
     async def call_tool(self, tool: str, arguments: dict[str, Any] | None = None) -> Any:
         """Call ``tool`` on the server and return its parsed result.

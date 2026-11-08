@@ -45,7 +45,7 @@ class AuthoredMcpIntegrationTests(unittest.IsolatedAsyncioTestCase):
                     tools = await integration.list_tools()
                 self.assertEqual(result, {"items": ["found"]})
                 self.assertEqual(tools, [{"name": tool, "description": "Search", "inputSchema": schema}])
-                session.list_tools.assert_awaited_once_with()
+                self.assertEqual(session.list_tools.await_count, 2)
                 session.call_tool.assert_awaited_once_with(tool, {"query": "roadmap"})
                 host.assert_not_awaited()
                 for reserved in ("run", "__wrapped__", "__call__"):

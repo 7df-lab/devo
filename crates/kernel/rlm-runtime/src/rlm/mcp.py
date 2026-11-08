@@ -8,7 +8,7 @@ from __future__ import annotations
 
 from typing import Any
 
-__all__ = ["call_tool", "list_tools"]
+__all__ = ["call_tool", "list_servers", "list_tools"]
 
 
 async def _request(action: str, payload: dict[str, Any]) -> Any:
@@ -37,6 +37,40 @@ async def _request(action: str, payload: dict[str, Any]) -> Any:
             raise PermissionError(message)
         raise RuntimeError(message)
     return reply.get("result")
+
+
+async def list_servers() -> list[dict[str, Any]]:
+    """Return observed native server states, without initiating connections.
+
+    Entries contain ``server``, ``status``, ``authStatus``, and ``toolCount``.
+    Only ``ready`` records a successful handshake/discovery. This snapshot is
+    not a live health check: use ``list_tools(server)`` to verify a connection.
+    Credentials, URLs, commands, headers, and tool schemas are not returned.
+    """
+    result = await _request("mcp.list_servers", {})
+    if not isinstance(result, dict) or not isinstance(result.get("servers"), list):
+        raise RuntimeError("mcp.list_servers host response must contain result.servers")
+    servers = []
+    for server in result["servers"]:
+        if (
+            not isinstance(server, dict)
+            or not isinstance(server.get("server"), str)
+            or not server["server"]
+            or not isinstance(server.get("status"), str)
+            or server["status"] not in {
+                "disabled", "not_started", "starting", "ready", "failed",
+                "auth_required", "degraded", "stopped",
+            }
+            or not isinstance(server.get("authStatus"), str)
+            or server["authStatus"] not in {
+                "not_required", "authenticated", "auth_required", "auth_failed",
+            }
+            or type(server.get("toolCount")) is not int
+            or server["toolCount"] < 0
+        ):
+            raise RuntimeError("mcp.list_servers host response contains an invalid server")
+        servers.append({key: server[key] for key in ("server", "status", "authStatus", "toolCount")})
+    return servers
 
 
 async def list_tools(server: str) -> list[dict[str, Any]]:

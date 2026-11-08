@@ -7,6 +7,29 @@ import rlm.repl as repl
 
 
 class McpHostTests(unittest.IsolatedAsyncioTestCase):
+    async def test_list_servers_returns_only_connection_state(self):
+        state = {"server": "docs", "status": "not_started", "authStatus": "not_required", "toolCount": 0}
+        host = AsyncMock(return_value={"status": "ok", "result": {"servers": [
+            {**state, "Authorization": "must-not-escape", "url": "https://private.example"}
+        ]}})
+        with patch.object(repl, "host_request", host):
+            self.assertEqual(await mcp.list_servers(), [state])
+        host.assert_awaited_once_with({"type": "mcp.list_servers"})
+
+    async def test_list_servers_rejects_malformed_state(self):
+        state = {"server": "docs", "status": "ready", "authStatus": "authenticated", "toolCount": 0}
+        for result in ({}, {"servers": None}, {"servers": [None]},
+                       {"servers": [{**state, "status": "connected"}]},
+                       {"servers": [{**state, "status": []}]},
+                       {"servers": [{**state, "authStatus": {}}]},
+                       {"servers": [{**state, "toolCount": True}]},
+                       {"servers": [{**state, "toolCount": -1}]}):
+            with self.subTest(result=result), patch.object(
+                repl, "host_request", AsyncMock(return_value={"status": "ok", "result": result})
+            ):
+                with self.assertRaises(RuntimeError):
+                    await mcp.list_servers()
+
     async def test_native_list_tools_uses_exact_server_and_python_contract(self):
         schema = {"type": "object", "properties": {"q": {"type": "string"}}}
         host = AsyncMock(return_value={"status": "ok", "result": {"tools": [
@@ -65,7 +88,8 @@ class McpHostTests(unittest.IsolatedAsyncioTestCase):
                     host.assert_awaited_once()
 
     async def test_unsupported_host_requires_upgrade(self):
-        for action, call in (("mcp.list_tools", lambda: mcp.list_tools("docs")),
+        for action, call in (("mcp.list_servers", mcp.list_servers),
+                             ("mcp.list_tools", lambda: mcp.list_tools("docs")),
                              ("mcp.call", lambda: mcp.call_tool("docs", "search"))):
             for kind in ("unknown", "unsupported"):
                 for label in ("host_request action", "host request action", "action"):
@@ -131,7 +155,7 @@ class McpHostTests(unittest.IsolatedAsyncioTestCase):
         send.assert_called_once_with({"event": "done", "id": "shutdown-1", "status": "ok"})
 
     def test_generic_facade_has_no_local_transport_or_lifecycle(self):
-        self.assertEqual(mcp.__all__, ["call_tool", "list_tools"])
+        self.assertEqual(mcp.__all__, ["call_tool", "list_servers", "list_tools"])
         for name in ("_Registry", "_Generation", "_registry", "_dispatch", "_StderrTail",
                      "reload", "close", "McpStartupError"):
             self.assertFalse(hasattr(mcp, name), name)
