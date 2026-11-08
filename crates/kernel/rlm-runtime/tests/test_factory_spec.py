@@ -23,7 +23,7 @@ class FactorySpecTests(unittest.TestCase):
 
     def test_invalid_specs(self):
         good = {"version": 1, "nodes": [{"id": "one", "prompt": "Task"}]}
-        bad_specs = [None, [], {}, {**good, "version": True}, {**good, "version": 2},
+        bad_specs = [None, [], {}, {**good, "version": True}, {**good, "version": 3},
                      {**good, "machine": {}}, {**good, "max_parallel": True},
                      {**good, "max_parallel": 0}, {**good, "max_parallel": 17},
                      {**good, "max_parallel": 1.0}, {**good, "max_parallel": None},

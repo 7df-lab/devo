@@ -1,5 +1,9 @@
 # Factory workflows: experimental DAG slice
 
+For opt-in durable checkpoints, explicit recovery, and version 2 guards/joins,
+see [Durable Factory workflows](factory-durable-workflows.md). The baseline API
+and version 1 contract below remain available.
+
 Devo Factory v1 composes ordinary direct child agents into a finite DAG.
 It provides strict preflight validation, bounded parallel admission, all-parent
 joins, plain-text result forwarding, explicit failure policies, local status,

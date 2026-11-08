@@ -3,6 +3,7 @@
 from __future__ import annotations
 
 import re
+import math
 from dataclasses import dataclass
 from typing import Any
 
@@ -14,12 +15,21 @@ _ID = re.compile(r"[a-z][a-z0-9_-]{0,31}\Z")
 
 
 @dataclass(frozen=True)
+class FactoryGuard:
+    node: str
+    equals: str | int | float | bool | None
+    path: tuple[str, ...] | None = None
+
+
+@dataclass(frozen=True)
 class FactoryNode:
     id: str
     prompt: str
     needs: tuple[str, ...] = ()
     model: str | None = None
     thinking: str | None = None
+    join: str = "all"
+    when: FactoryGuard | None = None
 
 
 @dataclass(frozen=True)
@@ -27,6 +37,7 @@ class FactorySpec:
     nodes: tuple[FactoryNode, ...]
     max_parallel: int = 4
     failure_policy: str = "fail_fast"
+    version: int = 1
 
 
 def validate(spec: Any) -> FactorySpec:
@@ -40,8 +51,8 @@ def validate(spec: Any) -> FactorySpec:
     unknown = set(spec) - {"version", "nodes", "max_parallel", "failure_policy"}
     if unknown:
         raise ValueError(f"unsupported factory fields: {sorted(unknown, key=str)}")
-    if type(spec.get("version")) is not int or spec["version"] != 1:
-        raise ValueError("factory version must be 1")
+    if type(spec.get("version")) is not int or spec["version"] not in (1, 2):
+        raise ValueError("factory version must be 1 or 2")
     max_parallel = spec.get("max_parallel", 4)
     if type(max_parallel) is not int or not 1 <= max_parallel <= MAX_PARALLEL:
         raise ValueError(f"max_parallel must be an integer from 1 to {MAX_PARALLEL}")
@@ -56,7 +67,10 @@ def validate(spec: Any) -> FactorySpec:
     for raw in raw_nodes:
         if not isinstance(raw, dict):
             raise ValueError("each factory node must be an object")
-        unknown = set(raw) - {"id", "prompt", "needs", "model", "thinking"}
+        allowed = {"id", "prompt", "needs", "model", "thinking"}
+        if spec["version"] == 2:
+            allowed |= {"join", "when"}
+        unknown = set(raw) - allowed
         if unknown:
             raise ValueError(f"unsupported node fields: {sorted(unknown, key=str)}")
         node_id = raw.get("id")
@@ -83,7 +97,31 @@ def validate(spec: Any) -> FactorySpec:
         thinking = raw.get("thinking")
         if thinking is not None and (not isinstance(thinking, str) or not thinking.strip()):
             raise ValueError(f"node {node_id}: thinking must be a nonempty string")
-        nodes.append(FactoryNode(node_id, prompt, tuple(needs), model, thinking))
+        join = raw.get("join", "all")
+        if join not in ("all", "any") or (join == "any" and not needs):
+            raise ValueError(f"node {node_id}: join must be all, or any with dependencies")
+        guard = None
+        if "when" in raw:
+            when = raw["when"]
+            if not isinstance(when, dict) or set(when) - {"node", "path", "equals"} or not {"node", "equals"} <= set(when):
+                raise ValueError(f"node {node_id}: when requires node/equals and optional path")
+            source, equals = when["node"], when["equals"]
+            if not isinstance(source, str) or source not in needs:
+                raise ValueError(f"node {node_id}: guard source must be an explicit dependency")
+            if equals is not None and type(equals) not in (str, bool, int, float):
+                raise ValueError(f"node {node_id}: guard equals must be a finite JSON scalar")
+            if isinstance(equals, float) and not math.isfinite(equals):
+                raise ValueError(f"node {node_id}: guard equals must be finite")
+            if type(equals) is int and abs(equals) > 2**53 - 1:
+                raise ValueError(f"node {node_id}: guard integer must be in the JSON safe integer range")
+            path = when.get("path")
+            if "path" in when and (not isinstance(path, list) or len(path) > 16
+                                    or not all(isinstance(key, str) and key for key in path)):
+                raise ValueError(f"node {node_id}: guard path must contain at most 16 nonempty object keys")
+            if path is None and not isinstance(equals, str):
+                raise ValueError(f"node {node_id}: text guard equals must be a string")
+            guard = FactoryGuard(source, equals, tuple(path) if path is not None else None)
+        nodes.append(FactoryNode(node_id, prompt, tuple(needs), model, thinking, join, guard))
     for node in nodes:
         missing = set(node.needs) - seen
         if missing:
@@ -94,4 +132,23 @@ def validate(spec: Any) -> FactorySpec:
         if not ready:
             raise ValueError("factory dependencies must not contain a cycle")
         remaining = {node_id: needs - ready for node_id, needs in remaining.items() if node_id not in ready}
-    return FactorySpec(tuple(nodes), max_parallel, failure_policy)
+    return FactorySpec(tuple(nodes), max_parallel, failure_policy, spec["version"])
+
+
+def spec_dict(spec: FactorySpec) -> dict[str, Any]:
+    """Serialize a canonical spec using only the public, versioned fields."""
+    nodes = []
+    for node in spec.nodes:
+        raw = {"id": node.id, "prompt": node.prompt, "needs": list(node.needs)}
+        for key in ("model", "thinking"):
+            if getattr(node, key) is not None:
+                raw[key] = getattr(node, key)
+        if spec.version == 2:
+            raw["join"] = node.join
+            if node.when is not None:
+                raw["when"] = {"node": node.when.node, "equals": node.when.equals}
+                if node.when.path is not None:
+                    raw["when"]["path"] = list(node.when.path)
+        nodes.append(raw)
+    return {"version": spec.version, "nodes": nodes, "max_parallel": spec.max_parallel,
+            "failure_policy": spec.failure_policy}
