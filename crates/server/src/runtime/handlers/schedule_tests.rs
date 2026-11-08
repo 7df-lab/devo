@@ -685,3 +685,43 @@ async fn inactive_schedules_discard_claimed_but_undelivered_occurrences() -> Res
     runtime.shutdown().await;
     Ok(())
 }
+
+#[tokio::test]
+async fn schedule_retains_occurrence_when_missing_index_has_unreadable_journal() -> Result<()> {
+    let home = TempDir::new()?;
+    let runtime = TestRuntime::noop().runtime(home.path());
+    let session_id = devo_protocol::native::ids::SessionId::new();
+    std::fs::create_dir_all(home.path().join("sessions"))?;
+    std::fs::write(
+        home.path()
+            .join("sessions")
+            .join(format!("{session_id}.jsonl")),
+        b"{invalid journal\n",
+    )?;
+    let job = runtime.schedule_store.upsert(
+        devo_protocol::native::rpc_schedule::SessionScheduleUpsertParams {
+            kind: devo_protocol::native::rpc_schedule::ScheduleJobKind::Cron,
+            session_id,
+            job_id: None,
+            cwd: None,
+            schedule: None,
+            interval_ms: Some(1),
+            prompt: Some("retain uncertain recovery".into()),
+            instruction: None,
+            delivery_mode: devo_protocol::native::rpc_schedule::ScheduleDeliveryMode::FollowUp,
+            label: None,
+        },
+    )?;
+    runtime
+        .schedule_store
+        .claim_due_with_outbox(job.next_run_at.context("due")?)?;
+    runtime.dispatch_due_schedule_jobs().await?;
+    assert!(runtime.schedule_store.get_job(&job.job_id)?.is_some());
+    let pending = runtime
+        .schedule_store
+        .pending_occurrences(chrono::Utc::now() + chrono::Duration::hours(1))?;
+    assert_eq!(pending.len(), 1);
+    assert_eq!(pending[0].job.job_id, job.job_id);
+    runtime.shutdown().await;
+    Ok(())
+}

@@ -1493,11 +1493,17 @@ impl RolloutStore {
     pub(crate) fn rollout_paths(&self) -> Result<Vec<PathBuf>> {
         let mut files = Vec::new();
         let sessions = self.data_root.join("sessions");
-        if sessions.exists() {
+        if sessions
+            .try_exists()
+            .context("inspect sessions directory")?
+        {
             collect_rollout_files(&sessions, &mut files)?;
         }
         let artifacts = self.data_root.join("session-artifacts");
-        if artifacts.exists() {
+        if artifacts
+            .try_exists()
+            .context("inspect session artifacts directory")?
+        {
             collect_rollout_files(&artifacts, &mut files)?;
         }
         files.sort();

@@ -328,6 +328,30 @@ impl ServerRuntime {
                 match error {
                     crate::runtime::session_cache::LoadSessionError::SessionNotFound
                     | crate::runtime::session_cache::LoadSessionError::RolloutMissing => {
+                        // SQLite is only a cache. A failed/partial startup scan
+                        // must never turn durable work into a deleted schedule.
+                        let runtime = Arc::clone(self);
+                        let missing =
+                            tokio::task::spawn_blocking(move || -> anyhow::Result<bool> {
+                                let found = runtime
+                                    .rollout_store
+                                    .find_journal_containing_session_strict(
+                                        &session_id,
+                                        crate::persistence::JournalVisibility::IncludeDeleted,
+                                    )?;
+                                if found.is_some() {
+                                    runtime
+                                        .rollout_store
+                                        .index_rollout_metadata(&runtime.deps.db)?;
+                                }
+                                Ok(found.is_none())
+                            })
+                            .await;
+                        if !matches!(missing, Ok(Ok(true))) {
+                            tracing::warn!(%session_id, "schedule journal is present or uncertain; retaining occurrence for retry");
+                            self.retry_schedule_occurrence(occurrence_id);
+                            continue;
+                        }
                         tracing::warn!(
                             job_id = job.job_id.as_str(),
                             session_id = %session_id,

@@ -460,6 +460,9 @@ impl ServerRuntime {
     /// persists interrupted turn records. Called on graceful shutdown.
     pub async fn shutdown(self: &Arc<Self>) {
         self.schedule_wake_cancel.cancel();
+        // Wait for an already admitted durable dispatch before snapshotting sessions.
+        let schedule_drain = self.schedule_store.lock_dispatch().await;
+        drop(schedule_drain);
         self.command_exec_manager.terminate_all().await;
         let session_handles = self.list_session_handles().await;
 
