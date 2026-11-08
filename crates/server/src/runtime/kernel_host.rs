@@ -125,9 +125,17 @@ pub async fn dispatch_host_request_with_bridge(bridge: &HostBridge, data: Value)
             let Some(sid) = parse_session_id(session_id) else {
                 return error_reply("invalid session id");
             };
+            if params.get("trajectoryItemIds").is_some()
+                || params.get("trajectory_item_ids").is_some()
+            {
+                return error_reply(
+                    "trajectory selection requires the user-facing Native refine request",
+                );
+            }
             let is_root = !matches!(bridge.agent_scope, ToolAgentScope::Subagent);
             let rpc_params = SessionRefineRunParams {
                 session_id: sid,
+                trajectory_item_ids: Vec::new(),
                 instructions: params
                     .get("instructions")
                     .and_then(|v| v.as_str())
@@ -567,6 +575,23 @@ mod tests {
         assert_eq!(run["status"], "ok");
         assert_eq!(run["result"]["scheduled"], true);
         assert!(run["result"].get("note").is_some(), "{run}");
+    }
+
+    #[tokio::test]
+    async fn refine_kernel_cannot_select_trajectory() {
+        let sid = format!("ses_{}", Uuid::new_v4());
+        for field in ["trajectoryItemIds", "trajectory_item_ids"] {
+            let reply = dispatch_host_request(
+                &sid,
+                json!({"type":"refine.run", "params":{field:["private-item"]}}),
+            )
+            .await;
+            assert_eq!(
+                reply,
+                json!({"status":"error",
+                "error":"trajectory selection requires the user-facing Native refine request"})
+            );
+        }
     }
 
     /// Verifies: rlm.run/list_subagents/delete_subagents reach their real

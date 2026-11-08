@@ -159752,9 +159752,19 @@
         },
         "sessionId": {
           "$ref": "#/definitions/SessionId"
+        },
+        "trajectoryItemIds": {
+          "description": "Explicit user-selected root-session item IDs to send to the session model. Empty by default. Only local, manual refinement may consume trajectory. Clients must let the user review selected text before supplying IDs.",
+          "type": "array",
+          "items": {
+            "$ref": "#/definitions/ItemId"
+          }
         }
       },
       "definitions": {
+        "ItemId": {
+          "type": "string"
+        },
         "SessionId": {
           "type": "string"
         }
