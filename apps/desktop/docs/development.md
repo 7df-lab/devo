@@ -39,3 +39,26 @@ a 500 ms graceful window before forced termination. Background commands are
 stopped across connections even when their session has no active model turn.
 Confirmed deletions leave the sidebar immediately. Failed deletions retain
 the folder and its connection so removal can be retried.
+
+## Queued follow-up controls
+
+Dragging queued messages tracks stable queue IDs and resolves Native's one-based
+positions at drop time, so draining a previous message cannot move the wrong
+entry. Steering
+submits the complete queued input, including attachments, skills, and mentions,
+rather than its display preview. Text-only editing is unavailable for messages
+with non-text context so editing cannot silently discard it.
+
+Failed queue actions remain visible beside the message and can be retried. If
+steering succeeded but removing the original queue entry failed, the control
+changes to **Retry removal** and retries cleanup without steering the message
+again. Pending operations and cleanup retries are scoped to their originating
+session and survive navigation between conversations while the composer stays
+mounted. This client-side state does not survive unmounting the composer or
+restarting the app.
+
+Steering and removing the original queued input are still two separate requests,
+not an atomic server-side queue-to-steering operation. A server queue drain
+between them can still consume the original message. Exactly-once transfer
+requires a future Native operation that claims the original queue entry and
+deduplicates retries, including when a steering response is lost.

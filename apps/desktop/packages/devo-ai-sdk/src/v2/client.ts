@@ -608,7 +608,7 @@ export type QueueWireEntry = {
 	position: number
 	preview: string
 	enqueuedAt?: string
-	input?: Array<{ type: string; text?: string }>
+	input?: UserInput[]
 }
 
 function parseQueueWireEntries(value: unknown): QueueWireEntry[] {
@@ -621,15 +621,10 @@ function parseQueueWireEntries(value: unknown): QueueWireEntry[] {
 			position: Number(entry.position ?? 0),
 			preview: String(entry.preview ?? ""),
 			enqueuedAt: typeof entry.enqueuedAt === "string" ? entry.enqueuedAt : undefined,
-			input: Array.isArray(entry.input)
-				? entry.input.map((part) => {
-						const record = objectRecord(part)
-						return {
-							type: String(record?.type ?? "text"),
-							text: typeof record?.text === "string" ? record.text : undefined,
-						}
-					})
-				: undefined,
+			// Native results are schema-validated before reaching this parser.
+			// Retain every input field so steering cannot discard attachments,
+			// skill names, or file mentions from the queued message.
+			input: Array.isArray(entry.input) ? entry.input as UserInput[] : undefined,
 		}))
 		.filter((entry) => entry.queueItemId.length > 0)
 		.sort((left, right) => left.position - right.position)
@@ -967,15 +962,25 @@ class NativeClient {
 				return { data: null }
 			},
 		},
-		steer: async (params: { sessionId: string; parts: PromptPartInput[] }) => {
+		steer: async (params:
+			| { sessionId: string; parts: PromptPartInput[] }
+			| { sessionId: string; queueItemId: string }
+		) => {
 			const expectedTurnId = this.activeTurnIds.get(params.sessionId)
 			if (!expectedTurnId) {
 				throw new Error("No active turn to steer")
 			}
+			const input = "queueItemId" in params
+				? this.queueEntriesForSession(params.sessionId)
+					.find((entry) => entry.queueItemId === params.queueItemId)?.input
+				: userInputsFromPromptParts(params.parts)
+			if (!input?.length) {
+				throw new Error("Queued message is no longer available to steer")
+			}
 			const result = await this.requestCanonical("turn/steer", {
 				sessionId: params.sessionId,
 				expectedTurnId,
-				input: userInputsFromPromptParts(params.parts),
+				input,
 				idempotencyKey: crypto.randomUUID(),
 			})
 			return { data: result }
