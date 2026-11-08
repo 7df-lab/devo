@@ -354,12 +354,14 @@ async fn mcp_real_kernel_uses_native_dispatch_and_reports_legacy_refresh_failure
     let crates_dir = std::path::Path::new(env!("CARGO_MANIFEST_DIR"))
         .parent()
         .unwrap();
-    let mut config = KernelSessionConfig::default();
-    config.cwd = home.path().to_path_buf();
-    config.python_path_entries = vec![
-        crates_dir.join("kernel/rlm-runtime/src"),
-        crates_dir.join("skills/assets/bundled/linear/src"),
-    ];
+    let mut config = KernelSessionConfig {
+        cwd: home.path().to_path_buf(),
+        python_path_entries: vec![
+            crates_dir.join("kernel/rlm-runtime/src"),
+            crates_dir.join("skills/assets/bundled/linear/src"),
+        ],
+        ..KernelSessionConfig::default()
+    };
     config.extra_env.push((
         "DEVO_CODING_AGENT_DIR".into(),
         home.path().to_string_lossy().into_owned(),

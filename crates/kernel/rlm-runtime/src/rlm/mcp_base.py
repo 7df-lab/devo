@@ -8,8 +8,8 @@ methods, so the agent writes ordinary Python:
     import linear
     issues = await linear.list_issues(team="Engineering")
 
-Credentials live in the host's ``auth.json`` (single store, survives kernel
-rebuilds). This module reads that file directly for the common case; on token
+Authored integration credentials live in their login host's ``auth.json``
+(survives kernel rebuilds). This module reads that file directly for the common case; on token
 expiry it asks the host to refresh via ``rlm.host_request("mcp.refresh", ...)``
 and re-reads. Interactive login runs host-side, never here. The current Rust
 host does not implement this legacy auth.json refresh contract and reports that
@@ -47,8 +47,9 @@ class NotEnabled(RuntimeError):
         self.server = server
         super().__init__(
             f"The '{server}' integration is not enabled: no credentials found. "
-            f"Tell the user to run `/mcp login {server}` (or `/login` → Services) "
-            f"in Devo to connect it. Do not ask them to set environment variables."
+            f"Connect through its login host (`/mcp login {server}` or `/login` → Services "
+            "where supported). Native Rust-configured MCP servers use rlm.mcp instead. "
+            "Do not ask the user to set environment variables."
         )
 
 
