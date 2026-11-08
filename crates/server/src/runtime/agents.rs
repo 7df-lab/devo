@@ -647,6 +647,7 @@ impl ServerRuntime {
             .get_mut(&parent_session_id)
         {
             registry.update_status(child_session_id, status);
+            self.rlm_child_changed.notify_waiters();
         }
     }
 
@@ -1870,8 +1871,15 @@ impl ServerRuntime {
 
     /// Kernel `host_request("rlm.list_subagents")` — direct children retained
     /// by this session, in the payload shape `rlm.list_subagents()` parses.
-    pub(crate) async fn host_rlm_list_subagents(&self, session_id: &str) -> serde_json::Value {
+    pub(crate) async fn host_rlm_list_subagents(
+        self: &Arc<Self>,
+        session_id: &str,
+    ) -> serde_json::Value {
         let sid = SessionId::from_string(session_id.to_owned());
+        if let Err(error) = self.restore_direct_children(sid).await {
+            return serde_json::json!({"status": "error", "error": error});
+        }
+        let notes = self.rlm_progress_notes.lock().await.clone();
         let entries: Vec<serde_json::Value> = {
             let registries = self.agent_registries.lock().await;
             registries
@@ -1881,7 +1889,13 @@ impl ServerRuntime {
                         .children_of(&sid)
                         .into_iter()
                         .filter_map(|child_id| registry.get(&child_id))
-                        .map(Self::rlm_subagent_entry)
+                        .map(|meta| {
+                            let mut entry = Self::rlm_subagent_entry(meta);
+                            if let Some((_, note)) = notes.get(&meta.session_id) {
+                                entry["progress_note"] = serde_json::json!(note);
+                            }
+                            entry
+                        })
                         .collect()
                 })
                 .unwrap_or_default()

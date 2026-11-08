@@ -51,6 +51,7 @@ class RLMSubagent:
     session_name: str
     session_dir: Path
     status: str
+    progress_note: str | None = None
 
 
 def _spawn_handle_from_payload(payload: Any) -> RLMSpawnHandle:
@@ -328,13 +329,23 @@ async def create_session(
     thinking: str | None = None,
     cwd: str | None = None,
 ) -> RLMCreateSessionHandle:
-    """Create and prompt a resident depth-0 daemon session.
+    """Create and prompt an independent, durable root in the same workspace.
 
-    Only daemon-backed depth-0 sessions support this operation. The optional
-    arguments set the session name, model, thinking level, and working directory.
+    Requires a durable root in Build mode. Model and safety settings inherit;
+    an explicit model uses an exact selector from find_models. The result is
+    visible in session/list and has its own journal, with no parent lifecycle.
+    An explicit cwd must resolve to the current working directory.
     """
     if not isinstance(prompt, str):
         raise TypeError(f"prompt must be str, got {type(prompt).__name__}")
+    if not prompt.strip():
+        raise ValueError("prompt must be a non-empty string")
+    for label, value in (("name", name), ("model", model), ("thinking", thinking), ("cwd", cwd)):
+        if value is not None:
+            if not isinstance(value, str):
+                raise TypeError(f"{label} must be str")
+            if not value.strip() or value.strip() != value:
+                raise ValueError(f"{label} must be a nonempty string without surrounding whitespace")
     kwargs: dict[str, Any] = {}
     if name is not None:
         kwargs["name"] = name
@@ -398,6 +409,7 @@ def _subagent_from_payload(payload: Any, operation: str = "rlm.list_subagents") 
         session_name=session_name,
         session_dir=Path(session_dir),
         status=status,
+        progress_note=payload.get("progress_note"),
     )
 
 
@@ -487,6 +499,15 @@ class _RLMNamespace:
     async def request_user_input(self, questions: list[dict[str, Any]]) -> dict[str, Any]:
         return await request_user_input(questions)
 
+    async def collect(self, targets=None, *, timeout_ms: int = 0) -> list[RLMChildResult]:
+        return await collect(targets, timeout_ms=timeout_ms)
+
+    async def progress_note(self, message: str) -> RLMProgressNoteResult:
+        return await progress_note(message)
+
+    async def end_turn(self) -> dict[str, Any]:
+        return await end_turn()
+
     async def list_subagents(self) -> list[RLMSubagent]:
         return await list_subagents()
 
@@ -561,3 +582,7 @@ def __getattr__(name: str) -> Any:  # noqa: D401 - module-level lazy attr hook
     if name == "run":
         raise AttributeError(_RENAMED_RUN_MESSAGE)
     raise AttributeError(f"module {__name__!r} has no attribute {name!r}")
+
+# Imported after handle definitions to keep the orchestration parser independent.
+from .controls import RLMChildResult, RLMProgressNoteResult, collect, progress_note, end_turn
+__all__ += ["RLMChildResult", "RLMProgressNoteResult", "collect", "progress_note", "end_turn"]

@@ -382,6 +382,47 @@ impl RolloutStore {
         )
     }
 
+    /// Persist inherited settings before the first metadata header in one locked
+    /// create batch. A crash leaving only a prefix cannot expose a root with
+    /// relaxed defaults: either its settings precede its header or no header exists.
+    pub(crate) fn append_seeded_session_meta_create_at(
+        &self,
+        rollout_path: &Path,
+        session: &devo_protocol::native::session::Session,
+        extras: devo_core::SessionPersistenceExtras,
+        settings: &[(SessionSettingsField, serde_json::Value)],
+    ) -> Result<()> {
+        let session_id = session.id;
+        self.append_rollout_lines_with(
+            rollout_path,
+            session_id,
+            JournalWriteMode::CreateIfMissing,
+            |state| {
+                let mut lines = Vec::with_capacity(settings.len() + 1);
+                let session_state = state.session_state_mut(session_id);
+                for (field, value) in settings {
+                    let epoch = session_state.allocate_settings_epoch();
+                    lines.push(devo_core::settings_line(
+                        Utc::now(),
+                        session_id,
+                        *field,
+                        value.clone(),
+                        epoch,
+                    ));
+                }
+                let merged =
+                    merge_session_extras(state.session_extras.get(&session_id), Some(&extras));
+                state.session_extras.insert(session_id, merged.clone());
+                lines.push(devo_core::session_line(
+                    session.clone(),
+                    Some(merged),
+                    Utc::now(),
+                ));
+                Ok(lines)
+            },
+        )
+    }
+
     fn append_session_meta_with_mode(
         &self,
         rollout_path: &Path,
@@ -2964,10 +3005,22 @@ impl ReplayState {
         native.active_turn_id = None;
         native.queued_count = 0;
         native.last_activity_at = last_activity_at;
+        // The actor's next turn resolves its selection from these strings.
+        // Keeping only the base binding silently drops a named variant after
+        // restart even when the display-only `variant` field still says fast.
+        let persisted_selection = turn_config.variant.as_ref().map(|variant| {
+            let base = turn_config
+                .model_binding_id
+                .as_ref()
+                .unwrap_or(&turn_config.model.slug);
+            format!("{base}/{variant}")
+        });
         native.model.provider = turn_config
             .model_binding_id
+            .map(|binding| persisted_selection.clone().unwrap_or(binding))
             .unwrap_or_else(|| "unknown".into());
-        native.model.model = turn_config.model.slug.clone();
+        native.model.model = persisted_selection.unwrap_or_else(|| turn_config.model.slug.clone());
+        native.model.variant = turn_config.variant.clone();
         native.model.reasoning_effort = summary_reasoning_effort;
         native.settings.reasoning_effort = summary_reasoning_effort_selection.clone();
         native.settings.mode = Some(match core_session.collaboration_mode {

@@ -148,6 +148,24 @@ impl ServerRuntime {
         params: SessionStartParams,
         tool_registry: Option<Arc<devo_core::tools::ToolRegistry>>,
     ) -> serde_json::Value {
+        self.start_session_with_seed(
+            connection_id,
+            request_id,
+            params,
+            tool_registry,
+            /*seed*/ None,
+        )
+        .await
+    }
+
+    pub(crate) async fn start_session_with_seed(
+        &self,
+        connection_id: u64,
+        request_id: serde_json::Value,
+        params: SessionStartParams,
+        tool_registry: Option<Arc<devo_core::tools::ToolRegistry>>,
+        seed: Option<super::super::kernel_host_session::RootSessionSeed>,
+    ) -> serde_json::Value {
         let now = Utc::now();
         let session_id = devo_protocol::native::ids::SessionId::new();
         let runtime_context = match self.deps.context_for_workspace(&params.cwd).await {
@@ -164,13 +182,46 @@ impl ServerRuntime {
             .model_binding_id
             .as_deref()
             .or(params.model.as_deref());
-        let initial_turn_config = runtime_context.resolve_turn_config(requested_model, None);
+        let initial_turn_config = runtime_context.resolve_turn_config(
+            requested_model,
+            seed.as_ref()
+                .and_then(|seed| seed.settings.reasoning_effort.clone()),
+        );
         let model = initial_turn_config.model.slug.clone();
-        let model_binding_id = initial_turn_config.model_binding_id.clone();
+        let mut model_binding_id = initial_turn_config.model_binding_id.clone();
+        let persisted_model = if seed.is_some()
+            && let Some(variant) = initial_turn_config.variant.as_ref()
+        {
+            let base = model_binding_id.as_ref().unwrap_or(&model);
+            let selected = format!("{base}/{variant}");
+            model_binding_id = model_binding_id.as_ref().map(|_| selected.clone());
+            selected
+        } else {
+            model.clone()
+        };
+        let seeded_settings = seed.as_ref().map(|seed| {
+            let mut settings = vec![
+                (
+                    SessionSettingsField::Model,
+                    serde_json::json!(persisted_model),
+                ),
+                (
+                    SessionSettingsField::ModelBindingId,
+                    serde_json::json!(model_binding_id),
+                ),
+            ];
+            if let Some(sandbox) = seed.config.sandbox_profile.as_ref() {
+                settings.push((
+                    SessionSettingsField::SandboxProfile,
+                    serde_json::json!(sandbox),
+                ));
+            }
+            settings
+        });
         let initial_effort = initial_turn_config.reasoning_effort_selection.clone();
         let mut invented_persistence =
             (!params.ephemeral).then(|| self.rollout_store.invent_session_persistence(&session_id));
-        let native_session = devo_protocol::native::session::Session {
+        let mut native_session = devo_protocol::native::session::Session {
             id: session_id,
             version: 1,
             cwd: params.cwd.clone(),
@@ -194,8 +245,10 @@ impl ServerRuntime {
                 .unwrap_or(SessionTitleState::Unset),
             model: devo_protocol::native::model::ModelBinding {
                 provider: model_binding_id.unwrap_or_else(|| "unknown".to_string()),
-                model: model.clone(),
-                variant: None,
+                model: persisted_model,
+                variant: seed
+                    .as_ref()
+                    .and_then(|_| initial_turn_config.variant.clone()),
                 reasoning_effort: None,
             },
             settings: devo_protocol::native::session::SessionSettings {
@@ -224,6 +277,12 @@ impl ServerRuntime {
                 updated_at: now,
             },
         };
+        if let Some(seed) = &seed {
+            native_session.settings = seed.settings.clone();
+            if let Some(invented) = invented_persistence.as_mut() {
+                invented.extras.collaboration_mode = Some(seed.collaboration_mode);
+            }
+        }
         let applied_compaction_limit = crate::runtime::context_occupancy::resolved_compaction_limit(
             &initial_turn_config.model,
         );
@@ -250,6 +309,13 @@ impl ServerRuntime {
             params.cwd.clone(),
             params.additional_directories.clone(),
         );
+        if let Some(seed) = seed {
+            core_session.config.permission_mode = seed.config.permission_mode;
+            core_session.config.permission_profile = seed.config.permission_profile;
+            core_session.config.sandbox_profile = seed.config.sandbox_profile;
+            core_session.collaboration_mode = seed.collaboration_mode;
+            summary.collaboration_mode = seed.collaboration_mode;
+        }
         let permission_preset =
             protocol_preset_from_safety(core_session.config.permission_profile.preset);
         summary.set_permission_preset(permission_preset);
@@ -298,18 +364,28 @@ impl ServerRuntime {
             }
             None => None,
         };
-        if let Some(invented) = &invented_persistence
-            && let Err(error) = self.rollout_store.append_session_meta_create_at(
-                &invented.rollout_path,
-                &summary.native,
-                Some(invented.extras.clone()),
-            )
-        {
-            return self.error_response(
-                request_id,
-                ProtocolErrorCode::InternalError,
-                format!("failed to persist session metadata: {error}"),
-            );
+        if let Some(invented) = &invented_persistence {
+            let persisted = if let Some(settings) = seeded_settings {
+                self.rollout_store.append_seeded_session_meta_create_at(
+                    &invented.rollout_path,
+                    &summary.native,
+                    invented.extras.clone(),
+                    &settings,
+                )
+            } else {
+                self.rollout_store.append_session_meta_create_at(
+                    &invented.rollout_path,
+                    &summary.native,
+                    Some(invented.extras.clone()),
+                )
+            };
+            if let Err(error) = persisted {
+                return self.error_response(
+                    request_id,
+                    ProtocolErrorCode::InternalError,
+                    format!("failed to persist session metadata: {error}"),
+                );
+            }
         }
         crate::runtime::context_occupancy::apply_resolved_compaction_limit(
             &mut core_session.config,

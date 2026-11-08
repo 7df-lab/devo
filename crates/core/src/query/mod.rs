@@ -1323,6 +1323,14 @@ pub async fn query(
             session.end_turn();
             return Err(AgentError::Aborted);
         }
+        if options
+            .end_turn_requested
+            .as_ref()
+            .is_some_and(|requested| requested.load(std::sync::atomic::Ordering::Acquire))
+        {
+            session.end_turn();
+            return Ok(());
+        }
     }
 }
 
