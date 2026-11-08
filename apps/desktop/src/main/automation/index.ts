@@ -11,6 +11,7 @@ import { BrowserWindow } from "electron"
 import { createLogger } from "../logger"
 import { closeDb, ensureDb, getDb } from "./database"
 import { executeRun } from "./executor"
+import { recoverInterruptedRuns } from "./recovery"
 import { createConfig, deleteConfig, listConfigs, readConfig, updateConfig } from "./registry"
 import { addTask, getNextRunTime, previewSchedule, removeTask, stopAll } from "./scheduler"
 import { automationRuns, automations } from "./schema"
@@ -25,6 +26,8 @@ import type {
 const log = createLogger("automation")
 
 const semaphore = new Semaphore(5)
+let initialization: Promise<void> | null = null
+let shuttingDown = false
 
 // ============================================================
 // Broadcast helper
@@ -43,12 +46,22 @@ function broadcastRunsUpdated(): void {
 
 /** Initialize the automation subsystem. Call once at app startup. */
 export async function initAutomations(): Promise<void> {
+	if (shuttingDown) throw new Error("Automation subsystem is shutting down")
+	initialization ??= initializeAutomations()
+	await initialization
+	if (shuttingDown) throw new Error("Automation subsystem is shutting down")
+}
+
+async function initializeAutomations(): Promise<void> {
 	log.info("Initializing automation subsystem")
 	const db = await ensureDb()
+	const interruptedCount = await recoverInterruptedRuns(db)
+	if (interruptedCount > 0) log.warn("Recovered interrupted automation records", { interruptedCount })
 
 	// Load all active automations and schedule them
 	const configs = listConfigs()
 	for (const config of configs) {
+		if (shuttingDown) return
 		if (config.status !== "active") continue
 
 		// Ensure timing row exists in SQLite
@@ -72,6 +85,7 @@ export async function initAutomations(): Promise<void> {
 
 /** Shut down the automation subsystem. Call on app quit. */
 export function shutdownAutomations(): void {
+	shuttingDown = true
 	stopAll()
 	closeDb()
 	log.info("Automation subsystem shut down")
@@ -95,6 +109,9 @@ async function scheduleAndPersistNextRun(
 		await executeAutomation(id)
 	})
 
+	// A quit during asynchronous scheduling must not reopen the closed database.
+	if (shuttingDown) return
+
 	// Persist the computed nextRunAt
 	const db = getDb()
 	await db
@@ -117,6 +134,7 @@ async function scheduleAndPersistNextRun(
 // ============================================================
 
 export async function listAutomations(): Promise<Automation[]> {
+	await initAutomations()
 	const configs = listConfigs()
 	const db = getDb()
 	const results: Automation[] = []
@@ -128,6 +146,7 @@ export async function listAutomations(): Promise<Automation[]> {
 }
 
 export async function getAutomation(id: string): Promise<Automation | null> {
+	await initAutomations()
 	const config = readConfig(id)
 	if (!config) return null
 	const db = getDb()
@@ -136,6 +155,7 @@ export async function getAutomation(id: string): Promise<Automation | null> {
 }
 
 export async function createAutomation(input: CreateAutomationInput): Promise<Automation> {
+	await initAutomations()
 	const id = createConfig(input)
 	const db = getDb()
 	const now = Date.now()
@@ -159,6 +179,7 @@ export async function createAutomation(input: CreateAutomationInput): Promise<Au
 }
 
 export async function updateAutomation(input: UpdateAutomationInput): Promise<Automation | null> {
+	await initAutomations()
 	const before = readConfig(input.id)
 	if (!before) return null
 
@@ -191,6 +212,7 @@ export async function updateAutomation(input: UpdateAutomationInput): Promise<Au
 }
 
 export async function deleteAutomation(id: string): Promise<boolean> {
+	await initAutomations()
 	removeTask(id)
 	deleteConfig(id)
 	const db = getDb()
@@ -203,6 +225,7 @@ export async function deleteAutomation(id: string): Promise<boolean> {
 // ============================================================
 
 export async function listRuns(automationId?: string, limit = 50): Promise<AutomationRun[]> {
+	await initAutomations()
 	const db = getDb()
 
 	if (automationId) {
@@ -221,6 +244,7 @@ export async function archiveRun(
 	runId: string,
 	reason: "auto" | "manual" = "manual",
 ): Promise<boolean> {
+	await initAutomations()
 	const db = getDb()
 	const result = await db
 		.update(automationRuns)
@@ -236,6 +260,7 @@ export async function archiveRun(
 }
 
 export async function acceptRun(runId: string): Promise<boolean> {
+	await initAutomations()
 	const db = getDb()
 	const result = await db
 		.update(automationRuns)
@@ -251,6 +276,7 @@ export async function acceptRun(runId: string): Promise<boolean> {
 
 /** Mark a run as read without changing its status. */
 export async function markRunRead(runId: string): Promise<boolean> {
+	await initAutomations()
 	const db = getDb()
 	const result = await db
 		.update(automationRuns)
@@ -272,6 +298,7 @@ export async function markRunRead(runId: string): Promise<boolean> {
  * block the renderer.
  */
 export async function runNow(id: string): Promise<boolean> {
+	await initAutomations()
 	const config = readConfig(id)
 	if (!config) return false
 
@@ -295,6 +322,7 @@ interface ExecuteOptions {
 }
 
 async function executeAutomation(id: string, opts: ExecuteOptions = {}): Promise<void> {
+	await initAutomations()
 	const config = readConfig(id)
 	if (!config) {
 		log.warn("Automation config not found, skipping execution", { id })
@@ -325,6 +353,7 @@ async function executeAutomation(id: string, opts: ExecuteOptions = {}): Promise
 	})
 
 	try {
+		if (shuttingDown) return
 		// Run once per workspace, or once with empty workspace if none configured
 		const targets = config.workspaces.length > 0 ? config.workspaces : [""]
 		log.info("Starting automation execution", {
@@ -335,6 +364,7 @@ async function executeAutomation(id: string, opts: ExecuteOptions = {}): Promise
 			timeoutSec: config.execution.timeout,
 		})
 		for (const workspace of targets) {
+			if (shuttingDown) return
 			const runId = crypto.randomUUID()
 			const now = Date.now()
 
@@ -384,6 +414,7 @@ async function executeAutomation(id: string, opts: ExecuteOptions = {}): Promise
 						await new Promise((resolve) => setTimeout(resolve, config.execution.retryDelay * 1000))
 					}
 
+					if (shuttingDown) return
 					lastResult = await executeRun(config, workspace, async (info) => {
 						// Persist sessionId as soon as it is available so the
 						// renderer can show the live session view immediately

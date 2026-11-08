@@ -1,267 +1,185 @@
-/**
- * Automation scheduler service.
- *
- * Uses the rrule library for date math and setTimeout for precise
- * per-automation timers. No polling -- each automation gets a single
- * timer set to fire at its exact next run time.
- */
-
+/** In-process automation scheduler. Explicit app quit always stops scheduling. */
+import { scheduleOccurrences } from "../../shared/automation-schedule"
 import { createLogger } from "../logger"
 
 const log = createLogger("automation-scheduler")
+// Bounded checkpoints avoid Node's ~24.8-day timeout overflow and recheck the
+// wall clock after sleep or clock adjustments. They never execute early.
+export const MAX_TIMER_DELAY_MS = 60_000
 
+type Timer = ReturnType<typeof setTimeout>
 interface ScheduledTask {
-	timer: ReturnType<typeof setTimeout> | null
+	timer: Timer | null
 	rruleStr: string
 	timezone: string
+	startAt: Date
 	paused: boolean
-	running: boolean
+	generation: number
 	callback: () => Promise<void>
-	/** The computed next run time, updated after each scheduling cycle. */
 	nextRunAt: Date | null
 }
 
-const tasks = new Map<string, ScheduledTask>()
-
-// ============================================================
-// Internal helpers
-// ============================================================
-
-/** Human-readable delay string for log messages. */
-function formatDelay(ms: number): string {
-	if (ms < 1000) return `${ms}ms`
-	const seconds = Math.round(ms / 1000)
-	if (seconds < 120) return `${seconds}s`
-	const minutes = Math.round(seconds / 60)
-	if (minutes < 120) return `${minutes}m`
-	const hours = Math.round(minutes / 60)
-	return `${hours}h`
+interface SchedulerDependencies {
+	now: () => number
+	setTimer: (callback: () => void, delay: number) => Timer
+	clearTimer: (timer: Timer) => void
+	occurrences: typeof scheduleOccurrences
 }
 
-async function computeNextRun(
-	id: string,
-	rruleStr: string,
-	_timezone: string,
-): Promise<Date | null> {
-	const rruleModule = await import("rrule")
-	// Handle CJS/ESM interop: named export in CJS, nested under default in ESM
-	const RRule = rruleModule.RRule ?? rruleModule.default?.RRule
-	try {
-		const rule = RRule.fromString(rruleStr)
-		const now = new Date()
-		const next = rule.after(now, false)
-		if (next) {
-			const delayMs = next.getTime() - now.getTime()
-			log.debug("Computed next run", {
-				id,
-				rruleStr,
-				now: now.toISOString(),
-				next: next.toISOString(),
-				delayMs,
-			})
-		} else {
-			log.warn("RRULE produced no future occurrence", { id, rruleStr, now: now.toISOString() })
-		}
-		return next
-	} catch (err) {
-		log.error("Failed to parse RRULE", { id, rruleStr }, err)
-		return null
+/** Owns timer lifetimes; injected clock/timers make cancellation races testable. */
+export class AutomationScheduler {
+	private readonly tasks = new Map<string, ScheduledTask>()
+	// Kept separately so replacing a schedule cannot overlap its in-flight run.
+	private readonly running = new Set<string>()
+
+	constructor(
+		private readonly dependencies: SchedulerDependencies = {
+			now: Date.now,
+			setTimer: setTimeout,
+			clearTimer: clearTimeout,
+			occurrences: scheduleOccurrences,
+		},
+	) {}
+
+	private isCurrent(id: string, task: ScheduledTask, generation: number): boolean {
+		return this.tasks.get(id) === task && !task.paused && task.generation === generation
 	}
-}
 
-async function scheduleNext(id: string, task: ScheduledTask): Promise<Date | null> {
-	if (task.timer) {
-		clearTimeout(task.timer)
+	private async scheduleNext(id: string, task: ScheduledTask): Promise<Date | null> {
+		const generation = ++task.generation
+		if (task.timer !== null) this.dependencies.clearTimer(task.timer)
 		task.timer = null
-		log.debug("Cleared previous timer", { id })
-	}
-
-	if (task.paused) {
-		log.debug("Task is paused, skipping schedule", { id })
 		task.nextRunAt = null
-		return null
+		if (task.paused || this.tasks.get(id) !== task) return null
+
+		try {
+			const [next] = await this.dependencies.occurrences(task.rruleStr, task.timezone, {
+				after: new Date(this.dependencies.now()),
+				count: 1,
+				startAt: task.startAt,
+			})
+			// Removing, pausing, replacing or stopping while date math awaits must
+			// not resurrect a timer, even if a pause was followed by a resume.
+			if (!this.isCurrent(id, task, generation)) return null
+			task.nextRunAt = next ?? null
+			if (next) this.armTimer(id, task, generation, next)
+			return next ?? null
+		} catch (err) {
+			log.error("Unable to schedule automation", { id, timezone: task.timezone }, err)
+			return null
+		}
 	}
 
-	const next = await computeNextRun(id, task.rruleStr, task.timezone)
-	if (!next) {
-		log.warn("No next occurrence for automation, timer chain stopped", {
-			id,
-			rruleStr: task.rruleStr,
-		})
+	private armTimer(id: string, task: ScheduledTask, generation: number, next: Date): void {
+		const delay = Math.min(
+			MAX_TIMER_DELAY_MS,
+			Math.max(0, next.getTime() - this.dependencies.now()),
+		)
+		task.timer = this.dependencies.setTimer(() => {
+			if (!this.isCurrent(id, task, generation)) return
+			task.timer = null
+			if (this.dependencies.now() < next.getTime()) {
+				this.armTimer(id, task, generation, next)
+				return
+			}
+			void this.fire(id, task, generation)
+		}, delay)
+		task.timer?.unref?.()
+	}
+
+	private async fire(id: string, task: ScheduledTask, generation: number): Promise<void> {
 		task.nextRunAt = null
-		return null
-	}
-
-	task.nextRunAt = next
-	const delay = Math.max(0, next.getTime() - Date.now())
-	log.info("Timer set", {
-		id,
-		nextRun: next.toISOString(),
-		delayMs: delay,
-		delayHuman: formatDelay(delay),
-	})
-
-	task.timer = setTimeout(async () => {
-		// Verify this task is still the active one (guards against stale closures
-		// after addTask replaces the task while a callback is in-flight)
-		if (tasks.get(id) !== task) {
-			log.warn("Timer fired for stale task, ignoring", { id })
+		if (this.running.has(id)) {
+			// Skip an overlapping occurrence, never queue a backlog of side effects.
+			await this.scheduleNext(id, task)
 			return
 		}
-		if (task.paused) {
-			log.warn("Timer fired but task is paused, ignoring", { id })
-			return
-		}
-		if (task.running) {
-			log.warn("Timer fired but task is already running, ignoring", { id })
-			return
-		}
-
-		log.info("Timer fired, starting automation callback", { id, scheduledFor: next.toISOString() })
-		task.running = true
-		const startTime = Date.now()
+		this.running.add(id)
 		try {
 			await task.callback()
-			log.info("Automation callback completed", {
-				id,
-				durationMs: Date.now() - startTime,
-			})
 		} catch (err) {
-			log.error("Automation callback threw", { id, durationMs: Date.now() - startTime }, err)
+			log.error("Automation callback threw", { id }, err)
 		} finally {
-			task.running = false
-			// Schedule the next run. Await and catch so a rejection doesn't
-			// silently kill the recurring timer chain.
-			if (tasks.get(id) === task && !task.paused) {
-				log.debug("Rescheduling after run", { id })
-				try {
-					await scheduleNext(id, task)
-				} catch (err) {
-					log.error("Failed to reschedule automation after run -- timer chain broken", { id }, err)
-				}
-			} else {
-				log.warn("Skipping reschedule", {
-					id,
-					reason: tasks.get(id) !== task ? "task replaced" : "task paused",
-				})
-			}
+			this.running.delete(id)
+			if (this.isCurrent(id, task, generation)) await this.scheduleNext(id, task)
 		}
-	}, delay)
-
-	// Don't prevent app exit
-	if (task.timer && typeof task.timer === "object" && "unref" in task.timer) {
-		task.timer.unref()
 	}
 
-	return next
-}
-
-// ============================================================
-// Public API
-// ============================================================
-
-export async function addTask(
-	id: string,
-	rruleStr: string,
-	timezone: string,
-	callback: () => Promise<void>,
-): Promise<Date | null> {
-	log.info("Adding task", { id, rruleStr, timezone, hadExisting: tasks.has(id) })
-	removeTask(id)
-	const task: ScheduledTask = {
-		timer: null,
-		rruleStr,
-		timezone,
-		paused: false,
-		running: false,
-		callback,
-		nextRunAt: null,
+	async addTask(
+		id: string,
+		rruleStr: string,
+		timezone: string,
+		callback: () => Promise<void>,
+	): Promise<Date | null> {
+		this.removeTask(id)
+		const task: ScheduledTask = {
+			timer: null,
+			rruleStr,
+			timezone,
+			callback,
+			startAt: new Date(this.dependencies.now()),
+			paused: false,
+			generation: 0,
+			nextRunAt: null,
+		}
+		this.tasks.set(id, task)
+		return this.scheduleNext(id, task)
 	}
-	tasks.set(id, task)
-	const next = await scheduleNext(id, task)
-	log.info("Task added", {
-		id,
-		nextRun: next?.toISOString() ?? "none",
-		totalTasks: tasks.size,
-	})
-	return next
-}
 
-export function removeTask(id: string): void {
-	const task = tasks.get(id)
-	if (task) {
-		if (task.timer) clearTimeout(task.timer)
-		tasks.delete(id)
-		log.info("Task removed", { id, wasRunning: task.running, totalTasks: tasks.size })
+	removeTask(id: string): void {
+		const task = this.tasks.get(id)
+		if (task?.timer !== null && task?.timer !== undefined) this.dependencies.clearTimer(task.timer)
+		this.tasks.delete(id)
 	}
-}
 
-export function pauseTask(id: string): void {
-	const task = tasks.get(id)
-	if (task) {
+	pauseTask(id: string): void {
+		const task = this.tasks.get(id)
+		if (!task) return
 		task.paused = true
-		if (task.timer) {
-			clearTimeout(task.timer)
-			task.timer = null
-		}
-		log.info("Task paused", { id })
+		task.generation++
+		task.nextRunAt = null
+		if (task.timer !== null) this.dependencies.clearTimer(task.timer)
+		task.timer = null
 	}
-}
 
-export function resumeTask(id: string): void {
-	const task = tasks.get(id)
-	if (task?.paused) {
+	resumeTask(id: string): void {
+		const task = this.tasks.get(id)
+		if (!task?.paused) return
 		task.paused = false
-		log.info("Task resumed, rescheduling", { id })
-		scheduleNext(id, task)
+		void this.scheduleNext(id, task)
+	}
+
+	isRunning(id: string): boolean {
+		return this.running.has(id)
+	}
+
+	getNextRunTime(id: string): Date | null {
+		return this.tasks.get(id)?.nextRunAt ?? null
+	}
+
+	stopAll(): void {
+		for (const id of this.tasks.keys()) this.removeTask(id)
 	}
 }
 
-export function isRunning(id: string): boolean {
-	return tasks.get(id)?.running ?? false
-}
+const scheduler = new AutomationScheduler()
+export const addTask = scheduler.addTask.bind(scheduler)
+export const removeTask = scheduler.removeTask.bind(scheduler)
+export const pauseTask = scheduler.pauseTask.bind(scheduler)
+export const resumeTask = scheduler.resumeTask.bind(scheduler)
+export const isRunning = scheduler.isRunning.bind(scheduler)
+export const getNextRunTime = scheduler.getNextRunTime.bind(scheduler)
+export const stopAll = scheduler.stopAll.bind(scheduler)
 
-/**
- * Returns the computed next run time for a scheduled task, or null if
- * the task doesn't exist, is paused, or has no future occurrences.
- */
-export function getNextRunTime(id: string): Date | null {
-	return tasks.get(id)?.nextRunAt ?? null
-}
-
-export function stopAll(): void {
-	log.info("Stopping all scheduled automations", { count: tasks.size })
-	for (const [id, task] of tasks) {
-		if (task.timer) clearTimeout(task.timer)
-		log.debug("Stopped task", { id, wasRunning: task.running })
-	}
-	tasks.clear()
-	log.info("All scheduled automations stopped")
-}
-
-/**
- * Compute the next N occurrences for an RRULE (for UI preview).
- */
 export async function previewSchedule(
 	rruleStr: string,
-	_timezone: string,
-	count: number = 5,
+	timezone: string,
+	count = 5,
 ): Promise<Date[]> {
-	const rruleModule = await import("rrule")
-	// Handle CJS/ESM interop: named export in CJS, nested under default in ESM
-	const RRule = rruleModule.RRule ?? rruleModule.default?.RRule
 	try {
-		const rule = RRule.fromString(rruleStr)
-		const dates: Date[] = []
-		let current = new Date()
-		for (let i = 0; i < count; i++) {
-			const next = rule.after(current, false)
-			if (!next) break
-			dates.push(next)
-			current = next
-		}
-		return dates
-	} catch {
+		return await scheduleOccurrences(rruleStr, timezone, { count })
+	} catch (err) {
+		log.warn("Invalid automation schedule", { rruleStr, timezone }, err)
 		return []
 	}
 }
