@@ -756,6 +756,7 @@ impl ServerRuntime {
                 file_read_ledger: Arc::clone(&working.state.file_read_ledger),
                 sandbox_profile: working.state.core.config.sandbox_profile.clone(),
                 cancel_token: host_cancel_token.clone(),
+                end_turn_requested: None,
                 kernel_lifetime: Some(kernel.lifetime_token()),
                 mcp_manager: Some(Arc::clone(&working.state.runtime_context.mcp_manager)),
                 agent_scope,

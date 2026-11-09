@@ -120,8 +120,10 @@ mod items;
 mod kernel_host;
 mod kernel_host_agent_message;
 mod kernel_host_bridge;
+mod kernel_host_controls;
 mod kernel_host_heartbeat;
 mod kernel_host_models;
+mod kernel_host_session;
 mod kernel_idle_bash;
 mod lifecycle;
 mod mcp;
@@ -204,6 +206,9 @@ pub struct ServerRuntime {
     background_work: std::sync::Mutex<goal_background::BackgroundWork>,
     /// Per-root-session agent registries for subagent coordination.
     agent_registries: Mutex<HashMap<SessionId, AgentRegistry>>,
+    rlm_lazy_children: Mutex<HashSet<SessionId>>,
+    rlm_progress_notes: Mutex<HashMap<SessionId, (std::time::Instant, String)>>,
+    rlm_child_changed: tokio::sync::Notify,
     /// Per-session inboxes used by agent tools to exchange ordered messages.
     agent_mailboxes: Mutex<HashMap<SessionId, SubagentMailbox>>,
     /// Per-parent child-output buffers used by wait_agent polling.
@@ -446,6 +451,9 @@ impl ServerRuntime {
             goal_stores: Mutex::new(HashMap::new()),
             background_work: std::sync::Mutex::new(Default::default()),
             agent_registries: Mutex::new(HashMap::new()),
+            rlm_lazy_children: Mutex::new(HashSet::new()),
+            rlm_progress_notes: Mutex::new(HashMap::new()),
+            rlm_child_changed: tokio::sync::Notify::new(),
             agent_mailboxes: Mutex::new(HashMap::new()),
             agent_output_buffers: Mutex::new(HashMap::new()),
             agent_wait_cursors: Mutex::new(HashMap::new()),

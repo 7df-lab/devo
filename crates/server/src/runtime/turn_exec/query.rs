@@ -166,6 +166,7 @@ impl ServerRuntime {
             .await
             .unwrap_or_else(CancellationToken::new);
         let query_cancel_token = turn_cancel_token.clone();
+        let end_turn_requested = Arc::new(std::sync::atomic::AtomicBool::new(/*v*/ false));
         let provider_http = runtime_context
             .config_store
             .lock()
@@ -324,6 +325,7 @@ impl ServerRuntime {
                 file_read_ledger: Arc::clone(&state.file_read_ledger),
                 sandbox_profile: state.core.config.sandbox_profile.clone(),
                 cancel_token: turn_cancel_token.clone(),
+                end_turn_requested: Some(Arc::clone(&end_turn_requested)),
                 kernel_lifetime: Some(kernel.lifetime_token()),
                 mcp_manager: Some(Arc::clone(&runtime_context.mcp_manager)),
                 agent_scope,
@@ -473,6 +475,7 @@ impl ServerRuntime {
                             as Arc<dyn devo_core::durable_execution::ToolIntentJournal>
                     }),
                     cancel_token: Some(query_cancel_token.clone()),
+                    end_turn_requested: Some(end_turn_requested),
                     compaction_provider: Some(compaction_provider),
                     live_settings: live_turn_settings.clone(),
                     live_goal,
