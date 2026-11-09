@@ -22,9 +22,16 @@ class FactoryStore(Protocol):
     Save must return only after durable replacement, reject stale revisions, and
     never silently create a volatile fallback. Load/list must not mutate files.
     A save error may have committed; callers must reload rather than retry blind.
+    Spawn/cancel must fence the child operation with save's ownership transaction,
+    validating the revision and saved node identity and consuming a revision before
+    the effect. The transaction must remain held until the child operation ends.
     """
 
     async def save(self, run_id: str, expected_revision: int, snapshot: dict[str, Any]) -> int: ...
+
+    async def spawn(self, run_id: str, revision: int, node_id: str, prompt: str) -> tuple[str, int]: ...
+
+    async def cancel(self, run_id: str, revision: int, node_id: str) -> int: ...
 
     async def load(self, run_id: str) -> dict[str, Any]: ...
 
@@ -43,6 +50,29 @@ class HostFactoryStore:
                 or result["revision"] != expected_revision + 1):
             raise RuntimeError("factory.save returned an invalid acknowledgement; reload before continuing")
         return result["revision"]
+
+    async def spawn(self, run_id: str, revision: int, node_id: str, prompt: str) -> tuple[str, int]:
+        result = await self._effect("spawn", run_id, revision, node_id, prompt=prompt)
+        child_id = result.get("child_id")
+        if not isinstance(child_id, str) or not child_id:
+            raise RuntimeError("factory.spawn returned an invalid child identity; restore before continuing")
+        return child_id, result["revision"]
+
+    async def cancel(self, run_id: str, revision: int, node_id: str) -> int:
+        result = await self._effect("cancel", run_id, revision, node_id)
+        return result["revision"]
+
+    async def _effect(self, operation: str, run_id: str, revision: int, node_id: str, **kwargs) -> dict[str, Any]:
+        from . import host_request
+
+        result = await host_request(f"factory.{operation}", {
+            "run_id": run_id, "expected_revision": revision, "node_id": node_id, **kwargs})
+        if (result.get("run_id") != run_id or type(result.get("revision")) is not int
+                or result["revision"] != revision + 1):
+            raise RuntimeError("Factory effect returned an invalid acknowledgement; restore before continuing")
+        if "error" in result:
+            raise RuntimeError(f"Factory effect failed: {result['error']}; restore before continuing")
+        return result
 
     async def load(self, run_id: str) -> dict[str, Any]:
         from . import host_request

@@ -41,6 +41,8 @@ Corrupt or missing child journals are explicit restore errors. Saved unfinished
 turns, recoverable provider failures, and shutdown interruptions with no live execution report `waiting_for_resume`, `requires_resume=True`,
 and `settled=False`. Collect stops waiting once every target is settled or needs
 explicit Native recovery; it never silently starts a new run or replays tools.
+Explicitly closing a child durably cancels recovery, including a previously
+failed or interrupted turn; restarting does not make that turn resumable again.
 An idle restored child with queued follow-ups also requires resume. Use Native
 turn/recovery/read to identify resumable turns; approval recovery and queued-only
 work use their normal approval/session resume controls. In-process

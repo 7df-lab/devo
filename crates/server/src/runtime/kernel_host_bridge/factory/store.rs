@@ -222,7 +222,49 @@ pub(super) fn save(
     validate_snapshot(&run_id, &snapshot)?;
     let lock = directory.open_file("store.lock", FileMode::Lock)?;
     fs2::FileExt::lock_exclusive(&lock)?;
-    // Keep the stable sidecar lock, not the replaceable destination inode.
+    save_locked(directory, owner, run_id, expected_revision, snapshot)
+}
+
+/// A host effect holds the same lock as checkpoint/claim writes until child
+/// admission or close returns. No runtime actor/map lock is held by this gate.
+pub(super) struct EffectTransaction {
+    directory: Directory,
+    _lock: std::fs::File,
+}
+
+impl EffectTransaction {
+    pub fn open(directory: Directory) -> Result<Self> {
+        let lock = directory.open_file("store.lock", FileMode::Lock)?;
+        fs2::FileExt::lock_exclusive(&lock)?;
+        Ok(Self {
+            directory,
+            _lock: lock,
+        })
+    }
+
+    pub fn load(&self, owner: SessionId, run_id: &str) -> Result<StoredRun> {
+        load(&self.directory, owner, run_id)
+    }
+
+    pub fn reserve(&self, owner: SessionId, run: StoredRun) -> Result<Value> {
+        save_locked(
+            &self.directory,
+            owner,
+            run.run_id,
+            run.revision,
+            run.snapshot,
+        )
+    }
+}
+
+fn save_locked(
+    directory: &Directory,
+    owner: SessionId,
+    run_id: String,
+    expected_revision: u64,
+    snapshot: Value,
+) -> Result<Value> {
+    // Caller owns the stable sidecar lock, not the replaceable destination inode.
     let filename = format!("{run_id}.json");
     let current = match directory.open_file(&filename, FileMode::Read) {
         Ok(_) => Some(load(directory, owner, &run_id)?),

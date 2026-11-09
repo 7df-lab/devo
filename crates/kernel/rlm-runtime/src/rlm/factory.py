@@ -169,7 +169,7 @@ class FactoryNamespace:
         self._restoring.add(run_id)
         try:
             return await self._restore_saved(run_id)
-        except asyncio.CancelledError:
+        except BaseException:
             run = self._runs.get(run_id)
             if run is not None and run.status == "recovering":
                 run.status = "recovery_required"
@@ -219,147 +219,174 @@ class FactoryNamespace:
             raise RuntimeError("Factory run is being restored")
         run = self._runs[run_id]
         async with run.lock:
-            if self._runs.get(run_id) is not run:
-                raise RuntimeError("Factory run was restored; retry with its current state")
-            if run.checkpoint_error is not None:
-                raise RuntimeError("Factory checkpoint failed; restore the saved run before continuing")
-            if run.status in _TERMINAL:
-                return self.status(run_id)
-            if run.stop_requested:
-                await self._cleanup(run)
-                return self.status(run_id)
-            if run.status in {"recovering", "recovery_required"}:
-                run.status = "recovery_required"
-                return self.status(run_id)
-            run.status = "running"
-            active = {node.child_id: node for node in run.nodes.values()
-                      if node.status in ("running", "waiting_for_input", "waiting_for_resume")}
-            if active:
-                # Do not partially apply malformed or incomplete replies. A read
-                # failure leaves all child IDs retained and can be safely retried.
-                snapshots = await self._backend.inspect(list(active))
-                ids = [item.child_id for item in snapshots]
-                if len(ids) != len(active) or set(ids) != set(active):
-                    raise RuntimeError("Factory collect returned missing or duplicate children")
-                for item in snapshots:
-                    if item.status not in {"running", "waiting_for_input", "waiting_for_resume", "completed", "failed",
-                                           "interrupted", "canceled", "closed"}:
-                        raise RuntimeError(f"Factory collect returned unknown status {item.status!r}")
-                    if (type(item.settled) is not bool
-                        or type(item.requires_resume) is not bool
-                        or (item.requires_resume and item.status != "waiting_for_resume")
-                        or (item.status in {"running", "waiting_for_resume"} and item.settled)
-                        or (item.status not in {"running", "waiting_for_input", "waiting_for_resume"} and not item.settled)
-                        or not isinstance(item.output, str)):
-                        raise RuntimeError("Factory collect returned inconsistent child state")
-                for item in snapshots:
-                    node = active[item.child_id]
-                    # The host may settle a turn while its child still waits
-                    # for input. That is not workflow success or a free slot.
-                    if not item.settled or item.status == "waiting_for_input":
-                        node.status = item.status
-                        continue
-                    node.needs_cleanup = False
-                    if item.status == "completed" and len(item.output) <= MAX_OUTPUT_CHARS:
-                        node.status, node.output = "completed", item.output
-                    else:
-                        node.status = "failed"
-                        node.error = (f"output exceeds {MAX_OUTPUT_CHARS} characters"
-                                      if item.status == "completed" else item.error or item.status)
-                        run.failed = True
-            # Settle gates transitively, even when declarations are out of order.
-            changed = True
-            while changed:
-                changed = False
-                for spec in run.spec.nodes:
-                    node = run.nodes[spec.id]
-                    if node.status != "pending":
-                        continue
-                    deps = [run.nodes[dep] for dep in spec.needs]
-                    if spec.join == "all" and any(dep.status in _FAILED_NODES for dep in deps):
-                        node.status, node.error = "blocked", "a dependency did not complete successfully"
-                    elif all(dep.status in _SETTLED_NODES for dep in deps):
-                        if ((spec.join == "all" and any(dep.status == "skipped" for dep in deps))
-                            or (spec.join == "any" and not any(dep.status == "completed" for dep in deps))):
-                            node.status, node.error = "skipped", "no matching dependency path"
-                        elif spec.when is not None:
-                            source = run.nodes[spec.when.node]
-                            try:
-                                matches = False
-                                if source.status == "completed":
-                                    value = source.output
-                                    if spec.when.path is not None:
-                                        value = json.loads(value)
-                                        json.dumps(value, allow_nan=False)
-                                        for key in spec.when.path:
-                                            value = value[key] if isinstance(value, dict) and key in value else _MISSING
-                                    matches = type(value) is type(spec.when.equals) and value == spec.when.equals
-                                if not matches:
-                                    node.status, node.error = "skipped", "guard did not match"
-                            except (ValueError, TypeError, RecursionError) as exc:
-                                node.status, node.error = "failed", f"invalid guard source: {exc}"
-                                run.failed = True
-                    if node.status != "pending":
-                        changed = True
-            if run.failed and run.spec.failure_policy == "fail_fast":
-                run.stop_requested = True
-            if run.stop_requested:
-                await self._cleanup(run)
-                return self.status(run_id)
-            for spec in run.spec.nodes:
-                if run.stop_requested:
-                    break
-                active_count = sum(node.needs_cleanup for node in run.nodes.values())
-                if active_count >= run.spec.max_parallel:
-                    break
-                node = run.nodes[spec.id]
-                if node.status != "pending" or not all(run.nodes[dep].status in _SETTLED_NODES for dep in spec.needs):
-                    continue
-                prompt = self._prompt(spec, run)
-                if len(prompt) > MAX_PROMPT_CHARS:
-                    node.status, node.error = "failed", "rendered prompt exceeds the Factory limit"
-                    run.failed = True
-                    # A fresh pass propagates blocks before admitting successors.
-                    if run.spec.failure_policy == "fail_fast":
-                        run.stop_requested = True
-                    break
-                node.status, node.needs_cleanup = "admitting", True
-                # Durable intent precedes the external side effect. Any failed
-                # acknowledgement is recovered, never retried as a new spawn.
-                await self._checkpoint(run, force=True)
-                if run.stop_requested:
-                    # Stop may arrive while the durable intent is being saved.
-                    # We know spawn has not been invoked, so settle this intent
-                    # without inventing a host child that needs cancellation.
-                    node.status, node.needs_cleanup = "cancelled", False
-                    await self._checkpoint(run)
-                    break
-                try:
-                    node.child_id = await self._backend.spawn(spec, prompt, node.name)
-                    if not isinstance(node.child_id, str) or not node.child_id:
-                        node.child_id = None
-                        raise RuntimeError("spawn returned an invalid child id")
-                except asyncio.CancelledError:
-                    node.status, node.error = "failed", "spawn interrupted; admission outcome uncertain"
-                    run.failed = run.stop_requested = True
-                    run.status = "stopping"
-                    raise
-                except Exception as exc:
-                    node.status, node.error = "failed", f"spawn outcome uncertain: {exc}"
-                    run.failed = run.stop_requested = True
-                    # Never retry an uncertain admission. Keep its unique name
-                    # until stop can confirm that child has been closed.
-                    break
-                node.status = "running"
-                await self._checkpoint(run)
-            if run.stop_requested:
-                await self._cleanup(run)
-            elif all(node.status in _SETTLED_NODES for node in run.nodes.values()):
-                run.status = "failed" if run.failed else "completed"
-            elif any(node.status == "waiting_for_resume" for node in run.nodes.values()):
-                run.status = "waiting_for_resume"
-            await self._checkpoint(run)
+            try:
+                return await self._advance(run)
+            except BaseException as exc:
+                if not isinstance(exc, Exception) and run.status not in _TERMINAL:
+                    # SIGINT may arrive between awaits. Close admission while
+                    # still holding the scheduler lock and retain cleanup names.
+                    run.stop_requested = True
+                    run.status = "persistence_error" if run.checkpoint_error else "stopping"
+                    for node in run.nodes.values():
+                        if node.status == "admitting" or (node.needs_cleanup and node.child_id is None):
+                            node.status, node.error = "failed", "admission interrupted; outcome uncertain"
+                            run.failed = True
+                raise
+
+    async def _advance(self, run: _Run) -> dict[str, Any]:
+        run_id = run.id
+        if self._runs.get(run_id) is not run:
+            raise RuntimeError("Factory run was restored; retry with its current state")
+        if run.checkpoint_error is not None:
+            raise RuntimeError("Factory checkpoint failed; restore the saved run before continuing")
+        if run.status in _TERMINAL:
             return self.status(run_id)
+        if run.stop_requested:
+            await self._cleanup(run)
+            return self.status(run_id)
+        if run.status in {"recovering", "recovery_required"}:
+            run.status = "recovery_required"
+            return self.status(run_id)
+        run.status = "running"
+        active = {node.child_id: node for node in run.nodes.values()
+                  if node.status in ("running", "waiting_for_input", "waiting_for_resume")}
+        if active:
+            # Do not partially apply malformed or incomplete replies. A read
+            # failure leaves all child IDs retained and can be safely retried.
+            snapshots = await self._backend.inspect(list(active))
+            ids = [item.child_id for item in snapshots]
+            if len(ids) != len(active) or set(ids) != set(active):
+                raise RuntimeError("Factory collect returned missing or duplicate children")
+            for item in snapshots:
+                if item.status not in {"running", "waiting_for_input", "waiting_for_resume", "completed", "failed",
+                                       "interrupted", "canceled", "closed"}:
+                    raise RuntimeError(f"Factory collect returned unknown status {item.status!r}")
+                if (type(item.settled) is not bool
+                    or type(item.requires_resume) is not bool
+                    or (item.requires_resume and item.status != "waiting_for_resume")
+                    or (item.status in {"running", "waiting_for_resume"} and item.settled)
+                    or (item.status not in {"running", "waiting_for_input", "waiting_for_resume"} and not item.settled)
+                    or not isinstance(item.output, str)):
+                    raise RuntimeError("Factory collect returned inconsistent child state")
+            for item in snapshots:
+                node = active[item.child_id]
+                # The host may settle a turn while its child still waits
+                # for input. That is not workflow success or a free slot.
+                if not item.settled or item.status == "waiting_for_input":
+                    node.status = item.status
+                    continue
+                node.needs_cleanup = False
+                if item.status == "completed" and len(item.output) <= MAX_OUTPUT_CHARS:
+                    node.status, node.output = "completed", item.output
+                else:
+                    node.status = "failed"
+                    node.error = (f"output exceeds {MAX_OUTPUT_CHARS} characters"
+                                  if item.status == "completed" else item.error or item.status)
+                    run.failed = True
+        # Settle gates transitively, even when declarations are out of order.
+        changed = True
+        while changed:
+            changed = False
+            for spec in run.spec.nodes:
+                node = run.nodes[spec.id]
+                if node.status != "pending":
+                    continue
+                deps = [run.nodes[dep] for dep in spec.needs]
+                if spec.join == "all" and any(dep.status in _FAILED_NODES for dep in deps):
+                    node.status, node.error = "blocked", "a dependency did not complete successfully"
+                elif all(dep.status in _SETTLED_NODES for dep in deps):
+                    if ((spec.join == "all" and any(dep.status == "skipped" for dep in deps))
+                        or (spec.join == "any" and not any(dep.status == "completed" for dep in deps))):
+                        node.status, node.error = "skipped", "no matching dependency path"
+                    elif spec.when is not None:
+                        source = run.nodes[spec.when.node]
+                        try:
+                            matches = False
+                            if source.status == "completed":
+                                value = source.output
+                                if spec.when.path is not None:
+                                    value = json.loads(value)
+                                    json.dumps(value, allow_nan=False)
+                                    for key in spec.when.path:
+                                        value = value[key] if isinstance(value, dict) and key in value else _MISSING
+                                matches = type(value) is type(spec.when.equals) and value == spec.when.equals
+                            if not matches:
+                                node.status, node.error = "skipped", "guard did not match"
+                        except (ValueError, TypeError, RecursionError) as exc:
+                            node.status, node.error = "failed", f"invalid guard source: {exc}"
+                            run.failed = True
+                if node.status != "pending":
+                    changed = True
+        if run.failed and run.spec.failure_policy == "fail_fast":
+            run.stop_requested = True
+        if run.stop_requested:
+            await self._cleanup(run)
+            return self.status(run_id)
+        for spec in run.spec.nodes:
+            if run.stop_requested:
+                break
+            active_count = sum(node.needs_cleanup for node in run.nodes.values())
+            if active_count >= run.spec.max_parallel:
+                break
+            node = run.nodes[spec.id]
+            if node.status != "pending" or not all(run.nodes[dep].status in _SETTLED_NODES for dep in spec.needs):
+                continue
+            prompt = self._prompt(spec, run)
+            if len(prompt) > MAX_PROMPT_CHARS:
+                node.status, node.error = "failed", "rendered prompt exceeds the Factory limit"
+                run.failed = True
+                # A fresh pass propagates blocks before admitting successors.
+                if run.spec.failure_policy == "fail_fast":
+                    run.stop_requested = True
+                break
+            node.status, node.needs_cleanup = "admitting", True
+            # Durable intent precedes the external side effect. Any failed
+            # acknowledgement is recovered, never retried as a new spawn.
+            await self._checkpoint(run, force=True)
+            if run.stop_requested:
+                # Stop may arrive while the durable intent is being saved.
+                # We know spawn has not been invoked, so settle this intent
+                # without inventing a host child that needs cancellation.
+                node.status, node.needs_cleanup = "cancelled", False
+                await self._checkpoint(run)
+                break
+            try:
+                if run.durable:
+                    try:
+                        node.child_id, run.revision = await self._store.spawn(run.id, run.revision, node.id, prompt)
+                    except BaseException as exc:
+                        run.checkpoint_error = str(exc) or type(exc).__name__
+                        run.status = "persistence_error"
+                        raise
+                else:
+                    node.child_id = await self._backend.spawn(spec, prompt, node.name)
+                if not isinstance(node.child_id, str) or not node.child_id:
+                    node.child_id = None
+                    raise RuntimeError("spawn returned an invalid child id")
+            except asyncio.CancelledError:
+                node.status, node.error = "failed", "spawn interrupted; admission outcome uncertain"
+                run.failed = run.stop_requested = True
+                run.status = "stopping"
+                raise
+            except Exception as exc:
+                node.status, node.error = "failed", f"spawn outcome uncertain: {exc}"
+                run.failed = run.stop_requested = True
+                # Never retry an uncertain admission. Keep its unique name
+                # until stop can confirm that child has been closed.
+                break
+            node.status = "running"
+            await self._checkpoint(run)
+        if run.checkpoint_error is not None:
+            run.status = "persistence_error"
+            raise RuntimeError("Factory effect failed; restore before continuing")
+        if run.stop_requested:
+            await self._cleanup(run)
+        elif all(node.status in _SETTLED_NODES for node in run.nodes.values()):
+            run.status = "failed" if run.failed else "completed"
+        elif any(node.status == "waiting_for_resume" for node in run.nodes.values()):
+            run.status = "waiting_for_resume"
+        await self._checkpoint(run)
+        return self.status(run_id)
 
     @staticmethod
     def _prompt(spec: FactoryNode, run: _Run) -> str:
@@ -379,13 +406,24 @@ class FactoryNamespace:
                 continue
             await self._checkpoint(run, force=True)
             try:
-                await self._backend.cancel(node.child_id or node.name)
+                if run.durable:
+                    try:
+                        run.revision = await self._store.cancel(run.id, run.revision, node.id)
+                    except BaseException as exc:
+                        run.checkpoint_error = str(exc) or type(exc).__name__
+                        run.status = "persistence_error"
+                        raise
+                else:
+                    await self._backend.cancel(node.child_id or node.name)
             except Exception as exc:
                 node.cleanup_error = str(exc)
             else:
                 node.needs_cleanup, node.cleanup_error = False, None
                 if node.status != "failed":
                     node.status = "cancelled"
+            if run.checkpoint_error is not None:
+                run.status = "persistence_error"
+                return
             await self._checkpoint(run)
         if not any(node.needs_cleanup for node in run.nodes.values()):
             run.status = "failed" if run.failed else "stopped"
@@ -404,6 +442,12 @@ class FactoryNamespace:
         async with run.lock:
             if self._runs.get(run_id) is not run:
                 raise RuntimeError("Factory run was restored; retry with its current state")
+            # An advance may fail or finish while stop waits for its lock.
+            # Never checkpoint or cancel from an uncertain owner after that wait.
+            if run.checkpoint_error is not None:
+                raise RuntimeError("Factory checkpoint failed; restore before stopping or close children directly")
+            if run.status in _TERMINAL:
+                return self.status(run_id)
             await self._cleanup(run)
             return self.status(run_id)
 

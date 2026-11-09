@@ -18,7 +18,15 @@ Before each spawn, it saves an `admitting` intent containing the reserved child
 name. After admission, it saves the returned child ID. Observations, graph
 decisions, and stop/cleanup results are checkpointed too. Unchanged observation
 polls do not write a new revision. Each external mutation still checks the
-current revision first, including retried cancellation.
+current revision first, including retried cancellation. Durable admission and
+cleanup use host-owned `factory.spawn` and `factory.cancel`, not a save followed
+by an unfenced child RPC. These operations accept the run ID, expected revision,
+and node ID (plus the rendered prompt for spawn), validate the saved intent,
+consume a revision, and keep the same store lock through child admission/close.
+Restore claims therefore serialize with the actual effect, not merely its
+checkpoint. A delayed old acknowledgement cannot authorize a later mutation.
+The host retains the operation and its fence if the kernel stops awaiting its
+reply; restore waits for that operation before reconciling the reserved name.
 
 The host resolves storage under the current session's artifact directory:
 `factory/<run_id>.json`. The caller cannot supply a path, another session, or a
@@ -33,7 +41,7 @@ not redirect an approved operation. Windows directory handles disallow deletion
 while the operation holds them, and reparse-point entries are rejected.
 
 The ordinary host permission pipeline covers the store and transaction sidecars.
-Plan Mode rejects saves before creating files. Read-only load/list never create
+Plan Mode rejects saves, spawns, and cleanup before creating files. Read-only load/list never create
 directories/locks and never load or recover child sessions. Stored content is
 recovery data, not a permission grant or authoritative child lifecycle state.
 
@@ -76,7 +84,7 @@ uncertain admission back into pending.
 - A missing, ambiguous, or mismatched child leaves `recovery_required`. `wait`
   returns immediately. Inspect the host's direct children and the node error;
   do not infer that a missing acknowledgement means the child was never created.
-- A lost checkpoint acknowledgement leaves `persistence_error` in the local
+- A lost checkpoint or effect acknowledgement leaves `persistence_error` in the local
   view. Reload/restore rather than retrying the old revision. A persisted
   admission intent can remain unresolved even when no child actually started;
   this conservative outcome prevents duplicate work.
@@ -87,7 +95,10 @@ uncertain admission back into pending.
 
 If persistence is unavailable while an already admitted child needs an urgent
 stop, use the existing child controls directly; after storage is available,
-restore and reconcile the run. Neither interruption nor a wait timeout promises
+restore and reconcile the run. An interrupted scheduler closes local admission
+and retains each unresolved child ID or reserved name for cleanup, including
+`KeyboardInterrupt`, `SystemExit`, and task cancellation. Durable effects with
+uncertain replies require restore before further mutation. Neither interruption nor a wait timeout promises
 that host-owned children have stopped.
 
 ## Version 2 guards and joins

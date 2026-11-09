@@ -11,11 +11,17 @@ from test_factory import FakeBackend, dag
 
 
 class MemoryStore:
-    def __init__(self):
+    def __init__(self, backend):
+        self.backend = backend
+        self.lock = asyncio.Lock()
         self.records = {}
         self.writes = []
 
     async def save(self, run_id, expected_revision, snapshot):
+        async with self.lock:
+            return self._save(run_id, expected_revision, snapshot)
+
+    def _save(self, run_id, expected_revision, snapshot):
         actual = self.records.get(run_id, {}).get("revision", 0)
         if actual != expected_revision:
             raise RuntimeError("stale checkpoint revision")
@@ -23,6 +29,31 @@ class MemoryStore:
         self.records[run_id] = record
         self.writes.append(copy.deepcopy(record))
         return actual + 1
+
+    async def spawn(self, run_id, revision, node_id, prompt):
+        async with self.lock:
+            record = self.records[run_id]
+            node = record["snapshot"]["run"]["nodes"][node_id]
+            if record["revision"] != revision:
+                raise RuntimeError("stale effect revision")
+            if node["status"] != "admitting" or node["child_id"] is not None:
+                raise RuntimeError("invalid admission")
+            revision = self._save(run_id, revision, record["snapshot"])
+            spec = validate(record["snapshot"]["spec"])
+            child = await self.backend.spawn(next(n for n in spec.nodes if n.id == node_id), prompt, node["name"])
+            return child, revision
+
+    async def cancel(self, run_id, revision, node_id):
+        async with self.lock:
+            record = self.records[run_id]
+            if record["revision"] != revision:
+                raise RuntimeError("stale effect revision")
+            node = record["snapshot"]["run"]["nodes"][node_id]
+            if not record["snapshot"]["run"]["stop_requested"] or not node["needs_cleanup"]:
+                raise RuntimeError("invalid cleanup")
+            revision = self._save(run_id, revision, record["snapshot"])
+            await self.backend.cancel(node["child_id"] or node["name"])
+            return revision
 
     async def load(self, run_id):
         return copy.deepcopy(self.records[run_id])
@@ -43,7 +74,7 @@ class ResolvingBackend(FakeBackend):
 class DurableFactoryTests(unittest.IsolatedAsyncioTestCase):
     async def asyncSetUp(self):
         self.backend = ResolvingBackend()
-        self.store = MemoryStore()
+        self.store = MemoryStore(self.backend)
         self.factory = FactoryNamespace(self.backend, self.store)
 
     async def start(self, spec=None):
@@ -161,7 +192,7 @@ class DurableFactoryTests(unittest.IsolatedAsyncioTestCase):
         run_id = await self.start()
         await self.factory.advance(run_id)
         with patch.object(self.backend, "cancel", AsyncMock(side_effect=RuntimeError("offline"))):
-            self.assertEqual((await self.factory.stop(run_id))["status"], "stopping")
+            self.assertEqual((await self.factory.stop(run_id))["status"], "persistence_error")
         restored = FactoryNamespace(self.backend, self.store)
         self.assertEqual((await restored.restore(run_id, enabled=True))["status"], "stopping")
         result = await restored.stop(run_id)

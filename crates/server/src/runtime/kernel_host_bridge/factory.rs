@@ -11,6 +11,7 @@ use super::{
 };
 use devo_safety::ResourceKind;
 
+mod effects;
 mod files;
 mod store;
 
@@ -36,15 +37,21 @@ enum Operation {
     Save(SaveParams),
     Load(LoadParams),
     List,
+    Effect(effects::Params),
 }
 
 pub(crate) async fn handle_factory(bridge: &HostBridge, action: &str, params: &Value) -> Value {
-    if action == "factory.save" && plan_mode_denies_mutation(bridge) {
+    if matches!(action, "factory.save" | "factory.spawn" | "factory.cancel")
+        && plan_mode_denies_mutation(bridge)
+    {
         return deny_plan_mutation(action);
     }
     let parsed = match action {
         "factory.save" => serde_json::from_value(params.clone()).map(Operation::Save),
         "factory.load" => serde_json::from_value(params.clone()).map(Operation::Load),
+        "factory.spawn" | "factory.cancel" => {
+            serde_json::from_value(params.clone()).map(Operation::Effect)
+        }
         "factory.list" => {
             serde_json::from_value::<ListParams>(params.clone()).map(|_| Operation::List)
         }
@@ -59,6 +66,7 @@ pub(crate) async fn handle_factory(bridge: &HostBridge, action: &str, params: &V
             .and_then(|_| store::validate_snapshot(&params.run_id, &params.snapshot)),
         Operation::Load(params) => store::validate_id(&params.run_id),
         Operation::List => Ok(()),
+        Operation::Effect(params) => effects::validate(action, params),
     };
     if let Err(error) = validation {
         return error_reply(error.to_string());
@@ -69,7 +77,9 @@ pub(crate) async fn handle_factory(bridge: &HostBridge, action: &str, params: &V
             Operation::Load(params) => {
                 error_reply(format!("Factory run not found: {}", params.run_id))
             }
-            Operation::Save(_) => error_reply("This session has no persistent Factory store"),
+            Operation::Save(_) | Operation::Effect(_) => {
+                error_reply("This session has no persistent Factory store")
+            }
         };
     };
     // Open the host-owned directory before permission waits. On Unix every
@@ -83,7 +93,7 @@ pub(crate) async fn handle_factory(bridge: &HostBridge, action: &str, params: &V
         Err(error) if error.kind() == std::io::ErrorKind::NotFound => None,
         Err(error) => return error_reply(format!("open Factory store: {error}")),
     };
-    let mutation = matches!(operation, Operation::Save(_));
+    let mutation = matches!(operation, Operation::Save(_) | Operation::Effect(_));
     // Approval covers the store directory, including its stable lock and
     // unique temporary files. No unapproved sidecar path is opened for write.
     let path: PathBuf = root.path.join("factory");
@@ -110,12 +120,19 @@ pub(crate) async fn handle_factory(bridge: &HostBridge, action: &str, params: &V
     if bridge.cancel_token.is_cancelled() {
         return error_reply("cancelled");
     }
+    if let Operation::Effect(params) = operation {
+        let Some(directory) = directory else {
+            return error_reply("Factory effect requires a saved admission intent");
+        };
+        return effects::execute(bridge, directory, action, params).await;
+    }
     let owner = bridge.session_id;
     match tokio::task::spawn_blocking(move || {
         let directory = match (directory, &operation) {
             (Some(directory), _) => directory,
             (None, Operation::Save(_)) => root.create_child("factory")?,
             (None, Operation::List) => return Ok(json!({"runs":[]})),
+            (None, Operation::Effect(_)) => unreachable!("effects dispatched above"),
             (None, Operation::Load(params)) => {
                 anyhow::bail!("Factory run not found: {}", params.run_id)
             }
@@ -132,6 +149,7 @@ pub(crate) async fn handle_factory(bridge: &HostBridge, action: &str, params: &V
                 store::load(&directory, owner, &params.run_id).map(|run| run.response())
             }
             Operation::List => store::list(&directory, owner),
+            Operation::Effect(_) => unreachable!("effects dispatched above"),
         }
     })
     .await
@@ -144,3 +162,6 @@ pub(crate) async fn handle_factory(bridge: &HostBridge, action: &str, params: &V
 
 #[cfg(test)]
 mod tests;
+
+#[cfg(test)]
+mod effects_tests;
