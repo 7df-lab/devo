@@ -128,7 +128,12 @@ function QuestionSection({
 						value={customText}
 						onChange={(e) => onCustomChange(index, e.target.value)}
 						onKeyDown={(e) => {
-							if (e.key === "Enter" && !e.shiftKey) {
+							if (
+								e.key === "Enter" &&
+								!e.shiftKey &&
+								!e.nativeEvent.isComposing &&
+								e.nativeEvent.keyCode !== 229
+							) {
 								e.preventDefault()
 								onSubmitCustom?.()
 							}
@@ -392,47 +397,14 @@ const QuestionRequestStepper = memo(function QuestionRequestStepper({
 	}, [disabled, submitting, onReject, request.id])
 
 	useEffect(() => {
-		function handleKeyDown(e: KeyboardEvent) {
-			if (e.target instanceof HTMLInputElement && e.target.id?.startsWith("question-custom-")) {
-				return
-			}
-			if (e.key === "Enter" && !e.shiftKey) {
-				if (isReview ? allAnswered : currentAnswered) {
-					e.preventDefault()
-					handleAdvance()
-				}
-			} else if (e.key === "Escape") {
-				e.preventDefault()
-				handleSkip()
-			} else if (e.key === "ArrowLeft") {
-				e.preventDefault()
-				handlePrevPage()
-			} else if (e.key === "ArrowRight") {
-				e.preventDefault()
-				handleNextPage()
-			}
-		}
-		document.addEventListener("keydown", handleKeyDown)
-		return () => document.removeEventListener("keydown", handleKeyDown)
-	}, [
-		isReview,
-		allAnswered,
-		currentAnswered,
-		handleAdvance,
-		handleSkip,
-		handlePrevPage,
-		handleNextPage,
-	])
-
-	useEffect(() => {
 		const timer = requestAnimationFrame(() => {
 			if (isReview) {
 				cardRef.current?.focus()
 				return
 			}
-			const customInput = document.getElementById(
-				`question-custom-${currentStep}`,
-			) as HTMLInputElement | null
+			const customInput = cardRef.current?.querySelector<HTMLInputElement>(
+				`#question-custom-${currentStep}`,
+			)
 			if (customInput) {
 				customInput.focus()
 			} else {
@@ -452,6 +424,34 @@ const QuestionRequestStepper = memo(function QuestionRequestStepper({
 			ref={cardRef}
 			tabIndex={-1}
 			aria-label="Agent question"
+			onKeyDown={(e) => {
+				if (
+					e.defaultPrevented ||
+					e.nativeEvent.isComposing ||
+					e.nativeEvent.keyCode === 229 ||
+					disabled ||
+					submitting ||
+					e.target instanceof HTMLInputElement
+				) return
+
+				if (e.key === "Enter" && !e.shiftKey) {
+					// Focused buttons keep their native activation (select, edit, skip, or send).
+					if (e.target !== e.currentTarget) return
+					if (isReview ? allAnswered : currentAnswered) {
+						e.preventDefault()
+						handleAdvance()
+					}
+				} else if (e.key === "Escape") {
+					e.preventDefault()
+					handleSkip()
+				} else if (e.key === "ArrowLeft") {
+					e.preventDefault()
+					handlePrevPage()
+				} else if (e.key === "ArrowRight") {
+					e.preventDefault()
+					handleNextPage()
+				}
+			}}
 			className="devo-composer animate-in fade-in slide-in-from-bottom-2 bg-background/95 shadow-[0_8px_32px_rgba(0,0,0,0.05)] outline-none duration-200 dark:shadow-[0_10px_36px_rgba(0,0,0,0.28)]"
 		>
 			<div className="px-3 pt-3">

@@ -77,13 +77,16 @@ impl ServerRuntime {
         self.active_turns
             .register_turn(session_id, turn.native)
             .await;
+        self.rlm_lazy_children.lock().await.remove(&session_id);
     }
 
     pub(super) async fn clear_active_turn_runtime_handles(
         &self,
         session_id: devo_protocol::native::ids::SessionId,
     ) -> bool {
-        self.active_turns.clear_runtime_handles(session_id).await
+        let activation = self.active_turns.clear_runtime_handles(session_id).await;
+        self.rlm_child_changed.notify_waiters();
+        activation
     }
 }
 

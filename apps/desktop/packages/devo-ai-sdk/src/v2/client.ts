@@ -77,6 +77,13 @@ export type {
 	ReferenceSearchSnapshot,
 } from "./reference-search-session"
 
+import { SessionRosterEvents } from "./session-roster-events"
+export type { SessionRosterChange } from "./session-roster-events"
+
+import type { SessionRosterParams, SessionRosterPage } from "./session-roster"
+export type { Session as NativeSession } from "./generated/native"
+export type { SessionRosterParams, SessionRosterPage } from "./session-roster"
+
 export type JsonRpcId = number | string
 
 export interface DevoNativeTransportEvent {
@@ -800,6 +807,7 @@ class NativeClient {
 	private disposed = false
 	private unsubscribeTransport: (() => void) | null = null
 	private events = new AsyncEventQueue<GlobalEvent>()
+	private rosterEvents = new SessionRosterEvents()
 	private sessions = new Map<string, Session>()
 	private sessionDirectories = new Map<string, string>()
 	private sessionStatuses = new Map<string, SessionStatus>()
@@ -837,6 +845,7 @@ class NativeClient {
 	dispose(): void {
 		if (this.disposed) return
 		this.disposed = true
+		this.rosterEvents.clear()
 		const unsubscribe = this.unsubscribeTransport
 		this.unsubscribeTransport = null
 		try {
@@ -850,6 +859,11 @@ class NativeClient {
 		list: async () => ({ data: await this.listProjects() }),
 	}
 	session = {
+		/** Observe existing Native traffic without consuming the global event stream. */
+		observeRoster: this.rosterEvents.subscribe,
+		/** A single read-only Native roster page. Does not resume sessions or load transcripts. */
+		roster: async (params: SessionRosterParams): Promise<SessionRosterPage> =>
+			await this.requestCanonical("session/list", params) as SessionRosterPage,
 		list: async (params?: { limit?: number; roots?: boolean; search?: string }) => ({
 			data: await this.listSessions(params),
 		}),
@@ -1679,8 +1693,14 @@ class NativeClient {
 	private async discoverSession(sessionId: string): Promise<Session | undefined> {
 		const pending = this.sessionDiscovery.get(sessionId)
 		if (pending) return pending
-		const discovery = this.listSessions()
-			.then((sessions) => sessions.find((session) => session.id === sessionId))
+		// Child sessions are absent from the default root-only roster. Resolve an
+		// exact ID without scanning the roster or resuming any work.
+		const discovery = this.requestCanonical("session/read", { sessionId })
+			.then((result) => this.rememberNativeSession(result.session))
+			.catch((error) => {
+				if (isSessionNotFoundError(error)) return undefined
+				throw error
+			})
 			.finally(() => {
 				this.sessionDiscovery.delete(sessionId)
 			})
@@ -1924,6 +1944,7 @@ class NativeClient {
 
 	private handleTransportEvent(event: DevoNativeTransportEvent): void {
 		if (this.disposed) return
+		this.rosterEvents.handle(event)
         if (event.type === "closed" || (event.type === "notification" &&
             (event.method?.startsWith("turn/") || event.method === "session/metadataUpdated"))) {
             for (const listener of this.recoveryListeners) listener()

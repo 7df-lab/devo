@@ -44,6 +44,7 @@ import {
 	setOpenInPreferred,
 } from "../services/backend"
 import { ChatView } from "./chat"
+import { SubagentsButton } from "./subagents-button"
 import { ContextUsageButton } from "./context-usage-button"
 import { BottomPanelIcon, RightPanelIcon } from "./panel-icons"
 import { ReviewSideRail } from "./review/review-side-rail"
@@ -415,6 +416,7 @@ export function SessionPanelHeader({
 					</div>
 
 					<div className="flex shrink-0 items-center gap-0.5">
+						<SubagentsButton key={agent.sessionId} agent={agent} />
 						<ContextUsageButton sessionId={agent.sessionId} />
 						<TerminalToggleButton />
 						<ChangesPanelToggleButton

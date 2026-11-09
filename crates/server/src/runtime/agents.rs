@@ -3,6 +3,7 @@ use std::time::Duration;
 
 use super::*;
 
+mod closure;
 mod coordinator;
 pub(in crate::runtime) mod handlers;
 mod lifecycle;
@@ -647,6 +648,7 @@ impl ServerRuntime {
             .get_mut(&parent_session_id)
         {
             registry.update_status(child_session_id, status);
+            self.rlm_child_changed.notify_waiters();
         }
     }
 
@@ -1457,92 +1459,6 @@ impl ServerRuntime {
         }
     }
 
-    async fn close_child_agent(
-        self: &Arc<Self>,
-        parent_session_id: SessionId,
-        child_session_id: SessionId,
-    ) -> Result<String, ToolCallError> {
-        let already_terminal = {
-            let mut registries = self.agent_registries.lock().await;
-            let Some(registry) = registries.get_mut(&parent_session_id) else {
-                return Err(ToolCallError::InvalidInput(format!(
-                    "agent not found: {child_session_id}"
-                )));
-            };
-            let Some(metadata) = registry.agents.get_mut(&child_session_id) else {
-                return Err(ToolCallError::InvalidInput(format!(
-                    "agent not found: {child_session_id}"
-                )));
-            };
-            let terminal = matches!(
-                metadata.status,
-                SubagentStatus::Completed
-                    | SubagentStatus::Failed
-                    | SubagentStatus::Interrupted
-                    | SubagentStatus::Canceled
-                    | SubagentStatus::Closed
-            );
-            metadata.close_requested = true;
-            if !terminal {
-                metadata.status = SubagentStatus::Closed;
-                metadata.closed_at = Some(Utc::now());
-            }
-            terminal
-        };
-        // A running turn's cancellation is now observed by the session actor's
-        // own turn-completion handling (`handle_subagent_turn_completed_for_actor_state`),
-        // which independently resolves and records the terminal "closed" status
-        // once it sees `close_requested`. Track whether a turn was actually in
-        // flight so we don't also send a duplicate closed notification below.
-        self.discard_child_queued_work(parent_session_id, child_session_id)
-            .await;
-        let active_turn_id = self.active_turns.active_turn_id(child_session_id).await;
-        let interrupted_turn = self.interrupt_child_runtime_work(child_session_id).await;
-        if already_terminal && interrupted_turn.is_none() {
-            let status = self
-                .resolve_child_agent(parent_session_id, child_session_id.as_ref())
-                .await?
-                .status
-                .as_str()
-                .to_string();
-            return Ok(status);
-        }
-
-        if let Some(turn) = interrupted_turn {
-            self.broadcast_notification(
-                devo_protocol::native::event::ServerNotification::TurnCompleted {
-                    turn: Box::new(turn.native.clone()),
-                },
-            )
-            .await;
-            self.handle_subagent_turn_completed(child_session_id, &turn)
-                .await;
-        } else if let Some(turn_id) = active_turn_id {
-            // Hard-abort recovery may have no actor-owned turn left to return.
-            if self.recent_terminal_turn_status(turn_id).await.is_none() {
-                self.record_subagent_status_event(
-                    parent_session_id,
-                    child_session_id,
-                    SubagentStatus::Closed,
-                    turn_id,
-                )
-                .await;
-            }
-        } else {
-            self.send_closed_notification(parent_session_id, child_session_id)
-                .await;
-        }
-        self.broadcast_notification(
-            devo_protocol::native::event::ServerNotification::session_status_changed(
-                child_session_id,
-                SessionStatus::Idle,
-                /*active_turn_id*/ None,
-            ),
-        )
-        .await;
-        Ok(SubagentStatus::Closed.as_str().to_string())
-    }
-
     async fn send_closed_notification(
         &self,
         parent_session_id: SessionId,
@@ -1870,8 +1786,15 @@ impl ServerRuntime {
 
     /// Kernel `host_request("rlm.list_subagents")` — direct children retained
     /// by this session, in the payload shape `rlm.list_subagents()` parses.
-    pub(crate) async fn host_rlm_list_subagents(&self, session_id: &str) -> serde_json::Value {
+    pub(crate) async fn host_rlm_list_subagents(
+        self: &Arc<Self>,
+        session_id: &str,
+    ) -> serde_json::Value {
         let sid = SessionId::from_string(session_id.to_owned());
+        if let Err(error) = self.restore_direct_children(sid).await {
+            return serde_json::json!({"status": "error", "error": error});
+        }
+        let notes = self.rlm_progress_notes.lock().await.clone();
         let entries: Vec<serde_json::Value> = {
             let registries = self.agent_registries.lock().await;
             registries
@@ -1881,7 +1804,13 @@ impl ServerRuntime {
                         .children_of(&sid)
                         .into_iter()
                         .filter_map(|child_id| registry.get(&child_id))
-                        .map(Self::rlm_subagent_entry)
+                        .map(|meta| {
+                            let mut entry = Self::rlm_subagent_entry(meta);
+                            if let Some((_, note)) = notes.get(&meta.session_id) {
+                                entry["progress_note"] = serde_json::json!(note);
+                            }
+                            entry
+                        })
                         .collect()
                 })
                 .unwrap_or_default()

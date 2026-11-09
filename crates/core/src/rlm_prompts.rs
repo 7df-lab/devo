@@ -1,7 +1,7 @@
 //! Immutable RLM system-prompt doctrine for Devo sessions.
 //!
 //! Kernel-surface RLM prompt set (reference-agent design, Devo branding) with explicit
-//! denial of daemon `rlm.create_session`. Catalog skill progressive disclosure
+//! bounded subagent and independent-root controls. Catalog skill progressive disclosure
 //! uses XML (`format_catalog_skills_xml`); the markdown skill body from
 //! `devo_skills::render_available_skills_body` remains for non-RLM surfaces.
 
@@ -241,12 +241,14 @@ pub fn build_rlm_base_prompt(options: &RlmPromptOptions) -> String {
         );
     }
 
-    // Explicit deny: never teach daemon create_session (depth-0 path is out of scope).
-    parts.push(String::new());
-    parts.push(
-        "Do not call `rlm.create_session`. Daemon-backed top-level session creation is denied; use `await rlm.spawn(...)` only for child agents."
-            .to_string(),
-    );
+    if has_ipython {
+        parts.push(String::new());
+        parts.push(if options.depth == 0 {
+            "Durable Build roots may call `await rlm.create_session('task', name='independent')` to create a separately visible root in the same workspace. It inherits safety and model settings but has its own journal, no parent linkage, and no collect/child lifecycle. Plan and ephemeral callers are rejected."
+        } else {
+            "Child sessions cannot call `rlm.create_session`; use `await rlm.spawn(...)` for direct descendants."
+        }.to_string());
+    }
 
     if options.allow_recursion && has_ipython {
         parts.push(String::new());
@@ -259,7 +261,7 @@ pub fn build_rlm_base_prompt(options: &RlmPromptOptions) -> String {
                 .to_string(),
         );
         parts.push(
-            "Children inherit your model and thinking level. This host does not support `model` or `thinking` overrides on `rlm.spawn`; omit both options."
+            "Children inherit your model and thinking level by default. Discover exact model selectors and supported thinking levels with `await rlm.find_models()`, then optionally pass `model=chosen.selector` and `thinking` to `rlm.spawn`; unsupported selections fail without fallback."
                 .to_string(),
         );
         if has_agent_observe {
@@ -290,12 +292,12 @@ pub fn build_rlm_base_prompt(options: &RlmPromptOptions) -> String {
             );
         } else {
             parts.push(
-                "Inspect files a child wrote when you need to collect its work without an observation capability."
+                "Use `await rlm.collect(child, timeout_ms=0)` to inspect retained child results without an observation capability, or read the files the child wrote."
                     .to_string(),
             );
         }
         parts.push(
-            "Spawn independent children in separate calls and end your turn instead of awaiting completion. Multiple replies may arrive over multiple turns. Delete a direct child explicitly with `await rlm.delete_subagent(child)` when it is no longer needed."
+            "Use `await rlm.collect(children, timeout_ms=1000)` for a short bounded wait: timeout returns partial snapshots without cancellation. Check `settled`, `requires_resume`, and `answer_truncated`; saved unfinished work requires explicit recovery, not automatic replay. Children can report `await rlm.progress_note('running tests')` without steering the parent. `await rlm.end_turn()` ends normally after the current tool batch while children continue. Delete a direct child explicitly with `await rlm.delete_subagent(child)` when it is no longer needed."
                 .to_string(),
         );
     }
@@ -424,7 +426,7 @@ mod tests {
 
     use super::*;
 
-    /// Verifies: root RLM base prompt carries Devo doctrine strings and denies create_session.
+    /// Root prompt teaches the supported controls and their safety boundaries.
     #[test]
     fn build_rlm_base_prompt_contains_key_doctrine() {
         let mut options = RlmPromptOptions::root("/repo", "/tmp/messages.jsonl");
@@ -441,7 +443,11 @@ mod tests {
         assert!(prompt.contains("rlm.spawn"));
         assert!(prompt.contains("rlm.harness"));
         assert!(prompt.contains("rlm.create_session"));
-        assert!(prompt.contains("denied"));
+        assert!(prompt.contains("Durable Build roots"));
+        assert!(prompt.contains("rlm.collect"));
+        assert!(prompt.contains("rlm.progress_note"));
+        assert!(prompt.contains("rlm.end_turn"));
+        assert!(!prompt.contains("Daemon-backed top-level session creation is denied"));
         assert!(!prompt.contains("daemon-backed depth-0 session"));
         assert!(prompt.contains("Recursive agent depth: 0"));
         assert!(prompt.contains("await refine.run()"));
@@ -506,7 +512,7 @@ mod tests {
             assert!(prompt.contains("Kernel snapshots are separate"));
             assert!(prompt.contains("`rlm.shell()` defaults to the session workspace"));
             assert!(prompt.contains("Bash on Unix and PowerShell on Windows"));
-            assert!(prompt.contains("does not support `model` or `thinking` overrides"));
+            assert!(prompt.contains("unsupported selections fail without fallback"));
             assert!(prompt.contains("never relax relative to the parent") || options.depth == 0);
             assert!(
                 prompt.contains("Never use direct Python process or filesystem APIs to bypass")

@@ -167,7 +167,7 @@ The main groups are:
 | `rlm.web_search`, `rlm.web_fetch` | Host-mediated network access. |
 | `rlm.update_plan`, `rlm.request_user_input` | Session UI integration. |
 | `rlm.read`, `rlm.write`, `rlm.read_once`, `rlm.write_once` | Direct file I/O, with host-mediated fallback on OS denial. |
-| `rlm.spawn`, `rlm.create_session`, `rlm.find_models`, `rlm.list_subagents`, `rlm.delete_subagent` | Recursive subagent control. |
+| `rlm.spawn`, `rlm.create_session`, `rlm.find_models`, `rlm.list_subagents`, `rlm.delete_subagent`, `rlm.collect`, `rlm.progress_note`, `rlm.end_turn` | Recursive subagent control. |
 | `rlm.factory` | Experimental, explicit-opt-in DAG workflows; advance/wait inside an active cell. Requires the subagent collection API. See [Factory workflows](../../../docs/factory-workflows.md). |
 | `rlm.harness`, `rlm.get_harness_state` | Cached reads and async host-owned harness CRUD. |
 | `rlm.emit` | Ship a MIME-keyed display event. |
@@ -191,8 +191,12 @@ if chosen is not None:
 ```
 
 `rlm.spawn` returns when the child is admitted, not when it finishes. The child
-runs as a separate session; results arrive through `agent_message` replies or
-files, usually on a later turn.
+runs as a separate session. Use `await rlm.collect(reviewer, timeout_ms=10000)`
+for retained typed results; timeout returns partial snapshots without cancellation.
+Children can report `await rlm.progress_note("running tests")` without steering the
+parent. `await rlm.end_turn()` finishes normally after the current tool batch.
+`create_session` creates a separate durable root in the same workspace. See
+[orchestration semantics](../../../docs/rlm-orchestration.md) for limits and recovery.
 
 Omitted `model` and `thinking` (or `None`) inherit the immediate parent's values.
 An unsupported inherited thinking level fails just like an explicit unsupported
@@ -339,7 +343,7 @@ README. It owns:
   formats the digest injected into the next turn;
 - `RefineProposal` / `RefineEdit` and `apply_proposal_re_read`, which re-reads
   the file, rejects per-entry drift, applies edits, and saves;
-- the append-only `refinements.jsonl` audit/undo log;
+- the append-only `refinements.jsonl` audit mirror and atomic state-file undo history;
 - `AutoRefineSettings` and `should_auto_refine`: root sessions default to a
   review every 25 successful user-visible turns, with a 20-minute compact
   cooldown; child sessions never auto-refine.
@@ -448,7 +452,7 @@ the agent wants the host to review evidence and decide the smallest edit.
   cannot kill the REPL; the next kernel save rewrites a clean file.
 - The Rust schemas are mirrored by hand. If you add or change a
   field, update both sides and bump `SCHEMA_VERSION`.
-- The host's `refinements.jsonl` is an append-only audit/undo log. Python's
+- The host's `refinements.jsonl` is an append-only audit mirror. Canonical before/after undo history lives in `harness_state.json` and commits with the entries. See [authorized trajectory refinement and rollback](../../../docs/trajectory-refinement.md). Python's
   `record_refinement` writes a `RefinementEvent` into the state JSON's
   `refinements` array; it does not append to the JSONL log.
 
