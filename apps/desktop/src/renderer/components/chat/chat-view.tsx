@@ -2385,6 +2385,7 @@ export function ChatInputSection({
 										</PromptInputTools>
 										<div className="ml-auto flex min-w-0 items-center gap-0.5">
 											<PromptToolbar
+												directory={agent.directory}
 												agents={devoAgents ?? []}
 												selectedAgent={selectedAgent}
 												defaultAgent={config?.defaultAgent}

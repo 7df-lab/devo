@@ -84,3 +84,59 @@ for (const value of ["default-model", "organization/model", "workspace/model/hig
 		])
 	})
 }
+
+test("Native-filtered routes never return through configured catalog or credentials", async () => {
+	const available = await nativeProviders("local/unusable", [])
+	const catalog: ProviderCatalogData = {
+		...emptyCatalog,
+		providers: [
+			{
+				id: "local",
+				name: "Local",
+				enabled: true,
+				baseUrl: "http://127.0.0.1:1/v1",
+				wireApis: ["anthropic_messages"],
+				models: { unusable: { name: "Unusable" } },
+			},
+		],
+		connectedIds: new Set(["local"]),
+	}
+	const models = buildPickerModels(available, catalog, {
+		models: [
+			{
+				slug: "local/unusable",
+				providerId: "local",
+				modelId: "unusable",
+				displayName: "Unusable",
+				provider: "anthropic_messages",
+				contextWindow: 1000,
+				reasoningCapability: { levels: [] },
+				inputModalities: ["text"],
+			},
+		],
+		credentials: [{ id: "old-key", provider: "local", kind: "api_key", masked: "***" }],
+	})
+	expect(filterPickerModels(models, "", "ready")).toEqual([])
+	expect(
+		filterPickerModels(models, "", "all").map(({ value, ready }) => ({ value, ready })),
+	).toEqual([{ value: "local/unusable", ready: false }])
+})
+
+test("directory-only opaque defaults are not assumed to be available", () => {
+	const models = buildPickerModels(null, null, {
+		models: [
+			{
+				slug: "default-model",
+				displayName: "Default",
+				provider: "openai_chat_completions",
+				contextWindow: 1000,
+				reasoningCapability: { levels: [] },
+				inputModalities: ["text"],
+			},
+		],
+		credentials: [],
+	})
+	expect(models.map(({ value, ready }) => ({ value, ready }))).toEqual([
+		{ value: "default-model", ready: false },
+	])
+})

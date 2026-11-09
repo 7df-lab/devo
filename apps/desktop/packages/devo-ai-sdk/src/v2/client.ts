@@ -1382,9 +1382,18 @@ class NativeClient {
 	}
 
 	config = {
-		providers: async () => ({
-			data: providerDataFromConfigOptions(await this.ensureCurrentConfigOptions()),
-		}),
+		providers: async () => {
+			// Selectable routes must come from a fresh Native read, never an ACP
+			// session cache that retains the current model as a placeholder.
+			const result = await this.requestCanonical("model/preferences/read", {
+				...(this.options.directory ? { cwd: this.options.directory } : {}),
+			}) as { preferences: ModelPreferencesWire }
+			return {
+				data: providerDataFromConfigOptions(
+					sessionConfigOptionsFromModelPreferences(result.preferences),
+				),
+			}
+		},
 		get: async () => ({ data: configDataFromConfigOptions(await this.ensureCurrentConfigOptions()) }),
 		setOption: async (params: { configID: string; value: string }) => ({
 			data: configDataFromConfigOptions(
