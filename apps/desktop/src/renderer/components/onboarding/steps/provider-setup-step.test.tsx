@@ -154,7 +154,7 @@ test("onboarding shows the complete server catalog and requests a stale remote r
 			(button) => button.textContent,
 		),
 	).toEqual([
-		"ChatGPT1 model · Connected",
+		"ChatGPT1 model · Configured",
 		"Anthropic1 model",
 		"Groq1 model",
 		"Remote provider1 model",
@@ -230,9 +230,11 @@ test("offline and failed refresh keep saved connections usable and allow continu
 			.querySelector('[role="alert"]')
 			?.textContent?.includes("Network unavailable"),
 		offline: mount.querySelector('[role="status"]')?.textContent,
+		count: mount.querySelector('[aria-live="polite"]')?.textContent,
 	}).toEqual({
 		error: true,
 		offline: "Offline mode · showing the saved catalog.",
+		count: "4 providers · 1 configured",
 	})
 	await click("Continue")
 	expect(completed).toEqual([1])
@@ -249,5 +251,67 @@ test("waiting for the server does not start a refresh and permits skipping", asy
 	expect({ refreshes: refreshed, skipped }).toEqual({
 		refreshes: [],
 		skipped: 1,
+	})
+})
+
+test("saved provider configuration is not presented as verified model access", async () => {
+	data = { ...data, connectedIds: new Set(["groq"]) }
+	await render()
+	expect({
+		count: mount.querySelector('[aria-live="polite"]')?.textContent,
+		configured: [...mount.querySelectorAll('[aria-label="Provider catalog"] button')]
+			.map((button) => button.textContent)
+			.filter((text) => text?.includes("Configured")),
+		explanation: mount.textContent?.includes("Saving a connection does not verify model access."),
+	}).toEqual({
+		count: "4 providers · 1 configured",
+		configured: ["Groq1 model · Configured"],
+		explanation: true,
+	})
+	expect(mount.querySelector('[aria-label="Provider catalog"]')?.textContent).not.toContain(
+		"Connected",
+	)
+})
+
+test("saving API setup updates configured labels and preserves Continue without a model test", async () => {
+	data = { ...data, connectedIds: new Set() }
+	await render()
+	await click("Groq")
+	data = { ...data, connectedIds: new Set(["groq"]) }
+	await act(async () => templateProps.onConnected())
+	expect({
+		count: mount.querySelector('[aria-live="polite"]')?.textContent,
+		label: mount.querySelector('[aria-label="Provider catalog"] button')?.textContent,
+		completed,
+		reloaded,
+		invalidated,
+	}).toEqual({
+		count: "4 providers · 1 configured",
+		label: "Groq1 model · Configured",
+		completed: [],
+		reloaded: 1,
+		invalidated: 1,
+	})
+	await click("Continue")
+	expect(completed).toEqual([1])
+})
+
+test("cancelling setup does not mark a provider configured and still permits skipping", async () => {
+	data = { ...data, connectedIds: new Set() }
+	await render()
+	await click("Groq")
+	await act(async () => templateProps.onOpenChange(false))
+	expect(mount.querySelector('[aria-live="polite"]')?.textContent).toBe(
+		"4 providers · 0 configured",
+	)
+	expect(mount.querySelector('[aria-label="Provider catalog"]')?.textContent).not.toContain(
+		"Configured",
+	)
+	await click("I'll do this later")
+	expect({ skipped, completed, reloaded, invalidated }).toEqual({
+		skipped: 1,
+		completed: [],
+		reloaded: 0,
+		invalidated: 0,
 	})
 })
