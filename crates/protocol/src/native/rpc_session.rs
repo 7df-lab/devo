@@ -86,7 +86,8 @@ pub struct SessionNewResult {
 
 // ── session/list ──
 
-/// No filtering by status/archive flags; only title search is supported.
+/// Filters compose across cwd, title search and direct subagent parent.
+/// No filtering by status/archive flags.
 /// Returned sessions use `turnsView = notLoaded` (no embedded history).
 #[derive(Debug, Clone, Default, PartialEq, Eq, Serialize, Deserialize, JsonSchema, TS)]
 #[serde(rename_all = "camelCase")]
@@ -105,6 +106,11 @@ pub struct SessionListParams {
     /// user-visible roots/forks (Agents View roster).
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub include_children: Option<bool>,
+    /// Restrict to this parent's saved direct subagents (not user forks or
+    /// grandchildren). Implies `include_children`, even when explicitly false.
+    /// Filtering happens before pagination and never resumes the parent/children.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub parent_session_id: Option<SessionId>,
 }
 
 pub type SessionListResult = Page<Session>;

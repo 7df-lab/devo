@@ -8,6 +8,8 @@ export interface SessionRosterParams {
 	cursor?: string
 	limit?: number
 	includeChildren?: boolean
+	/** Direct subagents only; implies includeChildren on supported runtimes. */
+	parentSessionId?: string
 }
 
 export interface SessionRosterPage {

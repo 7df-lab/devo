@@ -547,6 +547,7 @@ impl ServerRuntime {
                 .last_activity_at
                 .cmp(&left.last_activity_at)
                 .then_with(|| right.usage.updated_at.cmp(&left.usage.updated_at))
+                .then_with(|| left.id.as_str().cmp(right.id.as_str()))
         });
         sessions
     }
@@ -1754,12 +1755,22 @@ impl ServerRuntime {
             .limit
             .map_or(CANONICAL_SESSION_LIST_DEFAULT_LIMIT, |limit| limit as usize);
         let search = params.search.as_deref().map(str::to_lowercase);
-        let include_children = params.include_children.unwrap_or(false);
+        let include_children =
+            params.parent_session_id.is_some() || params.include_children.unwrap_or(false);
         let mut sessions = Vec::new();
         for mut session in self
             .list_native_sessions_with_options(include_children)
             .await
         {
+            if let Some(parent_id) = params.parent_session_id
+                && !matches!(
+                    session.parent,
+                    Some(devo_protocol::native::session::SessionParent::Agent { session_id, .. })
+                        if session_id == parent_id
+                )
+            {
+                continue;
+            }
             if !session_list_cwd_matches(&params.cwds, &session.cwd) {
                 continue;
             }
