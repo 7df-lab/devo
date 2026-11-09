@@ -8,6 +8,8 @@
  * next-runs preview using the rrule library.
  */
 
+import { scheduleOccurrences } from "../../shared/automation-schedule"
+
 // ============================================================
 // Types
 // ============================================================
@@ -250,21 +252,13 @@ export function formatScheduleSummary(config: ScheduleConfig): string {
  * Compute the next N occurrences for an RRULE string, entirely client-side.
  * Returns ISO date strings. Falls back to empty array on parse errors.
  */
-export async function computeNextRuns(rruleStr: string, count = 3): Promise<Date[]> {
+export async function computeNextRuns(
+	rruleStr: string,
+	count = 3,
+	timezone = Intl.DateTimeFormat().resolvedOptions().timeZone,
+): Promise<Date[]> {
 	try {
-		const rruleModule = await import("rrule")
-		// Handle CJS/ESM interop: named export in CJS, nested under default in ESM
-		const RRule = rruleModule.RRule ?? rruleModule.default?.RRule
-		const rule = RRule.fromString(rruleStr)
-		const dates: Date[] = []
-		let current = new Date()
-		for (let i = 0; i < count; i++) {
-			const next = rule.after(current, false)
-			if (!next) break
-			dates.push(next)
-			current = next
-		}
-		return dates
+		return await scheduleOccurrences(rruleStr, timezone, { count })
 	} catch {
 		return []
 	}
