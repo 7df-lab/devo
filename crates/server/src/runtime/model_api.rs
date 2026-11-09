@@ -75,6 +75,14 @@ fn model_preferences_from_config_options(
         .effective_config()
         .provider_catalog_config()
         .providers;
+    // ACP retains the current value even before setup, but that placeholder is
+    // not an available Native choice when no provider can serve it. Use this
+    // workspace's configuration and default adapter, never a global UI catalog.
+    // Injected Default routes remain valid, including slugs containing `/`.
+    if configured_providers.is_empty() && !runtime_context.provider.is_available() {
+        preferences.available_models.clear();
+        return preferences;
+    }
     let live = runtime_context.live_model_catalog();
     let catalog: &dyn ModelCatalog = live
         .as_ref()

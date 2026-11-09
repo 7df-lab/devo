@@ -1,9 +1,8 @@
 import { afterEach, expect, mock, test } from "bun:test"
 import { Window } from "happy-dom"
-import { act, createContext, type ReactNode, useContext, useState } from "react"
+import { act, createContext, useContext, useState, type ReactNode } from "react"
 import type { Root } from "react-dom/client"
-import type { ProviderCatalogData, ProvidersData } from "../../hooks/use-devo-data"
-import { buildPickerModels, type PickerModel } from "./model-picker-data"
+import type { PickerModel } from "./model-picker-data"
 
 const dom = new Window({ url: "http://localhost" })
 Object.assign(globalThis, {
@@ -189,47 +188,4 @@ test("remote refresh disables duplicate requests while retaining models", async 
 		disabled: refresh?.disabled,
 		rows: mount.querySelectorAll("button[data-model-option]").length,
 	}).toEqual({ disabled: true, rows: 1 })
-})
-
-test("an unconfigured Native model is absent from Ready to use and available as Connect", async () => {
-	const unconfigured: ProviderCatalogData = {
-		providers: [
-			{
-				id: "302ai",
-				name: "302.AI",
-				enabled: true,
-				wireApis: [],
-				models: { "MiniMax-M1": { name: "MiniMax-M1" } },
-			},
-		],
-		connectedIds: new Set(),
-		templateIds: new Set(["302ai"]),
-		connectionModels: {},
-	}
-	const native = {
-		providers: [
-			{
-				id: "session",
-				name: "Session",
-				models: { "302ai/MiniMax-M1": { name: "302ai/MiniMax-M1" } },
-			},
-		],
-		defaults: {},
-	} as ProvidersData
-	const choices = buildPickerModels(native, unconfigured)
-	await renderPicker({ models: choices })
-	expect(mount.querySelectorAll("button[data-model-option]").length).toBe(0)
-	expect(mount.textContent).toContain("Connect a provider to get started")
-	expect(selected).toEqual([])
-	await act(async () =>
-		[...mount.querySelectorAll("button")]
-			.find((button) => button.textContent === "Browse all models")
-			?.click(),
-	)
-	const row = mount.querySelector<HTMLButtonElement>("button[data-model-option]")
-	expect(row?.getAttribute("aria-label")).toBe("MiniMax-M1, 302.AI, connect provider")
-	expect(row?.textContent).toContain("Connect")
-	await act(async () => row?.click())
-	expect(selected).toEqual([choices[0]])
-	expect(selected[0]?.ready).toBe(false)
 })

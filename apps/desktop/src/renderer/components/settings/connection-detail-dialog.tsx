@@ -149,7 +149,7 @@ export function ConnectionDetailDialog({
 						<div className="flex items-center gap-3">
 							<ProviderIcon id={provider.id} name={provider.name} size="xs" />
 							<DialogTitle>{provider.name}</DialogTitle>
-							<Badge variant="secondary">Connected</Badge>
+							<Badge variant="secondary">Configured</Badge>
 						</div>
 						<DialogDescription>
 							{Object.keys({ ...provider.models, ...discovered, ...connectionModels }).length}{" "}
@@ -158,9 +158,9 @@ export function ConnectionDetailDialog({
 								.length !== 1
 								? "s"
 								: ""}{" "}
-							available.
+							listed.
 							{provider.baseUrl ? ` Endpoint: ${provider.baseUrl}` : ""}
-							{" Discovery is temporary. Save a model to keep it in your configuration."}
+							{" Model access has not been verified by saving this connection. Discovery is temporary. Save a model to keep it in your configuration."}
 						</DialogDescription>
 					</DialogHeader>
 
@@ -209,7 +209,7 @@ export function ConnectionDetailDialog({
 							<div className="px-4 py-6 text-center text-xs text-muted-foreground">
 								{search.trim()
 									? `No models match "${search}"`
-									: "No models available. Discover or add a model."}
+									: "No models listed. Discover or add a model."}
 							</div>
 						) : (
 							models.map(([modelId, model]) => {

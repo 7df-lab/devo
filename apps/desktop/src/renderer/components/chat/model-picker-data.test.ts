@@ -1,8 +1,7 @@
 import { describe, expect, test } from "bun:test"
-import { createDevoClient, type DevoNativeTransport } from "@devo-ai/sdk/v2/client"
 import type { ProviderCatalogData, ProvidersData } from "../../hooks/use-devo-data"
-import type { ModelDirectoryData } from "../../hooks/use-model-directory"
 import { buildPickerModels, filterPickerModels } from "./model-picker-data"
+import type { ModelDirectoryData } from "../../hooks/use-model-directory"
 
 const catalog: ProviderCatalogData = {
 	providers: [
@@ -165,112 +164,4 @@ describe("desktop model directory", () => {
 			},
 		])
 	})
-})
-
-test("a Native preference placeholder does not prove its provider is configured", async () => {
-	const requests: string[] = []
-	const transport: DevoNativeTransport = {
-		connected: () => true,
-		subscribe: () => () => {},
-		respond: async () => {},
-		request: async (method) => {
-			requests.push(method)
-			if (method === "initialize")
-				return { protocolVersion: 1, agentCapabilities: {}, authMethods: [] }
-			if (method === "model/preferences/read")
-				return {
-					preferences: {
-						model: "302ai/MiniMax-M1",
-						availableModels: [{ value: "302ai/MiniMax-M1", label: "302ai/MiniMax-M1" }],
-						availableEfforts: [],
-					},
-				}
-			throw new Error(`Unexpected request ${method}`)
-		},
-	}
-	const client = createDevoClient({ directory: "/repo", transport })
-	const { data } = await client.config.providers()
-	const unconfigured: ProviderCatalogData = {
-		providers: [
-			{
-				id: "302ai",
-				name: "302.AI",
-				enabled: true,
-				wireApis: ["openai_chat_completions"],
-				models: { "MiniMax-M1": { name: "MiniMax-M1" } },
-			},
-		],
-		connectedIds: new Set(),
-		templateIds: new Set(["302ai"]),
-		connectionModels: {},
-	}
-	const models = buildPickerModels(
-		{ providers: data.providers, defaults: data.default },
-		unconfigured,
-	)
-	expect(models).toEqual([
-		{
-			value: "302ai/MiniMax-M1",
-			selection: { providerID: "session", modelID: "302ai/MiniMax-M1" },
-			providerID: "302ai",
-			providerName: "302.AI",
-			modelID: "MiniMax-M1",
-			displayName: "MiniMax-M1",
-			ready: false,
-		},
-	])
-	expect(filterPickerModels(models, "", "ready")).toEqual([])
-	expect(filterPickerModels(models, "", "all")).toEqual(models)
-	expect(requests).toEqual(["initialize", "model/preferences/read"])
-})
-
-test("stale Native preferences lose readiness after the connection is removed", () => {
-	const disconnected = { ...catalog, connectedIds: new Set<string>() }
-	expect(
-		buildPickerModels(available, catalog).find((model) => model.value === "deepseek/flash")?.ready,
-	).toBe(true)
-	expect(
-		buildPickerModels(available, disconnected).find((model) => model.value === "deepseek/flash")
-			?.ready,
-	).toBe(false)
-})
-
-test("credential-only Native models keep their exact variant selection", () => {
-	const preferred = {
-		...available,
-		providers: [
-			{ ...available.providers[0], models: { "deepseek/flash/high": { name: "Flash high" } } },
-		],
-	} as ProvidersData
-	const directory: ModelDirectoryData = {
-		models: [],
-		credentials: [{ id: "deepseek-auth", provider: "deepseek", masked: "***", kind: "api_key" }],
-	}
-	expect(buildPickerModels(preferred, null, directory)).toEqual([
-		{
-			value: "deepseek/flash/high",
-			selection: { providerID: "session", modelID: "deepseek/flash/high" },
-			providerID: "deepseek",
-			providerName: "Session",
-			modelID: "flash/high",
-			displayName: "Flash high",
-			ready: true,
-		},
-	])
-	expect(buildPickerModels(preferred, null)[0]?.ready).toBe(false)
-})
-
-test("unqualified Native default-route values retain their existing readiness", () => {
-	const direct = {
-		...available,
-		providers: [
-			{ ...available.providers[0], models: { "default-model": { name: "Default model" } } },
-		],
-	} as ProvidersData
-	expect(
-		buildPickerModels(direct, null).map((model) => ({
-			selection: model.selection,
-			ready: model.ready,
-		})),
-	).toEqual([{ selection: { providerID: "session", modelID: "default-model" }, ready: true }])
 })

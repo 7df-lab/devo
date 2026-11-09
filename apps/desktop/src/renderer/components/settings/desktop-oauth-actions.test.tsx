@@ -10,7 +10,7 @@ const writes = mock(() => {})
 const network = mock(() => Promise.reject(new Error("Unexpected network")))
 Object.assign(dom, { devo: { providerOAuth: { login: writes } }, fetch: network })
 const wrap = ({ children }: { children?: ReactNode }) => <div>{children}</div>
-mock.module("@devo/ui/components/button", () => ({ Button: ({ children, onClick }: any) => <button onClick={onClick}>{children}</button> }))
+mock.module("@devo/ui/components/button", () => ({ Button: ({ children, onClick }: any) => <button type="button" onClick={onClick}>{children}</button> }))
 mock.module("@devo/ui/components/input", () => ({ Input: (props: any) => <input {...props} /> }))
 mock.module("@devo/ui/components/spinner", () => ({ Spinner: () => null }))
 mock.module("@devo/ui/components/skeleton", () => ({ Skeleton: () => null }))
@@ -86,3 +86,14 @@ for (const outcome of ["loaded", "error"] as const) {
 		expect(dialog.getAttribute("data-models")).toBe("{}")
 	})
 }
+
+
+test("saved connections are labeled as configured, not as tested connectivity", async () => {
+	catalog = { providers: [{ id: "deepseek", name: "DeepSeek", models: {}, enabled: true, wireApis: [] }],
+		connectedIds: new Set(["deepseek"]), templateIds: new Set(), connectionModels: {} }
+	await render(<ProviderSettings />)
+	expect([...mount.querySelectorAll("h3")].map((heading) => heading.textContent)).toContain("Configured")
+	expect([...mount.querySelectorAll("h3")].map((heading) => heading.textContent)).not.toContain("Connected")
+	expect(mount.textContent).toContain("Saving a connection does not verify model access")
+	expect(writes.mock.calls).toEqual([])
+})
