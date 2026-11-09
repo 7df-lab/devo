@@ -138,6 +138,7 @@ impl ServerRuntime {
             updated_at: now,
             state: devo_protocol::native::item::ItemState::Completed,
             item: devo_protocol::native::item::Item::UserMessage {
+                origin: None,
                 client_user_message_id: None,
                 content: params.content.clone(),
                 entry: match params.mode {
@@ -237,7 +238,7 @@ impl ServerRuntime {
         let Some(latest_user) = history.items.iter().rev().find(|item| {
             matches!(
                 &item.item,
-                devo_protocol::native::item::Item::UserMessage { .. }
+                devo_protocol::native::item::Item::UserMessage { origin: None, .. }
             )
         }) else {
             return Err(self.error_response(

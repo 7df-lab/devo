@@ -20,6 +20,7 @@ import {
 	recentNativeItems,
 } from "./native-item"
 export type { NativeItemEnvelope } from "./native-item"
+export type { HostMessageOrigin } from "./generated/native"
 export {
 	assistantOrReasoningText,
 	compareNativeItems,
@@ -32,6 +33,7 @@ export {
 	userMessageText,
 } from "./native-item"
 import type {
+	HostMessageOrigin,
 	ModelListResult,
 	CredentialListResult,
 	ModelCatalogRefreshParams,
@@ -596,6 +598,7 @@ export type PromptAsyncOutcome =
 	| { outcome: "queued"; queueItemId: string }
 
 export type QueueWireEntry = {
+	origin?: HostMessageOrigin
 	queueItemId: string
 	position: number
 	preview: string
@@ -608,21 +611,31 @@ function parseQueueWireEntries(value: unknown): QueueWireEntry[] {
 	return value
 		.map((entry) => objectRecord(entry))
 		.filter((entry): entry is Record<string, unknown> => !!entry)
-		.map((entry) => ({
-			queueItemId: String(entry.queueItemId ?? ""),
-			position: Number(entry.position ?? 0),
-			preview: String(entry.preview ?? ""),
-			enqueuedAt: typeof entry.enqueuedAt === "string" ? entry.enqueuedAt : undefined,
-			input: Array.isArray(entry.input)
-				? entry.input.map((part) => {
-						const record = objectRecord(part)
-						return {
-							type: String(record?.type ?? "text"),
-							text: typeof record?.text === "string" ? record.text : undefined,
-						}
-					})
-				: undefined,
-		}))
+		.map((entry) => {
+			const origin = objectRecord(entry.origin)
+			if (entry.origin != null && (!origin ||
+				typeof origin.eventId !== "string" || typeof origin.sender !== "string" ||
+				!["agent", "backgroundTask", "schedule"].includes(origin.source) ||
+				!["followUp", "steer"].includes(origin.delivery))) {
+				throw new Error("Invalid host message origin in queue entry")
+			}
+			return {
+				...(origin ? { origin: origin as HostMessageOrigin } : {}),
+				queueItemId: String(entry.queueItemId ?? ""),
+				position: Number(entry.position ?? 0),
+				preview: String(entry.preview ?? ""),
+				enqueuedAt: typeof entry.enqueuedAt === "string" ? entry.enqueuedAt : undefined,
+				input: Array.isArray(entry.input)
+					? entry.input.map((part) => {
+							const record = objectRecord(part)
+							return {
+								type: String(record?.type ?? "text"),
+								text: typeof record?.text === "string" ? record.text : undefined,
+							}
+						})
+					: undefined,
+			}
+		})
 		.filter((entry) => entry.queueItemId.length > 0)
 		.sort((left, right) => left.position - right.position)
 }

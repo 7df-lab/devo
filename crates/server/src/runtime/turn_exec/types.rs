@@ -94,6 +94,7 @@ pub(super) struct QueuedTurnInput {
     /// Native queue entry id of the drained entry (`queue/updated`
     /// `drained` notification, 01 §4.3).
     pub(super) queued_item_id: devo_protocol::native::ids::QueueItemId,
+    pub(super) host_origin: Option<devo_protocol::native::host_message::HostMessageOrigin>,
     pub(super) client_user_message_id: Option<String>,
     pub(super) display_input: String,
     pub(super) input_text: String,

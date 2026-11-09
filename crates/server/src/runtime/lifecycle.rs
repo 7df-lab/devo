@@ -623,6 +623,7 @@ fn materialized_steer_keys(history: &devo_core::CanonicalHistory) -> Materialize
             entry: UserMessageEntry::Steer,
             content,
             client_user_message_id,
+            ..
         } = &envelope.item
         else {
             continue;
@@ -700,6 +701,7 @@ mod tests {
                 updated_at: now,
                 state: devo_protocol::native::item::ItemState::Completed,
                 item: Item::UserMessage {
+                    origin: None,
                     client_user_message_id: Some(client_user_message_id.to_string()),
                     content: vec![UserInput::Text {
                         text: "original steer".to_string(),

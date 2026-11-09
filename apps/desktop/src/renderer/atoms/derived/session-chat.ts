@@ -122,3 +122,12 @@ export function itemDisplayText(envelope: NativeItemEnvelope): string {
 	}
 	return type
 }
+
+/** Host notices and synthetic rows do not replace the latest editable human prompt. */
+export function latestEditableUserTurnIndex(turns: ChatTurn[]): number {
+	for (let index = turns.length - 1; index >= 0; index--) {
+		const envelope = turns[index].userMessage.info
+		if (isUserMessageItem(envelope) && envelope.item.origin == null) return index
+	}
+	return -1
+}

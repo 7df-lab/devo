@@ -160,3 +160,35 @@ describe("Native item ordering", () => {
 		])
 	})
 })
+
+for (const source of ["agent", "backgroundTask", "schedule"]) {
+	test(`${source} origin survives live and replay without replacing human input`, () => {
+		const origin = { eventId: "event-1", source, sender: "worker-1", delivery: "followUp" }
+		const host = userItem("host-1", "turn-host", 2, "2026-11-09T00:00:00Z")
+		host.item = { ...host.item, origin }
+		const human = userItem("optimistic-human", "", 1, "2026-11-09T00:00:00Z")
+		const live = createStore()
+		live.set(upsertItemAtom, human)
+		live.set(upsertItemAtom, host)
+		const replay = createStore()
+		replay.set(setItemsAtom, { sessionId: "s1", items: [human, host] })
+		const project = (store: ReturnType<typeof createStore>) => groupIntoTurns(mergeSessionItems(store.get(itemsFamily("s1"))), [])
+		expect(project(live)).toEqual(project(replay))
+		expect(project(live).map(turn => turn.userMessage.info)).toEqual([human, host])
+	})
+}
+
+import { latestEditableUserTurnIndex } from "./derived/session-chat"
+
+test("human remains editable after host and synthetic messages", () => {
+	const human = userItem("human", "turn-1", 1, "2026-11-09T00:00:00Z")
+	const host = userItem("host", "turn-2", 2, "2026-11-09T00:00:01Z")
+	host.item.origin = { source: "agent", eventId: "e", sender: "worker", delivery: "followUp" }
+	const humanTurns = groupIntoTurns(mergeSessionItems([human]), [])
+	const mixedTurns = groupIntoTurns(mergeSessionItems([human, host]), [])
+	expect(latestEditableUserTurnIndex(humanTurns)).toBe(0)
+	expect(latestEditableUserTurnIndex(mixedTurns)).toBe(0)
+	expect(latestEditableUserTurnIndex(mixedTurns.slice(1))).toBe(-1)
+	const synthetic = { ...host, item: { type: "plan" } }
+	expect(latestEditableUserTurnIndex([...mixedTurns, { id: "plan", userMessage: { info: synthetic }, assistantMessages: [] }])).toBe(0)
+})

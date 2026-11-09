@@ -133,6 +133,7 @@ mod tests {
     #[test]
     fn session_history_entry_item_roundtrips() {
         let entry = SessionHistoryEntry::item(crate::native::item::Item::UserMessage {
+            origin: None,
             client_user_message_id: None,
             content: vec![crate::native::item::UserInput::Text {
                 text: "hello".into(),

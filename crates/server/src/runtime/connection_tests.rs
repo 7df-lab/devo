@@ -4018,6 +4018,7 @@ async fn turn_steer_injects_and_late_unconsumed_degrades_back_to_queue() -> Resu
             && matches!(
                 &item.item,
                 devo_protocol::native::item::Item::UserMessage {
+                    origin: None,
                     client_user_message_id: Some(id),
                     entry: devo_protocol::native::item::UserMessageEntry::Steer,
                     ..
@@ -4152,6 +4153,7 @@ async fn turn_steer_injects_and_late_unconsumed_degrades_back_to_queue() -> Resu
     assert!(items.data.iter().any(|item| matches!(
         &item.item,
         devo_protocol::native::item::Item::UserMessage {
+            origin: None,
             client_user_message_id: Some(id),
             entry: devo_protocol::native::item::UserMessageEntry::Queue,
             ..
@@ -4288,6 +4290,7 @@ async fn queue_persistence_restart_and_steer_restore() -> Result<()> {
     assert!(items.data.iter().any(|item| matches!(
         &item.item,
         devo_protocol::native::item::Item::UserMessage {
+            origin: None,
             client_user_message_id: Some(id),
             entry: devo_protocol::native::item::UserMessageEntry::Queue,
             ..

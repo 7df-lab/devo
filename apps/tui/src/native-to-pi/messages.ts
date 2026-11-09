@@ -141,6 +141,23 @@ export function nativeItemToAgentMessages(envelope: unknown): AgentMessageLike[]
       }
     }
     if (content.length === 0) content.push({ type: "text", text: "" });
+    // Host content is a custom notification, never a user-editable prompt.
+    if (item.origin != null && typeof item.origin === "object") {
+      const origin = item.origin as Record<string, unknown>;
+      const labels: Record<string, string> = {
+        agent: "Agent message",
+        backgroundTask: "Background notification",
+        schedule: "Scheduled notification",
+      };
+      return [{
+        role: "custom",
+        customType: labels[String(origin.source)] ?? "Host notification",
+        content: [{ type: "text", text: `From: ${String(origin.sender ?? "Host")}` }, ...content],
+        display: true,
+        details: { origin: item.origin },
+        timestamp: ts,
+      }];
+    }
     return [{ role: "user", content, timestamp: ts }];
   }
 

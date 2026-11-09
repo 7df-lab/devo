@@ -464,10 +464,13 @@ impl ServerRuntime {
                 return;
             }
             match start_runtime
-                .start_runtime_turn(
+                .deliver_host_message(
                     start_child_session_id,
-                    start_message.clone(),
-                    start_message,
+                    super::host_messages::HostMessage::agent(
+                        start_parent_session_id,
+                        format!("agent:{start_child_session_id}:startup"),
+                        start_message,
+                    ),
                     /*queued_metadata*/ None,
                 )
                 .await
@@ -706,244 +709,25 @@ impl ServerRuntime {
             return;
         }
 
-        let text = completion_notices
-            .iter()
-            .map(|notice| match notice.get("kind").and_then(|k| k.as_str()) {
+        for (index, notice) in completion_notices.iter().enumerate() {
+            let text = match notice.get("kind").and_then(|kind| kind.as_str()) {
                 Some("async_python_completion") => format_python_completion_notice(notice),
                 _ => format_bash_completion_notice(notice),
-            })
-            .collect::<Vec<_>>()
-            .join("\n\n");
-        if let Err(error) = self
-            .start_runtime_turn(session_id, text.clone(), text, None)
-            .await
-        {
-            tracing::warn!(
-                session_id = %session_id,
-                error = %error,
-                "failed to start follow-up turn for async tool completion"
-            );
-            for notice in completion_notices {
-                crate::runtime::kernel_host::push_bash_notice(&sid, notice);
+            };
+            let message = super::host_messages::HostMessage::background(session_id, notice, text);
+            if let Err(error) = self.deliver_host_message(session_id, message, None).await {
+                tracing::warn!(%session_id, %error, "failed to admit background completion");
+                // Restore only events that were not accepted; accepted entries
+                // are already executing or durably queued.
+                for pending in &completion_notices[index..] {
+                    crate::runtime::kernel_host::push_bash_notice(&sid, pending.clone());
+                }
+                break;
             }
         }
     }
 
-    pub(super) async fn start_runtime_turn(
-        self: &Arc<Self>,
-        session_id: SessionId,
-        display_input: String,
-        input_text: String,
-        queued_metadata: Option<serde_json::Value>,
-    ) -> Result<crate::turn::RuntimeTurn, ToolCallError> {
-        let session_handle = self.session(session_id).await.ok_or_else(|| {
-            ToolCallError::InvalidInput(format!("session not found: {session_id}"))
-        })?;
-        let _state_change_guard = session_handle.lock_state_change().await;
-        if let Some((parent_session_id, _)) = self.child_parent_and_path(session_id).await
-            && self
-                .agent_close_requested(parent_session_id, session_id)
-                .await
-        {
-            return Err(ToolCallError::InvalidInput(
-                "child agent is closed".to_string(),
-            ));
-        }
-        if let Some(rollout_path) = session_handle.rollout_path().await.flatten()
-            && self.rollout_store.journal_is_closed(&rollout_path)
-        {
-            return Err(ToolCallError::InvalidInput(format!(
-                "session journal for {session_id} was deleted"
-            )));
-        }
-
-        let reservation = self
-            .session_turn_reservation_snapshot(session_id)
-            .await
-            .ok_or_else(|| {
-                ToolCallError::InvalidInput(format!(
-                    "failed to snapshot session reservation: {session_id}"
-                ))
-            })?;
-        // Resolve admission without round-tripping this actor's own mailbox:
-        // the reservation snapshot already carries the parent/root identity.
-        let lifecycle_root = if reservation.ephemeral {
-            match reservation.parent_session_id {
-                Some(parent_session_id) => self
-                    .resolve_lifecycle_root(parent_session_id, None)
-                    .await
-                    .map_err(|error| ToolCallError::InternalError(error.to_string()))?,
-                None => session_id,
-            }
-        } else {
-            self.resolve_lifecycle_root(session_id, None)
-                .await
-                .map_err(|error| match error {
-                    crate::runtime::session_deletion::LifecycleRootError::MissingEvidence {
-                        ..
-                    } => ToolCallError::InvalidInput(format!(
-                        "session has no lifecycle evidence: {session_id}"
-                    )),
-                    other => ToolCallError::InternalError(other.to_string()),
-                })?
-        };
-        let _lifecycle_admission = self
-            .begin_lifecycle_operation_for_root(lifecycle_root)
-            .map_err(ToolCallError::InvalidInput)?;
-
-        if reservation.max_turns.is_some_and(|max_turns| {
-            max_turns == 0
-                || reservation
-                    .active_turn
-                    .as_ref()
-                    .is_some_and(|turn| turn.native.sequence >= max_turns)
-                || reservation
-                    .latest_turn
-                    .as_ref()
-                    .is_some_and(|turn| turn.native.sequence >= max_turns)
-        }) {
-            return Err(ToolCallError::InvalidInput(
-                "agent maximum turn count reached".to_string(),
-            ));
-        }
-
-        if let Some(active_turn) = reservation.active_turn.clone() {
-            let item = devo_protocol::PendingInputItem::new(
-                devo_protocol::PendingInputKind::UserText { text: input_text },
-                queued_metadata,
-                Utc::now(),
-            );
-            if let Some((parent_session_id, _)) = self.child_parent_and_path(session_id).await {
-                self.register_background_work(
-                    parent_session_id,
-                    format!("agent:{session_id}:queued:{}", item.id),
-                );
-            }
-            session_handle
-                .enqueue_pending_turn_input(item.clone())
-                .await;
-            if !reservation.ephemeral
-                && let Err(error) = self
-                    .deps
-                    .db
-                    .push_pending(&session_id, QueueType::Turn, &item)
-            {
-                tracing::warn!(
-                    session_id = %session_id,
-                    error = %error,
-                    "failed to persist agent follow-up pending message"
-                );
-            }
-            return Ok(active_turn);
-        }
-
-        let turn_config = reservation
-            .runtime_context
-            .resolve_session_turn_config(
-                &reservation.summary,
-                session_model_selection(&reservation.summary),
-                reservation.summary.settings.reasoning_effort.clone(),
-            )
-            .map_err(|error| ToolCallError::InvalidInput(error.to_string()))?;
-        let resolved_request = turn_config
-            .model
-            .resolve_reasoning_effort_selection(turn_config.reasoning_effort_selection.as_deref());
-
-        let request_model = turn_config.provider_request_model(&resolved_request.request_model);
-        let now = Utc::now();
-        let sequence = reservation
-            .latest_turn
-            .as_ref()
-            .map_or(1, |turn| turn.native.sequence + 1);
-        let native_turn_id = devo_protocol::native::ids::TurnId::new();
-        let turn_id = native_turn_id;
-        let native_session_id = reservation.summary.native.id;
-        let runtime_turn = crate::turn::RuntimeTurn {
-            native: devo_protocol::native::turn::Turn {
-                id: native_turn_id,
-                session_id: native_session_id,
-                sequence,
-                kind: devo_protocol::native::turn::TurnKind::Regular,
-                status: devo_protocol::native::turn::TurnStatus::InProgress,
-                model: devo_protocol::native::model::ModelBinding {
-                    provider: turn_config
-                        .model_binding_id
-                        .clone()
-                        .unwrap_or_else(|| "unknown".to_string()),
-                    model: request_model,
-                    variant: turn_config.variant.clone(),
-                    reasoning_effort: resolved_request.effective_reasoning_effort,
-                },
-                collaboration_mode: Some(devo_protocol::CollaborationMode::Build),
-                started_at: now,
-                completed_at: None,
-                error: None,
-                usage: None,
-            },
-            extras: crate::turn::RuntimeTurnExtras {
-                request_thinking: resolved_request.request_thinking.clone(),
-                stop_reason: None,
-                failure_reason: None,
-            },
-        };
-
-        session_handle
-            .begin_runtime_turn(runtime_turn.clone(), turn_config.clone())
-            .await;
-
-        if let Err(error) = self.append_turn_start(session_id, &runtime_turn).await {
-            let _ = session_handle.clear_active_turn_if_matches(turn_id).await;
-            return Err(error);
-        }
-
-        self.broadcast_notification(
-            devo_protocol::native::event::ServerNotification::session_status_changed(
-                session_id,
-                SessionStatus::Active,
-                /*active_turn_id*/ None,
-            ),
-        )
-        .await;
-        self.broadcast_notification(
-            devo_protocol::native::event::ServerNotification::TurnStarted {
-                turn: Box::new(runtime_turn.native.clone()),
-            },
-        )
-        .await;
-
-        self.add_active_turn_user_text(session_id, turn_id, display_input.clone())
-            .await;
-        let runtime = Arc::clone(self);
-        let turn_for_task = runtime_turn.clone();
-        let turn_config_for_task = turn_config.clone();
-        if let Some(parent_session_id) = reservation.parent_session_id {
-            self.active_turns
-                .copy_connection_from_parent(session_id, parent_session_id)
-                .await;
-        }
-        self.spawn_active_runtime_turn_task(session_id, runtime_turn.clone(), None, async move {
-            runtime
-                .execute_turn(ExecuteTurnRequest {
-                    session_id,
-                    turn: turn_for_task,
-                    turn_config: turn_config_for_task,
-                    display_input,
-                    client_user_message_id: None,
-                    input: input_text,
-                    input_messages: Vec::new(),
-                    input_images: Vec::new(),
-                    input_image_paths: Vec::new(),
-                    collaboration_mode: devo_protocol::CollaborationMode::Build,
-                    input_mode: TurnInputMode::VisibleUserMessage,
-                    user_message_already_emitted: false,
-                })
-                .await;
-        })
-        .await;
-        Ok(runtime_turn)
-    }
-
-    async fn append_turn_start(
+    pub(super) async fn append_turn_start(
         self: &Arc<Self>,
         session_id: SessionId,
         turn: &crate::turn::RuntimeTurn,
@@ -1033,10 +817,13 @@ impl ServerRuntime {
                 .await;
             }
             let result = self
-                .start_runtime_turn(
+                .deliver_host_message(
                     child_session_id,
-                    message.content.clone(),
-                    message.content,
+                    super::host_messages::HostMessage::agent(
+                        message.from_session_id,
+                        message.message_id,
+                        message.content,
+                    ),
                     Some(subagent_usage_owner_pending_metadata(
                         message.from_session_id,
                         parent_turn_id,
@@ -1384,7 +1171,7 @@ impl ServerRuntime {
         }
     }
 
-    async fn agent_close_requested(
+    pub(super) async fn agent_close_requested(
         &self,
         parent_session_id: SessionId,
         child_session_id: SessionId,
@@ -1709,6 +1496,10 @@ impl ServerRuntime {
         };
         let mut messages = Vec::new();
         for item in items.iter().rev() {
+            let origin = match &item.item {
+                devo_protocol::native::item::Item::UserMessage { origin, .. } => origin.as_ref(),
+                _ => None,
+            };
             let text = match &item.item {
                 devo_protocol::native::item::Item::UserMessage { content, .. } => {
                     let text = content
@@ -1721,7 +1512,11 @@ impl ServerRuntime {
                         })
                         .collect::<Vec<_>>()
                         .join("\n");
-                    Some(format!("user: {text}"))
+                    Some(if origin.is_some() {
+                        format!("host: {text}")
+                    } else {
+                        format!("user: {text}")
+                    })
                 }
                 devo_protocol::native::item::Item::AssistantMessage { text, .. } => {
                     Some(format!("assistant: {text}"))
@@ -1735,10 +1530,15 @@ impl ServerRuntime {
             if text.chars().count() > max_chars {
                 text = text.chars().take(max_chars).collect::<String>() + "…";
             }
-            messages.push(serde_json::json!({
-                "role": "message",
+            let mut message = serde_json::json!({
+                "role": if origin.is_some() { "host" } else { "message" },
                 "text": text,
-            }));
+            });
+            if let Some(origin) = origin {
+                message["origin"] = serde_json::json!(origin);
+                message["authorityNotice"] = devo_core::HOST_MESSAGE_AUTHORITY_NOTICE.into();
+            }
+            messages.push(message);
             if messages.len() >= limit {
                 break;
             }

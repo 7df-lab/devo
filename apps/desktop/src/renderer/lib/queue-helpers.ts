@@ -1,4 +1,7 @@
+import type { HostMessageOrigin } from "./host-message"
+
 export interface QueueWireEntry {
+	origin?: HostMessageOrigin
 	queueItemId: string
 	position: number
 	preview: string

@@ -261,6 +261,15 @@ pub fn build_session_tree(history: &CanonicalHistory) -> (Vec<SessionTreeNode>, 
 
 fn tree_label(envelope: &ItemEnvelope) -> Option<String> {
     match &envelope.item {
+        Item::UserMessage {
+            content,
+            origin: Some(origin),
+            ..
+        } => Some(format!(
+            "Host notification from {}: {}",
+            origin.sender,
+            user_text(content).chars().take(80).collect::<String>()
+        )),
         Item::UserMessage { content, .. } => Some(user_text(content).chars().take(80).collect()),
         Item::AssistantMessage { text, .. } => Some(text.chars().take(80).collect()),
         Item::Reasoning { text, .. } => Some(format!(
@@ -316,6 +325,20 @@ fn project_tree_entry(envelope: &ItemEnvelope, parent_id: Option<&ItemId>) -> Js
         .map(|id| json!(id.as_str()))
         .unwrap_or(JsonValue::Null);
     match &envelope.item {
+        Item::UserMessage {
+            content,
+            origin: Some(origin),
+            ..
+        } => json!({
+            "type": "custom_message",
+            "id": envelope.id.as_str(),
+            "parentId": parent,
+            "timestamp": timestamp,
+            "customType": "Host notification",
+            "display": true,
+            "content": format!("From: {}\n{}", origin.sender, user_text(content)),
+            "details": { "origin": origin, "authorityNotice": crate::HOST_MESSAGE_AUTHORITY_NOTICE },
+        }),
         Item::UserMessage { content, .. } => json!({
             "type": "message",
             "id": envelope.id.as_str(),
@@ -433,6 +456,7 @@ mod active_path_items_tests {
 
     fn user_message(text: &str) -> Item {
         Item::UserMessage {
+            origin: None,
             client_user_message_id: None,
             content: vec![UserInput::Text {
                 text: text.to_owned(),

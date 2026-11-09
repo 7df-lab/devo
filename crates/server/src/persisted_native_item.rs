@@ -49,6 +49,7 @@ pub(crate) fn is_user_message(item: &Item) -> bool {
     matches!(
         item,
         Item::UserMessage {
+            origin: None,
             entry: UserMessageEntry::TurnStart | UserMessageEntry::Queue,
             ..
         }
@@ -172,6 +173,7 @@ pub(crate) fn user_message_item(
         });
     }
     Item::UserMessage {
+        origin: None,
         client_user_message_id: None,
         content,
         entry,

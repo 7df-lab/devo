@@ -394,6 +394,7 @@ fn write_session_transcript(
                     user_at,
                     ItemState::Completed,
                     Item::UserMessage {
+                        origin: None,
                         client_user_message_id: None,
                         content: vec![UserInput::Text {
                             text: format!(
@@ -509,6 +510,7 @@ fn write_hot_parent_traffic(
                 at + Duration::milliseconds(2),
                 ItemState::Completed,
                 Item::UserMessage {
+                    origin: None,
                     client_user_message_id: None,
                     content: vec![UserInput::Text {
                         text: format!(
@@ -569,6 +571,7 @@ fn write_child_comm_rounds(
                 at,
                 ItemState::Completed,
                 Item::UserMessage {
+                    origin: None,
                     client_user_message_id: None,
                     content: vec![UserInput::Text {
                         text: format!("from parent {parent_id} round={round} child={child_index}"),

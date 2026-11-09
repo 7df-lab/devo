@@ -215,14 +215,14 @@ impl ServerRuntime {
         turn: &crate::turn::RuntimeTurn,
         display_input: &str,
         input_image_paths: &[std::path::PathBuf],
-        emits_user_message: bool,
+        input_mode: Option<&TurnInputMode>,
         client_user_message_id: Option<&str>,
     ) {
         state.turn_approval_cache = crate::execution::ApprovalGrantCache::default();
         // Emit the visible user bubble before workspace baseline capture so the
         // TUI is not blocked on git I/O (L2-DES-APP-010 first-party latency).
-        if emits_user_message {
-            let user_message = if let Some(client_user_message_id) = client_user_message_id {
+        if let Some(input_mode) = input_mode.filter(|mode| mode.emits_user_message()) {
+            let mut user_message = if let Some(client_user_message_id) = client_user_message_id {
                 crate::runtime::items::native_user_message_item_with_client_message_id(
                     display_input.to_string(),
                     input_image_paths,
@@ -236,6 +236,13 @@ impl ServerRuntime {
                     devo_protocol::native::item::UserMessageEntry::Queue,
                 )
             };
+            if let devo_protocol::native::item::Item::UserMessage {
+                origin: item_origin,
+                ..
+            } = &mut user_message
+            {
+                *item_origin = input_mode.host_origin().cloned();
+            }
             self.emit_turn_native_item(
                 state.summary.native.id,
                 *turn.native_turn_id(),

@@ -2184,3 +2184,49 @@ test("explicit login setup ignores API keys and MCP OAuth", async () => {
   assert.deepEqual(fake.requests, []);
   await conn.dispose();
 });
+
+for (const [source, label] of Object.entries({ agent: "Agent message", backgroundTask: "Background notification", schedule: "Scheduled notification" })) {
+  test(`fork picker labels ${source} and retains context-only fork identity`, async () => {
+    const origin = { source, sender: "worker-1", eventId: "event-1", delivery: "followUp" };
+    const { conn, fake } = await bootConnection([
+      (method, _params, respond) => {
+        if (method === "session/items/list") {
+          respond({ data: [
+            { id: "human-1", turnId: "turn_human", item: { type: "userMessage", content: [{ type: "text", text: "Human request" }] } },
+            { id: "host-1", turnId: "turn_host", item: { type: "userMessage", content: [{ type: "text", text: "Host result ready" }], origin } },
+          ], nextCursor: null });
+          return true;
+        }
+        if (method === "session/tree/read") {
+          respond({ tree: [{ entry: { id: "human-1", parentId: null }, children: [
+            { entry: { id: "host-1", parentId: "human-1", type: "custom_message", details: { origin } }, children: [] },
+          ] }], leafId: "host-1" });
+          return true;
+        }
+        return false;
+      },
+    ]);
+    try {
+      const messages = await conn.getUserMessagesForForking();
+      assert.deepEqual(messages, [
+        { entryId: "turn_human", text: "Human request" },
+        { entryId: "turn_host", text: `[${label} · worker-1] Host result ready` },
+      ]);
+      const { UserMessageSelectorComponent } = await import("../lib/coding-agent/src/modes/interactive/components/user-message-selector.js");
+      const { initTheme } = await import("../lib/coding-agent/src/modes/interactive/theme/theme.js");
+      initTheme("dark", false);
+      const selector = new UserMessageSelectorComponent(messages.map(message => ({ id: message.entryId, text: message.text })), () => {}, () => {}, "turn_host");
+      const rendered = selector.render(120).join("\n").replace(/\x1b\[[0-9;]*m/g, "");
+      assert.ok(rendered.includes(label));
+      assert.ok(rendered.includes("worker-1"));
+      assert.ok(rendered.includes("Host result ready"));
+      assert.ok(rendered.includes("Select a message"));
+      const result = await conn.fork(messages[1].entryId);
+      assert.equal(result.cancelled, false);
+      assert.equal("selectedText" in result, false);
+      assert.equal(fake.requests.find(request => request.method === "session/fork")?.params.atTurnId, "turn_host");
+    } finally {
+      await conn.dispose();
+    }
+  });
+}
