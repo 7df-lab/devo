@@ -511,3 +511,154 @@ while not Path('queue-installed').exists():
     );
     Ok(())
 }
+
+#[tokio::test]
+async fn closed_failure_stays_settled_after_restart() -> Result<()> {
+    let home = TempDir::new()?;
+    let provider = Arc::new(ScriptedProvider::new([
+        ScriptedProvider::ipython_code_tool_call(
+            r#"
+from pathlib import Path
+worker = await rlm.spawn('Fail the model request', name='failure')
+result = (await rlm.collect(worker, timeout_ms=10000))[0]
+assert not result.settled and result.status == 'waiting_for_resume', result
+assert result.requires_resume and result.answer_text is None, result
+assert 'scripted provider stream script exhausted' in result.error, result
+await rlm.delete_subagent(worker.rlm_child_id)
+closed = (await rlm.collect(worker))[0]
+assert closed.settled and not closed.requires_resume and closed.status == 'failed', closed
+assert closed.error == result.error, closed
+Path('failure-ok').write_text('reported')
+await rlm.end_turn()
+"#,
+        ),
+    ]));
+    let runtime = build_runtime(home.path(), provider.clone())?;
+    let (connection, mut notifications) = initialize_connection(&runtime).await?;
+    let parent = start_parent_session(&runtime, connection, home.path()).await?;
+    start_turn_with_approval_policy(
+        &runtime,
+        connection,
+        parent,
+        "Collect failure",
+        Some("never"),
+    )
+    .await?;
+    let completed =
+        wait_for_session_notification(&mut notifications, "turn/completed", parent).await?;
+    assert_eq!(completed["params"]["turn"]["status"], json!("completed"));
+    assert_eq!(
+        std::fs::read_to_string(home.path().join("failure-ok"))?,
+        "reported"
+    );
+    runtime.shutdown().await;
+    drop(runtime);
+    let provider = Arc::new(ScriptedProvider::new([
+        ScriptedProvider::ipython_code_tool_call(
+            r#"
+from pathlib import Path
+closed = (await rlm.collect('failure'))[0]
+import json
+Path('after-restart.json').write_text(json.dumps({'status': closed.status, 'settled': closed.settled, 'requires_resume': closed.requires_resume}))
+assert closed.settled and not closed.requires_resume, closed
+await rlm.end_turn()
+"#,
+        ),
+    ]));
+    let restored = build_runtime(home.path(), provider.clone())?;
+    restored.load_persisted_sessions().await?;
+    let (connection, mut notifications) = initialize_connection(&restored).await?;
+    let response = restored
+        .handle_incoming(
+            connection,
+            json!({
+                "id":81,"method":"session/resume","params":{"sessionId":parent}
+            }),
+        )
+        .await
+        .context("resume parent")?;
+    assert!(response.get("error").is_none(), "{response}");
+    start_turn_with_approval_policy(
+        &restored,
+        connection,
+        parent,
+        "Collect closed failure",
+        Some("never"),
+    )
+    .await?;
+    wait_for_session_notification(&mut notifications, "turn/completed", parent).await?;
+    let actual: serde_json::Value =
+        serde_json::from_slice(&std::fs::read(home.path().join("after-restart.json"))?)?;
+    assert_eq!(
+        actual,
+        json!({"status":"failed", "settled":true, "requires_resume":false})
+    );
+    Ok(())
+}
+
+#[tokio::test]
+async fn explicitly_closed_running_child_stays_settled_after_restart() -> Result<()> {
+    let home = TempDir::new()?;
+    let first_provider = Arc::new(ScriptedProvider::pending());
+    let first = build_runtime(home.path(), first_provider.clone())?;
+    let (connection, _) = initialize_connection(&first).await?;
+    let parent = start_parent_session(&first, connection, home.path()).await?;
+    spawn_child_named(
+        &first,
+        parent,
+        "Keep working",
+        Some("none"),
+        Some("recoverable"),
+    )
+    .await?;
+    wait_for_stream_calls(&first_provider, 1).await?;
+    request_agent_close(&first, connection, parent, "recoverable").await?;
+    first.shutdown().await;
+    drop(first);
+    let provider = Arc::new(ScriptedProvider::new([
+        ScriptedProvider::ipython_code_tool_call(
+            r#"
+from pathlib import Path
+result = (await rlm.collect('recoverable', timeout_ms=300000))[0]
+assert result.status == 'interrupted' and not result.requires_resume, result
+assert result.settled and result.answer_text is None, result
+Path('shutdown-recovery-ok').write_text('no replay')
+await rlm.end_turn()
+"#,
+        ),
+    ]));
+    let restored = build_runtime(home.path(), provider.clone())?;
+    restored.load_persisted_sessions().await?;
+    let (connection, mut notifications) = initialize_connection(&restored).await?;
+    let response = restored
+        .handle_incoming(
+            connection,
+            json!({
+                "id": 81, "method": "session/resume", "params": {"sessionId": parent}
+            }),
+        )
+        .await
+        .context("resume parent")?;
+    assert!(response.get("error").is_none(), "{response}");
+    start_turn_with_approval_policy(
+        &restored,
+        connection,
+        parent,
+        "Inspect recovery",
+        Some("never"),
+    )
+    .await?;
+    let completed =
+        wait_for_session_notification(&mut notifications, "turn/completed", parent).await?;
+    assert_eq!(
+        completed["params"]["turn"]["status"],
+        json!("completed"),
+        "{completed}"
+    );
+    assert_eq!(
+        std::fs::read_to_string(home.path().join("shutdown-recovery-ok"))?,
+        "no replay"
+    );
+    assert_eq!(provider.stream_calls(), 1);
+    Ok(())
+}
