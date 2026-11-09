@@ -13,6 +13,18 @@
 Detailed runtime, installation, and configuration guidance. For the short
 introduction and quick start, see the README.
 
+## Recovering after cancelling provider setup
+
+Cancelling first-run setup leaves the TUI open without a configured model. To
+continue, enter `/login` in the TUI to open provider authentication. Connect the
+provider you intend to use, then enter `/model` to select a model. `/login` and
+`/model` are local UI commands and do not need a working model to open.
+
+If `/model` is empty, use `/login` first rather than repeatedly reopening the
+empty model list. Closing either menu does not complete setup; you can reopen
+it with the same command. The removed `devo onboard` CLI command is not a
+recovery path. Run `devo` first if you are currently at a shell prompt.
+
 ## Goals and managed background work
 
 An active goal continues after a turn ends naturally. If that session still owns
