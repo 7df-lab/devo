@@ -25,8 +25,14 @@ export function subagentStatus(session: NativeSession): string {
 
 export function SubagentsButton({ agent }: { agent: Agent }) {
 	const [open, setOpen] = useState(false)
+	const [scope, setScope] = useState<"all" | "attention">("all")
 	const navigate = useNavigate()
 	const roster = useSubagentRoster(agent.sessionId, agent.directory, open)
+	const attention = roster.sessions.filter(
+		(session) =>
+			session.flags.includes("waitingApproval") || session.flags.includes("waitingUserInput"),
+	)
+	const visibleSessions = scope === "attention" ? attention : roster.sessions
 	return (
 		<Popover open={open} onOpenChange={setOpen}>
 			<PopoverTrigger
@@ -60,6 +66,28 @@ export function SubagentsButton({ agent }: { agent: Agent }) {
 				<PopoverDescription className="text-xs">
 					Direct children of this session. Updates automatically while open.
 				</PopoverDescription>
+				<fieldset
+					className="m-0 flex min-w-0 flex-wrap gap-1 border-0 p-0"
+					aria-label="Filter subagents"
+				>
+					{(["all", "attention"] as const).map((value) => (
+						<button
+							key={value}
+							type="button"
+							aria-pressed={scope === value}
+							onClick={() => setScope(value)}
+							className={`rounded-md px-2.5 py-1 text-xs transition-colors focus-visible:outline-2 focus-visible:outline-ring ${scope === value ? "bg-muted text-foreground" : "text-muted-foreground hover:bg-muted/60"}`}
+						>
+							{value === "attention"
+								? `Needs attention (${attention.length})`
+								: `All (${roster.sessions.length})`}
+						</button>
+					))}
+				</fieldset>
+				<p className="text-[11px] text-muted-foreground">
+					Filters and counts cover loaded children. Needs attention means waiting for approval or
+					input.
+				</p>
 				{roster.error && (
 					<p role="alert" className="text-xs text-destructive">
 						{roster.error} {roster.sessions.length > 0 && "Showing the last available state."}
@@ -68,15 +96,17 @@ export function SubagentsButton({ agent }: { agent: Agent }) {
 				{roster.loading && (
 					<output className="text-xs text-muted-foreground">Checking subagents…</output>
 				)}
-				{!roster.loading && !roster.error && roster.sessions.length === 0 && (
+				{!roster.loading && !roster.error && visibleSessions.length === 0 && (
 					<p className="py-3 text-xs text-muted-foreground">
-						{roster.nextCursor
-							? "No subagents found in the checked pages yet."
-							: "No saved subagents in this session."}
+						{scope === "attention"
+							? "No loaded subagents are waiting for approval or input."
+							: roster.nextCursor
+								? "No subagents found in the checked pages yet."
+								: "No saved subagents in this session."}
 					</p>
 				)}
 				<ul aria-label="Subagent sessions" className="max-h-72 overflow-y-auto">
-					{roster.sessions.map((session) => {
+					{visibleSessions.map((session) => {
 						const stop = roster.stopState(session.id)
 						return (
 							<li key={session.id}>

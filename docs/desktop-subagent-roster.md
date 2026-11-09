@@ -21,6 +21,27 @@ over working; queued idle work is labeled **Queued**. **Idle** means no active
 turn, not successful task completion or a promise that saved work will resume.
 Opening the child lets the existing conversation/recovery UI show more detail.
 
+## Finding children that need attention
+
+**All** shows every loaded child. **Needs attention** shows those with Native
+`waitingApproval` or `waitingUserInput` flags, preserving their roster order.
+Working, queued, compacting and idle alone do not qualify. A child with both
+waiting flags is counted once. Archived children retain their canonical flags
+and archive label rather than silently disappearing from this view.
+
+The counts and filter cover **loaded children only**, not the entire saved
+roster. An empty filtered view does not mean later pages contain no waiting
+children. **Check more sessions** remains available when a cursor remains;
+selecting a filter does not fetch more pages or start any extra polling.
+Native events and existing reconciliation update the visible rows and counts.
+Disconnected data retains the existing last-state warning.
+
+The selected filter survives Close/Reopen for this header's lifetime. **All**
+restores the other rows. Navigation and Stop still target the selected child's
+exact ID. Filtering neither sends approvals/replies nor cancels or replays a
+pending Stop request; its pending/error state remains available when the row
+is shown again. Open a waiting child to use the existing conversation controls.
+
 ## Live updates, reconciliation and cost
 
 - While open, the roster applies validated Native creation, metadata, status and

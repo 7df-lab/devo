@@ -42,6 +42,7 @@ Object.assign(globalThis, {
 	IS_REACT_ACT_ENVIRONMENT: true,
 })
 let page: SessionRosterPage = { data: [], nextCursor: null }
+let pages: SessionRosterPage[] = []
 let calls = 0
 const navigations: unknown[] = []
 const aborts: Array<{ sessionId: string; serverUrl: string | null }> = []
@@ -67,7 +68,7 @@ mock.module("../services/connection-manager", () => ({
 				},
 				roster: async () => {
 					calls++
-					return page
+					return pages.shift() ?? page
 				},
 			},
 		}
@@ -125,10 +126,181 @@ afterEach(async () => {
 	expect(listeners.size).toBe(0)
 	getDefaultStore().set(serverUrlAtom, null)
 	page = { data: [], nextCursor: null }
+	pages = []
 	calls = 0
 	navigations.length = 0
 	aborts.length = 0
 	interrupt = async () => {}
+})
+
+function filter(label: string) {
+	const element = [
+		...document.querySelectorAll<HTMLButtonElement>('[aria-label="Filter subagents"] button'),
+	].find((button) => button.textContent?.startsWith(label))
+	if (!element) throw new Error(`Missing ${label} filter`)
+	return element
+}
+
+describe("subagent attention filter", () => {
+	test("filters only approval/input flags, preserving order and exact-ID navigation", async () => {
+		page = {
+			data: [
+				{ ...child, id: "working", status: "active" },
+				{
+					...child,
+					id: "approval",
+					title: "Review change",
+					status: "active",
+					flags: ["waitingApproval"],
+				},
+				{ ...child, id: "queued", queuedCount: 2 },
+				{ ...child, id: "input", title: "Choose target", flags: ["waitingUserInput"] },
+				{ ...child, id: "compacting", flags: ["compacting", "updatingGoal"] },
+				{
+					...child,
+					id: "both",
+					title: "Both flags",
+					flags: ["waitingApproval", "waitingUserInput"],
+					archived: true,
+				},
+			],
+			nextCursor: null,
+		}
+		await render()
+		await click(button("Subagents"))
+		expect(filter("All").textContent).toBe("All (6)")
+		expect(filter("All").getAttribute("aria-pressed")).toBe("true")
+		expect(filter("Needs attention").textContent).toBe("Needs attention (3)")
+		await click(filter("Needs attention"))
+		const rows = [...document.querySelectorAll("ul[aria-label='Subagent sessions'] li")]
+		expect(rows.map((row) => row.querySelector(".font-medium")?.textContent)).toEqual([
+			"Review change",
+			"Choose target",
+			"Both flags",
+		])
+		expect(filter("Needs attention").getAttribute("aria-pressed")).toBe("true")
+		expect(document.body.textContent).toContain("Filters and counts cover loaded children")
+		expect(calls).toBe(1)
+		expect(aborts).toEqual([])
+		await click(rows[1].querySelector("button") as HTMLButtonElement)
+		expect(navigations).toEqual([
+			{
+				to: "/project/$projectSlug/session/$sessionId",
+				params: { projectSlug: "repo-1", sessionId: "input" },
+			},
+		])
+	})
+
+	test("live flags, creation and deletion update the filtered rows without extra reads", async () => {
+		page = { data: [child], nextCursor: null }
+		await render()
+		await click(button("Subagents"))
+		await click(filter("Needs attention"))
+		expect(document.body.textContent).toContain(
+			"No loaded subagents are waiting for approval or input",
+		)
+		await act(async () =>
+			emit({ type: "patch", sessionId: child.id, patch: { flags: ["waitingUserInput"] } }),
+		)
+		expect(filter("Needs attention").textContent).toBe("Needs attention (1)")
+		expect(document.querySelectorAll("ul li")).toHaveLength(1)
+		await act(async () => {
+			emit({ type: "patch", sessionId: child.id, patch: { flags: [] } })
+			emit({
+				type: "upsert",
+				session: { ...child, id: "new", title: "New approval", flags: ["waitingApproval"] },
+			})
+		})
+		expect(document.querySelector("ul")?.textContent).toContain("New approval")
+		expect(document.querySelector("ul")?.textContent).not.toContain("Check runtime")
+		await act(async () => emit({ type: "delete", sessionIds: ["new"] }))
+		expect(filter("Needs attention").textContent).toBe("Needs attention (0)")
+		expect(filter("All").textContent).toBe("All (1)")
+		expect(calls).toBe(1)
+		expect(aborts).toEqual([])
+	})
+
+	test("an empty filtered page does not hide explicit pagination or scan automatically", async () => {
+		pages = Array.from({ length: 5 }, (_, index) => ({
+			data: [{ ...child, id: `idle-${index}` }],
+			nextCursor: String(index + 1),
+		}))
+		page = { data: [{ ...child, id: "waiting", flags: ["waitingApproval"] }], nextCursor: null }
+		await render()
+		await click(button("Subagents"))
+		await click(filter("Needs attention"))
+		expect(calls).toBe(5)
+		expect(filter("All").textContent).toBe("All (5)")
+		expect(document.body.textContent).toContain("No loaded subagents are waiting")
+		const more = [...document.querySelectorAll("button")].find((button) =>
+			button.textContent?.startsWith("Check more sessions"),
+		)
+		if (!more) throw new Error("Missing pagination")
+		await click(more)
+		expect(calls).toBe(6)
+		expect(filter("All").textContent).toBe("All (6)")
+		expect(filter("Needs attention").textContent).toBe("Needs attention (1)")
+		expect(document.querySelectorAll("ul li")).toHaveLength(1)
+		expect(document.body.textContent).not.toContain("No loaded subagents are waiting")
+	})
+
+	test("close/reopen preserves the view and All restores the unfiltered rows", async () => {
+		page = {
+			data: [child, { ...child, id: "waiting", flags: ["waitingApproval"] }],
+			nextCursor: null,
+		}
+		await render()
+		await click(button("Subagents"))
+		await click(filter("Needs attention"))
+		await click(button("Close subagents"))
+		await click(button("Subagents"))
+		expect(filter("Needs attention").getAttribute("aria-pressed")).toBe("true")
+		expect(document.querySelectorAll("ul li")).toHaveLength(1)
+		await click(filter("All"))
+		expect(document.querySelectorAll("ul li")).toHaveLength(2)
+		expect(calls).toBe(2)
+		expect(aborts).toEqual([])
+		expect(navigations).toEqual([])
+	})
+
+	test("hiding a row does not drop or replay a pending stop or its error", async () => {
+		const pending = deferred()
+		interrupt = () => pending.promise
+		page = { data: [{ ...child, status: "active" }], nextCursor: null }
+		await render()
+		await click(button("Subagents"))
+		await click(button("Stop Check runtime"))
+		await click(filter("Needs attention"))
+		expect(document.querySelectorAll("ul li")).toHaveLength(0)
+		await click(filter("All"))
+		expect(button("Stop Check runtime").disabled).toBe(true)
+		await click(filter("Needs attention"))
+		await act(async () => pending.reject(new Error("Connection lost")))
+		await click(filter("All"))
+		expect(document.querySelector('[role="alert"]')?.textContent).toContain(
+			"Stop was not confirmed",
+		)
+		expect(aborts).toHaveLength(1)
+		expect(navigations).toEqual([])
+	})
+
+	test("disconnection keeps the last-state warning and changing servers replaces filtered rows", async () => {
+		page = { data: [{ ...child, flags: ["waitingApproval"] }], nextCursor: null }
+		await render()
+		await click(button("Subagents"))
+		await click(filter("Needs attention"))
+		await act(async () => emit({ type: "disconnected" }))
+		expect(document.querySelector('[role="alert"]')?.textContent).toContain(
+			"Showing the last available state",
+		)
+		expect(filter("Needs attention").textContent).toBe("Needs attention (1)")
+		page = { data: [child], nextCursor: null }
+		await act(async () => getDefaultStore().set(serverUrlAtom, "http://second-runtime"))
+		expect(document.querySelector('[role="alert"]')).toBeNull()
+		expect(filter("Needs attention").textContent).toBe("Needs attention (0)")
+		expect(document.querySelectorAll("ul li")).toHaveLength(0)
+		expect(calls).toBe(2)
+	})
 })
 
 describe("subagent labels", () => {
