@@ -37,7 +37,7 @@ function findUndoTarget(sessionId: string, revertMessageId?: string): string | n
 	let lastUserMsgId: string | null = null
 	for (let i = items.length - 1; i >= 0; i--) {
 		const item = items[i]
-		if (!isUserMessageItem(item)) continue
+		if (!isUserMessageItem(item) || item.item.origin != null) continue
 		if (revertMessageId && item.id >= revertMessageId) continue
 		lastUserMsgId = item.id
 		break
@@ -62,10 +62,12 @@ function findRedoTarget(sessionId: string, revertMessageId: string): string | nu
 	return null
 }
 
-function getUserMessageText(sessionId: string, messageId: string): string {
+function getUserMessageText(sessionId: string, messageId: string): string | undefined {
 	const items = appStore.get(itemsFamily(sessionId))
 	const envelope = items?.find((item) => item.id === messageId)
-	return envelope ? userMessageText(envelope) : ""
+	return envelope && isUserMessageItem(envelope) && envelope.item.origin == null
+		? userMessageText(envelope)
+		: undefined
 }
 
 export interface UseSessionRevertResult {
@@ -101,15 +103,16 @@ export function useSessionRevert(
 		const client = getProjectClient(directory)
 		if (!client) return undefined
 
+		const targetId = findUndoTarget(sessionId, revertInfo?.itemId)
+		if (!targetId) return undefined
+
 		const sessionEntry = appStore.get(sessionFamily(sessionId))
 		if (sessionEntry?.status?.type === "busy") {
 			await client.session.abort({ sessionId: sessionId })
 		}
 
-		const targetId = findUndoTarget(sessionId, revertInfo?.itemId)
-		if (!targetId) return undefined
-
 		const userText = getUserMessageText(sessionId, targetId)
+		if (userText === undefined) return undefined
 		await client.session.revert({ sessionId: sessionId })
 		return userText
 	}, [directory, sessionId, revertInfo])

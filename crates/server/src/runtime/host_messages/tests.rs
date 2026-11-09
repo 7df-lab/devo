@@ -285,7 +285,9 @@ async fn host_followups_keep_origin_in_queue_live_model_and_replay() -> Result<(
             origin: Some(_), ..
         } = item.item
         {
-            assert!(!crate::persisted_native_item::is_user_message(&item.item));
+            assert!(!crate::persisted_native_item::is_human_turn_input(
+                &item.item
+            ));
         }
     }
     assert!(
@@ -301,6 +303,101 @@ async fn host_followups_keep_origin_in_queue_live_model_and_replay() -> Result<(
         )))
     );
     drop(requests);
+    // Turn addresses and counts include host inputs, independently of human
+    // authorship. In particular atTurnId must work for visible host fork rows.
+    let turn_inputs = history
+        .items
+        .iter()
+        .filter(|item| crate::persisted_native_item::is_turn_input(&item.item))
+        .collect::<Vec<_>>();
+    for (index, input) in turn_inputs.iter().enumerate() {
+        for (mode, cut, kept_count) in [
+            ("beforeUserTurn", "before", index),
+            ("throughUserTurn", "through", index + 1),
+        ] {
+            let preview = runtime
+                .handle_incoming(
+                    connection,
+                    json!({
+                        "id":30,"method":"session/rollback/preview","params":{
+                            "sessionId":session,"userTurnIndex":index,"mode":mode
+                        }
+                    }),
+                )
+                .await
+                .context("mixed-input rollback preview")?;
+            assert!(preview.get("error").is_none(), "{preview}");
+            assert_eq!(
+                preview["result"]["droppedTurnCount"],
+                json!(turn_inputs.len() - kept_count)
+            );
+            let fork = runtime
+                .handle_incoming(
+                    connection,
+                    json!({
+                        "id":31,"method":"session/fork","params":{
+                            "sessionId":session,"atTurnId":input.turn_id,"cut":cut
+                        }
+                    }),
+                )
+                .await
+                .context("fork at input turn")?;
+            assert!(fork.get("error").is_none(), "{fork}");
+            let fork_id = SessionId::from(
+                fork["result"]["session"]["id"]
+                    .as_str()
+                    .context("cut fork id")?,
+            );
+            let cut_history = runtime
+                .load_canonical_history(&json!(32), fork_id)
+                .await
+                .map_err(|error| anyhow::anyhow!("{error}"))?;
+            let cut_inputs = cut_history
+                .items
+                .iter()
+                .filter_map(|item| match &item.item {
+                    Item::UserMessage {
+                        origin, content, ..
+                    } => Some((origin.clone(), content.clone())),
+                    _ => None,
+                })
+                .collect::<Vec<_>>();
+            assert_eq!(cut_inputs, inputs[..kept_count]);
+            let cut_state = runtime
+                .session(fork_id)
+                .await
+                .context("cut fork actor")?
+                .export_runtime_session()
+                .await
+                .context("cut fork state")?;
+            assert_eq!(cut_state.core_session.lock().await.turn_count, kept_count);
+            assert_eq!(
+                cut_state
+                    .latest_turn
+                    .as_ref()
+                    .map(|turn| turn.native.sequence),
+                (kept_count > 0).then_some(kept_count as u32)
+            );
+        }
+        if matches!(
+            input.item,
+            Item::UserMessage {
+                origin: Some(_),
+                ..
+            }
+        ) {
+            let edit = runtime.handle_incoming(connection, json!({
+                "id":33,"method":"session/message/edit","params":{
+                    "sessionId":session,"itemId":input.id,"expectedRevision":0,
+                    "content":[{"type":"text","text":"reauthored host"}],"idempotencyKey":format!("host-edit-{index}")
+                }
+            })).await.context("host edit rejection")?;
+            assert!(
+                edit.get("error").is_some(),
+                "host turn must not become human-editable: {edit}"
+            );
+        }
+    }
     let forked = runtime
         .handle_incoming(
             connection,
@@ -332,10 +429,59 @@ async fn host_followups_keep_origin_in_queue_live_model_and_replay() -> Result<(
         fork_origins,
         vec![agent_origin.clone(), background_origin.clone()]
     );
+    let preview = runtime
+        .handle_incoming(
+            connection,
+            json!({
+                "id":34,"method":"session/rollback/preview","params":{
+                    "sessionId":fork_id,"userTurnIndex":1,"mode":"throughUserTurn"
+                }
+            }),
+        )
+        .await
+        .context("host rollback commit preview")?;
+    assert!(preview.get("error").is_none(), "{preview}");
+    assert_eq!(preview["result"]["droppedTurnCount"], 1);
+    let committed = runtime
+        .handle_incoming(
+            connection,
+            json!({
+                "id":35,"method":"session/rollback/commit","params":{
+                    "restorePlanId":preview["result"]["restorePlanId"],
+                    "expectedWorkspaceVersion":preview["result"]["workspaceVersion"]
+                }
+            }),
+        )
+        .await
+        .context("host rollback commit")?;
+    assert!(committed.get("error").is_none(), "{committed}");
+    let rolled_back = runtime
+        .session(fork_id)
+        .await
+        .context("rollback actor")?
+        .export_runtime_session()
+        .await
+        .context("rollback state")?;
+    assert_eq!(rolled_back.core_session.lock().await.turn_count, 2);
     // A fresh runtime has no original actor/turn state: history comes from disk.
     let restored = crate::test_support::TestRuntime::noop()
         .with_test_model()
         .runtime(home.path());
+    let rolled_back_history = restored
+        .load_canonical_history(&json!(36), fork_id)
+        .await
+        .map_err(|error| anyhow::anyhow!("{error}"))?;
+    let rolled_back_inputs = rolled_back_history
+        .items
+        .iter()
+        .filter_map(|item| match &item.item {
+            Item::UserMessage {
+                origin, content, ..
+            } => Some((origin.clone(), content.clone())),
+            _ => None,
+        })
+        .collect::<Vec<_>>();
+    assert_eq!(rolled_back_inputs, inputs[..2]);
     let restored_history = restored
         .load_canonical_history(&json!(9), session)
         .await

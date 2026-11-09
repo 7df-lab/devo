@@ -37,7 +37,11 @@ and the non-authorization warning outside their truncated text. Tree projection 
 custom entries, and navigating a host entry keeps it in context without filling the
 human editor. Native journals retain the structured origin through replay and
 fork; a compaction summary remains a model-generated summary, not an approval.
-No new permission grants or approval decisions are synthesized.
+No new permission grants or approval decisions are synthesized. Host turn-start
+and queue inputs still count as turn boundaries for fork/rollback and rebuilt
+turn counters. The legacy `userTurnIndex` is an input-turn index in the linear
+journal, not a human-authorship filter. In-turn steer messages do not add a turn
+boundary. Human editing and composer Undo use a separate authorship check.
 
 Desktop uses a separate labeled notification block rather than a human prompt
 bubble. Desktop and TUI show source labels for both live and reopened history,

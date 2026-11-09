@@ -45,15 +45,21 @@ impl PersistedNativeItem {
 /// Compatibility alias while call sites migrate off the TurnItem-backed name.
 pub(crate) type PersistedTurnItem = PersistedNativeItem;
 
-pub(crate) fn is_user_message(item: &Item) -> bool {
+/// A new input turn boundary, irrespective of human or host authorship.
+/// Host turns must remain addressable by fork/rollback and count during rebuild.
+pub(crate) fn is_turn_input(item: &Item) -> bool {
     matches!(
         item,
         Item::UserMessage {
-            origin: None,
             entry: UserMessageEntry::TurnStart | UserMessageEntry::Queue,
             ..
         }
     )
+}
+
+/// Editing a prompt requires human authorship as well as a new turn boundary.
+pub(crate) fn is_human_turn_input(item: &Item) -> bool {
+    matches!(item, Item::UserMessage { origin: None, .. }) && is_turn_input(item)
 }
 
 pub(crate) fn tool_call_id(item: &Item) -> Option<&str> {
@@ -177,5 +183,57 @@ pub(crate) fn user_message_item(
         client_user_message_id: None,
         content,
         entry,
+    }
+}
+
+#[cfg(test)]
+mod turn_input_tests {
+    use super::*;
+    use devo_protocol::native::host_message::{
+        HostMessageDelivery, HostMessageOrigin, HostMessageSource,
+    };
+    use pretty_assertions::assert_eq;
+
+    #[test]
+    fn host_turn_boundaries_never_become_human_edit_targets() {
+        for source in [
+            None,
+            Some(HostMessageSource::Agent),
+            Some(HostMessageSource::BackgroundTask),
+            Some(HostMessageSource::Schedule),
+        ] {
+            for entry in [
+                UserMessageEntry::TurnStart,
+                UserMessageEntry::Queue,
+                UserMessageEntry::Steer,
+            ] {
+                let origin = source.map(|source| HostMessageOrigin {
+                    event_id: "event".into(),
+                    source,
+                    sender: "worker".into(),
+                    delivery: HostMessageDelivery::FollowUp,
+                });
+                let item = Item::UserMessage {
+                    origin,
+                    client_user_message_id: None,
+                    content: vec![UserInput::Text {
+                        text: "input".into(),
+                    }],
+                    entry,
+                };
+                let boundary = entry != UserMessageEntry::Steer;
+                assert_eq!(
+                    (is_turn_input(&item), is_human_turn_input(&item)),
+                    (boundary, boundary && source.is_none())
+                );
+            }
+        }
+        let item = Item::AssistantMessage {
+            text: "reply".into(),
+        };
+        assert_eq!(
+            (is_turn_input(&item), is_human_turn_input(&item)),
+            (false, false)
+        );
     }
 }

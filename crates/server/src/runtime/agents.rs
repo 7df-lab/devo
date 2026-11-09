@@ -316,7 +316,7 @@ impl ServerRuntime {
         core_session.messages = rebuilt_messages;
         core_session.turn_count = stable_items
             .iter()
-            .filter(|item| crate::persisted_native_item::is_user_message(&item.item))
+            .filter(|item| crate::persisted_native_item::is_turn_input(&item.item))
             .count();
         let pending_turn_queue = Arc::clone(&core_session.pending_turn_queue);
         let steer_input_queue = Arc::clone(&core_session.steer_input_queue);
