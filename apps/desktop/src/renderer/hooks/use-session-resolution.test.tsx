@@ -1,4 +1,5 @@
 import { afterEach, beforeEach, describe, expect, mock, test } from "bun:test"
+import { createDevoClient, type DevoNativeTransport } from "@devo-ai/sdk/v2/client"
 import { Window } from "happy-dom"
 import { Provider, useAtomValue } from "jotai"
 import { act, Suspense, startTransition } from "react"
@@ -12,6 +13,7 @@ import {
 } from "../atoms/sessions"
 import { appStore } from "../atoms/store"
 import type { Session } from "../lib/types"
+import { getSession } from "../services/devo"
 
 const dom = new Window({ url: "http://localhost" })
 Object.assign(globalThis, {
@@ -276,4 +278,165 @@ describe("cold child session resolution", () => {
 		expect(calls).toHaveLength(2)
 		expect(result.state).toEqual({ status: "idle" })
 	})
+})
+
+const nativeChild = {
+	id: "child",
+	version: 1,
+	cwd: "/repo",
+	title: "Review tests",
+	parent: { kind: "agent", sessionId: "parent-1" },
+	createdAt: "2026-11-08T00:00:00Z",
+	lastActivityAt: "2026-11-08T00:00:00Z",
+	status: "idle",
+	flags: ["waitingApproval"],
+	archived: false,
+	ephemeral: false,
+	activity: "working",
+	model: { provider: "test", model: "test" },
+	settings: { permissionProfile: "default" },
+	preview: "",
+	queuedCount: 1,
+	usage: {
+		total: {
+			inputTokens: 0,
+			outputTokens: 0,
+			cacheCreationInputTokens: 0,
+			cacheReadInputTokens: 0,
+			reasoningTokens: 0,
+			totalTokens: 0,
+			callCount: 0,
+			meteredCallCount: 0,
+			failedCallCount: 0,
+			cancelledCallCount: 0,
+		},
+		byPurpose: [],
+		updatedAt: "2026-11-08T00:00:00Z",
+	},
+}
+
+test("returning after a discarded read validates identity through Native again", async () => {
+	let resolve!: (value: unknown) => void
+	const pending = new Promise<unknown>((yes) => {
+		resolve = yes
+	})
+	const wire: string[] = []
+	let missing = false
+	const transport: DevoNativeTransport = {
+		async request(method) {
+			wire.push(method)
+			if (method === "initialize")
+				return { protocolVersion: 1, agentCapabilities: {}, authMethods: [] }
+			if (method === "session/read") {
+				if (missing) throw Object.assign(new Error("gone"), { code: "SessionNotFound" })
+				return pending
+			}
+			throw new Error(`Unexpected ${method}`)
+		},
+		async respond() {},
+		subscribe: () => () => {},
+		connected: () => true,
+	}
+	const client = createDevoClient({ transport })
+	try {
+		read = (id) => getSession(client, id)
+		await render()
+		await render("child", false)
+		await act(async () => resolve({ session: nativeChild }))
+		expect(appStore.get(sessionFamily("child"))).toBeNull()
+		missing = true
+		await render("child", true)
+		expect(result.state).toEqual({ status: "notFound" })
+		expect(wire.filter((x) => x === "session/read")).toHaveLength(2)
+		expect(appStore.get(sessionFamily("child"))).toBeNull()
+	} finally {
+		client.dispose()
+	}
+})
+
+test("committed Suspense hiding and revealing restarts a discarded read", async () => {
+	const pending = deferred()
+	read = () => pending.promise
+	await render()
+	await act(async () =>
+		root?.render(
+			<Provider store={appStore}>
+				<Suspense fallback={<span>Navigation pending</span>}>
+					<Harness id="child" active suspend />
+				</Suspense>
+			</Provider>,
+		),
+	)
+	await act(async () => pending.resolve(child()))
+	read = async () => null
+	await render()
+	expect(result.state).toEqual({ status: "notFound" })
+	expect(calls).toHaveLength(2)
+})
+
+test("a replacement lookup does not share an abandoned in-flight SDK discovery", async () => {
+	let finishOld!: (value: unknown) => void
+	const old = new Promise<unknown>((resolve) => {
+		finishOld = resolve
+	})
+	let reads = 0
+	const transport: DevoNativeTransport = {
+		async request(method) {
+			if (method === "initialize")
+				return { protocolVersion: 1, agentCapabilities: {}, authMethods: [] }
+			if (method !== "session/read") throw new Error(`Unexpected ${method}`)
+			if (++reads === 1) return old
+			throw Object.assign(new Error("gone"), { code: "SessionNotFound" })
+		},
+		async respond() {},
+		subscribe: () => () => {},
+		connected: () => true,
+	}
+	const client = createDevoClient({ transport })
+	try {
+		read = (id) => getSession(client, id)
+		await render()
+		await render("child", false)
+		await render()
+		expect(reads).toBe(2)
+		expect(result.state).toEqual({ status: "notFound" })
+		await act(async () => finishOld({ session: nativeChild }))
+		expect(result.state).toEqual({ status: "notFound" })
+		expect(appStore.get(sessionFamily("child"))).toBeNull()
+		// The discarded fresh read must not seed even the SDK's cached get path.
+		expect(await client.session.get({ sessionId: "child" })).toEqual({ data: undefined })
+		expect(reads).toBe(3)
+	} finally {
+		client.dispose()
+	}
+})
+
+test("cold resolution ignores an existing SDK cache without changing it", async () => {
+	let reads = 0
+	const transport: DevoNativeTransport = {
+		async request(method) {
+			if (method === "initialize")
+				return { protocolVersion: 1, agentCapabilities: {}, authMethods: [] }
+			if (method !== "session/read") throw new Error(`Unexpected ${method}`)
+			reads++
+			return { session: { ...nativeChild, title: reads === 1 ? "Cached title" : "Fresh title" } }
+		},
+		async respond() {},
+		subscribe: () => () => {},
+		connected: () => true,
+	}
+	const client = createDevoClient({ transport })
+	try {
+		const cached = await client.session.get({ sessionId: "child" })
+		read = (id) => getSession(client, id)
+		await render()
+		expect(appStore.get(sessionFamily("child"))?.session).toEqual({
+			...cached.data,
+			title: "Fresh title",
+		})
+		expect(await client.session.get({ sessionId: "child" })).toEqual(cached)
+		expect(reads).toBe(2)
+	} finally {
+		client.dispose()
+	}
 })

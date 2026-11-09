@@ -193,7 +193,7 @@ export async function deleteSession(client: DevoClient, sessionId: string): Prom
  * callers can distinguish an unavailable child from a deleted one and retry.
  */
 export async function getSession(client: DevoClient, sessionId: string): Promise<Session | null> {
-	const result = await client.session.get({ sessionId: sessionId })
+	const result = await client.session.read({ sessionId: sessionId })
 	return (result.data as Session) ?? null
 }
 

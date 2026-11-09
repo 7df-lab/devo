@@ -1,5 +1,5 @@
 import { useAtomValue } from "jotai"
-import { useEffect, useLayoutEffect, useRef, useState } from "react"
+import { useLayoutEffect, useRef, useState } from "react"
 import { activeServerIdAtom, serverConnectedAtom, serverUrlAtom } from "../atoms/connection"
 import { sessionFamily, upsertSessionAtom } from "../atoms/sessions"
 import { appStore } from "../atoms/store"
@@ -23,25 +23,18 @@ export function useSessionResolution({
 	const serverUrl = useAtomValue(serverUrlAtom)
 	const serverId = useAtomValue(activeServerIdAtom)
 	const key = JSON.stringify([sessionId, serverUrl, serverId, connected, active, known])
-	const latest = useRef<string | null>(null)
-	// Invalidate only committed navigation. An abandoned concurrent render must
-	// not strand the still-visible session's pending read.
-	useLayoutEffect(() => {
-		latest.current = key
-		return () => {
-			latest.current = null
-		}
-	}, [key])
+
 	const [result, setResult] = useState<{ key: string; state: SessionResolution }>()
 	const retry = useRef(() => {})
 
-	useEffect(() => {
+	// A layout lifetime is stopped when Suspense hides this view and restarted
+	// on reveal, even if its props have not changed. Abandoned renders do neither.
+	useLayoutEffect(() => {
 		if (!sessionId || !active || known || !connected) return
 		let current = true
 		let pending = false
 		const isCurrent = () =>
 			current &&
-			latest.current === key &&
 			appStore.get(serverConnectedAtom) &&
 			appStore.get(serverUrlAtom) === serverUrl &&
 			appStore.get(activeServerIdAtom) === serverId
