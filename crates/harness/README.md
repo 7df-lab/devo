@@ -227,6 +227,11 @@ model calls refine.run()
   -> next turn's digest includes the new state
 ```
 
+Canonical before/after undo records live in `harness_state.json` and commit
+atomically with entries. `refinements.jsonl` is a compatibility audit mirror.
+See [authorized trajectory refinement and rollback](../../docs/trajectory-refinement.md)
+for the opt-in Native API, trust/privacy limits and conflict behavior.
+
 This crate does not decide what to refine. The server planner does that, using
 the session model with a heuristic fallback. This crate only accepts a proposal
 and applies it safely.

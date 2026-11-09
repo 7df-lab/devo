@@ -11,7 +11,10 @@ mod refinements;
 mod state;
 mod store;
 
-pub use apply::{ApplyError, RefineEdit, RefineEditOp, RefineProposal, apply_proposal_re_read};
+pub use apply::{
+    ApplyError, RefineEdit, RefineEditOp, RefineProposal, apply_proposal_re_read,
+    bind_proposal_baseline, rollback_refinement,
+};
 pub use auto::{
     AutoRefineSettings, DEFAULT_COMPACT_COOLDOWN_MS, DEFAULT_TURN_INTERVAL, should_auto_refine,
 };

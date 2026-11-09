@@ -65,6 +65,9 @@ pub struct HarnessState {
     pub entries: BTreeMap<String, BTreeMap<String, HarnessEntry>>,
     #[serde(default)]
     pub refinements: Vec<RefinementEvent>,
+    /// Canonical undo records committed atomically with entries. Legacy JSONL is a mirror.
+    #[serde(default, skip_serializing_if = "Vec::is_empty")]
+    pub refinement_history: Vec<crate::RefinementResultRecord>,
 }
 
 #[derive(Debug, Error)]
@@ -92,6 +95,7 @@ impl Default for HarnessState {
             schema: SCHEMA_VERSION,
             entries,
             refinements: Vec::new(),
+            refinement_history: Vec::new(),
         }
     }
 }
