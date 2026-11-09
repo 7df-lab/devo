@@ -1,6 +1,6 @@
 /** Session shortcuts must not override controls or an open portal overlay. */
 const INTERACTIVE_TARGET =
-	'input, textarea, select, button, a[href], [contenteditable]:not([contenteditable="false"]), [role="button"], [role="link"], [role="checkbox"], [role="switch"], [role="tab"], [role="slider"], [role="combobox"], [role="menuitem"], [role="option"], [aria-label="Tool permission request"]'
+	'input, textarea, select, button, a[href], [contenteditable]:not([contenteditable="false"]), [role="button"], [role="link"], [role="checkbox"], [role="switch"], [role="tab"], [role="slider"], [role="combobox"], [role="menuitem"], [role="option"], [aria-label="Tool permission request"], [aria-label="Agent question"]'
 
 const OPEN_OVERLAY =
 	'dialog[open], [role="dialog"][data-open], [role="alertdialog"][data-open], [role="dialog"][aria-modal="true"], [role="alertdialog"][aria-modal="true"], [data-slot="popover-content"][data-open], [data-slot="dropdown-menu-content"][data-open], [data-slot="context-menu-content"][data-open], [data-slot="select-content"][data-open], [data-slot="combobox-content"][data-open], [role="menu"][data-open]'
