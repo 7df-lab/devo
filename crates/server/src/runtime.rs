@@ -108,6 +108,8 @@ pub(crate) mod context_occupancy;
 mod context_usage;
 mod control_requests;
 mod credential_binding;
+#[cfg(test)]
+mod daemon_lifecycle_tests;
 mod goal_accounting;
 mod goal_background;
 mod goal_continuation;

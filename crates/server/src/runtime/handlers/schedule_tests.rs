@@ -685,3 +685,188 @@ async fn inactive_schedules_discard_claimed_but_undelivered_occurrences() -> Res
     runtime.shutdown().await;
     Ok(())
 }
+
+#[tokio::test]
+async fn schedule_retains_occurrence_when_missing_index_has_unreadable_journal() -> Result<()> {
+    let home = TempDir::new()?;
+    let runtime = TestRuntime::noop().runtime(home.path());
+    let session_id = devo_protocol::native::ids::SessionId::new();
+    std::fs::create_dir_all(home.path().join("sessions"))?;
+    std::fs::write(
+        home.path()
+            .join("sessions")
+            .join(format!("{session_id}.jsonl")),
+        b"{invalid journal\n",
+    )?;
+    let job = runtime.schedule_store.upsert(
+        devo_protocol::native::rpc_schedule::SessionScheduleUpsertParams {
+            kind: devo_protocol::native::rpc_schedule::ScheduleJobKind::Cron,
+            session_id,
+            job_id: None,
+            cwd: None,
+            schedule: None,
+            interval_ms: Some(1),
+            prompt: Some("retain uncertain recovery".into()),
+            instruction: None,
+            delivery_mode: devo_protocol::native::rpc_schedule::ScheduleDeliveryMode::FollowUp,
+            label: None,
+        },
+    )?;
+    runtime
+        .schedule_store
+        .claim_due_with_outbox(job.next_run_at.context("due")?)?;
+    runtime.dispatch_due_schedule_jobs().await?;
+    assert!(runtime.schedule_store.get_job(&job.job_id)?.is_some());
+    let pending = runtime
+        .schedule_store
+        .pending_occurrences(chrono::Utc::now() + chrono::Duration::hours(1))?;
+    assert_eq!(pending.len(), 1);
+    assert_eq!(pending[0].job.job_id, job.job_id);
+    runtime.shutdown().await;
+    Ok(())
+}
+
+#[tokio::test]
+async fn schedule_deleted_shared_child_is_retired() -> Result<()> {
+    use devo_protocol::native::ids::SessionId;
+    use devo_protocol::native::rpc_schedule::*;
+    let home = TempDir::new()?;
+    let runtime = TestRuntime::noop().runtime(home.path());
+    let root_id = SessionId::new();
+    let child_id = SessionId::new();
+    let root = runtime.rollout_store.create_session_record(
+        root_id,
+        chrono::Utc::now(),
+        home.path().to_path_buf(),
+        vec![],
+        Some("root".into()),
+        None,
+        None,
+        None,
+        "test".into(),
+        None,
+    );
+    let mut child = runtime.rollout_store.create_session_record(
+        child_id,
+        chrono::Utc::now(),
+        home.path().to_path_buf(),
+        vec![],
+        Some("child".into()),
+        None,
+        None,
+        None,
+        "test".into(),
+        Some(root_id),
+    );
+    child.agent_path = Some("root/child".into());
+    child.rollout_path = root.rollout_path.clone();
+    runtime.rollout_store.append_session_meta(&root)?;
+    runtime.rollout_store.append_session_meta(&child)?;
+    runtime.refresh_session_index()?;
+    let job = runtime.schedule_store.upsert(SessionScheduleUpsertParams {
+        kind: ScheduleJobKind::Heartbeat,
+        session_id: child_id,
+        job_id: None,
+        cwd: None,
+        schedule: Some("every 1h".into()),
+        interval_ms: None,
+        prompt: Some("child work".into()),
+        instruction: None,
+        delivery_mode: ScheduleDeliveryMode::FollowUp,
+        label: None,
+    })?;
+    runtime
+        .schedule_store
+        .claim_due_with_outbox(job.next_run_at.context("due")?)?;
+    assert_eq!(
+        runtime
+            .delete_session_tree(child_id)
+            .await
+            .map_err(anyhow::Error::msg)?,
+        vec![child_id]
+    );
+    assert!(
+        root.rollout_path.is_file(),
+        "root journal must survive child deletion"
+    );
+    runtime.refresh_session_index()?;
+    assert!(runtime.deps.db.get_session_index(&child_id)?.is_none());
+    runtime.dispatch_due_schedule_jobs().await?;
+    let remaining = runtime.schedule_store.get_job(&job.job_id)?;
+    let pending = runtime
+        .schedule_store
+        .pending_occurrences(chrono::Utc::now() + chrono::Duration::hours(2))?;
+    runtime.shutdown().await;
+    assert!(
+        remaining.is_none(),
+        "deleted child job must retire; pending outbox count: {}",
+        pending.len()
+    );
+    assert!(pending.is_empty());
+    Ok(())
+}
+
+#[tokio::test]
+async fn schedule_live_shared_child_missing_index_is_recovered() -> Result<()> {
+    use devo_protocol::native::ids::SessionId;
+    use devo_protocol::native::rpc_schedule::*;
+    let home = TempDir::new()?;
+    let runtime = TestRuntime::noop().runtime(home.path());
+    let root_id = SessionId::new();
+    let child_id = SessionId::new();
+    let root = runtime.rollout_store.create_session_record(
+        root_id,
+        chrono::Utc::now(),
+        home.path().to_path_buf(),
+        vec![],
+        Some("root".into()),
+        None,
+        None,
+        None,
+        "test".into(),
+        None,
+    );
+    let mut child = runtime.rollout_store.create_session_record(
+        child_id,
+        chrono::Utc::now(),
+        home.path().to_path_buf(),
+        vec![],
+        Some("child".into()),
+        None,
+        None,
+        None,
+        "test".into(),
+        Some(root_id),
+    );
+    child.agent_path = Some("root/child".into());
+    child.rollout_path = root.rollout_path.clone();
+    runtime.rollout_store.append_session_meta(&root)?;
+    runtime.rollout_store.append_session_meta(&child)?;
+    let job = runtime.schedule_store.upsert(SessionScheduleUpsertParams {
+        kind: ScheduleJobKind::Heartbeat,
+        session_id: child_id,
+        job_id: None,
+        cwd: None,
+        schedule: Some("every 1h".into()),
+        interval_ms: None,
+        prompt: Some("child work".into()),
+        instruction: None,
+        delivery_mode: ScheduleDeliveryMode::FollowUp,
+        label: None,
+    })?;
+    runtime
+        .schedule_store
+        .claim_due_with_outbox(job.next_run_at.context("due")?)?;
+    assert!(runtime.deps.db.get_session_index(&child_id)?.is_none());
+    runtime.dispatch_due_schedule_jobs().await?;
+    let remaining = runtime.schedule_store.get_job(&job.job_id)?;
+    let pending = runtime
+        .schedule_store
+        .pending_occurrences(chrono::Utc::now() + chrono::Duration::hours(2))?;
+    assert!(runtime.deps.db.get_session_index(&child_id)?.is_some());
+    runtime.shutdown().await;
+    assert!(remaining.is_some());
+    assert_eq!(pending.len(), 1);
+    assert_eq!(pending[0].job.job_id, job.job_id);
+    Ok(())
+}
