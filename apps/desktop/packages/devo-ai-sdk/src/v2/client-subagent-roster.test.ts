@@ -1,5 +1,10 @@
 import { describe, expect, test } from "bun:test"
-import { createDevoClient, type DevoNativeTransport, type DevoNativeTransportEvent } from "./client"
+import {
+	createDevoClient,
+	type DevoNativeTransport,
+	type DevoNativeTransportEvent,
+	type SessionRosterChange,
+} from "./client"
 
 const child = {
 	id: "child-1",
@@ -39,11 +44,17 @@ const child = {
 class Transport implements DevoNativeTransport {
 	requests: Array<{ method: string; params: unknown }> = []
 	error: Error | undefined
+	listeners = new Set<(event: DevoNativeTransportEvent) => void>()
+	emit(event: DevoNativeTransportEvent) {
+		for (const listener of this.listeners) listener(event)
+	}
 	async request(method: string, params?: unknown) {
 		this.requests.push({ method, params })
 		if (method === "initialize")
 			return { protocolVersion: 1, agentCapabilities: {}, authMethods: [] }
 		if (this.error) throw this.error
+		if (method === "subscription/create")
+			return { subscriptionId: "roster", snapshots: [], cursors: [] }
 		if (method === "session/read") return { session: child }
 		if (method === "session/list") {
 			return (params as { includeChildren?: boolean }).includeChildren
@@ -53,8 +64,11 @@ class Transport implements DevoNativeTransport {
 		throw new Error(`Unexpected ${method}`)
 	}
 	async respond() {}
-	subscribe(_listener: (event: DevoNativeTransportEvent) => void) {
-		return () => {}
+	subscribe(listener: (event: DevoNativeTransportEvent) => void) {
+		this.listeners.add(listener)
+		return () => {
+			this.listeners.delete(listener)
+		}
 	}
 	connected() {
 		return true
@@ -120,4 +134,79 @@ describe("read-only child session discovery", () => {
 			client.dispose()
 		}
 	})
+})
+
+test("passive roster observers do not consume the main event stream or start subscriptions", async () => {
+	const transport = new Transport()
+	const client = createDevoClient({ directory: "/repo", transport })
+	const observed: SessionRosterChange[] = []
+	const second: SessionRosterChange[] = []
+	const stop = client.session.observeRoster((change: SessionRosterChange) => observed.push(change))
+	client.session.observeRoster((change: SessionRosterChange) => second.push(change))
+	expect(transport.requests).toEqual([])
+	await client.session.roster({ includeChildren: true })
+	const { stream } = await client.global.event()
+	const iterator = stream[Symbol.asyncIterator]()
+	const pending = iterator.next()
+	const before = transport.requests.length
+	transport.emit({
+		type: "notification",
+		method: "session/statusChanged",
+		params: {
+			sessionId: child.id,
+			status: "idle",
+			flags: ["waitingApproval"],
+			activity: "working",
+			activeTurnId: null,
+		},
+	})
+	expect(observed).toEqual([
+		{
+			type: "patch",
+			sessionId: child.id,
+			patch: {
+				status: "idle",
+				flags: ["waitingApproval"],
+				activity: "working",
+				activeTurnId: null,
+			},
+		},
+	])
+	expect(second).toEqual(observed)
+	expect((await pending).value?.payload).toEqual({
+		type: "session.status",
+		properties: {
+			sessionId: child.id,
+			status: { type: "idle" },
+		},
+	})
+	expect(transport.requests.length).toBe(before)
+	stop()
+	transport.emit({ type: "closed" })
+	expect(observed).toHaveLength(1)
+	expect(second.at(-1)).toEqual({ type: "disconnected" })
+	client.dispose()
+	transport.emit({ type: "closed" })
+	expect(second).toHaveLength(2)
+	expect(transport.listeners.size).toBe(0)
+})
+
+test("validated Native creation and metadata reach roster observers unchanged", async () => {
+	const transport = new Transport()
+	const client = createDevoClient({ directory: "/repo", transport })
+	const observed: SessionRosterChange[] = []
+	client.session.observeRoster((change: SessionRosterChange) => observed.push(change))
+	await client.session.roster({ includeChildren: true })
+	const updated = { ...child, title: "Renamed", flags: [], queuedCount: 0 }
+	transport.emit({ type: "notification", method: "session/created", params: { session: child } })
+	transport.emit({
+		type: "notification",
+		method: "session/metadataUpdated",
+		params: { session: updated },
+	})
+	expect(observed).toEqual([
+		{ type: "upsert", session: child },
+		{ type: "upsert", session: updated },
+	])
+	client.dispose()
 })

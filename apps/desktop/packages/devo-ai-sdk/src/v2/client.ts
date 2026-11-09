@@ -77,6 +77,9 @@ export type {
 	ReferenceSearchSnapshot,
 } from "./reference-search-session"
 
+import { SessionRosterEvents } from "./session-roster-events"
+export type { SessionRosterChange } from "./session-roster-events"
+
 import type { SessionRosterParams, SessionRosterPage } from "./session-roster"
 export type { Session as NativeSession } from "./generated/native"
 export type { SessionRosterParams, SessionRosterPage } from "./session-roster"
@@ -804,6 +807,7 @@ class NativeClient {
 	private disposed = false
 	private unsubscribeTransport: (() => void) | null = null
 	private events = new AsyncEventQueue<GlobalEvent>()
+	private rosterEvents = new SessionRosterEvents()
 	private sessions = new Map<string, Session>()
 	private sessionDirectories = new Map<string, string>()
 	private sessionStatuses = new Map<string, SessionStatus>()
@@ -841,6 +845,7 @@ class NativeClient {
 	dispose(): void {
 		if (this.disposed) return
 		this.disposed = true
+		this.rosterEvents.clear()
 		const unsubscribe = this.unsubscribeTransport
 		this.unsubscribeTransport = null
 		try {
@@ -854,6 +859,8 @@ class NativeClient {
 		list: async () => ({ data: await this.listProjects() }),
 	}
 	session = {
+		/** Observe existing Native traffic without consuming the global event stream. */
+		observeRoster: this.rosterEvents.subscribe,
 		/** A single read-only Native roster page. Does not resume sessions or load transcripts. */
 		roster: async (params: SessionRosterParams): Promise<SessionRosterPage> =>
 			await this.requestCanonical("session/list", params) as SessionRosterPage,
@@ -1937,6 +1944,7 @@ class NativeClient {
 
 	private handleTransportEvent(event: DevoNativeTransportEvent): void {
 		if (this.disposed) return
+		this.rosterEvents.handle(event)
         if (event.type === "closed" || (event.type === "notification" &&
             (event.method?.startsWith("turn/") || event.method === "session/metadataUpdated"))) {
             for (const listener of this.recoveryListeners) listener()

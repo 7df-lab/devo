@@ -58,11 +58,11 @@ export function SubagentsButton({ agent }: { agent: Agent }) {
 					</button>
 				</div>
 				<PopoverDescription className="text-xs">
-					Direct children of this session. Refresh to check for changes.
+					Direct children of this session. Updates automatically while open.
 				</PopoverDescription>
 				{roster.error && (
 					<p role="alert" className="text-xs text-destructive">
-						{roster.error} {roster.sessions.length > 0 && "Showing the previous snapshot."}
+						{roster.error} {roster.sessions.length > 0 && "Showing the last available state."}
 					</p>
 				)}
 				{roster.loading && (

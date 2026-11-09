@@ -1,5 +1,7 @@
-import type { NativeSession, SessionRosterPage } from "@devo-ai/sdk/v2/client"
-import { useCallback, useEffect, useRef, useState } from "react"
+import type { NativeSession, SessionRosterChange, SessionRosterPage } from "@devo-ai/sdk/v2/client"
+import { useAtomValue } from "jotai"
+import { useEffect, useRef, useState } from "react"
+import { activeServerIdAtom, serverConnectedAtom, serverUrlAtom } from "../atoms/connection"
 import { getProjectClient } from "../services/connection-manager"
 
 export interface SubagentRoster {
@@ -14,7 +16,7 @@ const emptyRoster: SubagentRoster = {
 	scanned: 0,
 }
 
-/** Bound each user-requested scan; further pages require an explicit Load more. */
+/** Bound each scan; further pages require an explicit Load more. */
 export async function readSubagentRoster(
 	read: (cursor?: string) => Promise<SessionRosterPage>,
 	parentId: string,
@@ -50,23 +52,84 @@ export async function readSubagentRoster(
 	}
 }
 
-/** On-demand only: no closed-panel polling, child hydration, or model work. */
+/** Existing events are immediate; reconcile gaps only while the panel is open. */
+export const SUBAGENT_RECONCILE_MS = 30_000
+
+type RosterMutation = Exclude<SessionRosterChange, { type: "disconnected" | "resync" }>
+
+function applyChange(
+	roster: SubagentRoster,
+	change: RosterMutation,
+	parentId: string,
+): SubagentRoster {
+	const sessions = new Map(roster.sessions.map((session) => [session.id, session]))
+	if (change.type === "delete") {
+		for (const id of change.sessionIds) sessions.delete(id)
+	} else if (change.type === "upsert") {
+		const session = change.session
+		if (session.parent?.sessionId === parentId && !session.ephemeral)
+			sessions.set(session.id, session)
+		else sessions.delete(session.id)
+	} else {
+		const session = sessions.get(change.sessionId)
+		if (session) sessions.set(session.id, { ...session, ...change.patch })
+	}
+	return { ...roster, sessions: [...sessions.values()] }
+}
+
 export function useSubagentRoster(sessionId: string, directory: string, open: boolean) {
+	const connected = useAtomValue(serverConnectedAtom)
+	const serverUrl = useAtomValue(serverUrlAtom)
+	const serverId = useAtomValue(activeServerIdAtom)
 	const [roster, setRoster] = useState<SubagentRoster>(emptyRoster)
 	const [loading, setLoading] = useState(false)
 	const [error, setError] = useState<string | null>(null)
-	const request = useRef<AbortController | null>(null)
-	const run = useCallback(
-		async (previous = emptyRoster) => {
-			if (request.current) return
+	const scope = useRef("")
+	const current = useRef(emptyRoster)
+	const actions = useRef({ refresh: async () => {}, loadMore: async () => {} })
+
+	useEffect(() => {
+		const key = JSON.stringify([open, sessionId, directory, serverUrl, serverId])
+		if (scope.current !== key) {
+			scope.current = key
+			current.current = emptyRoster
+			setRoster(emptyRoster)
+			setError(null)
+		}
+		setLoading(false)
+		if (!open) return
+		if (!connected) {
+			setError("Connect to the runtime to view subagents.")
+			return
+		}
+		const client = getProjectClient(directory)
+		if (!client) {
+			setError("Connect to the runtime to view subagents.")
+			return
+		}
+
+		let active = true
+		let online = true
+		let request: AbortController | null = null
+		let timer: ReturnType<typeof setTimeout> | undefined
+		let pendingRefresh = false
+		// Keep only the latest overlay per ID while a snapshot is in flight.
+		// Old pages cannot overwrite newer status, insertions or tombstones.
+		const changes = new Map<string, RosterMutation>()
+		const publish = (next: SubagentRoster) => {
+			current.current = next
+			setRoster(next)
+		}
+		const run = async (more = false) => {
+			if (!active || !online || request) return
 			const controller = new AbortController()
-			request.current = controller
+			request = controller
+			changes.clear()
+			clearTimeout(timer)
 			setLoading(true)
 			setError(null)
 			try {
-				const client = getProjectClient(directory)
-				if (!client) throw new Error("Connect to the runtime to view subagents.")
-				const next = await readSubagentRoster(
+				let next = await readSubagentRoster(
 					(cursor) =>
 						client.session.roster({
 							cwds: [],
@@ -76,38 +139,99 @@ export function useSubagentRoster(sessionId: string, directory: string, open: bo
 						}),
 					sessionId,
 					controller.signal,
-					previous,
+					more ? current.current : emptyRoster,
 				)
-				if (!controller.signal.aborted) setRoster(next)
+				if (!active || controller.signal.aborted) return
+				// A capped scan is not evidence that previously loaded children vanished.
+				if (next.nextCursor) {
+					const sessions = new Map(current.current.sessions.map((s) => [s.id, s]))
+					for (const session of next.sessions) sessions.set(session.id, session)
+					next = { ...next, sessions: [...sessions.values()] }
+				}
+				for (const change of changes.values()) next = applyChange(next, change, sessionId)
+				publish(next)
 			} catch (cause) {
-				if (!controller.signal.aborted)
+				if (active && !controller.signal.aborted)
 					setError(cause instanceof Error ? cause.message : String(cause))
 			} finally {
-				if (request.current === controller) {
-					request.current = null
+				if (active && request === controller) {
+					request = null
+					changes.clear()
 					setLoading(false)
+					if (online) {
+						if (pendingRefresh) {
+							pendingRefresh = false
+							void run()
+						} else timer = setTimeout(() => void run(), SUBAGENT_RECONCILE_MS)
+					}
 				}
 			}
-		},
-		[directory, sessionId],
-	)
-
-	useEffect(() => {
-		setRoster(emptyRoster)
-		setError(null)
-		setLoading(false)
-		if (open) void run()
-		return () => {
-			request.current?.abort()
-			request.current = null
 		}
-	}, [open, run])
+		const refresh = () => {
+			if (request) pendingRefresh = true
+			else void run()
+		}
+		// Register before the first read, rather than stealing from the single-consumer stream.
+		const unsubscribe = client.session.observeRoster((change: SessionRosterChange) => {
+			if (!active) return
+			if (change.type === "disconnected") {
+				online = false
+				clearTimeout(timer)
+				request?.abort()
+				request = null
+				changes.clear()
+				pendingRefresh = false
+				setLoading(false)
+				setError("Connection lost. Updates will resume when the runtime reconnects.")
+				return
+			}
+			if (change.type === "resync") {
+				online = true
+				refresh()
+				return
+			}
+			if (!online) return
+			if (request) {
+				if (change.type === "delete") {
+					for (const id of change.sessionIds) changes.set(id, { type: "delete", sessionIds: [id] })
+				} else if (change.type === "upsert") changes.set(change.session.id, change)
+				else {
+					const previous = changes.get(change.sessionId)
+					if (previous?.type === "upsert")
+						changes.set(change.sessionId, {
+							type: "upsert",
+							session: { ...previous.session, ...change.patch },
+						})
+					else if (previous?.type !== "delete")
+						changes.set(change.sessionId, {
+							...change,
+							patch: { ...(previous?.type === "patch" ? previous.patch : {}), ...change.patch },
+						})
+				}
+			}
+			publish(applyChange(current.current, change, sessionId))
+		})
+		actions.current = {
+			refresh: () => run(),
+			loadMore: () => (current.current.nextCursor ? run(true) : Promise.resolve()),
+		}
+		window.addEventListener("focus", refresh)
+		void run()
+		return () => {
+			active = false
+			clearTimeout(timer)
+			request?.abort()
+			unsubscribe()
+			window.removeEventListener("focus", refresh)
+			actions.current = { refresh: async () => {}, loadMore: async () => {} }
+		}
+	}, [open, sessionId, directory, connected, serverUrl, serverId])
 
 	return {
 		...roster,
 		loading,
 		error,
-		refresh: () => run(),
-		loadMore: () => run(roster),
+		refresh: () => actions.current.refresh(),
+		loadMore: () => actions.current.loadMore(),
 	}
 }

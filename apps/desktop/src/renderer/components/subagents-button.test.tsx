@@ -1,9 +1,25 @@
-import { afterEach, describe, expect, mock, test } from "bun:test"
-import type { NativeSession, SessionRosterPage } from "@devo-ai/sdk/v2/client"
+import { afterEach, beforeEach, describe, expect, jest, mock, test } from "bun:test"
+import type { NativeSession, SessionRosterChange, SessionRosterPage } from "@devo-ai/sdk/v2/client"
 import { Window } from "happy-dom"
+import { getDefaultStore } from "jotai"
 import { act } from "react"
 import type { Root } from "react-dom/client"
+import { serverConnectedAtom, serverUrlAtom } from "../atoms/connection"
 import type { Agent } from "../lib/types"
+
+const listeners = new Set<(change: SessionRosterChange) => void>()
+const observeRoster = (listener: (change: SessionRosterChange) => void) => {
+	listeners.add(listener)
+	return () => {
+		listeners.delete(listener)
+	}
+}
+function emit(change: SessionRosterChange) {
+	for (const listener of listeners) listener(change)
+}
+beforeEach(() => {
+	getDefaultStore().set(serverConnectedAtom, true)
+})
 
 const dom = new Window({ url: "http://localhost" })
 Object.assign(globalThis, {
@@ -31,6 +47,7 @@ const navigations: unknown[] = []
 mock.module("../services/connection-manager", () => ({
 	getProjectClient: () => ({
 		session: {
+			observeRoster,
 			roster: async () => {
 				calls++
 				return page
@@ -86,6 +103,9 @@ afterEach(async () => {
 	})
 	root = undefined
 	mount?.remove()
+	jest.useRealTimers()
+	expect(listeners.size).toBe(0)
+	getDefaultStore().set(serverUrlAtom, null)
 	page = { data: [], nextCursor: null }
 	calls = 0
 	navigations.length = 0
@@ -157,4 +177,28 @@ describe("subagent popover interactions", () => {
 		expect(calls).toBe(2)
 		expect(navigations).toEqual([])
 	})
+})
+
+test("open popover follows live status, creation and deletion without clicking Refresh", async () => {
+	page = { data: [child], nextCursor: null }
+	await render()
+	await click(button("Subagents"))
+	await act(async () => {
+		emit({
+			type: "patch",
+			sessionId: child.id,
+			patch: { status: "active", flags: ["waitingUserInput"] },
+		})
+	})
+	expect(document.body.textContent).toContain("Needs input")
+	expect(document.body.textContent).toContain("Updates automatically while open")
+	await act(async () => {
+		emit({ type: "upsert", session: { ...child, id: "new", title: "New child" } })
+		emit({ type: "delete", sessionIds: [child.id] })
+	})
+	expect(document.body.textContent).toContain("New child")
+	expect(document.body.textContent).not.toContain("Check runtime")
+	expect(calls).toBe(1)
+	await click(button("Close subagents"))
+	expect(listeners.size).toBe(0)
 })
