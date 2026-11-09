@@ -168,6 +168,7 @@ The main groups are:
 | `rlm.update_plan`, `rlm.request_user_input` | Session UI integration. |
 | `rlm.read`, `rlm.write`, `rlm.read_once`, `rlm.write_once` | Direct file I/O, with host-mediated fallback on OS denial. |
 | `rlm.spawn`, `rlm.create_session`, `rlm.find_models`, `rlm.list_subagents`, `rlm.delete_subagent`, `rlm.collect`, `rlm.progress_note`, `rlm.end_turn` | Recursive subagent control. |
+| `rlm.factory` | Experimental, explicit-opt-in DAG workflows; advance/wait inside an active cell. Requires the subagent collection API. See [Factory workflows](../../../docs/factory-workflows.md). |
 | `rlm.harness`, `rlm.get_harness_state` | Cached reads and async host-owned harness CRUD. |
 | `rlm.emit` | Ship a MIME-keyed display event. |
 
