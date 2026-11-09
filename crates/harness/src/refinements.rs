@@ -1,4 +1,5 @@
-//! Append-only `refinements.jsonl` undo log (session-local).
+//! Append-only compatibility audit mirror (session-local). Canonical undo
+//! records are committed atomically in `HarnessState::refinement_history`.
 
 use std::fs::OpenOptions;
 use std::io::Write;
@@ -53,9 +54,18 @@ pub fn append_refinement(
     if let Some(parent) = path.parent() {
         std::fs::create_dir_all(parent)?;
     }
-    let mut file = OpenOptions::new().create(true).append(true).open(path)?;
-    serde_json::to_writer(&mut file, record)?;
-    file.write_all(b"\n")?;
+    let mut options = OpenOptions::new();
+    options.create(true).append(true);
+    #[cfg(unix)]
+    {
+        use std::os::unix::fs::OpenOptionsExt;
+        options.mode(0o600);
+    }
+    let mut file = options.open(path)?;
+    fs2::FileExt::lock_exclusive(&file)?;
+    let mut line = serde_json::to_vec(record)?;
+    line.push(b'\n');
+    file.write_all(&line)?;
     file.sync_all()?;
     Ok(())
 }

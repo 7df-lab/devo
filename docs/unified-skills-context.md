@@ -31,7 +31,7 @@ await rlm.harness.delete_memory(entry.id)
 
 The host resolves local/global destinations from session identity; Python cannot pass an arbitrary store path. Mutations pass host permission checks and are rejected in Plan mode. Ephemeral sessions have no persistent local store. Global writes require the explicit global scope and the normal host permission decision.
 
-Host CRUD and `/refine` share a short read-modify-write transaction under a cross-process advisory sidecar lock. Refinement scheduling only queues work; storage initialization and failures occur during apply. Permission checks and model calls occur outside the lock. Unique temporary files provide atomic replacement and preserve existing permissions. Corrupt state fails without replacing the file. Digests enter the next model request at a turn boundary, not the already-running request.
+Host CRUD and `/refine` share a short read-modify-write transaction under a cross-process advisory sidecar lock. Refinement before/after history is committed in the same state file; the JSONL audit is a compatibility mirror. See [authorized trajectory refinement and rollback](trajectory-refinement.md). Refinement scheduling only queues work; storage initialization and failures occur during apply. Permission checks and model calls occur outside the lock. Unique temporary files provide atomic replacement and preserve existing permissions. Corrupt state fails without replacing the file. Digests enter the next model request at a turn boundary, not the already-running request.
 
 ## Compatibility and limits
 

@@ -130,11 +130,12 @@ export function SessionShell({ activeSessionId, evictRef }: SessionShellProps) {
 
 	useEffect(() => {
 		const handleKeyDown = (event: KeyboardEvent) => {
-			if ((event.metaKey || event.ctrlKey) && event.shiftKey && event.key === "d") {
+			if (event.defaultPrevented || event.isComposing || event.keyCode === 229) return
+			if ((event.metaKey || event.ctrlKey) && event.shiftKey && event.key.toLowerCase() === "d") {
 				event.preventDefault()
 				setReviewPanelOpen((prev) => !prev)
 			}
-			if ((event.metaKey || event.ctrlKey) && event.shiftKey && event.key === "f") {
+			if ((event.metaKey || event.ctrlKey) && event.shiftKey && event.key.toLowerCase() === "f") {
 				event.preventDefault()
 				if (reviewPanelOpen) {
 					setReviewSettings((prev) => ({ ...prev, expanded: !prev.expanded }))
@@ -172,6 +173,12 @@ export function SessionShell({ activeSessionId, evictRef }: SessionShellProps) {
 			setTitleValue(activeAgent.name)
 		}
 	}, [activeAgent?.name, activeAgent?.sessionId])
+
+	useEffect(() => {
+		if (!isEditingTitle) return
+		titleInputRef.current?.focus()
+		titleInputRef.current?.select()
+	}, [isEditingTitle])
 
 	useLayoutEffect(() => {
 		if (setupPhase) {
