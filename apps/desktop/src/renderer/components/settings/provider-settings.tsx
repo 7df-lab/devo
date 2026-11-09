@@ -139,10 +139,13 @@ export function ProviderSettings() {
 			<DesktopOAuthActions onConnected={handleConnected} />
 
 			{/* Connected providers */}
-			<SettingsSection title="Connected">
+			<SettingsSection
+				title="Configured"
+				description="Saved connections. Saving a connection does not verify model access."
+			>
 				{connected.length === 0 ? (
 					<div className="px-4 py-6 text-center text-sm text-muted-foreground">
-						No connected providers. Connect a template below or add a custom provider.
+						No configured providers. Connect a template below or add a custom provider.
 					</div>
 				) : (
 					connected.map((provider) => (
@@ -377,7 +380,10 @@ function TemplateProviderRow({
 function ProviderSettingsLoading() {
 	return (
 		<>
-			<SettingsSection title="Connected">
+			<SettingsSection
+				title="Configured"
+				description="Saved connections. Saving a connection does not verify model access."
+			>
 				{[0, 1].map((index) => (
 					<div key={index} className="flex items-center gap-3 px-4 py-3">
 						<Skeleton className="size-5 rounded-md" />
