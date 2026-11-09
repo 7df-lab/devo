@@ -333,18 +333,26 @@ impl ServerRuntime {
                         let runtime = Arc::clone(self);
                         let missing =
                             tokio::task::spawn_blocking(move || -> anyhow::Result<bool> {
-                                let found = runtime
-                                    .rollout_store
-                                    .find_journal_containing_session_strict(
-                                        &session_id,
-                                        crate::persistence::JournalVisibility::IncludeDeleted,
-                                    )?;
-                                if found.is_some() {
+                                // A child can share a live root journal while being
+                                // durably deleted. Scan every journal: tombstones
+                                // win across journals, just as in the index rebuild.
+                                // Complete the strict scan before retiring anything;
+                                // corruption or I/O failure remains retryable.
+                                let mut live = false;
+                                let mut deleted = false;
+                                for path in runtime.rollout_store.rollout_paths()? {
+                                    let (has_meta, has_tombstone) = runtime
+                                        .rollout_store
+                                        .journal_session_membership(&path, &session_id)?;
+                                    live |= has_meta;
+                                    deleted |= has_tombstone;
+                                }
+                                if live && !deleted {
                                     runtime
                                         .rollout_store
                                         .index_rollout_metadata(&runtime.deps.db)?;
                                 }
-                                Ok(found.is_none())
+                                Ok(deleted || !live)
                             })
                             .await;
                         if !matches!(missing, Ok(Ok(true))) {
