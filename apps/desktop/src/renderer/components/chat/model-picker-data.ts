@@ -1,4 +1,4 @@
-import type { ModelRef, ProvidersData, ProviderCatalogData } from "../../hooks/use-devo-data"
+import type { ModelRef, ProviderCatalogData, ProvidersData } from "../../hooks/use-devo-data"
 import type { ModelDirectoryData } from "../../hooks/use-model-directory"
 
 export interface PickerModel {
@@ -42,7 +42,9 @@ export function buildPickerModels(
 					(model as { name?: string }).name === modelID
 						? providerInfo?.models?.[localID]?.name || modelID
 						: (model as { name?: string }).name || modelID,
-				ready: true,
+				// Native preferences also include the current selection before a provider is
+				// configured. A named provider still needs a connection or credential.
+				ready: providerID === "session" || configured.has(providerID),
 			})
 		}
 	}
