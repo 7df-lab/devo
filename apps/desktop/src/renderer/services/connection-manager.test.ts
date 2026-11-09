@@ -129,6 +129,13 @@ describe("connection manager project event bridge", () => {
 		delete (globalThis as unknown as { cancelAnimationFrame?: unknown }).cancelAnimationFrame
 	})
 
+	test("a disconnected exact-ID lookup reports connection failure instead of a missing child", async () => {
+		const manager = await import(`./connection-manager?case=disconnected-${Date.now()}`)
+		activeManager = manager
+		manager.disconnect()
+		await expect(manager.fetchSessionById("cold-child")).rejects.toThrow("Connect to the runtime")
+	})
+
 	test("forwards project-scoped session status events into renderer state", async () => {
 		const directory = "/repo/project-status-bridge"
 		const session: Session = {

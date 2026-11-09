@@ -77,6 +77,11 @@ export type {
 	ReferenceSearchSnapshot,
 } from "./reference-search-session"
 
+import {
+	objectRecord,
+	parseTimestampMs,
+	projectNativeSession,
+} from "./session-projection"
 import { SessionRosterEvents } from "./session-roster-events"
 export type { SessionRosterChange } from "./session-roster-events"
 
@@ -301,9 +306,6 @@ type PendingPermission = {
 	native?: boolean
 }
 
-function objectRecord(value: unknown): Record<string, unknown> | undefined {
-	return value && typeof value === "object" ? (value as Record<string, unknown>) : undefined
-}
 
 /** Canonical Native plan-entry statuses — no snake_case reshape. */
 function planStatus(status: string): string {
@@ -447,9 +449,6 @@ function nativeItemNotificationMethod(envelope: Record<string, unknown>): "item/
 	return "item/started"
 }
 
-function stringOrUndefined(value: unknown): string | undefined {
-	return typeof value === "string" && value.length > 0 ? value : undefined
-}
 
 function numberFromProtocol(value: unknown): number {
 	if (typeof value === "number" && Number.isFinite(value)) return value
@@ -548,21 +547,7 @@ function sessionConfigOptionsFromModelPreferences(preferences: ModelPreferencesW
 	return options
 }
 
-function parseTimestampMs(value: unknown): number | undefined {
-	if (typeof value === "number" && Number.isFinite(value)) return value
-	if (typeof value !== "string") return undefined
-	const parsed = Date.parse(value)
-	return Number.isFinite(parsed) ? parsed : undefined
-}
 
-function parseTitleState(value: unknown): string | undefined {
-	if (typeof value === "string") return value
-	if (value && typeof value === "object") {
-		const keys = Object.keys(value as Record<string, unknown>)
-		if (keys.length === 1) return keys[0]
-	}
-	return undefined
-}
 
 type LoadedSessionLimit = number | null
 type SessionSettingsPatch = {
@@ -1063,9 +1048,28 @@ class NativeClient {
 			const { directory } = this.forgetSession(params.sessionId)
 			this.emitSessionDeleted(params.sessionId, directory)
 		},
-		// `session.get` is a durable snapshot read. It intentionally does not
-		// resume the server actor; callers that need history use `messages`,
-		// while metadata updates can write the snapshot directly.
+		/** Independent exact-ID read. Neither consumes nor populates SDK caches.
+		 * Use when a discarded UI lifecycle must not supply a later lookup. */
+		read: async (params: { sessionId: string }) => {
+			try {
+				const result = await this.requestCanonical("session/read", params) as {
+					session: Record<string, unknown>
+				}
+				return {
+					data: projectNativeSession(
+						result.session,
+						/*existing*/ undefined,
+						this.options.directory ?? defaultCwd(),
+					),
+				}
+			} catch (error) {
+				if (isSessionNotFoundError(error)) return { data: undefined }
+				throw error
+			}
+		},
+		// `session.get` may reuse cached metadata or pending discovery. Call
+		// `session.read` for fresh identity validation across UI lifecycles.
+		// Neither path resumes work or loads history.
 		get: async (params: { sessionId: string }) => ({
 			data: await this.getSessionById(params.sessionId),
 		}),
@@ -1709,87 +1713,12 @@ class NativeClient {
 	}
 
 	private rememberNativeSession(info: Record<string, unknown>): Session {
-		const id = String(info.id ?? "")
-		if (!id) throw new Error("Native session is missing id")
-		const existing = this.sessions.get(id)
-		const usage = objectRecord(info.usage)
-		const total = objectRecord(usage?.total)
-		const created = parseTimestampMs(info.createdAt) ?? existing?.time.created ?? Date.now()
-		const wireActivity = parseTimestampMs(info.lastActivityAt)
-		const existingActivity = Math.max(existing?.time.lastActivity ?? 0, existing?.time.updated ?? 0)
-		// Never let resume/snapshot lower a known activity timestamp — that alone
-		// can reshuffle the sidebar. Prefer the newer of wire vs in-memory.
-		const updated =
-			wireActivity != null
-				? Math.max(wireActivity, existingActivity)
-				: existingActivity > 0
-					? existingActivity
-					: created
-		const parent = objectRecord(info.parent)
-		const forkFromId =
-			typeof info.forkFromId === "string"
-				? info.forkFromId
-				: typeof info.fork_from_id === "string"
-					? info.fork_from_id
-					: existing?.forkFromId
-		const atTurnId =
-			typeof info.atTurnId === "string"
-				? info.atTurnId
-				: typeof info.fork_at_turn_id === "string"
-					? info.fork_at_turn_id
-					: existing?.atTurnId
-		const titleState = parseTitleState(info.titleState ?? info.title_state)
-		// Persisted per-session turn settings (model / reasoning effort / mode).
-		// The server restores these on resume; without them the Desktop composer
-		// cannot re-seed per-session selections after a restart and every
-		// session falls back to the project default.
-		const wireModel = objectRecord(info.model)
-		const wireSettings = objectRecord(info.settings)
-		const sessionModel = wireModel
-			? {
-					provider:
-						typeof wireModel.provider === "string"
-							? wireModel.provider
-							: existing?.model?.provider,
-					model:
-						typeof wireModel.model === "string"
-							? wireModel.model
-							: existing?.model?.model,
-					reasoningEffort:
-						stringOrUndefined(wireModel.reasoningEffort ?? wireModel.reasoning_effort) ??
-						existing?.model?.reasoningEffort,
-			  }
-			: existing?.model
-		const sessionSettings = wireSettings
-			? {
-					mode: stringOrUndefined(wireSettings.mode) ?? existing?.settings?.mode,
-					reasoningEffort:
-						stringOrUndefined(wireSettings.reasoningEffort ?? wireSettings.reasoning_effort) ??
-						existing?.settings?.reasoningEffort,
-					permissionProfile:
-						stringOrUndefined(wireSettings.permissionProfile ?? wireSettings.permission_profile) ??
-						existing?.settings?.permissionProfile,
-			  }
-			: existing?.settings
-		const session: Session = {
-			id,
-			title: typeof info.title === "string" ? info.title : existing?.title,
-			titleState: titleState ?? existing?.titleState ?? "Unset",
-			parentId: typeof parent?.sessionId === "string" ? parent.sessionId : existing?.parentId,
-			forkFromId,
-			atTurnId,
-			time: { created, updated, lastActivity: updated },
-			directory: String(info.cwd ?? existing?.directory ?? this.options.directory ?? defaultCwd()),
-			model: sessionModel,
-			settings: sessionSettings,
-			totalInputTokens: Number(total?.inputTokens ?? existing?.totalInputTokens ?? 0),
-			totalOutputTokens: Number(total?.outputTokens ?? existing?.totalOutputTokens ?? 0),
-			totalTokens: Number(total?.totalTokens ?? existing?.totalTokens ?? 0),
-			totalCacheCreationTokens: Number(total?.cacheCreationInputTokens ?? existing?.totalCacheCreationTokens ?? 0),
-			totalCacheReadTokens: Number(total?.cacheReadInputTokens ?? existing?.totalCacheReadTokens ?? 0),
-			promptTokenEstimate: Number(total?.inputTokens ?? existing?.promptTokenEstimate ?? 0),
-			lastQueryTotalTokens: existing?.lastQueryTotalTokens ?? 0,
-		}
+		const session = projectNativeSession(
+			info,
+			this.sessions.get(String(info.id ?? "")),
+			this.options.directory ?? defaultCwd(),
+		)
+		const id = session.id
 		this.sessions.set(id, session)
 		this.sessionDirectories.set(id, session.directory ?? defaultCwd())
 		// Durable snapshots (session/list, resume, metadata) often report Idle
