@@ -33,11 +33,13 @@ export async function readSubagentRoster(
 		const result = await read(cursor)
 		signal.throwIfAborted()
 		for (const session of result.data) {
-			// User forks and independent roots are not subagents. Ephemeral side
-			// questions do not have a durable transcript to navigate to.
-			if (session.parent?.sessionId === parentId && !session.ephemeral) {
-				sessions.set(session.id, session)
-			}
+			// The Native filter is part of the contract, not a hint. Never fall
+			// back to scanning the global roster if a mismatched runtime ignores it.
+			if (session.parent?.sessionId !== parentId || session.ephemeral)
+				throw new Error(
+					"The runtime returned an unscoped subagent list. Update the runtime and retry.",
+				)
+			sessions.set(session.id, session)
 		}
 		scanned += result.data.length
 		cursor = result.nextCursor ?? undefined
@@ -133,7 +135,7 @@ export function useSubagentRoster(sessionId: string, directory: string, open: bo
 					(cursor) =>
 						client.session.roster({
 							cwds: [],
-							includeChildren: true,
+							parentSessionId: sessionId,
 							limit: 200,
 							...(cursor ? { cursor } : {}),
 						}),
@@ -205,7 +207,10 @@ export function useSubagentRoster(sessionId: string, directory: string, open: bo
 					else if (previous?.type !== "delete")
 						changes.set(change.sessionId, {
 							...change,
-							patch: { ...(previous?.type === "patch" ? previous.patch : {}), ...change.patch },
+							patch: {
+								...(previous?.type === "patch" ? previous.patch : {}),
+								...change.patch,
+							},
 						})
 				}
 			}

@@ -36,7 +36,11 @@ let read = async (_params: unknown): Promise<SessionRosterPage> => ({
 let connected = true
 mock.module("../services/connection-manager", () => ({
 	getProjectClient: () =>
-		connected ? { session: { roster: (params: unknown) => read(params), observeRoster } } : null,
+		connected
+			? {
+					session: { roster: (params: unknown) => read(params), observeRoster },
+				}
+			: null,
 }))
 const { readSubagentRoster, useSubagentRoster } = await import("./use-subagent-roster")
 const { createRoot } = await import("react-dom/client")
@@ -86,36 +90,29 @@ afterEach(async () => {
 })
 
 describe("bounded child roster scan", () => {
-	test("finds children on later pages, excluding roots, forks, grandchildren and ephemeral children", async () => {
-		const calls: Array<string | undefined> = []
-		const result = await readSubagentRoster(
-			async (cursor) => {
-				calls.push(cursor)
-				return cursor
-					? {
-							data: [child("right"), child("grandchild", "right")],
-							nextCursor: null,
-						}
-					: {
-							data: [
-								{ id: "root" },
-								{ id: "fork", forkFromId: "parent" },
-								{ ...child("side"), ephemeral: true },
-								child("other", "elsewhere"),
-							] as NativeSession[],
-							nextCursor: "4",
-						}
-			},
-			"parent",
-			new AbortController().signal,
-		)
-		expect(result).toEqual({
-			sessions: [child("right")],
-			nextCursor: null,
-			scanned: 6,
-		})
-		expect(calls).toEqual([undefined, "4"])
+	test("rejects unscoped pages rather than falling back to a global scan", async () => {
+		for (const session of [
+			{ id: "root" },
+			{ id: "fork", forkFromId: "parent" },
+			{ ...child("side"), ephemeral: true },
+			child("other", "elsewhere"),
+			child("grandchild", "child"),
+		]) {
+			let calls = 0
+			await expect(
+				readSubagentRoster(
+					async () => {
+						calls++
+						return { data: [session] as NativeSession[], nextCursor: "more" }
+					},
+					"parent",
+					new AbortController().signal,
+				),
+			).rejects.toThrow("unscoped subagent list")
+			expect(calls).toBe(1)
+		}
 	})
+
 	test("caps each scan at five pages and continues explicitly without duplicates", async () => {
 		const read = async (cursor?: string) => ({
 			data: [child("same")],
@@ -162,6 +159,25 @@ describe("bounded child roster scan", () => {
 })
 
 describe("roster lifecycle", () => {
+	test("every page requests this parent across all child working directories", async () => {
+		const calls: unknown[] = []
+		read = async (params) => {
+			calls.push(params)
+			return calls.length === 1
+				? { data: [child("first")], nextCursor: "200" }
+				: {
+						data: [{ ...child("moved"), cwd: "/other-repo" }],
+						nextCursor: null,
+					}
+		}
+		await render()
+		expect(calls).toEqual([
+			{ cwds: [], parentSessionId: "parent", limit: 200 },
+			{ cwds: [], parentSessionId: "parent", limit: 200, cursor: "200" },
+		])
+		expect(state.sessions.map((session) => session.id)).toEqual(["first", "moved"])
+	})
+
 	test("closed panels make no reads; repeated refreshes share the active scan", async () => {
 		const pending = deferred<SessionRosterPage>()
 		let calls = 0
@@ -277,12 +293,19 @@ describe("automatic roster updates", () => {
 		await render()
 		await act(async () => {
 			emit({ type: "patch", sessionId: "one", patch: { status: "active" } })
-			emit({ type: "patch", sessionId: "one", patch: { flags: ["waitingUserInput"] } })
+			emit({
+				type: "patch",
+				sessionId: "one",
+				patch: { flags: ["waitingUserInput"] },
+			})
 			emit({ type: "delete", sessionIds: ["gone"] })
 			emit({ type: "patch", sessionId: "gone", patch: { status: "active" } })
 			emit({ type: "upsert", session: child("new") })
 			emit({ type: "patch", sessionId: "new", patch: { queuedCount: 3 } })
-			pending.resolve({ data: [child("one"), child("gone")], nextCursor: null })
+			pending.resolve({
+				data: [child("one"), child("gone")],
+				nextCursor: null,
+			})
 		})
 		expect(state.sessions).toEqual([
 			{ ...child("one"), status: "active", flags: ["waitingUserInput"] },

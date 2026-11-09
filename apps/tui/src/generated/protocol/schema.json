@@ -151008,7 +151008,7 @@
     "SessionListParams": {
       "$schema": "http://json-schema.org/draft-07/schema#",
       "title": "SessionListParams",
-      "description": "No filtering by status/archive flags; only title search is supported. Returned sessions use `turnsView = notLoaded` (no embedded history).",
+      "description": "Filters compose across cwd, title search and direct subagent parent. No filtering by status/archive flags. Returned sessions use `turnsView = notLoaded` (no embedded history).",
       "type": "object",
       "properties": {
         "cursor": {
@@ -151039,12 +151039,28 @@
           "format": "uint32",
           "minimum": 0.0
         },
+        "parentSessionId": {
+          "description": "Restrict to this parent's saved direct subagents (not user forks or grandchildren). Implies `include_children`, even when explicitly false. Filtering happens before pagination and never resumes the parent/children.",
+          "anyOf": [
+            {
+              "$ref": "#/definitions/SessionId"
+            },
+            {
+              "type": "null"
+            }
+          ]
+        },
         "search": {
           "description": "Case-insensitive substring match on title.",
           "type": [
             "string",
             "null"
           ]
+        }
+      },
+      "definitions": {
+        "SessionId": {
+          "type": "string"
         }
       }
     },

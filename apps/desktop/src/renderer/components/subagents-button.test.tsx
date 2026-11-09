@@ -126,6 +126,16 @@ describe("subagent labels", () => {
 })
 
 describe("subagent popover interactions", () => {
+	test("unscoped runtime results show an actionable error without child navigation", async () => {
+		page = { data: [{ ...child, parent: undefined }], nextCursor: "200" }
+		await render()
+		await click(button("Subagents"))
+		expect(document.querySelector("[role=alert]")?.textContent).toContain("Update the runtime")
+		expect(document.querySelectorAll("ul[aria-label='Subagent sessions'] li")).toHaveLength(0)
+		expect(calls).toBe(1)
+		expect(navigations).toEqual([])
+	})
+
 	test("opens on demand, shows child state and navigates using the real session ID", async () => {
 		page = {
 			data: [{ ...child, flags: ["waitingApproval"] }],

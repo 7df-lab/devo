@@ -57,7 +57,8 @@ class Transport implements DevoNativeTransport {
 			return { subscriptionId: "roster", snapshots: [], cursors: [] }
 		if (method === "session/read") return { session: child }
 		if (method === "session/list") {
-			return (params as { includeChildren?: boolean }).includeChildren
+			return (params as { includeChildren?: boolean; parentSessionId?: string }).includeChildren ||
+				(params as { parentSessionId?: string }).parentSessionId
 				? { data: [child], nextCursor: "200" }
 				: { data: [], nextCursor: null }
 		}
@@ -82,7 +83,7 @@ describe("read-only child session discovery", () => {
 		try {
 			const params = {
 				cwds: [],
-				includeChildren: true,
+				parentSessionId: "parent-1",
 				limit: 200,
 				cursor: "100",
 			}
@@ -198,7 +199,11 @@ test("validated Native creation and metadata reach roster observers unchanged", 
 	client.session.observeRoster((change: SessionRosterChange) => observed.push(change))
 	await client.session.roster({ includeChildren: true })
 	const updated = { ...child, title: "Renamed", flags: [], queuedCount: 0 }
-	transport.emit({ type: "notification", method: "session/created", params: { session: child } })
+	transport.emit({
+		type: "notification",
+		method: "session/created",
+		params: { session: child },
+	})
 	transport.emit({
 		type: "notification",
 		method: "session/metadataUpdated",

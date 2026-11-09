@@ -15,8 +15,8 @@ restart or missed creation event. Unknown IDs now use canonical `session/read`,
 without resuming an actor or loading its history just to resolve the identity.
 
 The roster uses the existing Native `session/list` contract with
-`includeChildren: true`. It retains canonical status and flags instead of
-projecting a second subagent lifecycle. Approval and input flags take precedence
+`parentSessionId` set to the current session. It retains canonical status and
+flags instead of projecting a second subagent lifecycle. Approval and input flags take precedence
 over working; queued idle work is labeled **Queued**. **Idle** means no active
 turn, not successful task completion or a promise that saved work will resume.
 Opening the child lets the existing conversation/recovery UI show more detail.
@@ -38,9 +38,18 @@ Opening the child lets the existing conversation/recovery UI show more detail.
 - Each scan requests at most five pages of 200 sessions, retaining only direct
   children. If a cursor remains, the UI exposes **Check more sessions** rather
   than presenting a complete empty result. Duplicate child IDs are deduplicated.
-- The Native list API has no parent filter. Pages enumerate the global roster so
-  children whose cwd changed are not omitted. The five-page bound limits returned
-  rows and round trips, not the server's underlying index/live-handle enumeration.
+- Native `session/list` filters direct subagents by `parentSessionId` **before**
+  pagination, so unrelated sessions cannot fill the five-page scan. The parent
+  filter implies child inclusion even if `includeChildren` is omitted or false.
+  It composes with cwd/title filters; Desktop leaves `cwds` empty so children
+  whose cwd changed are not omitted. Unknown parents return an empty page.
+  Equal activity timestamps are ordered by session ID to keep repeated pages stable.
+- Desktop expects the matching Native contract shipped with it. If a runtime
+  ignores the filter and returns an unrelated/ephemeral session, Desktop reports
+  the mismatch and asks for a runtime update instead of silently scanning the
+  global roster. There is no older-runtime discovery fallback.
+  The five-page bound limits returned rows and round trips, not the server's
+  underlying index/live-handle enumeration.
   A bounded scan is not proof that a previously loaded child disappeared: those
   rows are retained if the scan is incomplete. Live deletion events remove them;
   deletions missed while disconnected can remain until a complete scan/reopen.
@@ -63,12 +72,18 @@ PR #272 adds Python `rlm.collect`, progress notes, graceful end-turn, and indepe
 root creation. Those are not new public Native UI RPCs. This Desktop change works
 on the existing Native surface and does not stack or duplicate #272's runtime
 changes. It does not expose collection results, retained final answers, child
-progress notes, or bulk steering/cancellation. Those require a separate design
+progress notes, or bulk steering/cancellation. Factory children use this same roster. Factory graph state and durable checkpoints
+remain owned by the Python scheduler and host bridge; this is child discovery,
+not a Native Factory start/stop or graph-control API. Those require a separate design
 that preserves the runtime's recovery and admission semantics.
 
 ## Verification
 
-Tests cover exact-ID child discovery, Native validation, read-only requests,
+Native integration tests cover parent filtering before pagination across more
+than 1,000 unrelated rows, deterministic tied timestamps, cold index rows with
+unreadable journals, cross-cwd children, composed title/cwd filters, unchanged
+root/fork discovery, and live child status. Desktop tests cover unscoped-response
+errors without a global-scan fallback, exact-ID child discovery, Native validation, read-only requests,
 multi-page filtering, bounded scans, duplicate IDs, repeated cursor errors,
 close/reopen and navigation races, repeated refreshes, error/retry behavior, and
 real Base UI popover opening, Escape/Close dismissal, focus restoration and child
