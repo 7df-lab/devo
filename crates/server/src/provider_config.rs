@@ -34,8 +34,7 @@ use std::path::Path;
 use std::pin::Pin;
 use std::sync::Arc;
 
-const NO_PROVIDER_CONFIGURED_MESSAGE: &str =
-    "No provider configured. Run `devo onboard` to complete setup.";
+pub(crate) const NO_PROVIDER_CONFIGURED_MESSAGE: &str = "No provider configured. In the TUI, use `/login` to connect a provider, then `/model` to select a model.";
 
 /// Resolved provider bootstrap owned by the server runtime.
 pub struct ResolvedServerProvider {
@@ -601,7 +600,7 @@ mod tests {
     }
 
     #[tokio::test]
-    async fn empty_provider_config_loads_missing_provider_for_onboarding() {
+    async fn empty_provider_config_explains_current_tui_setup_recovery() {
         let config = devo_core::AppConfig::default();
         let dir = tempfile::tempdir().expect("temp dir");
 
@@ -611,28 +610,36 @@ mod tests {
 
         assert_eq!(actual.default_model, "onboard-model");
         assert_eq!(actual.provider.name(), "missing-provider");
+        let request = devo_protocol::ModelRequest {
+            model_slug: devo_protocol::ModelProfileKey::Generic,
+            model: "onboard-model".to_string(),
+            system: None,
+            messages: Vec::new(),
+            max_tokens: 1,
+            tools: None,
+            hosted_tools: Vec::new(),
+            sampling: devo_protocol::SamplingControls::default(),
+            request_thinking: None,
+            reasoning_effort: None,
+            extra_body: None,
+        };
         let error = actual
             .provider
-            .completion(devo_protocol::ModelRequest {
-                model_slug: devo_protocol::ModelProfileKey::Generic,
-                model: "onboard-model".to_string(),
-                system: None,
-                messages: Vec::new(),
-                max_tokens: 1,
-                tools: None,
-                hosted_tools: Vec::new(),
-                sampling: devo_protocol::SamplingControls::default(),
-                request_thinking: None,
-                reasoning_effort: None,
-                extra_body: None,
-            })
+            .completion(request.clone())
             .await
             .expect_err("missing provider should reject model requests");
 
         assert_eq!(
             error.to_string(),
-            "No provider configured. Run `devo onboard` to complete setup."
+            "No provider configured. In the TUI, use `/login` to connect a provider, then `/model` to select a model."
         );
+        let streaming_error = actual
+            .provider
+            .completion_stream(request)
+            .await
+            .err()
+            .expect("missing provider should reject streaming requests");
+        assert_eq!(streaming_error.to_string(), error.to_string());
     }
 
     /// Verifies: server provider construction validates provider custom header configuration.

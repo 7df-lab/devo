@@ -19,6 +19,7 @@ use crate::ServerRuntime;
 use crate::db::Database;
 use crate::execution::ServerRuntimeDependencies;
 use crate::load_server_provider;
+use crate::provider_config::NO_PROVIDER_CONFIGURED_MESSAGE;
 use crate::resolve_listen_targets;
 use crate::run_listeners_with_internal_proxy;
 use crate::singleton::ServerControlAction;
@@ -305,7 +306,7 @@ pub async fn run_server_process(
         .unwrap_or_default();
     if !config.has_provider_configuration() {
         tracing::warn!(
-            "No provider configured. Run `devo onboard` to complete setup; continuing with onboarding-capable server"
+            "{NO_PROVIDER_CONFIGURED_MESSAGE} Continuing with onboarding-capable server."
         );
     }
     let provider = load_server_provider(
