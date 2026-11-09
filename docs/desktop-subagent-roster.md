@@ -66,6 +66,36 @@ Opening the child lets the existing conversation/recovery UI show more detail.
   mutations is claimed. The 30-second reconciliation is a bounded fallback, not
   a promise that all unobserved child changes are delivered instantly.
 
+## Interrupting a child
+
+An active, non-archived child has a **Stop** control beside its navigation row.
+It sends the existing Native `session/interrupt` with that child's exact session
+ID through the same captured runtime client. It does not open the child, resume
+its actor, hydrate history, send a prompt, or invoke a Python fallback. The
+runtime retains its existing session-scoped interruption semantics, including
+cancellation of active work; this is not a new lifecycle or a Factory pause API.
+
+- Stop targets the session's current work when the runtime receives the request,
+  not a particular turn version captured when the roster was read.
+- Queued messages are not removed and can run after interruption. Idle or
+  queued-only children have no Stop control. Open the child for its queue and
+  recovery controls. This action does not stop a Factory graph from scheduling
+  future work.
+- The row is disabled while its request is pending, including after Close/Reopen
+  of this panel. Other children remain independently controllable. Navigation
+  remains available. Disconnect or a roster error disables Stop controls.
+- An acknowledgement never changes the displayed status to Idle or Completed.
+  Status remains driven by Native events and roster reads. After a request settles
+  while its panel remains open and connected, the roster reconciles again.
+- A failed request displays an accessible error. A missing response may mean the
+  interruption already happened; the UI asks the user to check state before an
+  explicit retry. No interrupt is automatically replayed on refresh, reopening,
+  or reconnect. Already-sent requests can complete after closing or navigation.
+- Pending/error state is scoped to the runtime, directory, parent and child so a
+  late result does not affect a different roster. The guard lasts for this header
+  component's lifetime; it does not claim durable exactly-once control across
+  application reloads or remounts.
+
 ## Relation to the Python controls
 
 PR #272 adds Python `rlm.collect`, progress notes, graceful end-turn, and independent
@@ -90,7 +120,10 @@ real Base UI popover opening, Escape/Close dismissal, focus restoration and chil
 navigation. Live regression cases cover validated passive fan-out without stealing
 main UI events, status/flag/queue and creation/deletion updates, events racing old
 pages, one scan at a time, the 30-second fallback, disconnect/reconnect and focus,
-server switching, and listener/timer cleanup. The roster does not change the existing visual tokens or icon scale.
+server switching, and listener/timer cleanup. Stop regressions cover exact-ID
+Native dispatch without replay/resume, independent child targets, idle/queued and
+archived rows, double clicks, close/reopen while pending, uncertain-response errors,
+explicit retry, disconnect/reconnect, and late results after parent/server changes. The roster does not change the existing visual tokens or icon scale.
 
 Packaged Electron, visual screenshot and real-provider end-to-end checks remain
 separate from these component and transport tests.

@@ -44,16 +44,34 @@ Object.assign(globalThis, {
 let page: SessionRosterPage = { data: [], nextCursor: null }
 let calls = 0
 const navigations: unknown[] = []
+const aborts: Array<{ sessionId: string; serverUrl: string | null }> = []
+let interrupt: () => Promise<void> = async () => {}
+function deferred() {
+	let resolve!: () => void
+	let reject!: (error: Error) => void
+	const promise = new Promise<void>((yes, no) => {
+		resolve = yes
+		reject = no
+	})
+	return { promise, resolve, reject }
+}
 mock.module("../services/connection-manager", () => ({
-	getProjectClient: () => ({
-		session: {
-			observeRoster,
-			roster: async () => {
-				calls++
-				return page
+	getProjectClient: () => {
+		const serverUrl = getDefaultStore().get(serverUrlAtom)
+		return {
+			session: {
+				observeRoster,
+				abort: async ({ sessionId }: { sessionId: string }) => {
+					aborts.push({ sessionId, serverUrl })
+					await interrupt()
+				},
+				roster: async () => {
+					calls++
+					return page
+				},
 			},
-		},
-	}),
+		}
+	},
 }))
 mock.module("@tanstack/react-router", () => ({
 	useNavigate: () => (route: unknown) => {
@@ -109,6 +127,8 @@ afterEach(async () => {
 	page = { data: [], nextCursor: null }
 	calls = 0
 	navigations.length = 0
+	aborts.length = 0
+	interrupt = async () => {}
 })
 
 describe("subagent labels", () => {
@@ -211,4 +231,147 @@ test("open popover follows live status, creation and deletion without clicking R
 	expect(calls).toBe(1)
 	await click(button("Close subagents"))
 	expect(listeners.size).toBe(0)
+})
+
+describe("subagent stop controls", () => {
+	test("interrupts the chosen active child without navigation or pretending it is idle", async () => {
+		page = {
+			data: [
+				{ ...child, status: "active", queuedCount: 2 },
+				{ ...child, id: "other", title: "Other child", status: "active" },
+			],
+			nextCursor: null,
+		}
+		await render()
+		await click(button("Subagents"))
+		await click(button("Stop Check runtime"))
+		expect(aborts).toEqual([{ sessionId: "child", serverUrl: null }])
+		expect(navigations).toEqual([])
+		expect(button("Subagents").getAttribute("aria-expanded")).toBe("true")
+		expect(document.body.textContent).toContain("Working")
+		expect(document.body.textContent).toContain("Queued messages may still run")
+		expect(calls).toBe(2)
+		await act(async () => emit({ type: "patch", sessionId: "child", patch: { status: "idle" } }))
+		expect(document.querySelector('button[aria-label="Stop Check runtime"]')).toBeNull()
+		expect(document.body.textContent).toContain("Queued")
+		expect(button("Stop Other child").disabled).toBe(false)
+	})
+
+	test("idle, queued-only and archived children have no stop control", async () => {
+		page = {
+			data: [
+				child,
+				{ ...child, id: "queued", queuedCount: 1 },
+				{ ...child, id: "archived", status: "active", archived: true },
+			],
+			nextCursor: null,
+		}
+		await render()
+		await click(button("Subagents"))
+		expect(document.querySelectorAll('button[aria-label^="Stop "]')).toHaveLength(0)
+		expect(aborts).toEqual([])
+	})
+
+	test("repeated clicks and close/reopen do not duplicate a pending interrupt", async () => {
+		const pending = deferred()
+		interrupt = () => pending.promise
+		page = { data: [{ ...child, status: "active" }], nextCursor: null }
+		await render()
+		await click(button("Subagents"))
+		await act(async () => {
+			button("Stop Check runtime").click()
+			button("Stop Check runtime").click()
+		})
+		expect(button("Stop Check runtime").disabled).toBe(true)
+		await click(button("Close subagents"))
+		await click(button("Subagents"))
+		expect(button("Stop Check runtime").disabled).toBe(true)
+		expect(document.body.textContent).toContain("Requesting stop")
+		await click(button("Stop Check runtime"))
+		expect(aborts).toHaveLength(1)
+		await act(async () => pending.resolve())
+		expect(button("Stop Check runtime").disabled).toBe(false)
+		expect(document.body.textContent).not.toContain("Requesting stop")
+	})
+
+	test("failed or uncertain interrupts surface an error and are never automatically replayed", async () => {
+		interrupt = async () => {
+			throw new Error("Connection lost before acknowledgement")
+		}
+		page = { data: [{ ...child, status: "active" }], nextCursor: null }
+		await render()
+		await click(button("Subagents"))
+		await click(button("Stop Check runtime"))
+		expect(document.querySelector('[role="alert"]')?.textContent).toContain(
+			"Check the child's state before retrying",
+		)
+		expect(document.body.textContent).toContain("Connection lost before acknowledgement")
+		await click(button("Refresh subagents"))
+		await click(button("Close subagents"))
+		await click(button("Subagents"))
+		expect(aborts).toHaveLength(1)
+		interrupt = async () => {}
+		await click(button("Stop Check runtime"))
+		expect(aborts).toHaveLength(2)
+		expect(document.querySelector('[role="alert"]')).toBeNull()
+	})
+
+	test("disconnect disables controls and reconnect does not replay an uncertain stop", async () => {
+		const pending = deferred()
+		interrupt = () => pending.promise
+		page = { data: [{ ...child, status: "active" }], nextCursor: null }
+		await render()
+		await click(button("Subagents"))
+		await click(button("Stop Check runtime"))
+		await act(async () => emit({ type: "disconnected" }))
+		await act(async () => pending.reject(new Error("Disconnected")))
+		expect(button("Stop Check runtime").disabled).toBe(true)
+		await click(button("Stop Check runtime"))
+		await act(async () => emit({ type: "resync" }))
+		expect(aborts).toHaveLength(1)
+		expect(button("Stop Check runtime").disabled).toBe(false)
+		expect(document.body.textContent).toContain("Stop was not confirmed")
+	})
+
+	test("late results stay with the original parent and do not affect another roster", async () => {
+		const pending = deferred()
+		interrupt = () => pending.promise
+		page = { data: [{ ...child, status: "active" }], nextCursor: null }
+		await render()
+		await click(button("Subagents"))
+		await click(button("Stop Check runtime"))
+		page = {
+			data: [
+				{ ...child, status: "active", parent: { kind: "agent", sessionId: "different-parent" } },
+			],
+			nextCursor: null,
+		}
+		await act(async () =>
+			root?.render(<SubagentsButton agent={{ ...agent, sessionId: "different-parent" }} />),
+		)
+		expect(button("Stop Check runtime").disabled).toBe(false)
+		await act(async () => pending.reject(new Error("Old parent request failed")))
+		expect(document.querySelector('[role="alert"]')).toBeNull()
+		expect(document.body.textContent).not.toContain("Requesting stop")
+		expect(aborts).toEqual([{ sessionId: "child", serverUrl: null }])
+	})
+
+	test("server switching uses the selected server and isolates late control results", async () => {
+		const pending = deferred()
+		interrupt = () => pending.promise
+		page = { data: [{ ...child, status: "active" }], nextCursor: null }
+		await render()
+		await click(button("Subagents"))
+		await click(button("Stop Check runtime"))
+		await act(async () => getDefaultStore().set(serverUrlAtom, "http://second-runtime"))
+		expect(button("Stop Check runtime").disabled).toBe(false)
+		await act(async () => pending.reject(new Error("Old runtime disconnected")))
+		expect(document.querySelector('[role="alert"]')).toBeNull()
+		interrupt = async () => {}
+		await click(button("Stop Check runtime"))
+		expect(aborts).toEqual([
+			{ sessionId: "child", serverUrl: null },
+			{ sessionId: "child", serverUrl: "http://second-runtime" },
+		])
+	})
 })

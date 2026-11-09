@@ -56,6 +56,7 @@ class Transport implements DevoNativeTransport {
 		if (method === "subscription/create")
 			return { subscriptionId: "roster", snapshots: [], cursors: [] }
 		if (method === "session/read") return { session: child }
+		if (method === "session/interrupt") return { interrupted: true }
 		if (method === "session/list") {
 			return (params as { includeChildren?: boolean; parentSessionId?: string }).includeChildren ||
 				(params as { parentSessionId?: string }).parentSessionId
@@ -214,4 +215,22 @@ test("validated Native creation and metadata reach roster observers unchanged", 
 		{ type: "upsert", session: updated },
 	])
 	client.dispose()
+})
+
+test("stopping a roster child sends only the canonical interrupt and never replays a failed request", async () => {
+	const transport = new Transport()
+	const client = createDevoClient({ directory: "/parent-repo", transport })
+	try {
+		await client.session.abort({ sessionId: child.id })
+		transport.error = new Error("Interrupt response lost")
+		await expect(client.session.abort({ sessionId: child.id })).rejects.toThrow(
+			"Interrupt response lost",
+		)
+		expect(transport.requests.filter((request) => request.method !== "initialize")).toEqual([
+			{ method: "session/interrupt", params: { scope: { scope: "session", sessionId: child.id } } },
+			{ method: "session/interrupt", params: { scope: { scope: "session", sessionId: child.id } } },
+		])
+	} finally {
+		client.dispose()
+	}
 })

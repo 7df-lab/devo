@@ -7,7 +7,7 @@ import {
 } from "@devo/ui/components/popover"
 import type { NativeSession } from "@devo-ai/sdk/v2/client"
 import { useNavigate } from "@tanstack/react-router"
-import { ArrowUpRightIcon, GitBranchIcon, RefreshCwIcon, XIcon } from "lucide-react"
+import { ArrowUpRightIcon, GitBranchIcon, RefreshCwIcon, SquareIcon, XIcon } from "lucide-react"
 import { useState } from "react"
 import { useSubagentRoster } from "../hooks/use-subagent-roster"
 import type { Agent } from "../lib/types"
@@ -76,38 +76,65 @@ export function SubagentsButton({ agent }: { agent: Agent }) {
 					</p>
 				)}
 				<ul aria-label="Subagent sessions" className="max-h-72 overflow-y-auto">
-					{roster.sessions.map((session) => (
-						<li key={session.id}>
-							<button
-								type="button"
-								onClick={() => {
-									setOpen(false)
-									void navigate({
-										to: "/project/$projectSlug/session/$sessionId",
-										params: {
-											projectSlug: agent.projectSlug,
-											sessionId: session.id,
-										},
-									})
-								}}
-								className="flex w-full items-center gap-2 rounded-md px-2 py-2 text-left text-xs transition-colors hover:bg-muted focus-visible:outline-2 focus-visible:outline-ring"
-							>
-								<span className="min-w-0 flex-1">
-									<span className="block truncate font-medium">
-										{session.title || "Untitled subagent"}
-									</span>
-									<span className="block text-muted-foreground">
-										{subagentStatus(session)}
-										{session.archived ? " · Archived" : ""}
-									</span>
-								</span>
-								<ArrowUpRightIcon
-									className="size-3.5 shrink-0 stroke-[1.5] text-muted-foreground"
-									aria-hidden="true"
-								/>
-							</button>
-						</li>
-					))}
+					{roster.sessions.map((session) => {
+						const stop = roster.stopState(session.id)
+						return (
+							<li key={session.id}>
+								<div className="flex items-center gap-1">
+									<button
+										type="button"
+										onClick={() => {
+											setOpen(false)
+											void navigate({
+												to: "/project/$projectSlug/session/$sessionId",
+												params: {
+													projectSlug: agent.projectSlug,
+													sessionId: session.id,
+												},
+											})
+										}}
+										className="flex min-w-0 flex-1 items-center gap-2 rounded-md px-2 py-2 text-left text-xs transition-colors hover:bg-muted focus-visible:outline-2 focus-visible:outline-ring"
+									>
+										<span className="min-w-0 flex-1">
+											<span className="block truncate font-medium">
+												{session.title || "Untitled subagent"}
+											</span>
+											<span className="block text-muted-foreground">
+												{subagentStatus(session)}
+												{session.archived ? " · Archived" : ""}
+											</span>
+										</span>
+										<ArrowUpRightIcon
+											className="size-3.5 shrink-0 stroke-[1.5] text-muted-foreground"
+											aria-hidden="true"
+										/>
+									</button>
+									{session.status === "active" && !session.archived && (
+										<button
+											type="button"
+											aria-label={`Stop ${session.title || "Untitled subagent"}`}
+											title="Interrupt current work. Queued messages may still run."
+											disabled={!roster.canStop || stop?.status === "pending"}
+											onClick={() => void roster.stop(session.id)}
+											className="inline-flex size-7 shrink-0 items-center justify-center rounded-md text-muted-foreground hover:bg-muted hover:text-foreground focus-visible:outline-2 focus-visible:outline-ring disabled:opacity-50"
+										>
+											<SquareIcon className="size-3.5 stroke-[1.5]" aria-hidden="true" />
+										</button>
+									)}
+								</div>
+								{stop?.status === "error" && (
+									<p role="alert" className="px-2 pb-2 text-xs text-destructive">
+										{stop.message}
+									</p>
+								)}
+								{stop?.status === "pending" && (
+									<output className="block px-2 pb-2 text-xs text-muted-foreground">
+										Requesting stop…
+									</output>
+								)}
+							</li>
+						)
+					})}
 				</ul>
 				{roster.nextCursor && (
 					<button
@@ -121,7 +148,7 @@ export function SubagentsButton({ agent }: { agent: Agent }) {
 				)}
 				<p className="text-[11px] text-muted-foreground">
 					Idle does not confirm completion. Open a child to view its conversation and any recovery
-					prompt.
+					prompt. Stop interrupts current work. Queued messages may still run.
 				</p>
 			</PopoverContent>
 		</Popover>

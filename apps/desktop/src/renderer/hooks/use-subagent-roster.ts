@@ -79,6 +79,8 @@ function applyChange(
 	return { ...roster, sessions: [...sessions.values()] }
 }
 
+export type SubagentStopState = { status: "pending" } | { status: "error"; message: string }
+
 export function useSubagentRoster(sessionId: string, directory: string, open: boolean) {
 	const connected = useAtomValue(serverConnectedAtom)
 	const serverUrl = useAtomValue(serverUrlAtom)
@@ -86,9 +88,18 @@ export function useSubagentRoster(sessionId: string, directory: string, open: bo
 	const [roster, setRoster] = useState<SubagentRoster>(emptyRoster)
 	const [loading, setLoading] = useState(false)
 	const [error, setError] = useState<string | null>(null)
+	// Keep in-flight controls across Close/Reopen, separately from read lifetimes.
+	// Include the server and parent so late results never target another roster.
+	const controlScope = JSON.stringify([sessionId, directory, serverUrl, serverId])
+	const stops = useRef(new Map<string, SubagentStopState>())
+	const [stopStates, setStopStates] = useState(stops.current)
 	const scope = useRef("")
 	const current = useRef(emptyRoster)
-	const actions = useRef({ refresh: async () => {}, loadMore: async () => {} })
+	const actions = useRef({
+		refresh: async () => {},
+		loadMore: async () => {},
+		stop: async (_id: string) => {},
+	})
 
 	useEffect(() => {
 		const key = JSON.stringify([open, sessionId, directory, serverUrl, serverId])
@@ -219,6 +230,40 @@ export function useSubagentRoster(sessionId: string, directory: string, open: bo
 		actions.current = {
 			refresh: () => run(),
 			loadMore: () => (current.current.nextCursor ? run(true) : Promise.resolve()),
+			stop: async (id: string) => {
+				const child = current.current.sessions.find((session) => session.id === id)
+				const key = JSON.stringify([controlScope, id])
+				if (
+					!active ||
+					!online ||
+					!child ||
+					child.status !== "active" ||
+					child.archived ||
+					child.parent?.sessionId !== sessionId ||
+					child.ephemeral ||
+					stops.current.get(key)?.status === "pending"
+				)
+					return
+				const publishStop = (state: SubagentStopState | null) => {
+					stops.current = new Map(stops.current)
+					if (state) stops.current.set(key, state)
+					else stops.current.delete(key)
+					setStopStates(stops.current)
+				}
+				publishStop({ status: "pending" })
+				try {
+					// Use this captured client, never resolve a different server after awaiting.
+					await client.session.abort({ sessionId: id })
+					// An ACK is not proof of task completion. Status stays server-owned.
+					publishStop(null)
+				} catch (cause) {
+					publishStop({
+						status: "error",
+						message: `Stop was not confirmed. Check the child's state before retrying. ${cause instanceof Error ? cause.message : String(cause)}`,
+					})
+				}
+				if (active && online) refresh()
+			},
 		}
 		window.addEventListener("focus", refresh)
 		void run()
@@ -228,9 +273,9 @@ export function useSubagentRoster(sessionId: string, directory: string, open: bo
 			request?.abort()
 			unsubscribe()
 			window.removeEventListener("focus", refresh)
-			actions.current = { refresh: async () => {}, loadMore: async () => {} }
+			actions.current = { refresh: async () => {}, loadMore: async () => {}, stop: async () => {} }
 		}
-	}, [open, sessionId, directory, connected, serverUrl, serverId])
+	}, [open, sessionId, directory, connected, serverUrl, serverId, controlScope])
 
 	return {
 		...roster,
@@ -238,5 +283,8 @@ export function useSubagentRoster(sessionId: string, directory: string, open: bo
 		error,
 		refresh: () => actions.current.refresh(),
 		loadMore: () => actions.current.loadMore(),
+		stop: (id: string) => actions.current.stop(id),
+		canStop: connected && !error,
+		stopState: (id: string) => stopStates.get(JSON.stringify([controlScope, id])),
 	}
 }
