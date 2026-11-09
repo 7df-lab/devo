@@ -43,6 +43,9 @@ pub async fn dispatch_host_request_with_bridge(bridge: &HostBridge, data: Value)
 
     match action.as_str() {
         "" => error_reply("missing host_request type/action"),
+        action if action.starts_with("factory.") => {
+            crate::runtime::kernel_host_bridge::handle_factory(bridge, action, &params).await
+        }
         action if action.starts_with("harness.") => {
             crate::runtime::kernel_host_bridge::handle_harness(bridge, action, &params).await
         }

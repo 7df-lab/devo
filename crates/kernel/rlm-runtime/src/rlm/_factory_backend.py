@@ -36,6 +36,8 @@ class FactoryBackend(Protocol):
 
     async def cancel(self, target: str) -> None: ...
 
+    async def resolve(self, name: str) -> ChildSnapshot | None: ...
+
 
 class RlmFactoryBackend:
     """Use only the public RLM helpers and their existing Rust authorization."""
@@ -67,3 +69,16 @@ class RlmFactoryBackend:
         import rlm
 
         await rlm.delete_subagent(target)
+
+    async def resolve(self, name: str) -> ChildSnapshot | None:
+        import rlm
+
+        matches = [item for item in await rlm.list_subagents() if item.session_name == name]
+        if len(matches) > 1:
+            raise RuntimeError("reserved Factory child name is ambiguous")
+        if not matches:
+            return None
+        snapshots = await self.inspect([matches[0].rlm_child_id])
+        if len(snapshots) != 1 or snapshots[0].child_id != matches[0].rlm_child_id:
+            raise RuntimeError("reserved Factory child could not be reconciled")
+        return snapshots[0]

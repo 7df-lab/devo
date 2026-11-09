@@ -310,7 +310,7 @@ class FactoryAdapterTests(unittest.IsolatedAsyncioTestCase):
 
     async def test_namespace_and_module_share_one_factory(self):
         self.assertIs(rlm.factory, rlm.rlm.factory)
-        self.assertIn("no loops", rlm.factory.help())
+        self.assertIn("No loops", rlm.factory.help())
 
 
 if __name__ == "__main__":

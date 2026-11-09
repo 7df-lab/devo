@@ -20,6 +20,8 @@ use uuid::Uuid;
 use super::ServerRuntime;
 use devo_core::McpManager;
 use devo_core::tools::contracts::ToolBudgets;
+mod factory;
+pub(crate) use factory::handle_factory;
 mod harness;
 pub(crate) use harness::handle_harness;
 mod shell;
