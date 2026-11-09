@@ -269,7 +269,11 @@ async fn scoped_roster_preserves_live_child_status_and_parent_scope() -> Result<
         }),
     )
     .await?;
-    support::wait_for_session_notification(&mut notifications, "turn/completed", child.child_session_id)
-        .await?;
+    support::wait_for_session_notification(
+        &mut notifications,
+        "turn/completed",
+        child.child_session_id,
+    )
+    .await?;
     Ok(())
 }
