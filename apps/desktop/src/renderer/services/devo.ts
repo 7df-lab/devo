@@ -189,15 +189,12 @@ export async function deleteSession(client: DevoClient, sessionId: string): Prom
 
 /**
  * Fetch a single session by ID.
- * Returns null if the session is not found or the request fails.
+ * Returns null only for a missing session. Preserve transport/runtime errors so
+ * callers can distinguish an unavailable child from a deleted one and retry.
  */
 export async function getSession(client: DevoClient, sessionId: string): Promise<Session | null> {
-	try {
-		const result = await client.session.get({ sessionId: sessionId })
-		return (result.data as Session) ?? null
-	} catch {
-		return null
-	}
+	const result = await client.session.get({ sessionId: sessionId })
+	return (result.data as Session) ?? null
 }
 
 /**

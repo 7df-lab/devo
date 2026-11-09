@@ -1,18 +1,17 @@
 import { useNavigate, useParams } from "@tanstack/react-router"
 import { useAtomValue, useSetAtom } from "jotai"
-import { useCallback, useEffect, useState } from "react"
+import { useCallback, useEffect } from "react"
 import { agentFamily, sessionNameFamily } from "../atoms/derived/agents"
-import { markSessionReadAtom, upsertSessionAtom } from "../atoms/sessions"
-import { appStore } from "../atoms/store"
+import { markSessionReadAtom } from "../atoms/sessions"
 import { viewedSessionIdAtom } from "../atoms/ui"
+import { createLogger } from "../lib/logger"
+import type { Agent, FileAttachment, PermissionResponse, QuestionAnswer } from "../lib/types"
 import { useSessionRevert } from "./use-commands"
 import type { ModelRef } from "./use-devo-data"
 import { useConfig, useDevoAgents, useProviders, useVcs } from "./use-devo-data"
 import { useAgentActions } from "./use-server"
 import { useSessionChat } from "./use-session-chat"
-import { createLogger } from "../lib/logger"
-import type { Agent, FileAttachment, PermissionResponse, QuestionAnswer } from "../lib/types"
-import { fetchSessionById } from "../services/connection-manager"
+import { useSessionResolution } from "./use-session-resolution"
 
 const log = createLogger("session-controller")
 
@@ -40,38 +39,11 @@ export function useSessionController(sessionId: string, isActive = true) {
 	}, [isActive, markSessionRead, sessionId, setViewedSessionId])
 
 	const agent = useAtomValue(agentFamily(sessionId))
-	const [resolving, setResolving] = useState(!agent)
-
-	useEffect(() => {
-		if (agent) {
-			setResolving(false)
-			return
-		}
-
-		let cancelled = false
-		setResolving(true)
-
-		fetchSessionById(sessionId)
-			.then((session) => {
-				if (cancelled) return
-				if (session) {
-					appStore.set(upsertSessionAtom, {
-						session,
-						directory: session.directory ?? "",
-					})
-				} else {
-					setResolving(false)
-				}
-			})
-			.catch(() => {
-				if (cancelled) return
-				setResolving(false)
-			})
-
-		return () => {
-			cancelled = true
-		}
-	}, [sessionId])
+	const { state: resolution, retry: retryResolution } = useSessionResolution({
+		sessionId,
+		known: Boolean(agent),
+		active: isActive,
+	})
 
 	const parentSessionName = useAtomValue(
 		sessionNameFamily(agent?.parentId ?? agent?.forkFromId ?? ""),
@@ -122,12 +94,7 @@ export function useSessionController(sessionId: string, isActive = true) {
 	)
 
 	const handleDenyPermission = useCallback(
-		async (
-			target: Agent,
-			permissionSessionId: string,
-			permissionId: string,
-			note?: string,
-		) => {
+		async (target: Agent, permissionSessionId: string, permissionId: string, note?: string) => {
 			await respondToPermission(target.directory, permissionSessionId, permissionId, "reject")
 			const trimmed = note?.trim()
 			if (trimmed) {
@@ -226,7 +193,9 @@ export function useSessionController(sessionId: string, isActive = true) {
 
 	return {
 		agent,
-		resolving,
+		resolving: resolution.status === "loading",
+		resolution,
+		retryResolution,
 		parentSessionName,
 		chatTurns,
 		chatLoading,

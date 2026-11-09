@@ -9,8 +9,9 @@
  * AutomationRunDetail (for automation sessions) use this component.
  */
 
-import { AgentDetail } from "./agent-detail"
 import { useSessionController } from "../hooks/use-session-controller"
+import { AgentDetail } from "./agent-detail"
+import { SessionResolutionState } from "./session-resolution-state"
 
 interface SessionViewProps {
 	/** The Devo session ID to display */
@@ -22,25 +23,10 @@ interface SessionViewProps {
 export function SessionView({ sessionId, isActive = true }: SessionViewProps) {
 	const controller = useSessionController(sessionId, isActive)
 
-	if (!controller.agent && controller.resolving && isActive) {
-		return (
-			<div className="flex h-full items-center justify-center">
-				<div className="size-4 animate-spin rounded-full border-2 border-muted-foreground/20 border-t-muted-foreground/60" />
-			</div>
-		)
-	}
-
 	if (!controller.agent) {
 		if (!isActive) return null
 		return (
-			<div className="flex h-full items-center justify-center">
-				<div className="text-center">
-					<p className="text-sm font-medium text-muted-foreground">Session not found</p>
-					<p className="mt-1 text-xs text-muted-foreground/60">
-						This session may have been deleted or is not yet loaded
-					</p>
-				</div>
-			</div>
+			<SessionResolutionState state={controller.resolution} onRetry={controller.retryResolution} />
 		)
 	}
 

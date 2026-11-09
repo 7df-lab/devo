@@ -564,12 +564,12 @@ export function getProjectClient(directory: string): DevoClient | null {
  * the Jotai store — for example, subagent sessions that arrived while the Native
  * event stream was reconnecting, or sessions absent from the initial batch load.
  *
- * Returns `null` if the session is not found, the server is unreachable, or
- * no connection has been established.
+ * Returns `null` only if the runtime reports the session is not found.
+ * Missing connections and failed reads remain errors for the caller to display.
  */
 export async function fetchSessionById(sessionId: string): Promise<import("../lib/types").Session | null> {
 	const client = getBaseClient()
-	if (!client) return null
+	if (!client) throw new Error("Connect to the runtime to open this session.")
 	return getSession(client, sessionId)
 }
 
