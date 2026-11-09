@@ -346,8 +346,12 @@ export function useProviders(directory: string | null): {
 		if (!connected) void queryClient.cancelQueries({ queryKey, exact: true })
 	}, [connected, queryClient, queryKey])
 	const reload = useCallback(() => {
-		if (directory !== null && connected && !isMockMode) void refetch()
-	}, [directory, connected, isMockMode, refetch])
+		if (directory === null || !connected || isMockMode) return
+		// Refetch alone deduplicates a pending first read when data is absent.
+		// Explicit cancellation also fences reads from a previous open cycle.
+		void queryClient.cancelQueries({ queryKey, exact: true })
+		void refetch()
+	}, [directory, connected, isMockMode, queryClient, queryKey, refetch])
 	if (isMockMode && directory !== null) {
 		return {
 			data: MOCK_PROVIDERS as unknown as ProvidersData,

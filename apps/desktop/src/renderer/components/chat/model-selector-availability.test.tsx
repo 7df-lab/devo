@@ -6,6 +6,7 @@ import { Provider } from "jotai"
 import { act, type ReactNode } from "react"
 import type { Root } from "react-dom/client"
 import { activeServerIdAtom, serverConnectedAtom, serverUrlAtom } from "../../atoms/connection"
+import { mockModeStorageAtom } from "../../atoms/mock-mode"
 import { appStore } from "../../atoms/store"
 import { queryClient } from "../../lib/query-client"
 
@@ -110,10 +111,11 @@ mock.module("../../services/backend", () => ({
 const { createRoot } = await import("react-dom/client")
 const { ModelSelector } = await import("./model-selector")
 const { useProviders } = await import("../../hooks/use-devo-data")
-function Picker({ directory }: { directory: string | null }) {
+function Picker({ directory, open }: { directory: string | null; open?: boolean }) {
 	return (
 		<ModelSelector
-			presentation="inline"
+			presentation={open === undefined ? "inline" : "popover"}
+			open={open}
 			directory={directory}
 			effectiveModel={null}
 			hasOverride={false}
@@ -133,7 +135,11 @@ async function flush() {
 		await new Promise((resolve) => setTimeout(resolve, 0))
 	})
 }
-async function render(directory: string | null = "/workspace/project", toolbar = false) {
+async function render(
+	directory: string | null = "/workspace/project",
+	toolbar = false,
+	open?: boolean,
+) {
 	if (!root) {
 		mount = document.createElement("div")
 		document.body.append(mount)
@@ -146,7 +152,7 @@ async function render(directory: string | null = "/workspace/project", toolbar =
 					{toolbar ? (
 						<ProviderDependentToolbar directory={directory} />
 					) : (
-						<Picker directory={directory} />
+						<Picker directory={directory} open={open} />
 					)}
 				</QueryClientProvider>
 			</Provider>,
@@ -171,6 +177,7 @@ function deferred() {
 	return { promise, resolve }
 }
 beforeEach(() => {
+	appStore.set(mockModeStorageAtom, false)
 	queryClient.setDefaultOptions({
 		queries: { retry: false, gcTime: 0, refetchOnWindowFocus: false },
 	})
@@ -197,6 +204,7 @@ afterEach(async () => {
 	root = undefined
 	mount?.remove()
 	queryClient.clear()
+	appStore.set(mockModeStorageAtom, false)
 	clients.clear()
 	requests.length = 0
 	selected.mockClear()
@@ -335,4 +343,87 @@ test("no selected project is distinct from global settings and performs no avail
 	expect(mount.textContent).toContain("Choose a project to load available models")
 	await click("All models")
 	expect(rows()[0].disabled).toBe(true)
+})
+
+test("reopening a mounted picker rechecks Native instead of offering its previous Ready choices", async () => {
+	read = async () => preferences("workspace/previous")
+	await render("/workspace/project", false, true)
+	expect(rows()).toHaveLength(1)
+	await render("/workspace/project", false, false)
+	const fresh = deferred()
+	read = () => fresh.promise
+	await render("/workspace/project", false, true)
+	expect(requests).toHaveLength(2)
+	expect(rows()).toEqual([])
+	expect(mount.textContent).toContain("Loading available models…")
+	await act(async () => fresh.resolve(preferences()))
+	await flush()
+	expect(rows()).toEqual([])
+	expect(selected).not.toHaveBeenCalled()
+})
+
+test("reopening cancels an unfinished first read even when no availability was cached", async () => {
+	const old = deferred()
+	read = () => old.promise
+	await render("/workspace/project", false, true)
+	await render("/workspace/project", false, false)
+	read = async () => preferences()
+	await render("/workspace/project", false, true)
+	await act(async () => old.resolve(preferences("obsolete/model")))
+	await flush()
+	expect(requests).toHaveLength(2)
+	expect(rows()).toEqual([])
+})
+
+test("a late reopen refresh cannot replace a new workspace or survive disconnect", async () => {
+	read = async () => preferences("first/model")
+	await render("/workspace/first", false, true)
+	await render("/workspace/first", false, false)
+	const old = deferred()
+	read = () => old.promise
+	await render("/workspace/first", false, true)
+	read = async () => preferences("second/model")
+	await render("/workspace/second", false, true)
+	await act(async () => old.resolve(preferences("obsolete/model")))
+	await flush()
+	expect(rows().map((row) => row.getAttribute("aria-label"))).toEqual(["second/model, Session"])
+	await render("/workspace/second", false, false)
+	await act(async () => appStore.set(serverConnectedAtom, false))
+	await render("/workspace/second", false, true)
+	expect(requests).toHaveLength(3)
+	expect(rows()).toEqual([])
+	expect(mount.textContent).toContain("Connect to the server")
+	read = async () => preferences()
+	await act(async () => appStore.set(serverConnectedAtom, true))
+	await flush()
+	expect(requests).toHaveLength(4)
+	expect(rows()).toEqual([])
+})
+
+test("a failed reopen read cannot select cached choices and can retry", async () => {
+	read = async () => preferences("workspace/previous")
+	await render("/workspace/project", false, true)
+	await render("/workspace/project", false, false)
+	read = async () => {
+		throw Error("Native read failed")
+	}
+	await render("/workspace/project", false, true)
+	expect(rows()).toEqual([])
+	expect(mount.textContent).toContain("Could not load model availability")
+	read = async () => preferences("workspace/current")
+	await click("Retry")
+	expect(rows().map((row) => row.getAttribute("aria-label"))).toEqual([
+		"workspace/current, Session",
+	])
+	expect(requests).toHaveLength(3)
+})
+
+test("reopening in mock mode does not wait for a disabled Native query", async () => {
+	appStore.set(mockModeStorageAtom, true)
+	await render("/workspace/project", false, true)
+	await render("/workspace/project", false, false)
+	await render("/workspace/project", false, true)
+	expect(requests).toEqual([])
+	expect(rows().length).toBeGreaterThan(0)
+	expect(mount.textContent).not.toContain("Loading available models…")
 })

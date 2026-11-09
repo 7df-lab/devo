@@ -6,7 +6,7 @@ import {
 import { useIsMobile } from "@devo/ui/hooks/use-mobile"
 import { useNavigate } from "@tanstack/react-router"
 import { ChevronDownIcon } from "lucide-react"
-import { useEffect, useMemo, useState } from "react"
+import { useEffect, useLayoutEffect, useMemo, useState } from "react"
 import {
 	type CatalogProviderInfo,
 	type ModelRef,
@@ -65,14 +65,26 @@ export function ModelSelector({
 	const modelDirectory = useModelDirectory()
 	const navigate = useNavigate()
 	const isMobile = useIsMobile()
+	const [localOpen, setLocalOpen] = useState(false)
+	const open = presentation === "inline" || (controlledOpen ?? localOpen)
+	const [wasOpen, setWasOpen] = useState(open)
+	const reopening = open && !wasOpen
+	useLayoutEffect(() => {
+		if (open === wasOpen) return
+		// Mount/scope/reconnect already trigger the shared query. A mounted
+		// popover reopening must recheck independently of catalog refresh.
+		if (open) availability.reload()
+		setWasOpen(open)
+	}, [open, wasOpen, availability.reload])
 	const models = useMemo(
 		() =>
 			buildPickerModels(
-				availability.loading || availability.error ? null : availability.data,
+				reopening || availability.loading || availability.error ? null : availability.data,
 				catalog.data,
 				modelDirectory.data,
 			),
 		[
+			reopening,
 			availability.data,
 			availability.loading,
 			availability.error,
@@ -92,7 +104,6 @@ export function ModelSelector({
 		currentVariant,
 		allowDefaultVariant,
 	)
-	const [localOpen, setLocalOpen] = useState(false)
 	const [mobileVariantView, setMobileVariantView] = useState(false)
 	const [connection, setConnection] = useState<CatalogProviderInfo | null>(null)
 	// Catalog refetches must not restart an in-progress OAuth dialog.
@@ -100,7 +111,6 @@ export function ModelSelector({
 		() => (connection ? { ...connection, env: [] } : null),
 		[connection],
 	)
-	const open = presentation === "inline" || (controlledOpen ?? localOpen)
 	useEffect(() => {
 		if (open) modelDirectory.refreshCatalog("ifStale")
 	}, [open, modelDirectory.refreshCatalog])
@@ -114,7 +124,7 @@ export function ModelSelector({
 			? "Choose a project to load available models"
 			: !availability.connected
 				? "Connect to the server to load available models"
-				: availability.loading
+				: reopening || availability.loading
 					? "Loading available models…"
 					: availability.error
 						? "Could not load model availability"
@@ -155,7 +165,7 @@ export function ModelSelector({
 					<ModelPickerList
 						models={models}
 						activeValue={activeValue}
-						loading={availability.loading || catalog.loading || modelDirectory.loading}
+						loading={reopening || availability.loading || catalog.loading || modelDirectory.loading}
 						unavailableReason={unavailableReason}
 						error={availability.error || catalog.error || modelDirectory.error}
 						onRetry={() => {
