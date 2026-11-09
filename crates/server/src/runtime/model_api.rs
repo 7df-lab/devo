@@ -3,6 +3,7 @@ use devo_core::ModelCatalogEntry;
 use devo_core::PresetModelCatalog;
 use devo_protocol::native::rpc_admin::ModelPreferences;
 use devo_protocol::native::rpc_admin::PreferencesOption;
+use devo_provider::ProviderRoute;
 
 use crate::runtime::handlers::acp_config_options::{
     ACP_MODEL_CONFIG_ID, ACP_REASONING_EFFORT_CONFIG_ID,
@@ -68,21 +69,12 @@ fn model_preferences_from_config_options(
     // Connection files are sparse overlays: a credential-only provider inherits
     // its models from the directory. Native preferences must include those
     // resolved models, rather than only models explicitly written to the overlay.
-    let configured_providers = runtime_context
+    let configured = runtime_context
         .config_store
         .lock()
         .expect("app config store mutex should not be poisoned")
         .effective_config()
-        .provider_catalog_config()
-        .providers;
-    // ACP retains the current value even before setup, but that placeholder is
-    // not an available Native choice when no provider can serve it. Use this
-    // workspace's configuration and default adapter, never a global UI catalog.
-    // Injected Default routes remain valid, including slugs containing `/`.
-    if configured_providers.is_empty() && !runtime_context.provider.is_available() {
-        preferences.available_models.clear();
-        return preferences;
-    }
+        .provider_catalog_config();
     let live = runtime_context.live_model_catalog();
     let catalog: &dyn ModelCatalog = live
         .as_ref()
@@ -92,7 +84,7 @@ fn model_preferences_from_config_options(
         let Some((provider_id, model_id)) = model.slug.split_once('/') else {
             continue;
         };
-        if !configured_providers.contains_key(provider_id)
+        if !configured.providers.contains_key(provider_id)
             || preferences
                 .available_models
                 .iter()
@@ -107,6 +99,41 @@ fn model_preferences_from_config_options(
             available_efforts: Vec::new(),
         });
     }
+    // Availability belongs to the exact workspace route, not to a global
+    // catalog entry or to the mere presence of some configured connection.
+    let router = runtime_context.provider_router();
+    let independent_default = runtime_context
+        .provider_catalog_snapshot
+        .providers
+        .is_empty()
+        && router.has_available_route(&ProviderRoute::Default);
+    let current_model = preferences.model.as_deref();
+    preferences.available_models.retain(|option| {
+        let Ok(selection) = configured.resolve_model(Some(&option.value)) else {
+            // ACP preserves the current value even when it has no connection.
+            // Keep real injected Default routes (whose slugs may contain `/`),
+            // but never revive a disconnected boot-time connection adapter.
+            return independent_default
+                && current_model == Some(option.value.as_str())
+                && !option
+                    .value
+                    .split_once('/')
+                    .is_some_and(|(provider, _)| configured.providers.contains_key(provider));
+        };
+        let model = configured.providers[&selection.provider_id]
+            .models
+            .get(&selection.model_id);
+        let route = if model.is_some_and(|model| model.base_url.is_some()) {
+            ProviderRoute::connection_model(
+                selection.provider_id,
+                selection.wire_api,
+                selection.model_id,
+            )
+        } else {
+            ProviderRoute::connection(selection.provider_id, selection.wire_api)
+        };
+        router.has_available_route(&route)
+    });
     enrich_available_models_with_efforts(&mut preferences, runtime_context, catalog);
     preferences
 }

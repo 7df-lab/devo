@@ -158,3 +158,223 @@ async fn workspace_only_connection_remains_available_without_global_connection_o
     assert_eq!(read["preferences"]["model"], json!("reviewlocal/tiny"));
     Ok(())
 }
+
+#[tokio::test]
+async fn disabled_only_configuration_does_not_offer_missing_default_placeholder() -> Result<()> {
+    let home = tempfile::tempdir()?;
+    std::fs::write(
+        home.path().join("config.toml"),
+        "[catalog]\noffline = true\n",
+    )?;
+    std::fs::write(
+        home.path().join("providers.json"),
+        serde_json::to_vec(&json!({
+            "model":"disabled/tiny", "provider":{"disabled":{"enabled":false,"name":"Disabled","base_url":"http://127.0.0.1:1/v1","wire_api":"openai_chat_completions","models":{"tiny":{}}}}
+        }))?,
+    )?;
+    let runtime = TestRuntime::new(Arc::new(DefaultProvider::Missing))
+        .with_named_model("302ai/MiniMax-M1", "MiniMax-M1")
+        .default_model("302ai/MiniMax-M1")
+        .runtime(home.path());
+    let connection = connect(&runtime).await?;
+    let read = request(&runtime, connection, "model/preferences/read", json!({})).await?;
+    assert_eq!(read["preferences"]["availableModels"], json!([]));
+    Ok(())
+}
+
+#[tokio::test]
+async fn empty_unrelated_connection_does_not_offer_missing_default_placeholder() -> Result<()> {
+    let home = tempfile::tempdir()?;
+    std::fs::write(
+        home.path().join("config.toml"),
+        "[catalog]\noffline = true\n",
+    )?;
+    std::fs::write(
+        home.path().join("providers.json"),
+        serde_json::to_vec(&json!({
+            "provider":{"empty":{"enabled":true,"name":"Empty","base_url":"http://127.0.0.1:1/v1","wire_api":"openai_chat_completions","models":{}}}
+        }))?,
+    )?;
+    let runtime = TestRuntime::new(Arc::new(DefaultProvider::Missing))
+        .with_named_model("302ai/MiniMax-M1", "MiniMax-M1")
+        .default_model("302ai/MiniMax-M1")
+        .runtime(home.path());
+    let connection = connect(&runtime).await?;
+    let read = request(&runtime, connection, "model/preferences/read", json!({})).await?;
+    assert_eq!(read["preferences"]["availableModels"], json!([]));
+    Ok(())
+}
+
+#[tokio::test]
+async fn dynamically_added_and_removed_connection_updates_choices_without_losing_workspace_identity()
+-> Result<()> {
+    let home = tempfile::tempdir()?;
+    std::fs::write(
+        home.path().join("config.toml"),
+        "[catalog]\noffline = true\n",
+    )?;
+    let runtime = TestRuntime::new(Arc::new(DefaultProvider::Missing))
+        .with_named_model("302ai/MiniMax-M1", "MiniMax-M1")
+        .default_model("302ai/MiniMax-M1")
+        .runtime(home.path());
+    let connection = connect(&runtime).await?;
+    let before = request(&runtime, connection, "model/preferences/read", json!({})).await?;
+    assert_eq!(before["preferences"]["availableModels"], json!([]));
+    request(
+        &runtime,
+        connection,
+        "provider/upsert",
+        json!({"provider":{
+            "id":"reviewdynamic","name":"Dynamic","enabled":true,"baseUrl":"http://127.0.0.1:1/v1",
+            "wireApis":["openai_chat_completions"],"models":{"tiny":{"name":"Tiny"}}
+        }}),
+    )
+    .await?;
+    let read = request(&runtime, connection, "model/preferences/read", json!({})).await?;
+    let values: Vec<_> = read["preferences"]["availableModels"]
+        .as_array()
+        .context("availableModels")?
+        .iter()
+        .map(|o| o["value"].clone())
+        .collect();
+    assert_eq!(values, vec![json!("reviewdynamic/tiny")]);
+    request(
+        &runtime,
+        connection,
+        "provider/disconnect",
+        json!({"providerId":"reviewdynamic"}),
+    )
+    .await?;
+    let after = request(&runtime, connection, "model/preferences/read", json!({})).await?;
+    assert_eq!(after["preferences"]["availableModels"], json!([]));
+    Ok(())
+}
+
+#[tokio::test]
+async fn disconnect_does_not_revive_the_retained_bootstrap_adapter() -> Result<()> {
+    let home = tempfile::tempdir()?;
+    std::fs::write(
+        home.path().join("config.toml"),
+        "[catalog]\noffline = true\n",
+    )?;
+    std::fs::write(
+        home.path().join("providers.json"),
+        serde_json::to_vec(&json!({
+            "model": "boot/tiny", "provider": { "boot": {
+                "base_url": "http://127.0.0.1:1/v1", "wire_api": "openai_chat_completions",
+                "models": { "tiny": {} },
+            } },
+        }))?,
+    )?;
+    let runtime = TestRuntime::new(Arc::new(DefaultProvider::Available))
+        .with_named_model("boot/tiny", "Tiny")
+        .default_model("boot/tiny")
+        .runtime(home.path());
+    let connection = connect(&runtime).await?;
+    request(
+        &runtime,
+        connection,
+        "provider/upsert",
+        json!({ "provider": {
+        "id": "boot", "name": "Boot", "enabled": true,
+        "baseUrl": "http://127.0.0.1:1/v1", "wireApis": ["openai_chat_completions"],
+        "models": { "tiny": { "name": "Tiny" } },
+    } }),
+    )
+    .await?;
+    let before = request(&runtime, connection, "model/preferences/read", json!({})).await?;
+    assert_eq!(
+        before["preferences"]["availableModels"][0]["value"],
+        json!("boot/tiny")
+    );
+    request(
+        &runtime,
+        connection,
+        "provider/disconnect",
+        json!({ "providerId": "boot" }),
+    )
+    .await?;
+    let after = request(&runtime, connection, "model/preferences/read", json!({})).await?;
+    assert_eq!(after["preferences"]["availableModels"], json!([]));
+    Ok(())
+}
+
+#[tokio::test]
+async fn workspace_connection_without_a_usable_adapter_is_not_selectable() -> Result<()> {
+    let home = tempfile::tempdir()?;
+    std::fs::write(
+        home.path().join("config.toml"),
+        "[catalog]\noffline = true\n",
+    )?;
+    let workspace = tempfile::tempdir()?;
+    std::fs::create_dir(workspace.path().join(".devo"))?;
+    std::fs::write(
+        workspace.path().join(".devo/providers.json"),
+        serde_json::to_vec(&json!({
+            "model": "unavailable/tiny", "provider": { "unavailable": {
+                "wire_api": "openai_chat_completions", "models": { "tiny": {} },
+            } },
+        }))?,
+    )?;
+    let runtime = TestRuntime::new(Arc::new(DefaultProvider::Missing))
+        .with_named_model("302ai/MiniMax-M1", "MiniMax-M1")
+        .default_model("302ai/MiniMax-M1")
+        .runtime(home.path());
+    let connection = connect(&runtime).await?;
+    let read = request(
+        &runtime,
+        connection,
+        "model/preferences/read",
+        json!({ "cwd": workspace.path() }),
+    )
+    .await?;
+    assert_eq!(read["preferences"]["availableModels"], json!([]));
+    Ok(())
+}
+
+#[tokio::test]
+async fn workspace_model_endpoint_keeps_slashed_ids_and_enabled_variants() -> Result<()> {
+    let home = tempfile::tempdir()?;
+    std::fs::write(
+        home.path().join("config.toml"),
+        "[catalog]\noffline = true\n",
+    )?;
+    let workspace = tempfile::tempdir()?;
+    std::fs::create_dir(workspace.path().join(".devo"))?;
+    std::fs::write(
+        workspace.path().join(".devo/providers.json"),
+        serde_json::to_vec(&json!({
+            "model": "local/org/model", "provider": { "local": {
+                "wire_api": "openai_chat_completions", "models": {
+                    "org/model": { "base_url": "http://127.0.0.1:1/v1", "variants": {
+                        "high": { "label": "High" }, "disabled": { "disabled": true },
+                    } },
+                    "disabled-model": { "enabled": false },
+                },
+            } },
+        }))?,
+    )?;
+    let runtime = TestRuntime::new(Arc::new(DefaultProvider::Missing))
+        .with_named_model("302ai/MiniMax-M1", "MiniMax-M1")
+        .default_model("302ai/MiniMax-M1")
+        .runtime(home.path());
+    let connection = connect(&runtime).await?;
+    let read = request(
+        &runtime,
+        connection,
+        "model/preferences/read",
+        json!({ "cwd": workspace.path() }),
+    )
+    .await?;
+    let values: Vec<_> = read["preferences"]["availableModels"]
+        .as_array()
+        .context("availableModels")?
+        .iter()
+        .map(|option| option["value"].clone())
+        .collect();
+    assert_eq!(
+        values,
+        vec![json!("local/org/model"), json!("local/org/model/high")]
+    );
+    Ok(())
+}
