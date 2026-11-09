@@ -30,7 +30,7 @@ import {
 } from "@devo/ui/components/select"
 import { Spinner } from "@devo/ui/components/spinner"
 import { PlusIcon, Trash2Icon } from "lucide-react"
-import { useCallback, useMemo, useState } from "react"
+import { useCallback, useEffect, useMemo, useRef, useState } from "react"
 import { getBaseClient } from "../../services/connection-manager"
 import {
 	isBuiltinTemplateProviderId,
@@ -94,6 +94,19 @@ export function CustomProviderDialog({
 	const [saving, setSaving] = useState(false)
 	const [error, setError] = useState<string | null>(null)
 	const [builtinConflictOpen, setBuiltinConflictOpen] = useState(false)
+	const saveScope = useRef<{ saving: boolean } | null>(null)
+
+	// A completed write still refreshes shared data after dismissal, but its UI
+	// result belongs only to the form opening that started it.
+	useEffect(() => {
+		saveScope.current = open ? { saving: false } : null
+		setSaving(false)
+		setError(null)
+		setBuiltinConflictOpen(false)
+		return () => {
+			saveScope.current = null
+		}
+	}, [open])
 
 	const suggestedAlternateId = useMemo(
 		() => suggestNonTemplateProviderId(providerId, templateIds),
@@ -125,42 +138,58 @@ export function CustomProviderDialog({
 	}, [])
 
 	const persistProvider = useCallback(async () => {
-		const id = providerId.trim()
-		const client = getBaseClient()
-		if (!client) throw new Error("Not connected to server")
+		const scope = saveScope.current
+		if (!scope || scope.saving) return
+		scope.saving = true
+		setSaving(true)
+		setError(null)
+		try {
+			const id = providerId.trim()
+			const client = getBaseClient()
+			if (!client) throw new Error("Not connected to server")
 
-		const catalogModels: Record<string, CatalogModelInfo> = {}
-		for (const m of models) {
-			const mid = m.id.trim()
-			if (mid) {
-				catalogModels[mid] = { name: m.name.trim() || undefined }
+			const catalogModels: Record<string, CatalogModelInfo> = {}
+			for (const m of models) {
+				const mid = m.id.trim()
+				if (mid) {
+					catalogModels[mid] = { name: m.name.trim() || undefined }
+				}
+			}
+
+			const catalogHeaders: Record<string, string> = {}
+			for (const h of headers) {
+				if (h.key.trim()) {
+					catalogHeaders[h.key.trim()] = h.value
+				}
+			}
+
+			const provider: CatalogProviderInfo = {
+				id,
+				name: displayName.trim() || id,
+				baseUrl: baseUrl.trim(),
+				wireApis: [wireApi],
+				models: catalogModels,
+				enabled: true,
+				...(Object.keys(catalogHeaders).length > 0 ? { headers: catalogHeaders } : {}),
+			}
+
+			await client.provider.upsert({
+				provider,
+				...(apiKey.trim() ? { apiKey: apiKey.trim() } : {}),
+			})
+
+			if (saveScope.current === scope) onOpenChange(false)
+			onSaved()
+		} catch (err) {
+			if (saveScope.current === scope) {
+				setError(err instanceof Error ? err.message : "Failed to save provider")
+			}
+		} finally {
+			if (saveScope.current === scope) {
+				scope.saving = false
+				setSaving(false)
 			}
 		}
-
-		const catalogHeaders: Record<string, string> = {}
-		for (const h of headers) {
-			if (h.key.trim()) {
-				catalogHeaders[h.key.trim()] = h.value
-			}
-		}
-
-		const provider: CatalogProviderInfo = {
-			id,
-			name: displayName.trim() || id,
-			baseUrl: baseUrl.trim(),
-			wireApis: [wireApi],
-			models: catalogModels,
-			enabled: true,
-			...(Object.keys(catalogHeaders).length > 0 ? { headers: catalogHeaders } : {}),
-		}
-
-		await client.provider.upsert({
-			provider,
-			...(apiKey.trim() ? { apiKey: apiKey.trim() } : {}),
-		})
-
-		onOpenChange(false)
-		onSaved()
 	}, [
 		providerId,
 		displayName,
@@ -190,28 +219,12 @@ export function CustomProviderDialog({
 			return
 		}
 
-		setSaving(true)
-		setError(null)
-		try {
-			await persistProvider()
-		} catch (err) {
-			setError(err instanceof Error ? err.message : "Failed to save provider")
-		} finally {
-			setSaving(false)
-		}
+		await persistProvider()
 	}, [providerId, baseUrl, isEdit, templateIds, persistProvider])
 
 	const handleOverlayBuiltin = useCallback(async () => {
 		setBuiltinConflictOpen(false)
-		setSaving(true)
-		setError(null)
-		try {
-			await persistProvider()
-		} catch (err) {
-			setError(err instanceof Error ? err.message : "Failed to save provider")
-		} finally {
-			setSaving(false)
-		}
+		await persistProvider()
 	}, [persistProvider])
 
 	const handleUseSuggestedId = useCallback(() => {
