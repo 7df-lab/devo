@@ -2499,7 +2499,7 @@ impl ReplayState {
                 Ok(())
             }
             RolloutLine::Turn { turn, extras, .. } => {
-                self.apply_native_turn(turn, extras.map(|extras| *extras))
+                self.apply_native_turn(*turn, extras.map(|extras| *extras))
             }
             RolloutLine::Item { item, .. } => {
                 self.apply_native_item_envelope(item)?;

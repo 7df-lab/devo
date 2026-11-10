@@ -8,7 +8,7 @@ pub(super) fn legacy_turn(session: SessionId, turn_id: TurnId, input: u64) -> Ro
         v: 2,
         timestamp: now,
         extras: None,
-        turn: Turn {
+        turn: Box::new(Turn {
             id: turn_id,
             session_id: session,
             sequence: 1,
@@ -32,7 +32,7 @@ pub(super) fn legacy_turn(session: SessionId, turn_id: TurnId, input: u64) -> Ro
                 },
                 overhead: UsageTotals::default(),
             }),
-        },
+        }),
     }
 }
 
