@@ -47,6 +47,10 @@ pub enum ApplyError {
     ImmutableBasePrompt,
     #[error("missing after entry for create/update of {id}")]
     MissingAfter { id: String },
+    #[error("invalid refinement: {0}")]
+    Invalid(String),
+    #[error("refinement history unavailable or already rolled back: {0}")]
+    History(String),
 }
 
 fn kind_key(kind: HarnessKind) -> &'static str {
@@ -58,62 +62,200 @@ fn kind_key(kind: HarnessKind) -> &'static str {
     }
 }
 
-/// Re-read `path`, reject per-entry drift vs the proposal baseline, apply, save.
+/// Attach the host-owned planning baseline, never a model-supplied baseline.
+pub fn bind_proposal_baseline(
+    proposal: &mut RefineProposal,
+    baseline: &HarnessState,
+) -> Result<(), ApplyError> {
+    for edit in &mut proposal.edits {
+        edit.before = baseline
+            .entries
+            .get(kind_key(edit.kind))
+            .and_then(|bucket| bucket.get(&edit.id))
+            .cloned();
+        if matches!(edit.op, RefineEditOp::Create) == edit.before.is_some() {
+            return Err(ApplyError::Drift {
+                id: edit.id.clone(),
+            });
+        }
+    }
+    Ok(())
+}
+
+/// Re-read, validate the entire proposal, and commit entries + undo history in
+/// one atomic replacement under the shared CRUD/refine lock.
 pub fn apply_proposal_re_read(
     path: &Path,
     proposal: &RefineProposal,
 ) -> Result<HarnessState, ApplyError> {
     crate::store::transact_harness(path, |state| {
-        for edit in &proposal.edits {
-            if edit.id == "base_system_prompt" {
-                return Err(ApplyError::ImmutableBasePrompt);
-            }
-            let bucket = state
-                .entries
-                .entry(kind_key(edit.kind).to_string())
-                .or_default();
-            let current = bucket.get(&edit.id);
-            if let Some(baseline) = &edit.before {
-                match current {
-                    Some(cur) if cur == baseline => {}
-                    _ => {
-                        return Err(ApplyError::Drift {
-                            id: edit.id.clone(),
-                        });
-                    }
-                }
-            } else if current.is_some() && matches!(edit.op, RefineEditOp::Create) {
-                return Err(ApplyError::Drift {
-                    id: edit.id.clone(),
-                });
-            }
-            match edit.op {
-                RefineEditOp::Create | RefineEditOp::Update => {
-                    let after = edit.after.clone().ok_or_else(|| ApplyError::MissingAfter {
-                        id: edit.id.clone(),
-                    })?;
-                    bucket.insert(edit.id.clone(), after);
-                }
-                RefineEditOp::Delete => {
-                    bucket.remove(&edit.id);
-                }
-            }
-        }
-        let now = Utc::now();
-        state.refinements.push(crate::state::RefinementEvent {
-            id: proposal.id.clone(),
-            trigger: proposal.trigger.clone(),
-            changes: proposal
-                .edits
-                .iter()
-                .map(|e| format!("{:?} {:?}:{}", e.op, e.kind, e.id))
-                .collect(),
-            evidence: proposal.evidence.clone(),
-            outcome: proposal.expected_outcome.clone(),
-            created_at: now,
-        });
+        apply_to_state(state, path, proposal, None)?;
         Ok(state.clone())
     })
+}
+
+/// Undo a recorded refinement only if all touched entries still match its
+/// committed post-image. No partial rollback, legacy-log guessing, or model call.
+pub fn rollback_refinement(
+    path: &Path,
+    target_id: &str,
+    rollback_id: &str,
+) -> Result<(HarnessState, RefineProposal), ApplyError> {
+    crate::store::transact_harness(path, |state| {
+        let record = state
+            .refinement_history
+            .iter()
+            .find(|record| record.id == target_id)
+            .filter(|record| record.rollback_of.is_none())
+            .ok_or_else(|| ApplyError::History(target_id.into()))?;
+        if state
+            .refinement_history
+            .iter()
+            .any(|record| record.rollback_of.as_deref() == Some(target_id))
+        {
+            return Err(ApplyError::History(target_id.into()));
+        }
+        let proposal = RefineProposal {
+            id: rollback_id.into(),
+            trigger: "rollback".into(),
+            summary: format!("Roll back refinement {target_id}"),
+            evidence: format!("Inverse of committed refinement {target_id}"),
+            expected_outcome: "Restore prior entry content; effectiveness not evaluated".into(),
+            edits: record
+                .applied_edits
+                .iter()
+                .rev()
+                .map(|edit| RefineEdit {
+                    op: match edit.op {
+                        RefineEditOp::Create => RefineEditOp::Delete,
+                        RefineEditOp::Update => RefineEditOp::Update,
+                        RefineEditOp::Delete => RefineEditOp::Create,
+                    },
+                    kind: edit.kind,
+                    id: edit.id.clone(),
+                    before: edit.after.clone(),
+                    after: edit.before.clone(),
+                })
+                .collect(),
+        };
+        apply_to_state(state, path, &proposal, Some(target_id))?;
+        Ok((state.clone(), proposal))
+    })
+}
+
+fn apply_to_state(
+    state: &mut HarnessState,
+    path: &Path,
+    proposal: &RefineProposal,
+    rollback_of: Option<&str>,
+) -> Result<(), ApplyError> {
+    if proposal.id.trim().is_empty()
+        || state
+            .refinement_history
+            .iter()
+            .any(|record| record.id == proposal.id)
+    {
+        return Err(ApplyError::History(proposal.id.clone()));
+    }
+    let mut touched = std::collections::HashSet::new();
+    let mut committed = proposal.clone();
+    let now = Utc::now();
+    for edit in &mut committed.edits {
+        if edit.id == "base_system_prompt" {
+            return Err(ApplyError::ImmutableBasePrompt);
+        }
+        if edit.id.trim().is_empty() || !touched.insert((edit.kind, edit.id.clone())) {
+            return Err(ApplyError::Invalid("empty or duplicate entry id".into()));
+        }
+        let bucket = state
+            .entries
+            .entry(kind_key(edit.kind).to_string())
+            .or_default();
+        let current = bucket.get(&edit.id);
+        // Update/Delete require a baseline. Missing is not an unconditional write.
+        if current != edit.before.as_ref()
+            || (matches!(edit.op, RefineEditOp::Create) != edit.before.is_none())
+        {
+            return Err(ApplyError::Drift {
+                id: edit.id.clone(),
+            });
+        }
+        match edit.op {
+            RefineEditOp::Create | RefineEditOp::Update => {
+                let after = edit
+                    .after
+                    .as_mut()
+                    .ok_or_else(|| ApplyError::MissingAfter {
+                        id: edit.id.clone(),
+                    })?;
+                if after.id != edit.id || after.kind != edit.kind {
+                    return Err(ApplyError::Invalid("entry identity mismatch".into()));
+                }
+                if let Some(before) = &edit.before {
+                    // Consolidation must not silently promote evidence-derived
+                    // suggestions into authoritative prompt guidance.
+                    if before
+                        .metadata
+                        .get("trust")
+                        .and_then(serde_json::Value::as_str)
+                        == Some("unverified_trajectory_lesson")
+                    {
+                        after.source = before.source.clone();
+                        after.metadata = before.metadata.clone();
+                    }
+                    after.created_at = before.created_at;
+                    after.version = before
+                        .version
+                        .checked_add(1)
+                        .ok_or_else(|| ApplyError::Invalid("entry version overflow".into()))?;
+                } else if rollback_of.is_some() {
+                    after.version = after
+                        .version
+                        .checked_add(1)
+                        .ok_or_else(|| ApplyError::Invalid("entry version overflow".into()))?;
+                } else {
+                    after.version = 1;
+                }
+                after.updated_at = now;
+                bucket.insert(edit.id.clone(), after.clone());
+            }
+            RefineEditOp::Delete => {
+                if edit.after.is_some() {
+                    return Err(ApplyError::Invalid("delete has an after entry".into()));
+                }
+                bucket.remove(&edit.id);
+            }
+        }
+    }
+    state.refinements.push(crate::state::RefinementEvent {
+        id: committed.id.clone(),
+        trigger: committed.trigger.clone(),
+        changes: committed
+            .edits
+            .iter()
+            .map(|e| format!("{:?} {:?}:{}", e.op, e.kind, e.id))
+            .collect(),
+        evidence: committed.evidence.clone(),
+        outcome: committed.expected_outcome.clone(),
+        created_at: now,
+    });
+    let scope = committed
+        .edits
+        .iter()
+        .find_map(|edit| {
+            edit.after
+                .as_ref()
+                .or(edit.before.as_ref())
+                .and_then(|entry| entry.scope)
+        })
+        .map(|scope| match scope {
+            crate::HarnessScope::Local => "local",
+            crate::HarnessScope::Global => "global",
+        });
+    let mut record = crate::record_from_proposal(&committed, path, scope);
+    record.rollback_of = rollback_of.map(str::to_string);
+    state.refinement_history.push(record);
+    Ok(())
 }
 
 #[cfg(test)]

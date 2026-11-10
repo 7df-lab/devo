@@ -43,12 +43,13 @@ pub async fn dispatch_host_request_with_bridge(bridge: &HostBridge, data: Value)
 
     match action.as_str() {
         "" => error_reply("missing host_request type/action"),
+        action if action.starts_with("factory.") => {
+            crate::runtime::kernel_host_bridge::handle_factory(bridge, action, &params).await
+        }
         action if action.starts_with("harness.") => {
             crate::runtime::kernel_host_bridge::handle_harness(bridge, action, &params).await
         }
-        "rlm.create_session" => {
-            error_reply("denied: rlm.create_session (daemon out of scope this release)")
-        }
+        "rlm.create_session" => super::kernel_host_session::create_session(bridge, &params).await,
         "rlm_heartbeat.list" => {
             let Some(runtime) = bridge.runtime() else {
                 return error_reply("runtime not available for rlm_heartbeat.list");
@@ -77,6 +78,9 @@ pub async fn dispatch_host_request_with_bridge(bridge: &HostBridge, data: Value)
             error_reply(format!("unknown rlm_heartbeat action: {a}"))
         }
         "rlm.run" => super::kernel_host_models::spawn(bridge, &params).await,
+        "rlm.collect" => super::kernel_host_controls::collect(bridge, &params).await,
+        "rlm.progress.note" => super::kernel_host_controls::progress_note(bridge, &params).await,
+        "rlm.end_turn" => super::kernel_host_controls::end_turn(bridge).await,
         "rlm.find_models" => super::kernel_host_models::find_models(bridge, &params).await,
         "rlm.list_subagents" => {
             let Some(runtime) = bridge.runtime() else {
@@ -125,9 +129,17 @@ pub async fn dispatch_host_request_with_bridge(bridge: &HostBridge, data: Value)
             let Some(sid) = parse_session_id(session_id) else {
                 return error_reply("invalid session id");
             };
+            if params.get("trajectoryItemIds").is_some()
+                || params.get("trajectory_item_ids").is_some()
+            {
+                return error_reply(
+                    "trajectory selection requires the user-facing Native refine request",
+                );
+            }
             let is_root = !matches!(bridge.agent_scope, ToolAgentScope::Subagent);
             let rpc_params = SessionRefineRunParams {
                 session_id: sid,
+                trajectory_item_ids: Vec::new(),
                 instructions: params
                     .get("instructions")
                     .and_then(|v| v.as_str())
@@ -393,9 +405,9 @@ mod tests {
     use devo_core::tools::PermissionChecker;
     use devo_protocol::CollaborationMode;
 
-    /// Verifies: rlm.create_session is denied.
+    /// Invalid root creation fails before side effects.
     #[tokio::test]
-    async fn denies_create_session() {
+    async fn create_session_requires_a_prompt() {
         let reply = dispatch_host_request(
             "ses_00000000-0000-0000-0000-000000000001",
             json!({ "type": "rlm.create_session" }),
@@ -403,7 +415,7 @@ mod tests {
         .await;
         assert_eq!(reply["status"], "error");
         assert!(
-            reply["error"].as_str().unwrap_or("").contains("denied"),
+            reply["error"].as_str().unwrap_or("").contains("prompt"),
             "{reply}"
         );
     }
@@ -534,6 +546,7 @@ mod tests {
             file_read_ledger: Arc::new(FileReadLedger::new()),
             sandbox_profile: None,
             cancel_token: tokio_util::sync::CancellationToken::new(),
+            end_turn_requested: None,
             kernel_lifetime: None,
             mcp_manager: None,
             agent_scope: ToolAgentScope::Parent,
@@ -581,6 +594,23 @@ mod tests {
         assert_eq!(run["status"], "ok");
         assert_eq!(run["result"]["scheduled"], true);
         assert!(run["result"].get("note").is_some(), "{run}");
+    }
+
+    #[tokio::test]
+    async fn refine_kernel_cannot_select_trajectory() {
+        let sid = format!("ses_{}", Uuid::new_v4());
+        for field in ["trajectoryItemIds", "trajectory_item_ids"] {
+            let reply = dispatch_host_request(
+                &sid,
+                json!({"type":"refine.run", "params":{field:["private-item"]}}),
+            )
+            .await;
+            assert_eq!(
+                reply,
+                json!({"status":"error",
+                "error":"trajectory selection requires the user-facing Native refine request"})
+            );
+        }
     }
 
     /// Verifies: rlm.run/list_subagents/delete_subagents reach their real

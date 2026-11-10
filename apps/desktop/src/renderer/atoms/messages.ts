@@ -48,13 +48,13 @@ export const upsertItemAtom = atom(null, (get, set, item: SessionItem) => {
 		item.id.startsWith("optimistic-") &&
 		item.turnId &&
 		existing.some(
-			(m) => isUserMessageItem(m) && !m.id.startsWith("optimistic-") && m.turnId === item.turnId,
+			(m) => isUserMessageItem(m) && !m.id.startsWith("optimistic-") && m.item.origin == null && m.turnId === item.turnId,
 		)
 	) {
 		return
 	}
 
-	if (isUserMessageItem(item) && !item.id.startsWith("optimistic-")) {
+	if (isUserMessageItem(item) && item.item.origin == null && !item.id.startsWith("optimistic-")) {
 		const optimisticIndex = existing.findIndex(
 			(m) =>
 				m.id.startsWith("optimistic-") &&

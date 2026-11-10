@@ -188,6 +188,8 @@ fn write_kept_history_to_rollout(
         {
             let mut turn = source_turn.native.clone();
             turn.session_id = native_session_id;
+            // Copied history supplies context, not spend in the independent fork.
+            turn.usage = None;
             if let Err(error) =
                 rollout_store.append_turn_at(rollout_path, &turn, Some(source_turn.extras.clone()))
             {

@@ -1,6 +1,9 @@
 mod approval_review_prompt;
 mod collaboration_mode_prompts;
 mod context;
+pub use devo_protocol::native::host_message::{
+    AUTHORITY_NOTICE as HOST_MESSAGE_AUTHORITY_NOTICE, render as render_host_message,
+};
 mod conversation;
 pub mod durable_execution;
 mod durable_record;

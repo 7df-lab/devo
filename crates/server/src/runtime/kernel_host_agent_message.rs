@@ -234,23 +234,15 @@ impl ServerRuntime {
                 return Err("agent_message.send to parent: no parent for this session".into());
             };
             let wake = format!("Agent message received\nFrom: {from_path}\n\n{message}");
-            super::kernel_host::push_bash_notice(
-                parent_id.as_ref(),
-                json!({
-                    "kind": "agent_message",
-                    "params": {
-                        "fromSessionId": from_session_id.to_string(),
-                        "fromAgentPath": from_path,
-                        "message": message,
-                    }
-                }),
-            );
             let busy = self.active_turn_id_for_session(parent_id).await.is_some();
             return match Arc::clone(self)
-                .start_runtime_turn(
+                .deliver_host_message(
                     parent_id,
-                    wake.clone(),
-                    wake,
+                    super::host_messages::HostMessage::agent(
+                        from_session_id,
+                        uuid::Uuid::new_v4().to_string(),
+                        wake,
+                    ),
                     Some(json!({
                         "source": "agent_message",
                         "fromSessionId": from_session_id.to_string(),

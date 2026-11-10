@@ -22,21 +22,15 @@ impl ServerRuntime {
         context_window_hint: Option<u64>,
         raw: RawContextBreakdown,
         anchor_total: u64,
+        delivery_policy: super::outbound::OutboundDeliveryPolicy,
     ) {
-        // A zero anchor is a leg-start placeholder (several providers send
-        // message_start with all-zero usage), not a measurement. Scaled to
-        // the `.max(1)` floor below it would broadcast a 1-token occupancy
-        // and the client context bar collapses to 0% for the first moments
-        // of every leg. Keep the last known occupancy instead.
-        if anchor_total == 0 {
-            return;
-        }
+        // Callers filter missing/placeholder samples by presence. A genuinely
+        // reported zero is a measurement and may clear the previous context.
         let window = self
             .live_occupancy_window(session_id, context_window_hint)
             .await
             .max(1);
-        let occupancy =
-            super::context_occupancy::occupancy_from_raw(window, raw, anchor_total.max(1));
+        let occupancy = super::context_occupancy::occupancy_from_raw(window, raw, anchor_total);
         let mut native_session_id = None;
         if let Some(stream) = self.active_stream_state(session_id).await {
             let mut stream = stream.lock().await;
@@ -55,11 +49,12 @@ impl ServerRuntime {
             // boundary: legacy session id when summary unavailable
             session_id
         };
-        self.broadcast_notification(
+        self.broadcast_notification_with_policy(
             devo_protocol::native::event::ServerNotification::ContextUsageUpdated {
                 session_id: native_session_id,
                 occupancy,
             },
+            delivery_policy,
         )
         .await;
     }
@@ -167,6 +162,18 @@ impl ServerRuntime {
         let window = model
             .map(crate::runtime::context_occupancy::resolved_compaction_limit)
             .unwrap_or(0);
+        if let Some(usage) = summary.last_query_usage {
+            return Some((
+                ContextOccupancy {
+                    total_tokens: usage.display_total_tokens(),
+                    context_window_tokens: window,
+                    // The provider anchor survived a crash; category estimates did
+                    // not. Do not fabricate a distribution for the known total.
+                    categories: Vec::new(),
+                },
+                true,
+            ));
+        }
         Some((ContextOccupancy::empty(window), false))
     }
 }

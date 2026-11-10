@@ -294,6 +294,11 @@ impl ScheduleStore {
         let mut file = self.read_unlocked()?;
         let mut due = Vec::new();
         let mut occurrences = Vec::new();
+        let pending_jobs = if matches!(mode, DueClaimMode::WithOutbox) {
+            self.pending_job_times_unlocked()?
+        } else {
+            HashMap::new()
+        };
         for job in &mut file.jobs {
             if job.status != ScheduleJobStatus::Active {
                 continue;
@@ -304,9 +309,22 @@ impl ScheduleStore {
             if scheduled_at > now {
                 continue;
             }
+            // One undelivered occurrence per job bounds approval/offline backlogs.
+            // The same timestamp is allowed so a crash between outbox and job
+            // writes can reconcile its persisted phase without a second delivery.
+            if pending_jobs
+                .get(job.job_id.as_str())
+                .is_some_and(|pending| *pending != scheduled_at)
+            {
+                continue;
+            }
             job.last_run_at = Some(now);
             job.run_count = job.run_count.saturating_add(1);
-            job.next_run_at = next_run_from_interval(job.interval_ms, now);
+            job.next_run_at = job.interval_ms.and_then(|interval| {
+                let elapsed = u64::try_from((now - scheduled_at).num_milliseconds()).ok()?;
+                let steps = elapsed.checked_div(interval)?.checked_add(1)?;
+                next_run_from_interval(interval.checked_mul(steps), scheduled_at)
+            });
             job.updated_at = now;
             let claimed = job.clone();
             if matches!(mode, DueClaimMode::WithOutbox) {

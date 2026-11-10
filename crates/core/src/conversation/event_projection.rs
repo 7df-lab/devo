@@ -110,15 +110,11 @@ pub fn events_from_rollout_line(line: &RolloutLine) -> Vec<DerivedEvent> {
             let (event_kind, notification) = match turn.status {
                 TurnStatus::InProgress | TurnStatus::WaitingApproval => (
                     "turn/started",
-                    ServerNotification::TurnStarted {
-                        turn: Box::new(turn.clone()),
-                    },
+                    ServerNotification::TurnStarted { turn: turn.clone() },
                 ),
                 TurnStatus::Completed | TurnStatus::Interrupted | TurnStatus::Failed => (
                     "turn/completed",
-                    ServerNotification::TurnCompleted {
-                        turn: Box::new(turn.clone()),
-                    },
+                    ServerNotification::TurnCompleted { turn: turn.clone() },
                 ),
             };
             vec![DerivedEvent {
@@ -223,6 +219,7 @@ mod tests {
             updated_at: Utc::now(),
             state,
             item: Item::UserMessage {
+                origin: None,
                 client_user_message_id: None,
                 content: vec![UserInput::Text {
                     text: "hi".to_owned(),

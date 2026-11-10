@@ -52,7 +52,7 @@ The server runtime uses **one session actor per session**. Durable session state
 - **In-memory session actors** are loaded on demand via `get_or_load_parent_session`; root sessions are LRU-evicted (capacity 16) when unpinned.
 - **`session/list`** returns durable user-visible sessions only (non-ephemeral, no `agent_path`; includes forks with `parent_session_id`); subagent rows are indexed but hidden from list.
 - **`session/resume`** loads sessions lazily from rollout files (roots and subagents). Subagent actors stay off the root LRU. Missing rollout files fail with an explicit restore error.
-- **Startup** runs `index_rollout_metadata` in the background instead of replaying every rollout into memory.
+- **Startup** finishes `index_rollout_metadata` before constructing the schedule wake loop, so durable jobs cannot be retired against an incomplete index. It indexes metadata without replaying every rollout into memory.
 
 ### Session title generation
 

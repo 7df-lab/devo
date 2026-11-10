@@ -59,7 +59,8 @@ impl ServerRuntime {
         let session_tool_registry = self.tool_registry_for_actor_state(state);
         let runtime_context = Arc::clone(&state.runtime_context);
         let turn_goal = match &input_mode {
-            super::super::TurnInputMode::VisibleUserMessage => {
+            super::super::TurnInputMode::VisibleUserMessage
+            | super::super::TurnInputMode::HostMessage(_) => {
                 let stores = self.goal_stores.lock().await;
                 stores
                     .get(&session_id)
@@ -87,7 +88,13 @@ impl ServerRuntime {
             state.core.clear_active_goal();
         }
         if input_mode.emits_user_message() {
-            push_resolved_user_input(&mut state.core, input, input_messages, input_images);
+            if let Some(origin) = input_mode.host_origin() {
+                state
+                    .core
+                    .push_message(Message::user(devo_core::render_host_message(origin, input)));
+            } else {
+                push_resolved_user_input(&mut state.core, input, input_messages, input_images);
+            }
         }
         let event_callback_tx = event_tx.clone();
         let callback: devo_core::EventCallback = std::sync::Arc::new(move |event: QueryEvent| {
@@ -166,6 +173,7 @@ impl ServerRuntime {
             .await
             .unwrap_or_else(CancellationToken::new);
         let query_cancel_token = turn_cancel_token.clone();
+        let end_turn_requested = Arc::new(std::sync::atomic::AtomicBool::new(/*v*/ false));
         let provider_http = runtime_context
             .config_store
             .lock()
@@ -324,6 +332,7 @@ impl ServerRuntime {
                 file_read_ledger: Arc::clone(&state.file_read_ledger),
                 sandbox_profile: state.core.config.sandbox_profile.clone(),
                 cancel_token: turn_cancel_token.clone(),
+                end_turn_requested: Some(Arc::clone(&end_turn_requested)),
                 kernel_lifetime: Some(kernel.lifetime_token()),
                 mcp_manager: Some(Arc::clone(&runtime_context.mcp_manager)),
                 agent_scope,
@@ -473,6 +482,7 @@ impl ServerRuntime {
                             as Arc<dyn devo_core::durable_execution::ToolIntentJournal>
                     }),
                     cancel_token: Some(query_cancel_token.clone()),
+                    end_turn_requested: Some(end_turn_requested),
                     compaction_provider: Some(compaction_provider),
                     live_settings: live_turn_settings.clone(),
                     live_goal,

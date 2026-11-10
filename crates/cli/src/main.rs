@@ -30,6 +30,7 @@ use tracing_subscriber::filter::LevelFilter;
 
 mod agent_command;
 mod app_exit;
+mod daemon_command;
 mod doctor_command;
 mod mcp_command;
 mod prompt_command;
@@ -186,6 +187,10 @@ async fn run_cli() -> Result<()> {
             run_mcp(command)
         }
         Some(Command::Upgrade) => run_upgrade(),
+        Some(Command::Daemon { command }) => {
+            let _logging = install_server_logging(&cli)?;
+            daemon_command::run_daemon(command).await
+        }
         Some(Command::Resume { session_id }) => {
             maybe_print_startup_update(&cli).await;
             let _logging = install_logging(&cli)?;
@@ -302,12 +307,18 @@ fn server_process_args_from_cli(cli: &Cli) -> Option<ServerProcessArgs> {
         | Some(Command::Doctor)
         | Some(Command::Mcp { .. })
         | Some(Command::Upgrade)
+        | Some(Command::Daemon { .. })
         | None => None,
     }
 }
 
 #[derive(Debug, Subcommand)]
 enum Command {
+    /// Manage an explicit independent Native runtime (does not install a service).
+    Daemon {
+        #[command(subcommand)]
+        command: daemon_command::DaemonCommand,
+    },
     /// Resume a saved interactive session by id.
     Resume {
         /// Session identifier printed by Devo at exit time.

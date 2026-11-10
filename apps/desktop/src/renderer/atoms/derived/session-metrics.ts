@@ -1,35 +1,35 @@
 /**
- * Native-item session metrics (rough cut).
- * Cost/token fields stay 0 until Native envelopes carry usage.
+ * Native transcript activity plus cumulative provider metering.
  */
 import { atom } from "jotai"
 import { atomFamily } from "jotai-family"
-import { isUserMessageItem, nativeItemType } from "@devo-ai/sdk/v2/client"
+import { isUserMessageItem, nativeItemType, type SessionUsageSummary } from "@devo-ai/sdk/v2/client"
 import {
-	formatCost,
 	formatPercentage,
 	formatTokens,
 	formatWorkDuration,
 	type SessionMetricsExtended,
 } from "../../lib/session-metrics"
 import { itemsFamily } from "../messages"
+import { sessionNativeFamily } from "../session-native"
 
 export interface SessionMetricsValue {
 	raw: SessionMetricsExtended
+	usage?: SessionUsageSummary
 	workTime: string
 	cost: string
 	tokens: string
 	workTimeMs: number
 	completedWorkTimeMs: number
 	activeStartMs: number | null
-	costRaw: number
-	tokensRaw: number
+	costRaw: number | null
+	tokensRaw: number | null
 	exchangeCount: number
 	userMessageCount: number
 	assistantMessageCount: number
 	modelDistribution: Record<string, number>
 	modelDistributionDisplay: Array<{ name: string; count: number }>
-	cacheEfficiency: number
+	cacheEfficiency: number | null
 	cacheEfficiencyFormatted: string
 	errorCount: number
 	retryCount: number
@@ -44,15 +44,15 @@ function emptyRaw(partial: Partial<SessionMetricsExtended> = {}): SessionMetrics
 		workTimeMs: 0,
 		completedWorkTimeMs: 0,
 		activeStartMs: null,
-		cost: 0,
-		tokens: { input: 0, output: 0, reasoning: 0, cacheRead: 0, cacheWrite: 0, total: 0 },
+		cost: null,
+		tokens: { input: null, output: null, reasoning: null, cacheRead: null, cacheWrite: null, total: null },
 		exchangeCount: 0,
 		userMessageCount: 0,
 		assistantMessageCount: 0,
 		modelDistribution: {},
-		cacheEfficiency: 0,
+		cacheEfficiency: null,
 		errorCount: 0,
-		avgExchangeCost: 0,
+		avgExchangeCost: null,
 		avgExchangeTimeMs: 0,
 		toolBreakdown: {},
 		toolCallCount: 0,
@@ -80,7 +80,23 @@ export const sessionMetricsFamily = atomFamily((sessionId: string) => {
 				toolCallCount += 1
 			}
 		}
+		const usage = get(sessionNativeFamily(sessionId)).cumulativeUsage
+		const cost = usage?.estimatedCost ? usage.estimatedCost.micros / 1_000_000 : null
+		const formatMoney = (amount: number | null) => amount === null || !usage?.estimatedCost
+			? "Unknown"
+			: new Intl.NumberFormat("en-US", { style: "currency", currency: usage.estimatedCost.currency }).format(amount)
+		const input = usage?.inputTokens ?? null
+		const cacheRead = usage?.cacheReadInputTokens ?? null
+		const cacheEfficiency = input !== null && input > 0 && cacheRead !== null ? cacheRead / input * 100 : null
+		const avgExchangeCost = cost !== null && userMessageCount > 0 ? cost / userMessageCount : null
 		const raw = emptyRaw({
+			cost,
+			tokens: {
+				input, output: usage?.outputTokens ?? null, reasoning: usage?.reasoningTokens ?? null,
+				cacheRead, cacheWrite: usage?.cacheCreationInputTokens ?? null, total: usage?.totalTokens ?? null,
+			},
+			cacheEfficiency,
+			avgExchangeCost,
 			userMessageCount,
 			assistantMessageCount,
 			exchangeCount: userMessageCount,
@@ -88,26 +104,27 @@ export const sessionMetricsFamily = atomFamily((sessionId: string) => {
 		})
 		return {
 			raw,
+			usage,
 			workTime: formatWorkDuration(0),
-			cost: formatCost(0),
-			tokens: formatTokens(0),
+			cost: formatMoney(cost),
+			tokens: usage?.totalTokens == null ? "Unknown" : formatTokens(usage.totalTokens),
 			workTimeMs: 0,
 			completedWorkTimeMs: 0,
 			activeStartMs: null,
-			costRaw: 0,
-			tokensRaw: 0,
+			costRaw: cost,
+			tokensRaw: usage?.totalTokens ?? null,
 			exchangeCount: userMessageCount,
 			userMessageCount,
 			assistantMessageCount,
 			modelDistribution: {},
 			modelDistributionDisplay: [],
-			cacheEfficiency: 0,
-			cacheEfficiencyFormatted: formatPercentage(0),
+			cacheEfficiency,
+			cacheEfficiencyFormatted: cacheEfficiency === null ? "Unknown" : formatPercentage(cacheEfficiency),
 			errorCount: 0,
 			retryCount: 0,
 			toolCallCount,
 			toolBreakdown: {},
-			avgExchangeCost: formatCost(0),
+			avgExchangeCost: formatMoney(avgExchangeCost),
 			avgExchangeTime: formatWorkDuration(0),
 		}
 	})

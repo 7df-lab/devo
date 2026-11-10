@@ -80,8 +80,10 @@ where
 
 #[derive(Debug, Clone, Deserialize, Serialize)]
 pub(super) struct OpenAICompletionUsage {
-    pub(super) prompt_tokens: usize,
-    pub(super) completion_tokens: usize,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub(super) prompt_tokens: Option<usize>,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub(super) completion_tokens: Option<usize>,
     #[serde(default)]
     pub(super) total_tokens: Option<usize>,
     #[serde(default)]
@@ -112,8 +114,10 @@ pub(super) struct OpenAICompletionTokenDetails {
 
 pub(crate) fn completion_usage_to_usage(usage: &OpenAICompletionUsage) -> Usage {
     Usage {
-        input_tokens: usage.prompt_tokens,
-        output_tokens: usage.completion_tokens,
+        unreported_fields: None,
+        reported: usage.prompt_tokens.is_some() || usage.completion_tokens.is_some(),
+        input_tokens: usage.prompt_tokens.unwrap_or(0),
+        output_tokens: usage.completion_tokens.unwrap_or(0),
         cache_creation_input_tokens: None,
         cache_read_input_tokens: usage
             .prompt_tokens_details
@@ -125,6 +129,7 @@ pub(crate) fn completion_usage_to_usage(usage: &OpenAICompletionUsage) -> Usage 
             .and_then(|details| details.reasoning_tokens),
         total_tokens: usage.total_tokens,
     }
+    .with_field_coverage(usage.prompt_tokens, usage.completion_tokens)
 }
 
 #[cfg(test)]
@@ -215,6 +220,8 @@ mod tests {
         assert_eq!(
             usage,
             Usage {
+                unreported_fields: None,
+                reported: true,
                 input_tokens: 11,
                 output_tokens: 7,
                 cache_creation_input_tokens: None,
@@ -222,6 +229,10 @@ mod tests {
                 reasoning_output_tokens: Some(2),
                 total_tokens: Some(18),
             }
+            .with_field_coverage(
+                /*input_tokens*/ Some(0),
+                /*output_tokens*/ Some(0)
+            )
         );
     }
 }

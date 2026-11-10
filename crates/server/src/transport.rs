@@ -35,9 +35,11 @@ use crate::runtime::OutboundFrame;
 use crate::runtime::enqueue_outbound;
 use crate::runtime::log_outbound_frame;
 use crate::runtime::outbound_frame_to_value;
+use crate::singleton::DAEMON_CONTROL_SHUTDOWN_METHOD;
 use crate::singleton::SERVER_CONTROL_ENABLE_PROTOCOLS_METHOD;
 use crate::singleton::SERVER_CONTROL_SHUTDOWN_METHOD;
 use crate::singleton::SERVER_CONTROL_STATUS_METHOD;
+use crate::singleton::ServerLifetime;
 
 /// Per-connection transport state shared between the read loop and handler tasks.
 struct ConnectionTransport {
@@ -240,11 +242,22 @@ pub struct InternalProxyEndpoint {
 #[derive(Clone)]
 pub struct InternalProxyControl {
     shutdown_token: CancellationToken,
+    lifetime: ServerLifetime,
 }
 
 impl InternalProxyControl {
     pub fn new(shutdown_token: CancellationToken) -> Self {
-        Self { shutdown_token }
+        Self {
+            shutdown_token,
+            lifetime: ServerLifetime::Client,
+        }
+    }
+
+    pub(crate) fn daemon(shutdown_token: CancellationToken) -> Self {
+        Self {
+            shutdown_token,
+            lifetime: ServerLifetime::Daemon,
+        }
     }
 
     fn request_shutdown(&self) {
@@ -332,6 +345,15 @@ pub async fn run_listeners_with_internal_proxy(
 ) -> Result<()> {
     let targets = resolve_listen_targets(listen)?;
     run_listener_tasks(runtime, targets, Some((internal_proxy, token, control))).await
+}
+
+pub(crate) async fn run_daemon_listener(
+    runtime: Arc<ServerRuntime>,
+    endpoint: InternalProxyEndpoint,
+    token: String,
+    control: InternalProxyControl,
+) -> Result<()> {
+    run_internal_proxy(runtime, endpoint, token, control).await
 }
 
 async fn run_listener_tasks(
@@ -509,21 +531,37 @@ async fn run_internal_proxy(
 ) -> Result<()> {
     let InternalProxyEndpoint { listener, endpoint } = internal_proxy;
     tracing::info!(endpoint = %endpoint, "internal stdio proxy listener bound");
-    loop {
-        let (stream, remote_addr) = listener.accept().await?;
+    // Long-lived clients cannot consume the slots reserved for controls/auth.
+    let capacity = Arc::new(Semaphore::new(32));
+    let client_capacity = Arc::new(Semaphore::new(16));
+    let mut connections = JoinSet::new();
+    let listener_result: Result<()> = loop {
+        let accepted = tokio::select! {
+            biased;
+            _ = control.shutdown_token.cancelled() => break Ok(()),
+            joined = connections.join_next(), if !connections.is_empty() => { let _ = joined; continue; },
+            accepted = listener.accept() => match accepted { Ok(value) => value, Err(error) => break Err(error.into()) },
+        };
+        let (stream, remote_addr) = accepted;
+        let Ok(permit) = Arc::clone(&capacity).try_acquire_owned() else {
+            continue;
+        };
         let runtime = Arc::clone(&runtime);
         let token = token.clone();
         let control = control.clone();
-        tokio::spawn(async move {
-            tracing::info!(remote_addr = %remote_addr, "internal stdio proxy connected");
-            if let Err(error) =
-                handle_internal_proxy_connection(runtime, stream, &token, control).await
-            {
-                tracing::warn!(remote_addr = %remote_addr, error = %error, "internal stdio proxy closed with error");
+        let client_capacity = Arc::clone(&client_capacity);
+        connections.spawn(async move {
+            let _permit = permit;
+            if let Err(error) = handle_internal_proxy_connection(runtime, stream, &token, control, client_capacity).await {
+                tracing::debug!(remote_addr = %remote_addr, error = %error, "internal proxy closed");
             }
-            tracing::info!(remote_addr = %remote_addr, "internal stdio proxy disconnected");
         });
-    }
+    };
+    control.request_shutdown();
+    // Do not let the process release its owner lock while admitted RPCs are
+    // still changing durable state. Each connection stops reads and drains.
+    while connections.join_next().await.is_some() {}
+    listener_result
 }
 
 async fn handle_internal_proxy_connection(
@@ -531,34 +569,80 @@ async fn handle_internal_proxy_connection(
     stream: tokio::net::TcpStream,
     expected_token: &str,
     control: InternalProxyControl,
+    client_capacity: Arc<Semaphore>,
 ) -> Result<()> {
-    let websocket = accept_async(stream).await?;
-    let (mut writer, mut reader) = websocket.split();
-    match reader.next().await {
+    let mut websocket = tokio::time::timeout(
+        std::time::Duration::from_secs(5),
+        tokio_tungstenite::accept_async_with_config(
+            stream,
+            Some(
+                tokio_tungstenite::tungstenite::protocol::WebSocketConfig::default()
+                    .max_message_size(Some(16 * 1024 * 1024))
+                    .max_frame_size(Some(16 * 1024 * 1024)),
+            ),
+        ),
+    )
+    .await
+    .context("internal proxy handshake timed out")??;
+    match tokio::time::timeout(std::time::Duration::from_secs(5), websocket.next())
+        .await
+        .context("internal proxy authentication timed out")?
+    {
         Some(Ok(Message::Text(token))) if token.as_str() == expected_token => {}
         Some(Ok(Message::Close(_))) | None => return Ok(()),
         Some(Ok(_)) => bail!("internal stdio proxy did not send auth token"),
         Some(Err(error)) => return Err(error.into()),
     }
 
+    let (mut writer, mut reader) = websocket.split();
+    let initialization_deadline = tokio::time::Instant::now() + std::time::Duration::from_secs(5);
     let first_value = loop {
-        match reader.next().await {
+        let frame = tokio::select! {
+            biased;
+            _ = control.shutdown_token.cancelled() => return Ok(()),
+            frame = tokio::time::timeout_at(initialization_deadline, reader.next()) => frame.context("internal proxy initialization timed out")?,
+        };
+        match frame {
             Some(Ok(Message::Text(text))) => {
                 let value: serde_json::Value = serde_json::from_str(&text)?;
                 if let Some(request) = parse_internal_proxy_control_request(&value) {
+                    let mismatched_shutdown = matches!(
+                        (&request.action, control.lifetime),
+                        (InternalProxyControlAction::Shutdown, ServerLifetime::Daemon)
+                            | (
+                                InternalProxyControlAction::ShutdownDaemon,
+                                ServerLifetime::Client
+                            )
+                    );
+                    if mismatched_shutdown {
+                        writer.send(Message::Text(serde_json::json!({
+                            "jsonrpc":"2.0", "id":request.id,
+                            "error":{"code":-32000,"message":"shutdown owner lifetime mismatch; use the explicit lifecycle command"},
+                        }).to_string().into())).await?;
+                        return Ok(());
+                    }
                     let enabled_protocols = match &request.action {
                         InternalProxyControlAction::EnableProtocols(requested) => {
                             runtime.enable_protocols(requested).await
                         }
                         InternalProxyControlAction::Status
-                        | InternalProxyControlAction::Shutdown => runtime.enabled_protocols().await,
+                        | InternalProxyControlAction::Shutdown
+                        | InternalProxyControlAction::ShutdownDaemon => {
+                            runtime.enabled_protocols().await
+                        }
                     };
-                    let response = internal_proxy_control_response(&request, &enabled_protocols);
+                    let mut response =
+                        internal_proxy_control_response(&request, &enabled_protocols);
+                    response["result"]["lifetime"] = serde_json::to_value(control.lifetime)?;
                     writer
                         .send(Message::Text(response.to_string().into()))
                         .await
                         .context("send internal proxy control response")?;
-                    if matches!(request.action, InternalProxyControlAction::Shutdown) {
+                    if matches!(
+                        request.action,
+                        InternalProxyControlAction::Shutdown
+                            | InternalProxyControlAction::ShutdownDaemon
+                    ) {
                         control.request_shutdown();
                     }
                     return Ok(());
@@ -571,6 +655,9 @@ async fn handle_internal_proxy_connection(
         }
     };
 
+    let _client_permit = client_capacity
+        .try_acquire_owned()
+        .context("internal proxy client capacity reached")?;
     let (transport, outbound_rx) = ConnectionTransport::new();
     let outbound_tx = transport.outbound_tx.clone();
     let connection_id = runtime
@@ -601,18 +688,26 @@ async fn handle_internal_proxy_connection(
             return Ok(());
         }
 
-        while let Some(frame) = reader.next().await {
+        loop {
+            let frame = tokio::select! {
+                biased;
+                _ = control.shutdown_token.cancelled() => break,
+                frame = reader.next() => frame,
+            };
+            let Some(frame) = frame else {
+                break;
+            };
             match frame {
                 Ok(Message::Text(text)) => {
-                    accept_incoming_client_message(
-                        Arc::clone(&runtime),
-                        connection_id,
-                        outbound_tx.clone(),
-                        Arc::clone(&transport.inbound_semaphore),
-                        text.as_str(),
-                        "internal_proxy_notifications",
-                    )
-                    .await;
+                    tokio::select! {
+                        biased;
+                        _ = control.shutdown_token.cancelled() => break,
+                        _ = accept_incoming_client_message(
+                            Arc::clone(&runtime), connection_id, outbound_tx.clone(),
+                            Arc::clone(&transport.inbound_semaphore), text.as_str(),
+                            "internal_proxy_notifications",
+                        ) => {},
+                    }
                 }
                 Ok(Message::Close(_)) => break,
                 Ok(_) => {}
@@ -624,8 +719,15 @@ async fn handle_internal_proxy_connection(
     .await;
 
     runtime.unregister_connection(connection_id).await;
-    tracing::info!(connection_id, "internal stdio proxy connection closed");
     outbound_writer.abort();
+    // Keep this connection in the listener JoinSet until every admitted RPC
+    // finishes, even if it disconnected before shutdown began. Otherwise the
+    // next stop could miss detached handlers still mutating durable state.
+    let _drain = transport
+        .inbound_semaphore
+        .acquire_many(INBOUND_CONCURRENCY_LIMIT as u32)
+        .await;
+    tracing::info!(connection_id, "internal stdio proxy connection closed");
     result
 }
 
@@ -633,6 +735,7 @@ async fn handle_internal_proxy_connection(
 enum InternalProxyControlAction {
     Status,
     Shutdown,
+    ShutdownDaemon,
     EnableProtocols(ProtocolSet),
 }
 
@@ -640,7 +743,9 @@ impl InternalProxyControlAction {
     fn response_status(&self) -> &'static str {
         match self {
             InternalProxyControlAction::Status => "running",
-            InternalProxyControlAction::Shutdown => "shutting down",
+            InternalProxyControlAction::Shutdown | InternalProxyControlAction::ShutdownDaemon => {
+                "shutting down"
+            }
             InternalProxyControlAction::EnableProtocols(_) => "running",
         }
     }
@@ -659,6 +764,7 @@ fn parse_internal_proxy_control_request(
     let action = match method {
         SERVER_CONTROL_STATUS_METHOD => InternalProxyControlAction::Status,
         SERVER_CONTROL_SHUTDOWN_METHOD => InternalProxyControlAction::Shutdown,
+        DAEMON_CONTROL_SHUTDOWN_METHOD => InternalProxyControlAction::ShutdownDaemon,
         SERVER_CONTROL_ENABLE_PROTOCOLS_METHOD => {
             let protocols = serde_json::from_value::<Vec<ServerProtocol>>(
                 value.pointer("/params/protocols")?.clone(),

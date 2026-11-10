@@ -359,3 +359,155 @@ fn provider_protocol_overlay_updates_only_inheriting_models() {
     );
     std::fs::remove_dir_all(root).unwrap();
 }
+
+#[test]
+fn invalid_connection_base_urls_leave_config_credentials_and_defaults_unchanged() {
+    for endpoint in [
+        "not-a-url",
+        "localhost:11434/v1",
+        "http:localhost",
+        "http://",
+        "ftp://localhost/v1",
+        "file:///tmp/model",
+        "https://bad host/v1",
+        "http://localhost:70000/v1",
+        "",
+    ] {
+        let home = tempfile::tempdir().unwrap();
+        let mut store = AppConfigStore::load(home.path().to_path_buf(), None).unwrap();
+        let original = ProviderInfo {
+            id: "local".into(),
+            name: "Original".into(),
+            enabled: true,
+            base_url: Some("http://localhost:11434/v1".into()),
+            wire_apis: vec![devo_protocol::ProviderWireApi::OpenAIChatCompletions],
+            models: BTreeMap::from([("qwen:latest".into(), ProviderModelInfo::default())]),
+            ..ProviderInfo::default()
+        };
+        store
+            .upsert_provider_connection(original.clone(), None, None, None)
+            .unwrap();
+        let before = store.provider_connections().unwrap();
+        let custom_path = home.path().join("custom-providers.json");
+        let before_bytes = std::fs::read(&custom_path).unwrap();
+        let error = store
+            .upsert_provider_connection(
+                ProviderInfo {
+                    base_url: Some(endpoint.into()),
+                    ..original
+                },
+                Some("local/qwen:latest".into()),
+                None,
+                Some("must-not-be-saved".into()),
+            )
+            .unwrap_err();
+        assert_eq!(
+            error.to_string(),
+            "Base URL must be a valid http:// or https:// URL"
+        );
+        assert_eq!(store.provider_connections().unwrap(), before);
+        assert_eq!(std::fs::read(&custom_path).unwrap(), before_bytes);
+        assert!(!home.path().join("auth.json").exists());
+        assert!(!home.path().join("config.toml").exists());
+    }
+}
+
+#[test]
+fn invalid_model_base_urls_are_rejected_before_any_provider_write() {
+    for use_overrides in [false, true] {
+        let home = tempfile::tempdir().unwrap();
+        let mut store = AppConfigStore::load(home.path().to_path_buf(), None).unwrap();
+        let models = BTreeMap::from([(
+            "qwen:latest".into(),
+            ProviderModelInfo {
+                base_url: Some("not-a-url".into()),
+                ..ProviderModelInfo::default()
+            },
+        )]);
+        let provider = ProviderInfo {
+            id: "local".into(),
+            name: "Local".into(),
+            enabled: true,
+            base_url: Some("http://localhost:11434/v1".into()),
+            wire_apis: vec![devo_protocol::ProviderWireApi::OpenAIChatCompletions],
+            models: if use_overrides {
+                BTreeMap::new()
+            } else {
+                models.clone()
+            },
+            model_overrides: if use_overrides {
+                models
+            } else {
+                BTreeMap::new()
+            },
+            ..ProviderInfo::default()
+        };
+        let error = store
+            .upsert_provider_connection(provider, None, None, Some("must-not-be-saved".into()))
+            .unwrap_err();
+        assert_eq!(
+            error.to_string(),
+            "Base URL must be a valid http:// or https:// URL"
+        );
+        assert_eq!(store.provider_connections().unwrap(), vec![]);
+        assert!(!home.path().join("custom-providers.json").exists());
+        assert!(!home.path().join("auth.json").exists());
+    }
+}
+
+#[test]
+fn local_http_base_urls_save_without_credentials_and_survive_reopen() {
+    for endpoint in [
+        "http://localhost:11434",
+        "http://127.0.0.1:1234/v1",
+        "http://[::1]:8080/v1/",
+        "https://gateway.example/custom/v4",
+        "HTTP://localhost:11434/v1",
+    ] {
+        let home = tempfile::tempdir().unwrap();
+        let mut store = AppConfigStore::load(home.path().to_path_buf(), None).unwrap();
+        let saved = store
+            .upsert_provider_connection(
+                ProviderInfo {
+                    id: "local".into(),
+                    name: "Local".into(),
+                    enabled: true,
+                    base_url: Some(endpoint.into()),
+                    wire_apis: vec![devo_protocol::ProviderWireApi::OpenAIChatCompletions],
+                    models: BTreeMap::from([(
+                        "org/qwen:latest".into(),
+                        ProviderModelInfo::default(),
+                    )]),
+                    ..ProviderInfo::default()
+                },
+                None,
+                None,
+                Some(String::new()),
+            )
+            .unwrap();
+        let reopened = AppConfigStore::load(home.path().to_path_buf(), None).unwrap();
+        assert_eq!(reopened.provider_connections().unwrap(), vec![saved]);
+        assert!(!home.path().join("auth.json").exists());
+    }
+}
+
+#[test]
+fn pinning_a_model_rejects_an_invalid_endpoint_before_writing() {
+    let home = tempfile::tempdir().unwrap();
+    let mut store = AppConfigStore::load(home.path().to_path_buf(), None).unwrap();
+    let error = store
+        .pin_provider_model(
+            "local",
+            "qwen:latest",
+            ProviderModelConfig {
+                base_url: Some("not-a-url".into()),
+                ..ProviderModelConfig::default()
+            },
+        )
+        .unwrap_err();
+    assert_eq!(
+        error.to_string(),
+        "Base URL must be a valid http:// or https:// URL"
+    );
+    assert_eq!(store.provider_connections().unwrap(), vec![]);
+}

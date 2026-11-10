@@ -328,6 +328,38 @@ impl ServerRuntime {
                 match error {
                     crate::runtime::session_cache::LoadSessionError::SessionNotFound
                     | crate::runtime::session_cache::LoadSessionError::RolloutMissing => {
+                        // SQLite is only a cache. A failed/partial startup scan
+                        // must never turn durable work into a deleted schedule.
+                        let runtime = Arc::clone(self);
+                        let missing =
+                            tokio::task::spawn_blocking(move || -> anyhow::Result<bool> {
+                                // A child can share a live root journal while being
+                                // durably deleted. Scan every journal: tombstones
+                                // win across journals, just as in the index rebuild.
+                                // Complete the strict scan before retiring anything;
+                                // corruption or I/O failure remains retryable.
+                                let mut live = false;
+                                let mut deleted = false;
+                                for path in runtime.rollout_store.rollout_paths()? {
+                                    let (has_meta, has_tombstone) = runtime
+                                        .rollout_store
+                                        .journal_session_membership(&path, &session_id)?;
+                                    live |= has_meta;
+                                    deleted |= has_tombstone;
+                                }
+                                if live && !deleted {
+                                    runtime
+                                        .rollout_store
+                                        .index_rollout_metadata(&runtime.deps.db)?;
+                                }
+                                Ok(deleted || !live)
+                            })
+                            .await;
+                        if !matches!(missing, Ok(Ok(true))) {
+                            tracing::warn!(%session_id, "schedule journal is present or uncertain; retaining occurrence for retry");
+                            self.retry_schedule_occurrence(occurrence_id);
+                            continue;
+                        }
                         tracing::warn!(
                             job_id = job.job_id.as_str(),
                             session_id = %session_id,

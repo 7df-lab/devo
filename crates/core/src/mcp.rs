@@ -237,6 +237,38 @@ pub trait McpManager: Send + Sync {
 
     async fn refresh(&self, server_id: &McpServerId) -> Result<McpServerStatus, McpError>;
 
+    /// Replace the selected transport and rediscover it, without replaying calls.
+    /// Implementations must opt in: refreshing is not a safe reconnect fallback.
+    async fn reconnect(&self, server_id: &McpServerId) -> Result<McpServerStatus, McpError> {
+        Err(McpError::McpProtocolError {
+            server_id: server_id.clone(),
+            message: "MCP reconnect is unsupported by this manager".into(),
+        })
+    }
+
+    /// Return the selected server's last discovered tool metadata without I/O.
+    async fn cached_tools(&self, server_id: &McpServerId) -> Result<Vec<McpToolInfo>, McpError> {
+        Err(McpError::McpProtocolError {
+            server_id: server_id.clone(),
+            message: "MCP cached tool metadata is unsupported by this manager".into(),
+        })
+    }
+
+    /// Change runtime enablement without starting a transport or doing network I/O.
+    /// Disabling must invalidate pending discoveries so late results cannot restore tools.
+    /// Managers must explicitly support this operation; callers cannot safely emulate it
+    /// by awaiting `set_enabled(true)` inside a publication lock.
+    async fn configure_enabled(
+        &self,
+        server_id: &McpServerId,
+        _enabled: bool,
+    ) -> Result<McpServerStatus, McpError> {
+        Err(McpError::McpProtocolError {
+            server_id: server_id.clone(),
+            message: "MCP enablement configuration is unsupported by this manager".into(),
+        })
+    }
+
     /// Enable or disable one MCP server without affecting sibling clients.
     ///
     /// When `enabled` is true, the manager starts (or refreshes) that server.

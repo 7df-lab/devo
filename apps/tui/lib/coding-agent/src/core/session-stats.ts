@@ -1,3 +1,4 @@
+import type { CumulativeUsage } from "./usage-display.js";
 import type { ContextUsage } from "./extensions/index.js";
 
 export interface SessionStats {
@@ -8,13 +9,8 @@ export interface SessionStats {
 	toolCalls: number;
 	toolResults: number;
 	totalMessages: number;
-	tokens: {
-		input: number;
-		output: number;
-		cacheRead: number;
-		cacheWrite: number;
-		total: number;
-	};
-	cost: number;
+	tokens: CumulativeUsage["tokens"];
+	cost: number | null;
+	cumulativeUsage?: CumulativeUsage;
 	contextUsage?: ContextUsage;
 }

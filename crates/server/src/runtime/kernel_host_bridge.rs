@@ -20,6 +20,8 @@ use uuid::Uuid;
 use super::ServerRuntime;
 use devo_core::McpManager;
 use devo_core::tools::contracts::ToolBudgets;
+mod factory;
+pub(crate) use factory::handle_factory;
 mod harness;
 pub(crate) use harness::handle_harness;
 mod mcp;
@@ -55,6 +57,7 @@ pub(crate) struct HostBridge {
     pub file_read_ledger: Arc<FileReadLedger>,
     pub sandbox_profile: Option<String>,
     pub cancel_token: CancellationToken,
+    pub end_turn_requested: Option<Arc<std::sync::atomic::AtomicBool>>,
     pub kernel_lifetime: Option<CancellationToken>,
     pub mcp_manager: Option<Arc<dyn McpManager>>,
     pub agent_scope: ToolAgentScope,
@@ -84,6 +87,7 @@ impl HostBridge {
             file_read_ledger: Arc::new(FileReadLedger::new()),
             sandbox_profile: None,
             cancel_token: CancellationToken::new(),
+            end_turn_requested: None,
             kernel_lifetime: None,
             mcp_manager: None,
             agent_scope: ToolAgentScope::Parent,

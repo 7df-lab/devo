@@ -67,6 +67,7 @@ import {
 import {
 	AGENT_MESSAGE_RECEIVED_PREVIEW_LABEL,
 	isAgentSessionMessage,
+	isHostFollowUpMessage,
 	startsAgentRun,
 } from "../../core/agent-messages.js";
 import {
@@ -87,7 +88,6 @@ import {
 import { DEFAULT_THINKING_LEVEL } from "../../core/defaults.js";
 import type {
 	AutocompleteProviderFactory,
-	ContextUsage,
 	EditorFactory,
 	ExtensionCommandContext,
 	ExtensionContext,
@@ -717,9 +717,6 @@ export class InteractiveMode {
 	private pulseTimer: NodeJS.Timeout | undefined = undefined;
 	private pulseFrame = 0;
 	private readonly activityTracker = new AgentActivityTracker();
-	// activityTracker token count already folded into the context snapshot; only output beyond
-	// this counts as live in-flight (keeps auto-retries from re-adding a failed attempt).
-	private contextUsageTokenBaseline = 0;
 	// Refresh ordering: a stale failure must never clobber a newer success.
 	private contextUsageRefresh = { generation: 0, lastSuccessGeneration: 0 };
 
@@ -2481,10 +2478,6 @@ export class InteractiveMode {
 		this.bindPromptStashSession(state.sessionId);
 		this.connectionState = state;
 		this.scheduleHeartbeatManagerRefresh();
-		// Don't touch contextUsageTokenBaseline: a mid-stream snapshot reflects only completed
-		// turns (the in-flight message isn't persisted yet), so the in-flight delta must keep
-		// accumulating. The baseline is managed at turn end (refreshConnectionContextUsage) and
-		// reset on a new user message.
 		this.footer.setAutoCompactEnabled(state.autoCompactionEnabled);
 		this.sessionRecap = state.recap;
 		this.renderRecap();
@@ -2497,23 +2490,6 @@ export class InteractiveMode {
 		}
 		this.connectionState = { ...this.connectionState, ...patch };
 		this.updateWorkingPulse();
-	}
-
-	// Bake this attempt's output into the snapshot so the tray doesn't dip in the gap between
-	// isStreaming clearing and the async refresh landing.
-	private applyOptimisticContextUsage(): void {
-		const snapshot = this.connectionState?.contextUsage;
-		if (!snapshot || snapshot.tokens === null || snapshot.contextWindow <= 0) return;
-		const completed = Math.max(0, this.activityTracker.getStatus().tokens - this.contextUsageTokenBaseline);
-		if (completed <= 0) return;
-		const tokens = snapshot.tokens + completed;
-		this.patchConnectionState({
-			contextUsage: {
-				tokens,
-				contextWindow: snapshot.contextWindow,
-				percent: (tokens / snapshot.contextWindow) * 100,
-			},
-		});
 	}
 
 	/** Refresh the tray's context usage from the session after a turn or compaction completes. */
@@ -2532,8 +2508,6 @@ export class InteractiveMode {
 			return;
 		}
 		this.contextUsageRefresh.lastSuccessGeneration = generation;
-		// Anything counted so far is now reflected in the snapshot; only later output is in-flight.
-		this.contextUsageTokenBaseline = this.activityTracker.getStatus().tokens;
 		this.patchConnectionState({ contextUsage: stats.contextUsage });
 	}
 
@@ -2549,6 +2523,15 @@ export class InteractiveMode {
 			return;
 		}
 		switch (event.type) {
+			case "context_usage_update":
+				this.contextUsageRefresh.generation += 1;
+				this.contextUsageRefresh.lastSuccessGeneration = this.contextUsageRefresh.generation;
+				this.patchConnectionState({ contextUsage: event.contextUsage });
+				this.ui.requestRender();
+				break;
+			case "session_usage_update":
+				this.patchConnectionState({ cumulativeUsage: event.cumulativeUsage });
+				break;
 			case "agent_start": {
 				const wasNewChat = this.isNewChat();
 				this.patchConnectionState({ isStreaming: true, activeToolNames: [] });
@@ -2672,25 +2655,9 @@ export class InteractiveMode {
 	}
 
 	private getConnectionContextUsage(): AgentConnectionState["contextUsage"] {
-		const snapshot = this.connectionState?.contextUsage;
-		if (!snapshot || snapshot.tokens === null || snapshot.contextWindow <= 0) {
-			return snapshot;
-		}
-		// Add only the output produced since the snapshot was last refreshed. The activity
-		// tracker accumulates across auto-retries within a turn, so subtract the baseline
-		// captured at the last refresh to avoid re-adding a failed attempt's tokens.
-		const inFlight = this.isAgentStreaming()
-			? Math.max(0, this.activityTracker.getStatus().tokens - this.contextUsageTokenBaseline)
-			: 0;
-		if (inFlight <= 0) {
-			return snapshot;
-		}
-		const tokens = snapshot.tokens + inFlight;
-		return {
-			tokens,
-			contextWindow: snapshot.contextWindow,
-			percent: (tokens / snapshot.contextWindow) * 100,
-		} satisfies ContextUsage;
+		// Provider occupancy already includes the latest request output. Character
+		// estimates from activity must not be added again or shown as actual usage.
+		return this.connectionState?.contextUsage;
 	}
 
 	private getScopedModelState(): AgentConnectionState["scopedModels"] {
@@ -2815,7 +2782,6 @@ export class InteractiveMode {
 		this.discardRefineLoader();
 		this.pendingBashComponents = [];
 		this.activityTracker.reset();
-		this.contextUsageTokenBaseline = 0;
 		this.resetPendingToolState();
 		this.agentRunFileChanges.clear();
 		this.renderRecap();
@@ -3100,7 +3066,7 @@ export class InteractiveMode {
 			parts.push(elapsed);
 		}
 		if (status.tokens > 0) {
-			parts.push(`${status.direction === "down" ? "↓" : "↑"} ${formatTokenCount(status.tokens)} tokens`);
+			parts.push(`${status.direction === "down" ? "↓" : "↑"} ${formatTokenCount(status.tokens)} tokens (est.)`);
 		}
 		return parts.join(" · ");
 	}
@@ -5377,10 +5343,12 @@ export class InteractiveMode {
 
 		this.footer.invalidate();
 		this.updateConnectionStateFromEvent(event);
-		// A new user message resets the activity tracker to 0, so the in-flight baseline must
-		// reset with it. (agent_start on auto-retry does not reset the tracker.)
-		if (event.type === "message_start" && (event.message.role === "user" || isAgentSessionMessage(event.message))) {
-			this.contextUsageTokenBaseline = 0;
+		if (
+			event.type === "message_start" &&
+			(event.message.role === "user" ||
+				isAgentSessionMessage(event.message) ||
+				isHostFollowUpMessage(event.message))
+		) {
 			this.clearShortcutGuide();
 			this.agentRunFileChanges.clear();
 			this.renderRecap();
@@ -5752,7 +5720,6 @@ export class InteractiveMode {
 				this.resetPendingToolState();
 				this.renderRecap();
 
-				this.applyOptimisticContextUsage();
 				// Auto-compaction can start server-side while this event is being handled.
 				// Do not hold its start event behind a stats RPC; stale refreshes are discarded.
 				void this.refreshConnectionContextUsage();

@@ -1,7 +1,7 @@
 /**
  * Session timing / occupancy helpers for the Native transcript path.
  *
- * Cost and token totals stay at zero until Native ItemEnvelope carries usage.
+ * Session spend comes from Native cumulative metering; missing fields remain unknown.
  * No OpenCode Message/Part duals.
  */
 
@@ -13,12 +13,12 @@ import type { ChatTurn } from "../atoms/derived/session-chat"
 // ============================================================
 
 export interface SessionTokens {
-	input: number
-	output: number
-	reasoning: number
-	cacheRead: number
-	cacheWrite: number
-	total: number
+	input: number | null
+	output: number | null
+	reasoning: number | null
+	cacheRead: number | null
+	cacheWrite: number | null
+	total: number | null
 }
 
 /** Distribution of turns across models (modelID -> count) */
@@ -34,8 +34,8 @@ export interface SessionMetrics {
 	completedWorkTimeMs: number
 	/** Start time (epoch ms) of the in-progress assistant message, or null if idle */
 	activeStartMs: number | null
-	/** Total cost in USD */
-	cost: number
+	/** Estimated cost in the provider-reported currency, unknown if absent. */
+	cost: number | null
 	/** Aggregated token counts */
 	tokens: SessionTokens
 	/** Number of exchanges (one exchange = one user message + all its assistant responses) */
@@ -46,12 +46,12 @@ export interface SessionMetrics {
 	assistantMessageCount: number
 	/** Map of modelID -> number of assistant messages using that model */
 	modelDistribution: ModelDistribution
-	/** Cache hit ratio: cacheRead / (input + cacheRead), as a percentage 0-100 */
-	cacheEfficiency: number
+	/** Cache hit ratio: cacheRead / input (input already includes cached tokens), as a percentage 0-100 */
+	cacheEfficiency: number | null
 	/** Number of assistant messages that had an error */
 	errorCount: number
-	/** Average cost per exchange (USD) */
-	avgExchangeCost: number
+	/** Average estimated cost per exchange in the provider-reported currency. */
+	avgExchangeCost: number | null
 	/** Average work time per exchange (ms) */
 	avgExchangeTimeMs: number
 }

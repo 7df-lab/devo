@@ -567,3 +567,133 @@ async fn invalid_selection_does_not_poison_later_spawn_during_active_parent_turn
     wait_for_parent_turn_completed(&mut notifications, root).await?;
     Ok(())
 }
+
+#[tokio::test]
+async fn independent_root_inherits_named_non_effort_variant() -> Result<()> {
+    let home = TempDir::new()?;
+    write_config(home.path())?;
+    let path = home.path().join("providers.json");
+    let mut config: serde_json::Value = serde_json::from_slice(&std::fs::read(&path)?)?;
+    config["provider"]["parent"]["models"]["vendor/main"]["variants"] = json!({
+        "fast": {"request": {"speed":"fast"}}
+    });
+    std::fs::write(&path, serde_json::to_vec(&config)?)?;
+    let parent = Arc::new(ScriptedProvider::new([
+        ScriptedProvider::ipython_code_tool_call(
+            r#"
+from pathlib import Path
+root = await rlm.create_session('Use the inherited variant', name='variant')
+Path('variant-root').write_text(root.session_id)
+await rlm.end_turn()
+"#,
+        ),
+        ScriptedProvider::completed("variant answer"),
+    ]));
+    let runtime = runtime(
+        home.path(),
+        parent.clone(),
+        Arc::new(ScriptedProvider::pending()),
+    );
+    let (connection, mut notifications) = initialize_connection(&runtime).await?;
+    let session = start_parent_session(&runtime, connection, home.path()).await?;
+    let response = runtime
+        .handle_incoming(
+            connection,
+            json!({
+                "id": 91, "method": "session/metadata/update", "params": {
+                    "sessionId": session, "expectedVersion":0,
+                    "model":{"provider":"parent", "model":"vendor/main", "variant":"fast"}
+                }
+            }),
+        )
+        .await
+        .context("select named variant")?;
+    assert!(response.get("error").is_none(), "{response}");
+    start_turn_with_approval_policy(
+        &runtime,
+        connection,
+        session,
+        "Create an independent root",
+        Some("never"),
+    )
+    .await?;
+    let completed =
+        wait_for_session_notification(&mut notifications, "turn/completed", session).await?;
+    assert_eq!(
+        completed["params"]["turn"]["status"],
+        json!("completed"),
+        "{completed}"
+    );
+    let child: SessionId = std::fs::read_to_string(home.path().join("variant-root"))?.parse()?;
+    wait_for_stream_calls(&parent, 2).await?;
+    assert_eq!(
+        parent
+            .requests()
+            .iter()
+            .map(|request| request.extra_body.clone())
+            .collect::<Vec<_>>(),
+        vec![Some(json!({"speed":"fast"})); 2]
+    );
+    let read = runtime
+        .handle_incoming(
+            connection,
+            json!({
+                "id":92, "method":"session/read", "params":{"sessionId": child}
+            }),
+        )
+        .await
+        .context("read variant root")?;
+    assert_eq!(read["result"]["session"]["model"]["variant"], json!("fast"));
+    runtime.shutdown().await;
+    drop(runtime);
+    let resumed_provider = Arc::new(ScriptedProvider::new([ScriptedProvider::completed(
+        "after restart",
+    )]));
+    let restored = self::runtime(
+        home.path(),
+        resumed_provider.clone(),
+        Arc::new(ScriptedProvider::pending()),
+    );
+    restored.load_persisted_sessions().await?;
+    let (connection, mut notifications) = initialize_connection(&restored).await?;
+    let resumed = restored
+        .handle_incoming(
+            connection,
+            json!({
+                "id":93, "method":"session/resume", "params":{"sessionId": child}
+            }),
+        )
+        .await
+        .context("resume variant root")?;
+    assert!(resumed.get("error").is_none(), "{resumed}");
+    assert_eq!(
+        resumed["result"]["session"]["model"]["variant"],
+        json!("fast")
+    );
+    while notifications.try_recv().is_ok() {}
+    let started = start_turn(
+        &restored,
+        connection,
+        child,
+        "Keep the variant after restart",
+    )
+    .await?;
+    let completed = loop {
+        let notification =
+            wait_for_session_notification(&mut notifications, "turn/completed", child).await?;
+        if notification["params"]["turn"]["id"] == json!(started.turn.id) {
+            break notification;
+        }
+    };
+    assert_eq!(
+        completed["params"]["turn"]["status"],
+        json!("completed"),
+        "{completed}"
+    );
+    wait_for_stream_calls(&resumed_provider, 1).await?;
+    assert_eq!(
+        resumed_provider.requests()[0].extra_body,
+        Some(json!({"speed":"fast"}))
+    );
+    Ok(())
+}

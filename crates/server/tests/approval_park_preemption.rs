@@ -448,3 +448,129 @@ async fn turn_start_on_approval_parked_session_admits_a_new_turn() -> Result<()>
     );
     Ok(())
 }
+
+/// Hold the query resumed after approval so queued input can be admitted before
+/// it finishes. Other queries retain the existing harmless scripted behavior.
+struct RestoredApprovalProvider {
+    scripted: ToolCallThenDoneProvider,
+    resumed: tokio::sync::Semaphore,
+    finish_resumed: tokio::sync::Semaphore,
+}
+
+#[async_trait]
+impl ModelProviderSDK for RestoredApprovalProvider {
+    async fn completion(&self, request: ModelRequest) -> Result<ModelResponse> {
+        self.scripted.completion(request).await
+    }
+
+    async fn completion_stream(
+        &self,
+        request: ModelRequest,
+    ) -> Result<Pin<Box<dyn futures::Stream<Item = Result<StreamEvent>> + Send>>> {
+        let is_resumed = self
+            .scripted
+            .stream_requests
+            .lock()
+            .expect("requests")
+            .len()
+            == 1;
+        if is_resumed {
+            self.resumed.add_permits(1);
+            self.finish_resumed.acquire().await?.forget();
+        }
+        self.scripted.completion_stream(request).await
+    }
+
+    fn name(&self) -> &str {
+        "restored-approval-queue"
+    }
+}
+
+#[tokio::test]
+async fn restored_approval_releases_admission_before_draining_queued_input() -> Result<()> {
+    let root = TempDir::new()?;
+    let workspace = root.path().join("workspace");
+    std::fs::create_dir(&workspace)?;
+    let provider = Arc::new(RestoredApprovalProvider {
+        scripted: ToolCallThenDoneProvider {
+            stream_requests: Mutex::new(Vec::new()),
+        },
+        resumed: tokio::sync::Semaphore::new(/*permits*/ 0),
+        finish_resumed: tokio::sync::Semaphore::new(/*permits*/ 0),
+    });
+    let make_runtime = || {
+        TestRuntime::new(provider.clone())
+            .disabled_skills()
+            .db_file("restored-approval-queue.db")
+            .runtime(root.path())
+    };
+    let original = make_runtime();
+    let (_original_connection, _original_events, session, parked_turn) =
+        park_turn_at_approval(&original, &workspace).await?;
+    // The durable checkpoint is complete before the original reverse request.
+    // A fresh runtime restores it without the original live approval task.
+    let restarted = make_runtime();
+    let (connection, mut events) = initialize_connection(&restarted).await?;
+    let reply = restarted
+        .handle_incoming(
+            connection,
+            json!({
+                "id": 19, "method": "subscription/create", "params": {
+                    "selectors": [{"kind": "session", "sessionId": session}],
+                    "includeSnapshot": false
+                }
+            }),
+        )
+        .await
+        .context("subscribe to restored session")?;
+    assert_eq!(reply.get("error"), None, "{reply}");
+    let reply = restarted
+        .handle_incoming(
+            connection,
+            json!({
+                "id": 20, "method": "session/resume", "params": {"sessionId": session}
+            }),
+        )
+        .await
+        .context("resume")?;
+    assert_eq!(reply.get("error"), None, "{reply}");
+    let recovered = collect_until(&mut events, |event| {
+        event["method"] == "approval/permission/request"
+    })
+    .await
+    .context("restored approval request")?;
+    let request = recovered.last().context("restored approval")?;
+    restarted.handle_incoming(connection, json!({
+        "id": request["id"], "result": {
+            "requestId": request["params"]["approvalId"],
+            "decision": {"decision": "approved", "scope": "once", "decidedAt": chrono::Utc::now()}
+        }
+    })).await;
+    timeout(Duration::from_secs(/*secs*/ 20), provider.resumed.acquire())
+        .await??
+        .forget();
+    let reply = restarted.handle_incoming(connection, json!({
+        "id": 21, "method": "session/queue/push", "params": {
+            "sessionId": session, "input": [{"type": "text", "text": "after restored approval"}],
+            "idempotencyKey": "after-restored-approval"
+        }
+    })).await.context("queue push")?;
+    assert_eq!(reply.get("error"), None, "{reply}");
+    provider.finish_resumed.add_permits(1);
+    let seen = collect_until(&mut events, |event| {
+        event["method"] == "turn/completed"
+            && event["params"]["turn"]["id"] != parked_turn
+            && event["params"]["turn"]["status"] == "completed"
+    })
+    .await
+    .context("queued input completes after restored approval")?;
+    assert!(
+        seen.iter()
+            .any(|event| event["method"] == "queue/updated"
+                && event["params"]["change"] == "drained")
+    );
+    let requests = provider.scripted.stream_requests.lock().expect("requests");
+    assert_eq!(requests.len(), 3);
+    assert!(serde_json::to_string(&requests[2])?.contains("after restored approval"));
+    Ok(())
+}

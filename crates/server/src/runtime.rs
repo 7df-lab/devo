@@ -108,6 +108,8 @@ pub(crate) mod context_occupancy;
 mod context_usage;
 mod control_requests;
 mod credential_binding;
+#[cfg(test)]
+mod daemon_lifecycle_tests;
 mod goal_accounting;
 mod goal_background;
 mod goal_continuation;
@@ -115,16 +117,20 @@ mod goal_handlers;
 mod handlers;
 mod history_cache;
 mod hooks;
+mod host_messages;
 mod interaction_items;
 mod items;
 mod kernel_host;
 mod kernel_host_agent_message;
 mod kernel_host_bridge;
+mod kernel_host_controls;
 mod kernel_host_heartbeat;
 mod kernel_host_models;
+mod kernel_host_session;
 mod kernel_idle_bash;
 mod lifecycle;
 mod mcp;
+mod mcp_reconnect;
 mod model_api;
 mod outbound;
 mod permission_decision;
@@ -204,6 +210,9 @@ pub struct ServerRuntime {
     background_work: std::sync::Mutex<goal_background::BackgroundWork>,
     /// Per-root-session agent registries for subagent coordination.
     agent_registries: Mutex<HashMap<SessionId, AgentRegistry>>,
+    rlm_lazy_children: Mutex<HashSet<SessionId>>,
+    rlm_progress_notes: Mutex<HashMap<SessionId, (std::time::Instant, String)>>,
+    rlm_child_changed: tokio::sync::Notify,
     /// Per-session inboxes used by agent tools to exchange ordered messages.
     agent_mailboxes: Mutex<HashMap<SessionId, SubagentMailbox>>,
     /// Per-parent child-output buffers used by wait_agent polling.
@@ -211,7 +220,7 @@ pub struct ServerRuntime {
     /// Per-parent `wait_agent` sequence cursors keyed by optional target string.
     agent_wait_cursors: Mutex<HashMap<SessionId, HashMap<String, u64>>>,
     /// Latest subagent turn usage grouped under the parent turn that requested the work.
-    subagent_usage: Mutex<subagent_usage::SubagentUsageState>,
+    usage_publication: Mutex<()>,
     /// Live client-owned reference search sessions.
     reference_searches: Mutex<
         HashMap<
@@ -269,11 +278,15 @@ pub struct ServerRuntime {
     /// Durable cron/heartbeat jobs (`$DEVO_HOME/schedules.json`).
     schedule_store: crate::schedule_store::ScheduleStore,
     schedule_wake_cancel: CancellationToken,
+    /// Short MCP registry publication and disable critical sections; never transport I/O.
+    mcp_publication_gate: Mutex<()>,
+    mcp_reconnecting: std::sync::Mutex<HashSet<String>>,
 }
 
 #[derive(Debug, Clone, PartialEq, Eq)]
 pub(crate) enum TurnInputMode {
     VisibleUserMessage,
+    HostMessage(devo_protocol::native::host_message::HostMessageOrigin),
     HiddenGoalContinuation {
         goal: devo_protocol::ThreadGoal,
     },
@@ -325,8 +338,14 @@ pub(crate) enum TurnStartQueuePolicy {
 }
 
 impl TurnInputMode {
+    fn host_origin(&self) -> Option<&devo_protocol::native::host_message::HostMessageOrigin> {
+        match self {
+            Self::HostMessage(origin) => Some(origin),
+            _ => None,
+        }
+    }
     fn emits_user_message(&self) -> bool {
-        matches!(self, Self::VisibleUserMessage)
+        matches!(self, Self::VisibleUserMessage | Self::HostMessage(_))
     }
 }
 
@@ -446,10 +465,13 @@ impl ServerRuntime {
             goal_stores: Mutex::new(HashMap::new()),
             background_work: std::sync::Mutex::new(Default::default()),
             agent_registries: Mutex::new(HashMap::new()),
+            rlm_lazy_children: Mutex::new(HashSet::new()),
+            rlm_progress_notes: Mutex::new(HashMap::new()),
+            rlm_child_changed: tokio::sync::Notify::new(),
             agent_mailboxes: Mutex::new(HashMap::new()),
             agent_output_buffers: Mutex::new(HashMap::new()),
             agent_wait_cursors: Mutex::new(HashMap::new()),
-            subagent_usage: Mutex::new(subagent_usage::SubagentUsageState::default()),
+            usage_publication: Mutex::new(()),
             reference_searches: Mutex::new(HashMap::new()),
             command_exec_manager: command_exec::CommandExecManager::new(),
             active_workspace_baselines: Mutex::new(HashMap::new()),
@@ -476,7 +498,10 @@ impl ServerRuntime {
             sandbox_network_proxy,
             schedule_store: crate::schedule_store::ScheduleStore::new(server_home),
             schedule_wake_cancel: CancellationToken::new(),
+            mcp_publication_gate: Mutex::new(()),
+            mcp_reconnecting: std::sync::Mutex::new(HashSet::new()),
         });
+        runtime.start_usage_updates();
         runtime.start_schedule_wake_loop();
         runtime
     }

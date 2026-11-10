@@ -311,6 +311,9 @@ async fn provider_retry_status_waits_for_channel_capacity() {
 #[test]
 fn lifecycle_and_control_query_events_are_must_deliver() {
     let events = [
+        devo_core::QueryEvent::Usage {
+            usage: devo_protocol::Usage::default(),
+        },
         devo_core::QueryEvent::ContextCompactionStarted,
         devo_core::QueryEvent::ContextCompactionCompleted {
             compacted_items: Vec::new(),
@@ -379,9 +382,6 @@ fn high_volume_query_events_are_best_effort() {
             },
         },
         devo_core::QueryEvent::UsageDelta {
-            usage: devo_protocol::Usage::default(),
-        },
-        devo_core::QueryEvent::Usage {
             usage: devo_protocol::Usage::default(),
         },
     ];

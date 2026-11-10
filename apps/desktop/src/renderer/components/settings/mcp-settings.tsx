@@ -15,6 +15,7 @@ import { serverConnectedAtom } from "../../atoms/connection"
 import { discoveryAtom } from "../../atoms/discovery"
 import { openMcpConfigFile } from "../../services/backend"
 import { getBaseClient, getProjectClient } from "../../services/connection-manager"
+import { McpReconnectButton } from "./mcp-reconnect-button"
 import { SettingsHeader } from "./settings-header"
 import { SettingsRow } from "./settings-row"
 import { SettingsSection } from "./settings-section"
@@ -184,7 +185,7 @@ export function McpSettings({
 					const enabled = mcpServerEnabled(server.status)
 					const expandedThis = expanded === server.name
 					return (
-						<div key={server.name}>
+						<div key={`${directory ?? ""}:${server.name}`}>
 							<SettingsRow
 								label={server.name}
 								description={
@@ -193,6 +194,14 @@ export function McpSettings({
 							>
 								<div className="flex items-center gap-2">
 									<Badge variant="secondary">{server.status}</Badge>
+									{enabled && (
+										<McpReconnectButton
+											client={client}
+											connected={connected}
+											directory={directory}
+											server={server}
+										/>
+									)}
 									{enabled && (
 										<Button
 											size="sm"

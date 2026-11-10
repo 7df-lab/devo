@@ -54,6 +54,7 @@ use devo_provider::ModelProviderSDK;
 use devo_provider::MultiProviderRouter;
 use devo_provider::ProviderRoute;
 use devo_provider::ProviderRouter;
+use devo_provider::UsageObserver;
 use futures::Stream;
 
 use crate::SkillRecord;
@@ -108,6 +109,17 @@ impl ModelProviderSDK for RoutedModelProvider {
     async fn completion(&self, request: ModelRequest) -> anyhow::Result<ModelResponse> {
         self.router
             .complete(self.route.clone(), request)
+            .await
+            .map_err(anyhow::Error::new)
+    }
+
+    async fn completion_with_usage_observer(
+        &self,
+        request: ModelRequest,
+        usage_observer: UsageObserver,
+    ) -> anyhow::Result<ModelResponse> {
+        self.router
+            .complete_with_usage_observer(self.route.clone(), request, usage_observer)
             .await
             .map_err(anyhow::Error::new)
     }
@@ -292,7 +304,13 @@ impl SessionRuntimeContext {
             &inherited_context.provider_catalog_snapshot,
         ) || config.provider_http
             != inherited_context.provider_http_snapshot;
-        let mcp_runtime_equivalent = config.mcp_runtime == inherited_config.mcp_runtime;
+        let workspace_owns_mcp_servers = !config_store
+            .lock()
+            .expect("app config store mutex should not be poisoned")
+            .workspace_mcp_server_ids()?
+            .is_empty();
+        let mcp_runtime_equivalent =
+            !workspace_owns_mcp_servers && config.mcp_runtime == inherited_config.mcp_runtime;
         let oauth_credentials_equivalent = config.mcp_oauth_credentials_store.unwrap_or_default()
             == inherited_config
                 .mcp_oauth_credentials_store

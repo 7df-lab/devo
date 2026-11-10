@@ -209,6 +209,8 @@ async fn pausing_budget_limited_wrapup_preserves_budget_limited_status() -> Resu
         requests: std::sync::atomic::AtomicUsize::new(0),
         captured_requests: Mutex::new(Vec::new()),
         usage: Usage {
+            unreported_fields: None,
+            reported: true,
             input_tokens: 120,
             output_tokens: 30,
             cache_creation_input_tokens: Some(40),

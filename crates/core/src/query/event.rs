@@ -141,6 +141,8 @@ pub struct QueryOptions {
     /// Acknowledged journal for durable sessions; absent for ephemeral callers.
     pub journal: Option<Arc<dyn crate::durable_execution::ToolIntentJournal>>,
     pub cancel_token: Option<CancellationToken>,
+    /// Graceful host request: finish after the current durable tool batch.
+    pub end_turn_requested: Option<Arc<std::sync::atomic::AtomicBool>>,
     /// Optional provider used only for compaction summaries. Servers use this
     /// seam to attach Compaction metering without misclassifying the main
     /// streaming query as compaction overhead.

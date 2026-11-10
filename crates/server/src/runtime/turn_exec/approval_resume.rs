@@ -459,14 +459,17 @@ impl ServerRuntime {
         self.unregister_active_stream(session_id).await;
         let explicit_goal_activation = self.clear_active_turn_runtime_handles(session_id).await;
         cancel_token.cancel();
-        if explicit_goal_activation {
-            super::spawn_post_turn_scheduling(
+        // Like ordinary and recovered turns, resumed approvals must release
+        // admission before scheduling. Otherwise the idle queue guards can
+        // correctly refuse the early drain with no later kick to resume it.
+        if continuation_result.is_ok() || explicit_goal_activation {
+            spawn_post_turn_scheduling(
                 Arc::clone(self),
                 session_id,
-                /*should_auto_continue_goal*/ true,
+                continuation_result.as_ref().copied().unwrap_or(false) || explicit_goal_activation,
             );
         }
-        continuation_result
+        continuation_result.map(|_| ())
     }
 
     #[allow(clippy::too_many_arguments)]
@@ -481,7 +484,7 @@ impl ServerRuntime {
         collaboration_mode: CollaborationMode,
         turn_config: TurnConfig,
         handle: &super::super::session_actor::SessionHandle,
-    ) -> Result<(), String> {
+    ) -> Result<bool, String> {
         let mut working = handle
             .checkout_turn_working_set(turn.clone())
             .await
@@ -557,7 +560,6 @@ impl ServerRuntime {
             turn,
             query_outcome,
             event_summary,
-            usage_parent_session_id: usage_parent_session_id.as_ref().map(|id| *id),
         })
         .await;
         let inline = {
@@ -577,8 +579,7 @@ impl ServerRuntime {
         if let Some(handle) = self.session(session_id).await {
             handle.merge_turn(working).await;
         }
-        spawn_post_turn_scheduling(Arc::clone(self), session_id, should_auto_continue_goal);
-        Ok(())
+        Ok(should_auto_continue_goal)
     }
 
     async fn turn_config_from_checkpoint(
@@ -756,6 +757,7 @@ impl ServerRuntime {
                 file_read_ledger: Arc::clone(&working.state.file_read_ledger),
                 sandbox_profile: working.state.core.config.sandbox_profile.clone(),
                 cancel_token: host_cancel_token.clone(),
+                end_turn_requested: None,
                 kernel_lifetime: Some(kernel.lifetime_token()),
                 mcp_manager: Some(Arc::clone(&working.state.runtime_context.mcp_manager)),
                 agent_scope,

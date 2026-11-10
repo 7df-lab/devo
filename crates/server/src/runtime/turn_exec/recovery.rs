@@ -486,7 +486,6 @@ impl ServerRuntime {
             turn,
             query_outcome,
             event_summary,
-            usage_parent_session_id: parent.as_ref().map(|id| *id),
         })
         .await;
         let inline = working.state.stream.lock().await.turn_inline.take();

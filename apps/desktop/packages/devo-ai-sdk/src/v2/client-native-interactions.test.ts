@@ -1,3 +1,4 @@
+import { sessionUsageFromProtocol } from "./native-usage"
 import { describe, expect, test } from "bun:test"
 import { buildAutomationPromptParts } from "../../../../src/main/automation/prompt"
 import {
@@ -1436,13 +1437,12 @@ describe("Native desktop SDK interactions", () => {
 			},
 		})
 
-		expect(await nextPayloadOfType(stream, "session.usage.updated")).toEqual({
-			type: "session.usage.updated",
+		expect(await nextPayloadOfType(stream, "context.tokens.updated")).toEqual({
+			type: "context.tokens.updated",
 			properties: {
 				sessionId: nativeSession.id,
 				used: 48_000,
 				size: 190_000,
-				cost: 0,
 			},
 		})
 	})
@@ -1754,3 +1754,84 @@ describe("Native desktop SDK interactions", () => {
 		expect(remaining.data).toEqual([])
 	})
 })
+
+
+const usageTotalsForTest = {
+	totalTokens: 350, inputTokens: 300, outputTokens: 50, reasoningTokens: 0,
+	cacheReadInputTokens: 100, cacheCreationInputTokens: 40, callCount: 2, meteredCallCount: 2, unreportedFields: [],
+	failedCallCount: 0, cancelledCallCount: 0,
+}
+
+test("completed model request publishes cumulative spend separately from latest context before turn completes", async () => {
+	const transport = new FakeNativeTransport()
+	const client = createDevoClient({ directory: "/repo", transport })
+	const stream = (await client.global.event()).stream[Symbol.asyncIterator]()
+	transport.emit({ type: "notification", method: "turn/usage/updated", params: {
+		sessionId: nativeSession.id, turnId: "turn-1", contextWindow: 1000, lastQueryInputTokens: 200,
+		usage: { query: { ...usageTotalsForTest, totalTokens: 230, inputTokens: 200, outputTokens: 30 }, overhead: { totalTokens: 0 } },
+		sessionTotals: usageTotalsForTest,
+	} })
+	expect(await nextPayloadOfType(stream, "context.tokens.updated")).toEqual({ type: "context.tokens.updated", properties: { sessionId: nativeSession.id, used: 230, size: 1000, sessionTotals: sessionUsageFromProtocol(usageTotalsForTest) } })
+	expect(await nextPayloadOfType(stream, "session.usage.updated")).toEqual({ type: "session.usage.updated", properties: { sessionId: nativeSession.id, usage: sessionUsageFromProtocol(usageTotalsForTest) } })
+})
+
+test("canonical session usage reads usage.total and does not emit a context reset", async () => {
+	const transport = new FakeNativeTransport()
+	const client = createDevoClient({ directory: "/repo", transport })
+	const stream = (await client.global.event()).stream[Symbol.asyncIterator]()
+	transport.emit({ type: "notification", method: "session/usage/updated", params: {
+		sessionId: nativeSession.id, usage: { total: usageTotalsForTest, byPurpose: [], updatedAt: "2026-11-10T00:00:00Z" },
+	} })
+	const event = await stream.next()
+	expect(event.value?.payload).toEqual({ type: "session.usage.updated", properties: { sessionId: nativeSession.id, usage: sessionUsageFromProtocol(usageTotalsForTest) } })
+})
+
+test("session resume restores cumulative metering from the session snapshot", async () => {
+	const transport = new FakeNativeTransport()
+	transport.resumeSession = { ...nativeSession, usage: { total: usageTotalsForTest, byPurpose: [], updatedAt: "2026-11-10T00:00:00Z" } }
+	const client = createDevoClient({ directory: "/repo", transport })
+	const stream = (await client.global.event()).stream[Symbol.asyncIterator]()
+	await client.session.messages({ sessionId: nativeSession.id })
+	expect(await nextPayloadOfType(stream, "session.usage.updated")).toEqual({ type: "session.usage.updated", properties: { sessionId: nativeSession.id, usage: sessionUsageFromProtocol(usageTotalsForTest) } })
+})
+
+for (const method of ["context/usage/read", "session/resume"] as const) {
+	for (const live of [false, true]) {
+		test(`${method} ${live ? "cannot publish stale occupancy after live context" : "restores occupancy when no newer context arrived"}`, async () => {
+			const transport = new FakeNativeTransport()
+			const originalRequest = transport.request.bind(transport)
+			let release!: (result: unknown) => void
+			let markStarted!: () => void
+			const started = new Promise<void>((resolve) => { markStarted = resolve })
+			transport.request = async (next, params, directory) => {
+				if (next !== method) return originalRequest(next, params, directory)
+				transport.requests.push({ method: next, params, directory })
+				markStarted()
+				return new Promise((resolve) => { release = resolve })
+			}
+			const client = createDevoClient({ directory: "/repo", transport })
+			const stream = (await client.global.event()).stream
+			const pending = method === "context/usage/read"
+				? client.context.usage.read({ sessionId: nativeSession.id })
+				: client.session.messages({ sessionId: nativeSession.id })
+			await started
+			if (live) transport.emit({ type: "notification", method: "turn/usage/updated", params: {
+				sessionId: nativeSession.id, turnId: "turn-usage-race", contextWindow: 1000,
+				usage: { query: { totalTokens: 230 }, overhead: { totalTokens: 0 } },
+				sessionTotals: usageTotalsForTest,
+			} })
+			const occupancy = { ...nativeOccupancy, totalTokens: 100, contextWindowTokens: 1000, categories: [] }
+			release(method === "context/usage/read" ? { occupancy } : {
+				session: { ...nativeSession, usage: { total: { ...usageTotalsForTest, totalTokens: 120, callCount: 1, meteredCallCount: 1 }, byPurpose: [], updatedAt: "2026-11-10T00:00:00Z" } },
+				lastContextOccupancy: occupancy,
+			})
+			await pending
+			client.dispose()
+			const events: any[] = []
+			for await (const event of stream) events.push(event.payload)
+			const occupancyEvents = events.filter((event) => event.type === "context.usage.updated")
+			expect(occupancyEvents).toEqual(live ? [] : [{ type: "context.usage.updated", properties: { sessionId: nativeSession.id, occupancy } }])
+			if (live) expect(events.find((event) => event.type === "context.tokens.updated")?.properties.used).toBe(230)
+		})
+	}
+}

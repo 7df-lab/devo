@@ -25,7 +25,9 @@ pub struct ToolRegistry {
     pub(crate) spec_index: HashMap<String, usize>,
     pub(crate) spec_exposure: HashMap<String, ToolExposure>,
     pub(crate) spec_search_text: HashMap<String, String>,
-    model_tool_allowlist: Option<Vec<String>>,
+    pub(crate) model_tool_allowlist: Option<Vec<String>>,
+    pub(crate) mcp_tools: Vec<crate::mcp::McpToolInfo>,
+    pub(crate) mcp_publication_owner: Option<Arc<dyn crate::mcp::McpManager>>,
     pub(crate) unified_exec_store: Option<Arc<ProcessStore>>,
     pub(crate) loaded_deferred_tools: Arc<Mutex<LoadedDeferredTools>>,
 }
@@ -46,6 +48,8 @@ impl ToolRegistry {
             spec_exposure: HashMap::new(),
             spec_search_text: HashMap::new(),
             model_tool_allowlist: None,
+            mcp_tools: Vec::new(),
+            mcp_publication_owner: None,
             unified_exec_store: None,
             loaded_deferred_tools: Arc::new(Mutex::new(LoadedDeferredTools::default())),
         }
@@ -127,6 +131,13 @@ impl ToolRegistry {
                 .collect()
         });
         registry.loaded_deferred_tools = Arc::clone(&self.loaded_deferred_tools);
+        registry.mcp_publication_owner = self.mcp_publication_owner.clone();
+        registry.mcp_tools = self
+            .mcp_tools
+            .iter()
+            .filter(|info| names.contains(&info.flat_name.as_str()))
+            .cloned()
+            .collect();
 
         for spec in &self.specs {
             if !names.iter().any(|name| *name == spec.name) {
@@ -344,6 +355,8 @@ pub struct ToolRegistryBuilder {
     spec_exposure: HashMap<String, ToolExposure>,
     spec_search_text: HashMap<String, String>,
     model_tool_allowlist: Option<Vec<String>>,
+    pub(crate) mcp_tools: Vec<crate::mcp::McpToolInfo>,
+    pub(crate) mcp_publication_owner: Option<Arc<dyn crate::mcp::McpManager>>,
     unified_exec_store: Option<Arc<ProcessStore>>,
     loaded_deferred_tools: Arc<Mutex<LoadedDeferredTools>>,
 }
@@ -357,6 +370,8 @@ impl ToolRegistryBuilder {
             spec_exposure: HashMap::new(),
             spec_search_text: HashMap::new(),
             model_tool_allowlist: None,
+            mcp_tools: Vec::new(),
+            mcp_publication_owner: None,
             unified_exec_store: None,
             loaded_deferred_tools: Arc::new(Mutex::new(LoadedDeferredTools::default())),
         }
@@ -460,6 +475,8 @@ impl ToolRegistryBuilder {
             spec_exposure: self.spec_exposure,
             spec_search_text: self.spec_search_text,
             model_tool_allowlist: self.model_tool_allowlist,
+            mcp_tools: self.mcp_tools,
+            mcp_publication_owner: self.mcp_publication_owner,
             unified_exec_store: self.unified_exec_store,
             loaded_deferred_tools: self.loaded_deferred_tools,
         }

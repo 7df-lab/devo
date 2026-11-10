@@ -19,6 +19,10 @@ use super::item::UserInput;
 #[serde(rename_all = "camelCase")]
 pub struct QueueEntry {
     pub queue_item_id: QueueItemId,
+    /// Host-owned provenance for queued notifications; not editable user input.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    #[ts(optional)]
+    pub origin: Option<super::host_message::HostMessageOrigin>,
     pub position: u32,
     /// Full editable content; `session/queue/update` replaces it wholesale.
     pub input: Vec<UserInput>,

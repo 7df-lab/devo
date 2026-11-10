@@ -121,6 +121,7 @@ impl ServerRuntime {
                 // queue truth immediately after). `enqueued_at` is
                 // approximate.
                 let entry = QueueEntry {
+                    origin: None,
                     queue_item_id: QueueItemId::from_string(queued_id.clone()),
                     position,
                     input: params.input.clone(),
@@ -299,6 +300,13 @@ impl ServerRuntime {
                     "queue item is no longer queued",
                 );
             };
+            if new_kind.is_some() && queue[index].host_message_origin().is_some() {
+                return self.error_response(
+                    request_id,
+                    ProtocolErrorCode::InvalidParams,
+                    "host notifications cannot be edited as human input",
+                );
+            }
             if let Some(kind) = new_kind {
                 queue[index].kind = kind;
             }
@@ -768,6 +776,7 @@ impl ServerRuntime {
             .find(|entry| entry.queue_item_id == item.id)
             .cloned()
             .unwrap_or_else(|| QueueEntry {
+                origin: item.host_message_origin(),
                 queue_item_id: item.id,
                 position: entries.len().max(1) as u32,
                 input: match &item.kind {
@@ -937,6 +946,7 @@ pub(crate) fn native_queue_entries(queue: &VecDeque<PendingInputItem>) -> Vec<Qu
                 _ => "",
             };
             QueueEntry {
+                origin: item.host_message_origin(),
                 queue_item_id: item.id,
                 position: (index + 1) as u32,
                 input,

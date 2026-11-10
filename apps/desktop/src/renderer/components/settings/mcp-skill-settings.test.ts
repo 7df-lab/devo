@@ -52,6 +52,15 @@ describe("Desktop MCP and Skills settings", () => {
 		})
 	})
 
+	test("reconnect is separate from enablement and leaves the disable switch available", () => {
+		const switchSource = mcpSource.slice(mcpSource.indexOf("<Switch"), mcpSource.indexOf("/>", mcpSource.indexOf("<Switch")))
+		expect({
+			reconnectControl: mcpSource.includes("<McpReconnectButton"),
+			reconnectDoesNotGateToggle: !switchSource.includes("reconnect") && !switchSource.includes("disabled="),
+			toggleStillUsesSetEnabled: mcpSource.includes("toggle.mutate({ name: server.name, enabled: nextEnabled })"),
+		}).toEqual({ reconnectControl: true, reconnectDoesNotGateToggle: true, toggleStillUsesSetEnabled: true })
+	})
+
 	test("registers a Customize pane for MCP, Skills, and Rules", () => {
 		expect({
 			sidebarEntry: sidebarSource.includes("Customize") && sidebarSource.includes("setCustomizeOpen(true)"),

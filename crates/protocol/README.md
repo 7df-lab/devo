@@ -178,6 +178,10 @@ onboarding.
 - `mcp/list`: list configured MCP servers.
 - `mcp/tools`: list tools exposed by one MCP server.
 - `mcp/set_enabled`: enable or disable one MCP server.
+- `mcp/reconnect`: replace one enabled Native server transport and rediscover tools.
+  Accepts only `{name}`; never accepts credentials or replays tool calls. This is
+  not an authored OAuth login/refresh API. Failures are redacted; read `mcp/list`
+  for observed state. See [connection lifecycle](../../docs/mcp-connection-lifecycle.md).
 
 ### Skills methods
 

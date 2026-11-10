@@ -24,6 +24,7 @@ devo-windows-sandbox = { workspace = true }
 devo-arg0 = { workspace = true }
 
 anyhow = { workspace = true }
+libc = { workspace = true }
 async-trait = { workspace = true }
 clap = { workspace = true }
 colored = { workspace = true }
@@ -39,5 +40,7 @@ tracing-subscriber = { workspace = true }
 tokio-console = ["devo-arg0/tokio-console"]
 
 [dev-dependencies]
+tokio-tungstenite = { workspace = true }
+chrono = { workspace = true }
 tempfile = { workspace = true }
 pretty_assertions = "1"

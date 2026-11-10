@@ -164,6 +164,14 @@ impl AppConfigStore {
         if provider.wire_apis.is_empty() {
             anyhow::bail!("wire_apis must contain at least one wire API");
         }
+        validate_base_url(provider.base_url.as_deref())?;
+        for model in provider
+            .models
+            .values()
+            .chain(provider.model_overrides.values())
+        {
+            validate_base_url(model.base_url.as_deref())?;
+        }
         for (model_id, model) in &provider.models {
             validate_model(&provider_id, &provider.wire_apis, model_id, model)?;
         }
@@ -305,6 +313,7 @@ impl AppConfigStore {
         model_id: &str,
         model: ProviderModelConfig,
     ) -> anyhow::Result<()> {
+        validate_base_url(model.base_url.as_deref())?;
         let custom_path = self.user_custom_provider_config_file();
         let custom = read_provider_catalog_config(&custom_path)?;
         let (path, mut config) = if custom.providers.contains_key(provider_id) {
@@ -391,6 +400,21 @@ fn provider_has_model(provider: &ProviderConfigEntry, provider_id: &str, model: 
                 .is_some_and(|model| model.variants.contains_key(*variant_id))
         })
         .is_some()
+}
+
+fn validate_base_url(base_url: Option<&str>) -> anyhow::Result<()> {
+    let Some(base_url) = base_url else {
+        return Ok(());
+    };
+    let base_url = base_url.trim();
+    let explicit_http_scheme = base_url.split_once("://").is_some_and(|(scheme, _)| {
+        scheme.eq_ignore_ascii_case("http") || scheme.eq_ignore_ascii_case("https")
+    });
+    let valid = explicit_http_scheme
+        && url::Url::parse(base_url)
+            .is_ok_and(|url| matches!(url.scheme(), "http" | "https") && url.host_str().is_some());
+    anyhow::ensure!(valid, "Base URL must be a valid http:// or https:// URL");
+    Ok(())
 }
 
 fn validate_model(

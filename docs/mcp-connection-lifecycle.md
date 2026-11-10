@@ -100,3 +100,45 @@ The useful Prime comparison is its separation of stored credentials from a
 verified connection record (`catalog_status_views.rs`, Prime `74591cd`). Devo
 can reuse its existing manager status rather than import that catalog's entire
 architecture.
+
+## Native transport reconnect
+
+`mcp/reconnect` accepts exactly `{ "name": "configured-server-id" }`. Desktop
+Settings → MCP exposes this as **Reconnect**. It is an explicit retry, not an
+OAuth login flow: the operation replaces that configured Native transport,
+performs a fresh handshake, and discovers its tools using the existing Native
+credential store. It does not accept credentials, change the configured endpoint,
+write authored integration `auth.json` grants, or invoke/replay a tool call.
+
+The configured process manager is the target. Contexts sharing that manager receive
+the selected server's updated schemas while retaining their own host tools,
+allowlists, deferred tool state, and execution stores. A distinct workspace MCP
+manager, including a same-named server override, is not reconnected. Explicit
+session registry overrides are updated within their actor, rather than replaced
+with the process-wide registry. An independently owned explicit registry, such as
+an ACP session registry, retains its own manager even when its session context
+shares the process manager or its current discovery is empty.
+
+Old selected-server schemas are withdrawn before reconnect. Success publishes the
+manager's current verified metadata, including visibility and read-only hints.
+Failure removes stale schemas and reports a redacted retryable error; `mcp/list`
+remains the authoritative observed status. Neither stored tokens nor successful
+RPC acknowledgement alone imply the server is ready. Desktop reloads status and
+tools after success or failure rather than keeping an optimistic connected flag.
+
+A concurrent reconnect is rejected. Manager discovery has per-server admission
+and generation checks, with no transport I/O under state locks. Ordinary discovery
+waits for an in-flight discovery and receives its complete metadata snapshot,
+rather than publishing an incomplete registry because the server was busy. Status remains
+readable during I/O, and disable invalidates the in-flight generation and wins
+over late discovery results. Already executing calls may complete on their
+previously acquired transport; reconnect does not repeat them. Cancellation
+releases admission and allows a later explicit retry.
+
+Enable/disable registry updates use the same targeted publication path, without
+rediscovering unrelated servers. Global enablement changes do not overwrite a
+same-named workspace-specific server record, even when its current values equal
+the global defaults. Workspace loads that overlap invalidation are retried before
+publication, so a late load cannot restore pre-disable state. Native login UI, authored grant
+migration, provider OAuth rotation, and live Linear/Notion verification remain
+separate work and are not claimed by this transport reconnect slice.

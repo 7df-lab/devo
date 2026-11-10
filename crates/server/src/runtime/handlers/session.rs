@@ -148,6 +148,24 @@ impl ServerRuntime {
         params: SessionStartParams,
         tool_registry: Option<Arc<devo_core::tools::ToolRegistry>>,
     ) -> serde_json::Value {
+        self.start_session_with_seed(
+            connection_id,
+            request_id,
+            params,
+            tool_registry,
+            /*seed*/ None,
+        )
+        .await
+    }
+
+    pub(crate) async fn start_session_with_seed(
+        &self,
+        connection_id: u64,
+        request_id: serde_json::Value,
+        params: SessionStartParams,
+        tool_registry: Option<Arc<devo_core::tools::ToolRegistry>>,
+        seed: Option<super::super::kernel_host_session::RootSessionSeed>,
+    ) -> serde_json::Value {
         let now = Utc::now();
         let session_id = devo_protocol::native::ids::SessionId::new();
         let runtime_context = match self.deps.context_for_workspace(&params.cwd).await {
@@ -164,13 +182,46 @@ impl ServerRuntime {
             .model_binding_id
             .as_deref()
             .or(params.model.as_deref());
-        let initial_turn_config = runtime_context.resolve_turn_config(requested_model, None);
+        let initial_turn_config = runtime_context.resolve_turn_config(
+            requested_model,
+            seed.as_ref()
+                .and_then(|seed| seed.settings.reasoning_effort.clone()),
+        );
         let model = initial_turn_config.model.slug.clone();
-        let model_binding_id = initial_turn_config.model_binding_id.clone();
+        let mut model_binding_id = initial_turn_config.model_binding_id.clone();
+        let persisted_model = if seed.is_some()
+            && let Some(variant) = initial_turn_config.variant.as_ref()
+        {
+            let base = model_binding_id.as_ref().unwrap_or(&model);
+            let selected = format!("{base}/{variant}");
+            model_binding_id = model_binding_id.as_ref().map(|_| selected.clone());
+            selected
+        } else {
+            model.clone()
+        };
+        let seeded_settings = seed.as_ref().map(|seed| {
+            let mut settings = vec![
+                (
+                    SessionSettingsField::Model,
+                    serde_json::json!(persisted_model),
+                ),
+                (
+                    SessionSettingsField::ModelBindingId,
+                    serde_json::json!(model_binding_id),
+                ),
+            ];
+            if let Some(sandbox) = seed.config.sandbox_profile.as_ref() {
+                settings.push((
+                    SessionSettingsField::SandboxProfile,
+                    serde_json::json!(sandbox),
+                ));
+            }
+            settings
+        });
         let initial_effort = initial_turn_config.reasoning_effort_selection.clone();
         let mut invented_persistence =
             (!params.ephemeral).then(|| self.rollout_store.invent_session_persistence(&session_id));
-        let native_session = devo_protocol::native::session::Session {
+        let mut native_session = devo_protocol::native::session::Session {
             id: session_id,
             version: 1,
             cwd: params.cwd.clone(),
@@ -194,8 +245,10 @@ impl ServerRuntime {
                 .unwrap_or(SessionTitleState::Unset),
             model: devo_protocol::native::model::ModelBinding {
                 provider: model_binding_id.unwrap_or_else(|| "unknown".to_string()),
-                model: model.clone(),
-                variant: None,
+                model: persisted_model,
+                variant: seed
+                    .as_ref()
+                    .and_then(|_| initial_turn_config.variant.clone()),
                 reasoning_effort: None,
             },
             settings: devo_protocol::native::session::SessionSettings {
@@ -224,6 +277,12 @@ impl ServerRuntime {
                 updated_at: now,
             },
         };
+        if let Some(seed) = &seed {
+            native_session.settings = seed.settings.clone();
+            if let Some(invented) = invented_persistence.as_mut() {
+                invented.extras.collaboration_mode = Some(seed.collaboration_mode);
+            }
+        }
         let applied_compaction_limit = crate::runtime::context_occupancy::resolved_compaction_limit(
             &initial_turn_config.model,
         );
@@ -250,6 +309,13 @@ impl ServerRuntime {
             params.cwd.clone(),
             params.additional_directories.clone(),
         );
+        if let Some(seed) = seed {
+            core_session.config.permission_mode = seed.config.permission_mode;
+            core_session.config.permission_profile = seed.config.permission_profile;
+            core_session.config.sandbox_profile = seed.config.sandbox_profile;
+            core_session.collaboration_mode = seed.collaboration_mode;
+            summary.collaboration_mode = seed.collaboration_mode;
+        }
         let permission_preset =
             protocol_preset_from_safety(core_session.config.permission_profile.preset);
         summary.set_permission_preset(permission_preset);
@@ -298,18 +364,28 @@ impl ServerRuntime {
             }
             None => None,
         };
-        if let Some(invented) = &invented_persistence
-            && let Err(error) = self.rollout_store.append_session_meta_create_at(
-                &invented.rollout_path,
-                &summary.native,
-                Some(invented.extras.clone()),
-            )
-        {
-            return self.error_response(
-                request_id,
-                ProtocolErrorCode::InternalError,
-                format!("failed to persist session metadata: {error}"),
-            );
+        if let Some(invented) = &invented_persistence {
+            let persisted = if let Some(settings) = seeded_settings {
+                self.rollout_store.append_seeded_session_meta_create_at(
+                    &invented.rollout_path,
+                    &summary.native,
+                    invented.extras.clone(),
+                    &settings,
+                )
+            } else {
+                self.rollout_store.append_session_meta_create_at(
+                    &invented.rollout_path,
+                    &summary.native,
+                    Some(invented.extras.clone()),
+                )
+            };
+            if let Err(error) = persisted {
+                return self.error_response(
+                    request_id,
+                    ProtocolErrorCode::InternalError,
+                    format!("failed to persist session metadata: {error}"),
+                );
+            }
         }
         crate::runtime::context_occupancy::apply_resolved_compaction_limit(
             &mut core_session.config,
@@ -471,6 +547,7 @@ impl ServerRuntime {
                 .last_activity_at
                 .cmp(&left.last_activity_at)
                 .then_with(|| right.usage.updated_at.cmp(&left.usage.updated_at))
+                .then_with(|| left.id.as_str().cmp(right.id.as_str()))
         });
         sessions
     }
@@ -1467,6 +1544,9 @@ impl ServerRuntime {
         &self,
         session_id: SessionId,
     ) -> Result<Option<devo_protocol::native::session::Session>, String> {
+        self.usage_ledger
+            .load_session(session_id)
+            .map_err(|error| error.to_string())?;
         let rollout_path =
             self.resolve_existing_rollout_path(session_id, self.indexed_rollout_path(session_id))?;
         // Only the metadata header is needed here; the filtered meta reader
@@ -1495,6 +1575,9 @@ impl ServerRuntime {
             if let Some(history) = history_session.as_ref() {
                 session.version = session.version.max(history.version);
             }
+            if let Some(usage) = self.usage_ledger.session_usage(session_id) {
+                session.usage = usage;
+            }
             return Ok(Some(session));
         }
         let Some(mut session) = history_session else {
@@ -1503,6 +1586,9 @@ impl ServerRuntime {
         if let Some(model) = self.deps.model_catalog.get(&session.model.model) {
             session.settings.effective_context_window =
                 Some(crate::runtime::context_occupancy::resolved_compaction_limit(model));
+        }
+        if let Some(usage) = self.usage_ledger.session_usage(session_id) {
+            session.usage = usage;
         }
         Ok(Some(session))
     }
@@ -1517,6 +1603,12 @@ impl ServerRuntime {
         session_id: SessionId,
         session: &mut devo_protocol::native::session::Session,
     ) {
+        if let Err(error) = self.usage_ledger.load_session(session_id) {
+            tracing::warn!(%session_id, %error, "failed to replay session usage");
+        }
+        if let Some(usage) = self.usage_ledger.session_usage(session_id) {
+            session.usage = usage;
+        }
         match self.active_turns.active_turn(session_id).await {
             Some(turn) => {
                 session.status = devo_protocol::native::session::SessionStatus::Active;
@@ -1678,12 +1770,22 @@ impl ServerRuntime {
             .limit
             .map_or(CANONICAL_SESSION_LIST_DEFAULT_LIMIT, |limit| limit as usize);
         let search = params.search.as_deref().map(str::to_lowercase);
-        let include_children = params.include_children.unwrap_or(false);
+        let include_children =
+            params.parent_session_id.is_some() || params.include_children.unwrap_or(false);
         let mut sessions = Vec::new();
         for mut session in self
             .list_native_sessions_with_options(include_children)
             .await
         {
+            if let Some(parent_id) = params.parent_session_id
+                && !matches!(
+                    session.parent,
+                    Some(devo_protocol::native::session::SessionParent::Agent { session_id, .. })
+                        if session_id == parent_id
+                )
+            {
+                continue;
+            }
             if !session_list_cwd_matches(&params.cwds, &session.cwd) {
                 continue;
             }
@@ -1721,6 +1823,14 @@ impl ServerRuntime {
         let turn_counts = self.deps.db.list_turn_counts(&page_ids).unwrap_or_default();
         for session in &mut data {
             let session_id = session.id;
+            // Enrich only the requested page. Read committed calls directly,
+            // including unhydrated sessions and a delayed publication pump.
+            if let Err(error) = self.usage_ledger.load_session(session_id) {
+                tracing::warn!(%session_id, %error, "failed to replay listed session usage");
+            }
+            if let Some(usage) = self.usage_ledger.session_usage(session_id) {
+                session.usage = usage;
+            }
             if let Some(turn_id) = active_turn_ids.get(&session_id).copied() {
                 session.status = devo_protocol::native::session::SessionStatus::Active;
                 session.active_turn_id = Some(turn_id);
@@ -2195,9 +2305,10 @@ impl ServerRuntime {
         } = options;
         let source_core_session = source.core_session.lock().await;
 
-        // Resolve the client-supplied index against the linear journal first —
-        // that is the list interactive clients enumerate — then cut on the
-        // active tree path so dead-branch items never leak into the copy.
+        // The legacy userTurnIndex indexes input turn boundaries in the linear
+        // journal, including host turns, not human authorship or transcript rows.
+        // Fork's atTurnId resolves against the same list. Cut only on the active
+        // tree path so dead-branch items never leak into the copy.
         let selected_turn_id = match user_turn_index {
             None => None,
             Some(index) => {
@@ -2282,7 +2393,7 @@ impl ServerRuntime {
         core_session.messages = rebuilt_messages;
         core_session.turn_count = kept_items
             .iter()
-            .filter(|item| crate::persisted_native_item::is_user_message(&item.item))
+            .filter(|item| crate::persisted_native_item::is_turn_input(&item.item))
             .count();
 
         let last_kept_turn_id = kept_items.last().and_then(|item| item.legacy_turn_id());
@@ -2347,7 +2458,7 @@ impl ServerRuntime {
                     .request_model;
                 let sequence = kept_items
                     .iter()
-                    .filter(|item| crate::persisted_native_item::is_user_message(&item.item))
+                    .filter(|item| crate::persisted_native_item::is_turn_input(&item.item))
                     .count() as u32;
                 Some(crate::turn::RuntimeTurn {
                     native: devo_protocol::native::turn::Turn {
@@ -2480,7 +2591,7 @@ fn user_turn_ids_from_items(
 ) -> Vec<devo_protocol::native::ids::TurnId> {
     let mut user_turn_ids = Vec::new();
     for item in persisted_turn_items {
-        if crate::persisted_native_item::is_user_message(&item.item)
+        if crate::persisted_native_item::is_turn_input(&item.item)
             && user_turn_ids.last() != Some(&item.turn_id)
         {
             user_turn_ids.push(item.turn_id);
@@ -2646,6 +2757,43 @@ mod tests {
         ];
         let prefix = items[..2].to_vec();
         (items, prefix)
+    }
+
+    #[test]
+    fn host_turn_indexes_include_inputs_but_skip_steering() {
+        use devo_protocol::native::host_message::{
+            HostMessageDelivery, HostMessageOrigin, HostMessageSource,
+        };
+        use devo_protocol::native::item::{Item, UserMessageEntry};
+        let first = TurnId::new();
+        let second = TurnId::new();
+        let mut host = user_item(first, "host startup");
+        if let Item::UserMessage { origin, .. } = &mut host.item {
+            *origin = Some(HostMessageOrigin {
+                event_id: "event".into(),
+                source: HostMessageSource::Agent,
+                sender: "parent".into(),
+                delivery: HostMessageDelivery::FollowUp,
+            });
+        }
+        let mut human_steer = user_item(first, "steer");
+        if let Item::UserMessage { entry, .. } = &mut human_steer.item {
+            *entry = UserMessageEntry::Steer;
+        }
+        let mut host_steer = host.clone();
+        if let Item::UserMessage { entry, .. } = &mut host_steer.item {
+            *entry = UserMessageEntry::Steer;
+        }
+        assert_eq!(
+            user_turn_ids_from_items(&[
+                host,
+                human_steer,
+                host_steer,
+                assistant_item(first, "reply"),
+                user_item(second, "human")
+            ]),
+            vec![first, second]
+        );
     }
 
     #[test]

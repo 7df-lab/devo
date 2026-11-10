@@ -47,6 +47,7 @@ export function ProviderSettings() {
 	// Dialog state
 	const [connectTemplate, setConnectTemplate] = useState<CatalogProviderInfo | null>(null)
 	const [customDialogOpen, setCustomDialogOpen] = useState(false)
+	const [editingProvider, setEditingProvider] = useState<CatalogProviderInfo | undefined>()
 	const [connectionDetail, setConnectionDetail] = useState<CatalogProviderInfo | null>(null)
 	const [disconnectTarget, setDisconnectTarget] = useState<CatalogProviderInfo | null>(null)
 	const [disconnecting, setDisconnecting] = useState(false)
@@ -139,10 +140,13 @@ export function ProviderSettings() {
 			<DesktopOAuthActions onConnected={handleConnected} />
 
 			{/* Connected providers */}
-			<SettingsSection title="Connected">
+			<SettingsSection
+				title="Configured"
+				description="Saved connections. Saving a connection does not verify model access."
+			>
 				{connected.length === 0 ? (
 					<div className="px-4 py-6 text-center text-sm text-muted-foreground">
-						No connected providers. Connect a template below or add a custom provider.
+						No configured providers. Connect a template below or add a custom provider.
 					</div>
 				) : (
 					connected.map((provider) => (
@@ -225,9 +229,15 @@ export function ProviderSettings() {
 
 			{customDialogOpen && (
 				<CustomProviderDialog
+					key={editingProvider?.id ?? "new"}
+					provider={editingProvider}
 					templateIds={catalog?.templateIds ?? new Set()}
+					connectedIds={catalog?.connectedIds ?? new Set()}
 					open={customDialogOpen}
-					onOpenChange={setCustomDialogOpen}
+					onOpenChange={(open) => {
+						setCustomDialogOpen(open)
+						if (!open) setEditingProvider(undefined)
+					}}
 					onSaved={handleConnected}
 				/>
 			)}
@@ -239,6 +249,11 @@ export function ProviderSettings() {
 					open={!!connectionDetail}
 					onOpenChange={(open) => { if (!open) setConnectionDetail(null) }}
 					onChanged={handleSaved}
+					onEdit={isDesktopOAuthProvider(connectionDetail.id) ? undefined : (current) => {
+						setEditingProvider(current)
+						setConnectionDetail(null)
+						setCustomDialogOpen(true)
+					}}
 				/>
 			)}
 
@@ -377,7 +392,10 @@ function TemplateProviderRow({
 function ProviderSettingsLoading() {
 	return (
 		<>
-			<SettingsSection title="Connected">
+			<SettingsSection
+				title="Configured"
+				description="Saved connections. Saving a connection does not verify model access."
+			>
 				{[0, 1].map((index) => (
 					<div key={index} className="flex items-center gap-3 px-4 py-3">
 						<Skeleton className="size-5 rounded-md" />

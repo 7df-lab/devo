@@ -643,10 +643,13 @@ mod tests {
         session_handle.update_rollout_path(bad_rollout_path).await;
 
         let error = runtime
-            .start_runtime_turn(
+            .deliver_host_message(
                 session_id,
-                "inspect this".to_string(),
-                "inspect this".to_string(),
+                crate::runtime::host_messages::HostMessage::agent(
+                    session_id,
+                    "test-event".into(),
+                    "inspect this".into(),
+                ),
                 /*queued_metadata*/ None,
             )
             .await

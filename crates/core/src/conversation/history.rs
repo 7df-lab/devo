@@ -315,9 +315,9 @@ fn apply_rollout_line(history: &mut CanonicalHistory, line: RolloutLine) {
                 .iter_mut()
                 .find(|existing| existing.id == turn.id)
             {
-                *existing = turn;
+                *existing = *turn;
             } else {
-                history.turns.push(turn);
+                history.turns.push(*turn);
             }
             if let Some(extras) = extras
                 .as_ref()
@@ -598,11 +598,11 @@ mod tests {
             RolloutLine::Turn {
                 v: 2,
                 timestamp: now,
-                turn: native_turn(
+                turn: Box::new(native_turn(
                     devo_protocol::native::turn::TurnStatus::InProgress,
                     first,
                     1,
-                ),
+                )),
                 extras: None,
             },
             // A later turn's running line must not take the first turn's
@@ -610,20 +610,31 @@ mod tests {
             RolloutLine::Turn {
                 v: 2,
                 timestamp: now,
-                turn: native_turn(
+                turn: Box::new(native_turn(
                     devo_protocol::native::turn::TurnStatus::InProgress,
                     second,
                     2,
-                ),
+                )),
                 extras: None,
             },
             RolloutLine::Turn {
                 v: 2,
                 timestamp: now,
-                turn: terminal_first,
+                turn: Box::new(terminal_first),
                 extras: None,
             },
         ] {
+            let serialized = serde_json::to_value(&line).unwrap();
+            if let RolloutLine::Turn { turn, .. } = &line {
+                assert_eq!(
+                    serialized["turn"],
+                    serde_json::to_value(turn.as_ref()).unwrap()
+                );
+            }
+            assert_eq!(
+                serde_json::from_value::<RolloutLine>(serialized).unwrap(),
+                line
+            );
             apply_rollout_line(&mut history, line);
         }
         assert_eq!(history.turns.len(), 2);
@@ -757,7 +768,7 @@ mod tests {
             RolloutLine::Turn {
                 v: ROLLOUT_FORMAT_VERSION,
                 timestamp: now,
-                turn,
+                turn: Box::new(turn),
                 extras: None,
             },
             RolloutLine::Item {
@@ -1300,23 +1311,23 @@ mod tests {
                 RolloutLine::Turn {
                     v: ROLLOUT_FORMAT_VERSION,
                     timestamp: now,
-                    turn: native_turn_for(
+                    turn: Box::new(native_turn_for(
                         root,
                         devo_protocol::native::turn::TurnStatus::Completed,
                         root_turn,
                         1,
-                    ),
+                    )),
                     extras: None,
                 },
                 RolloutLine::Turn {
                     v: ROLLOUT_FORMAT_VERSION,
                     timestamp: now,
-                    turn: native_turn_for(
+                    turn: Box::new(native_turn_for(
                         child,
                         devo_protocol::native::turn::TurnStatus::Completed,
                         child_turn,
                         1,
-                    ),
+                    )),
                     extras: None,
                 },
                 RolloutLine::Item {

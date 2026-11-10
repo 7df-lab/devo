@@ -293,7 +293,7 @@ pub fn turn_line(
     RolloutLine::Turn {
         v: ROLLOUT_FORMAT_VERSION,
         timestamp,
-        turn,
+        turn: Box::new(turn),
         extras: extras.map(Box::new),
     }
 }
