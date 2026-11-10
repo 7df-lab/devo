@@ -27,21 +27,10 @@ import {
 	Loader2Icon,
 	SearchIcon,
 } from "lucide-react"
-import { useCallback, useEffect, useMemo, useState } from "react"
-import type {
-	GitBranchInfo,
-	GitBranchState,
-	GitCheckoutResult,
-	GitStashResult,
-	GitStatusInfo,
-} from "../../preload/api"
-import {
-	fetchGitBranches,
-	fetchGitStatus,
-	gitCheckout,
-	gitStashAndCheckout,
-	isElectron,
-} from "../services/backend"
+import { useMemo } from "react"
+import type { GitBranchInfo, GitBranchState, GitStatusInfo } from "../../preload/api"
+import { isElectron } from "../services/backend"
+import { useBranchPicker } from "./use-branch-picker"
 
 // ============================================================
 // Types
@@ -64,155 +53,43 @@ interface BranchPickerProps {
 // Branch Picker
 // ============================================================
 
-export function BranchPicker({
+export function BranchPicker(props: BranchPickerProps) {
+	return <ProjectBranchPicker key={props.directory} {...props} />
+}
+
+function ProjectBranchPicker({
 	directory,
 	currentBranch,
 	currentState,
 	onBranchChanged,
 	activeSessionCount = 0,
 }: BranchPickerProps) {
-	const [open, setOpen] = useState(false)
-	const [branches, setBranches] = useState<GitBranchInfo | null>(null)
-	const [loading, setLoading] = useState(false)
-
-	// Dirty state dialog
-	const [dirtyDialog, setDirtyDialog] = useState<{
-		open: boolean
-		targetBranch: string
-		status: GitStatusInfo | null
-	}>({ open: false, targetBranch: "", status: null })
-	const [switching, setSwitching] = useState(false)
-	const [switchError, setSwitchError] = useState<string | null>(null)
-
-	// Active session warning dialog
-	const [sessionWarning, setSessionWarning] = useState<{
-		open: boolean
-		targetBranch: string
-		needsStash: boolean
-	}>({ open: false, targetBranch: "", needsStash: false })
-
-	// Load branches when popover opens
-	const loadBranches = useCallback(async () => {
-		if (!directory || !isElectron) return
-		setLoading(true)
-		try {
-			const result = await fetchGitBranches(directory)
-			setBranches(result)
-		} catch (err) {
-			console.error("Failed to load branches:", err)
-		} finally {
-			setLoading(false)
-		}
-	}, [directory])
-
-	useEffect(() => {
-		if (open) {
-			loadBranches()
-		}
-	}, [open, loadBranches])
-
+	const {
+		open,
+		setOpen,
+		branches,
+		loading,
+		loadError,
+		retryLoad,
+		operation,
+		switchError,
+		dismissError,
+		selectBranch,
+		stashAndSwitch,
+		proceed,
+		cancelDirty,
+		cancelWarning,
+	} = useBranchPicker({
+		directory,
+		currentBranch,
+		activeSessionCount,
+		onBranchChanged,
+	})
+	const busy = operation?.phase === "checking" || operation?.phase === "switching"
 	const effectiveCurrent = branches?.current || currentBranch || ""
-	const effectiveState = branches?.state ?? currentState ?? (effectiveCurrent ? "branch" : undefined)
+	const effectiveState =
+		branches?.state ?? currentState ?? (effectiveCurrent ? "branch" : undefined)
 	const displayLabel = branchTriggerLabel(effectiveState, effectiveCurrent)
-
-	// Perform the actual checkout
-	const performCheckout = useCallback(
-		async (branch: string, stash: boolean) => {
-			setSwitching(true)
-			setSwitchError(null)
-			try {
-				let result: GitCheckoutResult | GitStashResult
-
-				if (stash) {
-					result = await gitStashAndCheckout(directory, branch)
-				} else {
-					result = await gitCheckout(directory, branch)
-				}
-
-				if (!result.success) {
-					setSwitchError(result.error ?? "Checkout failed")
-					return
-				}
-
-				onBranchChanged?.(branch)
-			} catch (err) {
-				setSwitchError(err instanceof Error ? err.message : "Checkout failed")
-			} finally {
-				setSwitching(false)
-			}
-		},
-		[directory, onBranchChanged],
-	)
-
-	// Handle branch selection
-	const handleSelectBranch = useCallback(
-		async (branch: string) => {
-			// Strip remote prefix for checkout (e.g., "origin/feature" -> "feature")
-			const localName =
-				branch.includes("/") && !branches?.local.includes(branch)
-					? branch.replace(/^[^/]+\//, "")
-					: branch
-
-			if (localName === effectiveCurrent) {
-				setOpen(false)
-				return
-			}
-
-			setSwitchError(null)
-			setOpen(false)
-
-			// Check git status first
-			try {
-				const status = await fetchGitStatus(directory)
-
-				if (!status.isClean) {
-					// Show dirty state dialog
-					setDirtyDialog({ open: true, targetBranch: localName, status })
-					return
-				}
-
-				// Check for active sessions
-				if (activeSessionCount > 0) {
-					setSessionWarning({ open: true, targetBranch: localName, needsStash: false })
-					return
-				}
-
-				// Clean and no active sessions — switch directly
-				await performCheckout(localName, false)
-			} catch (err) {
-				setSwitchError(err instanceof Error ? err.message : "Failed to check status")
-			}
-		},
-		[directory, effectiveCurrent, branches, activeSessionCount, performCheckout],
-	)
-
-	// Handle dirty dialog actions
-	const handleStashAndSwitch = useCallback(async () => {
-		setDirtyDialog((d) => ({ ...d, open: false }))
-
-		// If there are active sessions, show that warning next
-		if (activeSessionCount > 0) {
-			setSessionWarning({ open: true, targetBranch: dirtyDialog.targetBranch, needsStash: true })
-			return
-		}
-
-		await performCheckout(dirtyDialog.targetBranch, true)
-	}, [dirtyDialog.targetBranch, activeSessionCount, performCheckout])
-
-	const handleDirtyCancel = useCallback(() => {
-		setDirtyDialog({ open: false, targetBranch: "", status: null })
-	}, [])
-
-	// Handle session warning actions
-	const handleSessionWarningProceed = useCallback(async () => {
-		const { targetBranch, needsStash } = sessionWarning
-		setSessionWarning({ open: false, targetBranch: "", needsStash: false })
-		await performCheckout(targetBranch, needsStash)
-	}, [sessionWarning, performCheckout])
-
-	const handleSessionWarningCancel = useCallback(() => {
-		setSessionWarning({ open: false, targetBranch: "", needsStash: false })
-	}, [])
 
 	// Don't render in browser mode
 	if (!isElectron) return null
@@ -224,18 +101,22 @@ export function BranchPicker({
 					render={
 						<button
 							type="button"
-							disabled={switching}
+							disabled={operation !== null}
 							className="flex items-center gap-1 rounded-md px-2 py-1 text-[11px] text-muted-foreground/60 transition-colors hover:bg-muted hover:text-foreground"
 						/>
 					}
 				>
-					{switching ? (
+					{busy ? (
 						<Loader2Icon className="size-3 animate-spin" />
 					) : (
 						<GitBranchIcon className="size-3" />
 					)}
 					<span className="max-w-[140px] truncate">
-						{switching ? "Switching..." : displayLabel}
+						{busy
+							? operation.phase === "checking"
+								? "Checking..."
+								: "Switching..."
+							: displayLabel}
 					</span>
 					<ChevronsUpDownIcon className="size-3 opacity-50" />
 				</SearchableListPopoverTrigger>
@@ -249,11 +130,20 @@ export function BranchPicker({
 						<div className="flex items-center justify-center py-6">
 							<Loader2Icon className="size-4 animate-spin text-muted-foreground" />
 						</div>
+					) : loadError ? (
+						<div className="space-y-2 p-3 text-sm">
+							<p role="alert" className="text-destructive">
+								{loadError}
+							</p>
+							<Button variant="outline" size="sm" onClick={retryLoad}>
+								Retry
+							</Button>
+						</div>
 					) : (
 						<BranchList
 							branches={branches}
 							effectiveCurrent={effectiveCurrent}
-							onSelectBranch={handleSelectBranch}
+							onSelectBranch={selectBranch}
 						/>
 					)}
 				</SearchableListPopoverContent>
@@ -261,7 +151,10 @@ export function BranchPicker({
 
 			{/* Error toast */}
 			{switchError && (
-				<div className="fixed right-4 bottom-4 z-50 max-w-sm rounded-lg border border-red-500/20 bg-red-500/10 px-4 py-3 text-sm text-red-500 shadow-lg">
+				<div
+					role="alert"
+					className="fixed right-4 bottom-4 z-50 max-w-sm rounded-lg border border-red-500/20 bg-red-500/10 px-4 py-3 text-sm text-red-500 shadow-lg"
+				>
 					<div className="flex items-start gap-2">
 						<AlertTriangleIcon className="mt-0.5 size-4 shrink-0" />
 						<div>
@@ -270,7 +163,7 @@ export function BranchPicker({
 						</div>
 						<button
 							type="button"
-							onClick={() => setSwitchError(null)}
+							onClick={dismissError}
 							className="ml-auto text-xs hover:text-red-300"
 						>
 							Dismiss
@@ -281,20 +174,20 @@ export function BranchPicker({
 
 			{/* Dirty state dialog */}
 			<DirtyStateDialog
-				open={dirtyDialog.open}
-				status={dirtyDialog.status}
-				targetBranch={dirtyDialog.targetBranch}
-				onStashAndSwitch={handleStashAndSwitch}
-				onCancel={handleDirtyCancel}
+				open={operation?.phase === "dirty"}
+				status={operation?.status ?? null}
+				targetBranch={operation?.branch ?? ""}
+				onStashAndSwitch={stashAndSwitch}
+				onCancel={cancelDirty}
 			/>
 
 			{/* Active session warning dialog */}
 			<ActiveSessionWarningDialog
-				open={sessionWarning.open}
-				targetBranch={sessionWarning.targetBranch}
+				open={operation?.phase === "warning"}
+				targetBranch={operation?.branch ?? ""}
 				sessionCount={activeSessionCount}
-				onProceed={handleSessionWarningProceed}
-				onCancel={handleSessionWarningCancel}
+				onProceed={proceed}
+				onCancel={cancelWarning}
 			/>
 		</>
 	)
@@ -488,10 +381,12 @@ function DirtyStateDialog({
 				)}
 
 				<DialogFooter>
-					<Button variant="outline" onClick={onCancel}>
+					<Button variant="outline" onClick={onCancel} disabled={!open}>
 						Cancel
 					</Button>
-					<Button onClick={onStashAndSwitch}>Stash & Switch</Button>
+					<Button onClick={onStashAndSwitch} disabled={!open}>
+						Stash & Switch
+					</Button>
 				</DialogFooter>
 			</DialogContent>
 		</Dialog>
@@ -534,10 +429,10 @@ function ActiveSessionWarningDialog({
 				</DialogHeader>
 
 				<DialogFooter>
-					<Button variant="outline" onClick={onCancel}>
+					<Button variant="outline" onClick={onCancel} disabled={!open}>
 						Cancel
 					</Button>
-					<Button variant="destructive" onClick={onProceed}>
+					<Button variant="destructive" onClick={onProceed} disabled={!open}>
 						Switch Anyway
 					</Button>
 				</DialogFooter>
