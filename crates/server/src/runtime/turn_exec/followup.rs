@@ -68,6 +68,12 @@ impl ServerRuntime {
             return false;
         };
         let state_change_guard = session_handle.lock_state_change().await;
+        // A newer turn (for example a message-edit replacement) may have won
+        // admission since the old turn released its runtime handles. Never
+        // drain or overwrite that execution, even for an Always-policy kick.
+        if self.runtime_active_turn_id(session_id).await.is_some() {
+            return false;
+        }
         let (queued, turn, turn_config) = loop {
             let Some(queued) = self
                 .pop_next_queued_turn_input(
@@ -152,6 +158,11 @@ impl ServerRuntime {
             return false;
         };
         let state_change_guard = session_handle.lock_state_change().await;
+        // Post-turn scheduling is spawned after cleanup, not atomically with
+        // it. Another turn can already own admission by the time we get here.
+        if self.runtime_active_turn_id(session_id).await.is_some() {
+            return false;
+        }
         let queue_len_before = session_handle
             .pending_queue_snapshot()
             .await
