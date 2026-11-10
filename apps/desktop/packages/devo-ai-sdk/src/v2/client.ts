@@ -89,6 +89,10 @@ import type { SessionRosterParams, SessionRosterPage } from "./session-roster"
 export type { Session as NativeSession } from "./generated/native"
 export type { SessionRosterParams, SessionRosterPage } from "./session-roster"
 
+/** Legacy undo/redo is not an alias for destructive Native rollback. */
+export const SESSION_HISTORY_UNAVAILABLE =
+	"Session undo and redo are not supported. No rollback was performed."
+
 export type JsonRpcId = number | string
 
 export interface DevoNativeTransportEvent {
@@ -1095,12 +1099,12 @@ class NativeClient {
 				throw error
 			}
 		},
-		revert: async (params: { sessionId: string }) => ({
-			data: this.sessions.get(params.sessionId),
-		}),
-		unrevert: async (params: { sessionId: string }) => ({
-			data: this.sessions.get(params.sessionId),
-		}),
+		revert: async (_params: { sessionId: string }): Promise<{ data: Session | undefined }> => {
+			throw new Error(SESSION_HISTORY_UNAVAILABLE)
+		},
+		unrevert: async (_params: { sessionId: string }): Promise<{ data: Session | undefined }> => {
+			throw new Error(SESSION_HISTORY_UNAVAILABLE)
+		},
 		command: async (params: { sessionId: string; command: string; arguments?: string }) => {
 			const suffix = params.arguments ? ` ${params.arguments}` : ""
 			await this.session.promptAsync({

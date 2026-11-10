@@ -1,3 +1,4 @@
+import { SESSION_HISTORY_UNAVAILABLE } from "@devo-ai/sdk/v2/client"
 import {
 	CommandDialog,
 	CommandEmpty,
@@ -40,7 +41,6 @@ import { automationsEnabledAtom, toggleAutomationsAtom } from "../atoms/feature-
 import { isMockModeAtom, toggleMockModeAtom } from "../atoms/mock-mode"
 import { lastProjectDirectoryAtom, opaqueWindowsAtom } from "../atoms/preferences"
 import { isReactScanAtom, toggleReactScanAtom } from "../atoms/react-scan"
-import { useSessionRevert } from "../hooks/use-commands"
 import { useProjectList } from "../hooks/use-agents"
 import {
 	useAvailableThemes,
@@ -75,16 +75,10 @@ export function CommandPalette({ open, onOpenChange, agents, onForkSession }: Co
 	const projects = useProjectList()
 	const lastProjectDirectory = useAtomValue(lastProjectDirectoryAtom)
 
-	// Resolve the active session's directory for undo/redo
+	// Resolve the active session for session-level commands
 	const activeAgent = useMemo(
 		() => (sessionId ? (agents.find((a) => a.id === sessionId) ?? null) : null),
 		[agents, sessionId],
-	)
-	const directory = activeAgent?.directory ?? null
-
-	const { canUndo, canRedo, undo, redo } = useSessionRevert(
-		directory,
-		activeAgent?.sessionId ?? null,
 	)
 
 	// Theme & color scheme state
@@ -105,8 +99,6 @@ export function CommandPalette({ open, onOpenChange, agents, onForkSession }: Co
 	const [searching, setSearching] = useState(false)
 	const [searchFailed, setSearchFailed] = useState(false)
 	const newSessionShortcut = formatShortcut(["mod", "N"])
-	const undoShortcut = formatShortcut(["mod", "Z"])
-	const redoShortcut = formatShortcut(["shift", "mod", "Z"])
 
 	const isElectron = typeof window !== "undefined" && "devo" in window
 
@@ -218,29 +210,19 @@ export function CommandPalette({ open, onOpenChange, agents, onForkSession }: Co
 						<span>New Session</span>
 						<CommandShortcut>{newSessionShortcut}</CommandShortcut>
 					</CommandItem>
-					{hasSession && canUndo && (
-						<CommandItem
-							onSelect={() => {
-								undo()
-								onOpenChange(false)
-							}}
-						>
-							<Undo2Icon />
-							<span>Undo Last Turn</span>
-							<CommandShortcut>{undoShortcut}</CommandShortcut>
-						</CommandItem>
-					)}
-					{hasSession && canRedo && (
-						<CommandItem
-							onSelect={() => {
-								redo()
-								onOpenChange(false)
-							}}
-						>
-							<Redo2Icon />
-							<span>Redo</span>
-							<CommandShortcut>{redoShortcut}</CommandShortcut>
-						</CommandItem>
+					{hasSession && (
+						<>
+							<CommandItem disabled title={SESSION_HISTORY_UNAVAILABLE}>
+								<Undo2Icon />
+								<span>Undo Last Turn</span>
+								<span className="ml-auto text-xs text-muted-foreground">Not supported</span>
+							</CommandItem>
+							<CommandItem disabled title={SESSION_HISTORY_UNAVAILABLE}>
+								<Redo2Icon />
+								<span>Redo</span>
+								<span className="ml-auto text-xs text-muted-foreground">Not supported</span>
+							</CommandItem>
+						</>
 					)}
 				{hasSession && (
 					<CommandItem
