@@ -35,7 +35,7 @@ import {
 	Trash2Icon,
 	TriangleIcon,
 } from "lucide-react"
-import { useCallback, useEffect, useMemo, useState } from "react"
+import { useCallback, useEffect, useMemo, useRef, useState } from "react"
 import { toast } from "sonner"
 import type { Automation } from "../../../preload/api"
 import { discoveryProjectsAtom } from "../../atoms/discovery"
@@ -137,8 +137,17 @@ export function CreateAutomationDialog({
 		}
 	}, [variants, selectedVariant])
 
-	// Pre-fill form when editing
+	// A polling refresh replaces the automation object, but must not replace an
+	// open draft. Initialize only on opening or when the editing target changes.
+	const initializedTargetRef = useRef<string | null | undefined>(undefined)
 	useEffect(() => {
+		if (!open) {
+			initializedTargetRef.current = undefined
+			return
+		}
+		const target = editAutomation?.id ?? null
+		if (initializedTargetRef.current === target) return
+		initializedTargetRef.current = target
 		if (open && editAutomation) {
 			setName(editAutomation.name)
 			setPrompt(editAutomation.prompt)
