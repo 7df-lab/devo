@@ -1,3 +1,4 @@
+import { latestEditableUserTurnIndex as findLatestEditableUserTurnIndex } from "../../atoms/derived/session-chat"
 import { useSessionHistoryShortcuts } from "../../hooks/use-session-history-shortcuts"
 import { useTurnRecovery } from "../../hooks/use-turn-recovery"
 import { TurnRecoveryPanel } from "./turn-recovery-panel"
@@ -118,7 +119,7 @@ import { ComposerSubmitControls } from "./composer-submit-controls"
 import { ChatPermissionFlow } from "./chat-permission"
 import { ChatQuestionFlow } from "./chat-question"
 import { isAssistantItemError } from "./assistant-item-error"
-import { ChatTurnComponent, isSyntheticMessage } from "./chat-turn"
+import { ChatTurnComponent } from "./chat-turn"
 import { ForkBoundaryDivider } from "./fork-boundary-divider"
 import { forkBoundaryAfterTurnIndex } from "./fork-boundary"
 import { ChatLoadingSkeleton } from "./chat-turn-skeleton"
@@ -1019,12 +1020,10 @@ export function ChatView({
 		)
 		return filtered.length === providerErrors.length ? providerErrors : filtered
 	}, [providerErrors, turns])
-	const latestEditableUserTurnIndex = useMemo(() => {
-		for (let index = turns.length - 1; index >= 0; index--) {
-			if (!isSyntheticMessage(turns[index].userMessage)) return index
-		}
-		return -1
-	}, [turns])
+	const latestEditableUserTurnIndex = useMemo(
+		() => findLatestEditableUserTurnIndex(turns),
+		[turns],
+	)
 
 	const forkBoundaryAfterIndex = useMemo(
 		() =>

@@ -50,6 +50,9 @@ const catalog = {
 	templateIds: new Set<string>(),
 	connectionModels: { local: savedModels },
 }
+let finishRemove: (() => void) | undefined
+const modelRemove = mock(() => new Promise<void>((resolve) => { finishRemove = resolve }))
+const list = mock(async () => ({ data: { providers: catalog.providers, connectedProviderIds: ["local"], connectionModels: catalog.connectionModels } }))
 const reload = mock(() => {})
 const upsert = mock(async (_params: unknown) => ({}))
 mock.module("../../hooks/use-devo-data", () => ({
@@ -59,7 +62,7 @@ mock.module("../../lib/invalidate-provider-queries", () => ({
 	invalidateProviderDependentQueries: () => {},
 }))
 mock.module("../../services/connection-manager", () => ({
-	getBaseClient: () => ({ provider: { upsert } }),
+	getBaseClient: () => ({ provider: { upsert, modelRemove, list } }),
 }))
 mock.module("./desktop-oauth-actions", () => ({ DesktopOAuthActions: () => null }))
 mock.module("./connect-provider-dialog", () => ({ ConnectProviderDialog: () => null }))
@@ -103,6 +106,11 @@ afterEach(async () => {
 	upsert.mockReset()
 	upsert.mockImplementation(async () => ({}))
 	reload.mockClear()
+	modelRemove.mockClear()
+	list.mockReset()
+	list.mockImplementation(async () => ({ data: { providers: catalog.providers, connectedProviderIds: ["local"], connectionModels: catalog.connectionModels } }))
+	catalog.providers = [provider]
+	catalog.connectionModels.local = savedModels
 })
 
 test("production Manage opens Edit and preserves model transport and connection metadata", async () => {
@@ -181,4 +189,73 @@ test("changing the primary wire API keeps protocols used by saved model routes",
 		},
 	})
 	expect(reload).toHaveBeenCalledTimes(1)
+})
+
+
+test("Edit waits for removal and reads current saved models despite stale catalog", async () => {
+	await render()
+	const row = [...document.querySelectorAll("button")].find((button) => button.textContent?.includes("Local QA"))!
+	await act(async () => row.click())
+	const remove = document.querySelector('[aria-label="Remove saved model Local Qwen"]') as HTMLButtonElement
+	await act(async () => remove.click())
+	const edit = [...document.querySelectorAll("button")].find((button) => button.textContent === "Edit connection")!
+	expect(edit.disabled).toBe(true)
+	await click("Edit connection")
+	expect(list).not.toHaveBeenCalled()
+	await click("Done")
+	expect(document.querySelector('[aria-label="Remove saved model Local Qwen"]')).not.toBeNull()
+	await act(async () => finishRemove!())
+	expect(reload).toHaveBeenCalledTimes(1)
+	// The cache has deliberately not refreshed, but the server has removed the model.
+	list.mockImplementationOnce(async () => ({ data: { providers: [{ ...provider, models: {} }], connectedProviderIds: ["local"], connectionModels: { local: {} as typeof savedModels } } }))
+	await click("Edit connection")
+	await click("Save")
+	expect(upsert).toHaveBeenCalledTimes(1)
+	expect((upsert.mock.calls[0][0] as { provider: CatalogProviderInfo }).provider.models).toEqual({})
+})
+
+test("Done cancels pending Edit reads and failed reads do not open stale Edit", async () => {
+	let finishList: ((value: Awaited<ReturnType<typeof list>>) => void) | undefined
+	list.mockImplementationOnce(() => new Promise((resolve) => { finishList = resolve }))
+	await render()
+	const row = [...document.querySelectorAll("button")].find((button) => button.textContent?.includes("Local QA"))!
+	await act(async () => row.click())
+	await click("Edit connection")
+	await click("Done")
+	await act(async () => finishList!({ data: { providers: [provider], connectedProviderIds: ["local"], connectionModels: { local: savedModels } } }))
+	expect(document.getElementById("provider-id")).toBeNull()
+	await act(async () => row.click())
+	list.mockImplementationOnce(async () => { throw new Error("Catalog unavailable") })
+	await click("Edit connection")
+	expect(document.body.textContent).toContain("Catalog unavailable")
+	expect(document.getElementById("provider-id")).toBeNull()
+})
+
+
+test("pending Add model cannot dismiss and unlock connection Edit before its write finishes", async () => {
+	let finishSave: ((value: object) => void) | undefined
+	upsert.mockImplementationOnce(() => new Promise((resolve) => { finishSave = resolve }))
+	await render()
+	const row = [...document.querySelectorAll("button")].find((button) => button.textContent?.includes("Local QA"))!
+	await act(async () => row.click())
+	await click("Add")
+	await fill("model-id", "new-model")
+	const dialog = [...document.querySelectorAll('[role="dialog"]')].find((entry) => entry.querySelector("#model-id"))!
+	const add = [...dialog.querySelectorAll("button")].find((button) => button.textContent?.trim() === "Add")!
+	await act(async () => add.click())
+	expect(upsert).toHaveBeenCalledTimes(1)
+	const close = dialog.querySelector('[data-slot="dialog-close"]') as HTMLButtonElement
+	await act(async () => close.click())
+	expect(document.getElementById("model-id")).not.toBeNull()
+	await act(async () => document.dispatchEvent(new KeyboardEvent("keydown", { key: "Escape", bubbles: true })))
+	expect(document.getElementById("model-id")).not.toBeNull()
+	await click("Cancel")
+	await click("Edit connection")
+	expect(list).not.toHaveBeenCalled()
+	expect(upsert).toHaveBeenCalledTimes(1)
+	await act(async () => finishSave!({}))
+	expect(document.getElementById("model-id")).toBeNull()
+	await click("Edit connection")
+	expect(list).toHaveBeenCalledTimes(1)
+	expect(document.getElementById("provider-id")).not.toBeNull()
 })

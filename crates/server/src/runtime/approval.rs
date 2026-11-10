@@ -1912,7 +1912,12 @@ fn format_persisted_turn_item(item: &crate::execution::PersistedTurnItem) -> Str
     use devo_protocol::native::item::UserInput;
 
     match &item.item {
-        Item::UserMessage { content, entry, .. } => {
+        Item::UserMessage {
+            content,
+            entry,
+            origin,
+            ..
+        } => {
             let text = content
                 .iter()
                 .filter_map(|part| match part {
@@ -1921,6 +1926,9 @@ fn format_persisted_turn_item(item: &crate::execution::PersistedTurnItem) -> Str
                 })
                 .collect::<Vec<_>>()
                 .join("\n");
+            if let Some(origin) = origin {
+                return devo_core::render_host_message(origin, &text);
+            }
             match entry {
                 devo_protocol::native::item::UserMessageEntry::Steer => {
                     format!("steer: {text}")

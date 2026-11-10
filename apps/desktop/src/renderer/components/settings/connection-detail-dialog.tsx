@@ -37,7 +37,7 @@ interface ConnectionDetailDialogProps {
 	open: boolean
 	onOpenChange: (open: boolean) => void
 	onChanged: () => void
-	onEdit?: () => void
+	onEdit?: (provider: CatalogProviderInfo) => void
 }
 
 export function ConnectionDetailDialog({
@@ -49,6 +49,7 @@ export function ConnectionDetailDialog({
 	onEdit,
 }: ConnectionDetailDialogProps) {
 	const [search, setSearch] = useState("")
+	const [editing, setEditing] = useState(false)
 	const [discovering, setDiscovering] = useState(false)
 	const [removingModel, setRemovingModel] = useState<string | null>(null)
 	const [addingModel, setAddingModel] = useState(false)
@@ -56,6 +57,8 @@ export function ConnectionDetailDialog({
 	const [discovered, setDiscovered] = useState<Record<string, CatalogModelInfo>>({})
 	const [savingModel, setSavingModel] = useState<string | null>(null)
 	const discoveryVersion = useRef(0)
+	const modelMutationPending = removingModel !== null || savingModel !== null || addingModel
+	const mutationPending = modelMutationPending || editing
 	useEffect(() => {
 		discoveryVersion.current++
 		setDiscovering(false)
@@ -143,9 +146,38 @@ export function ConnectionDetailDialog({
 		[provider.id, onChanged],
 	)
 
+	const handleEdit = useCallback(async () => {
+		if (!onEdit || mutationPending) return
+		const version = ++discoveryVersion.current
+		setEditing(true)
+		setError(null)
+		try {
+			const client = getBaseClient()
+			if (!client) throw new Error("Not connected to server")
+			// Read after pending mutations finish, rather than copying a stale catalog snapshot.
+			const { data } = await client.provider.list()
+			if (version !== discoveryVersion.current) return
+			const current = data.providers.find((entry: CatalogProviderInfo) => entry.id === provider.id)
+			if (!current || !data.connectedProviderIds.includes(provider.id)) {
+				throw new Error("This provider is no longer connected")
+			}
+			onEdit({ ...current, models: data.connectionModels[provider.id] ?? {} })
+		} catch (error) {
+			if (version === discoveryVersion.current) {
+				setError(error instanceof Error ? error.message : "Failed to load connection")
+			}
+		} finally {
+			if (version === discoveryVersion.current) setEditing(false)
+		}
+	}, [mutationPending, onEdit, provider.id])
+
 	return (
 		<>
-			<Dialog open={open} onOpenChange={onOpenChange}>
+			<Dialog open={open} onOpenChange={(nextOpen) => {
+				if (modelMutationPending) return
+				if (!nextOpen) discoveryVersion.current++
+				onOpenChange(nextOpen)
+			}}>
 				<DialogContent className="max-w-lg max-h-[80vh] overflow-y-auto">
 					<DialogHeader>
 						<div className="flex items-center gap-3">
@@ -181,7 +213,7 @@ export function ConnectionDetailDialog({
 							variant="outline"
 							size="sm"
 							onClick={handleDiscover}
-							disabled={discovering}
+							disabled={discovering || mutationPending}
 						>
 							{discovering ? (
 								<Spinner className="size-3.5" />
@@ -194,6 +226,7 @@ export function ConnectionDetailDialog({
 							variant="outline"
 							size="sm"
 							onClick={() => setAddingModel(true)}
+							disabled={mutationPending}
 						>
 							<PlusIcon className="size-3.5 stroke-[1.5]" />
 							Add
@@ -240,7 +273,7 @@ export function ConnectionDetailDialog({
 											<Button variant="outline" size="sm"
 												aria-label={`Save discovered model ${model.name ?? modelId}`}
 												onClick={() => handleSaveModel(modelId, model)}
-												disabled={savingModel === modelId}>
+												disabled={mutationPending}>
 												Save
 											</Button>
 										)}
@@ -252,7 +285,7 @@ export function ConnectionDetailDialog({
 													className="text-muted-foreground hover:text-destructive"
 													aria-label={`Remove saved model ${model.name ?? modelId}`}
 													onClick={() => handleRemoveModel(modelId)}
-													disabled={removingModel === modelId}
+													disabled={mutationPending}
 												>
 													{removingModel === modelId ? (
 														<Spinner className="size-3" />
@@ -268,8 +301,11 @@ export function ConnectionDetailDialog({
 					</div>
 
 					<DialogFooter>
-						{onEdit && <Button variant="outline" onClick={onEdit}>Edit connection</Button>}
-						<Button variant="outline" onClick={() => onOpenChange(false)}>
+						{onEdit && <Button variant="outline" onClick={handleEdit} disabled={mutationPending}>Edit connection</Button>}
+						<Button variant="outline" disabled={modelMutationPending} onClick={() => {
+							discoveryVersion.current++
+							onOpenChange(false)
+						}}>
 							Done
 						</Button>
 					</DialogFooter>

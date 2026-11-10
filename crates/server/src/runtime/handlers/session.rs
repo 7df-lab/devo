@@ -2282,9 +2282,10 @@ impl ServerRuntime {
         } = options;
         let source_core_session = source.core_session.lock().await;
 
-        // Resolve the client-supplied index against the linear journal first —
-        // that is the list interactive clients enumerate — then cut on the
-        // active tree path so dead-branch items never leak into the copy.
+        // The legacy userTurnIndex indexes input turn boundaries in the linear
+        // journal, including host turns, not human authorship or transcript rows.
+        // Fork's atTurnId resolves against the same list. Cut only on the active
+        // tree path so dead-branch items never leak into the copy.
         let selected_turn_id = match user_turn_index {
             None => None,
             Some(index) => {
@@ -2369,7 +2370,7 @@ impl ServerRuntime {
         core_session.messages = rebuilt_messages;
         core_session.turn_count = kept_items
             .iter()
-            .filter(|item| crate::persisted_native_item::is_user_message(&item.item))
+            .filter(|item| crate::persisted_native_item::is_turn_input(&item.item))
             .count();
 
         let last_kept_turn_id = kept_items.last().and_then(|item| item.legacy_turn_id());
@@ -2434,7 +2435,7 @@ impl ServerRuntime {
                     .request_model;
                 let sequence = kept_items
                     .iter()
-                    .filter(|item| crate::persisted_native_item::is_user_message(&item.item))
+                    .filter(|item| crate::persisted_native_item::is_turn_input(&item.item))
                     .count() as u32;
                 Some(crate::turn::RuntimeTurn {
                     native: devo_protocol::native::turn::Turn {
@@ -2567,7 +2568,7 @@ fn user_turn_ids_from_items(
 ) -> Vec<devo_protocol::native::ids::TurnId> {
     let mut user_turn_ids = Vec::new();
     for item in persisted_turn_items {
-        if crate::persisted_native_item::is_user_message(&item.item)
+        if crate::persisted_native_item::is_turn_input(&item.item)
             && user_turn_ids.last() != Some(&item.turn_id)
         {
             user_turn_ids.push(item.turn_id);
@@ -2733,6 +2734,43 @@ mod tests {
         ];
         let prefix = items[..2].to_vec();
         (items, prefix)
+    }
+
+    #[test]
+    fn host_turn_indexes_include_inputs_but_skip_steering() {
+        use devo_protocol::native::host_message::{
+            HostMessageDelivery, HostMessageOrigin, HostMessageSource,
+        };
+        use devo_protocol::native::item::{Item, UserMessageEntry};
+        let first = TurnId::new();
+        let second = TurnId::new();
+        let mut host = user_item(first, "host startup");
+        if let Item::UserMessage { origin, .. } = &mut host.item {
+            *origin = Some(HostMessageOrigin {
+                event_id: "event".into(),
+                source: HostMessageSource::Agent,
+                sender: "parent".into(),
+                delivery: HostMessageDelivery::FollowUp,
+            });
+        }
+        let mut human_steer = user_item(first, "steer");
+        if let Item::UserMessage { entry, .. } = &mut human_steer.item {
+            *entry = UserMessageEntry::Steer;
+        }
+        let mut host_steer = host.clone();
+        if let Item::UserMessage { entry, .. } = &mut host_steer.item {
+            *entry = UserMessageEntry::Steer;
+        }
+        assert_eq!(
+            user_turn_ids_from_items(&[
+                host,
+                human_steer,
+                host_steer,
+                assistant_item(first, "reply"),
+                user_item(second, "human")
+            ]),
+            vec![first, second]
+        );
     }
 
     #[test]

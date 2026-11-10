@@ -123,6 +123,7 @@ impl RolloutWriteState {
             TurnItem::UserMessage(item) => Projected::Item {
                 state: ItemState::Completed,
                 item: Item::UserMessage {
+                    origin: None,
                     client_user_message_id: None,
                     content: user_message_content(item),
                     entry: UserMessageEntry::TurnStart,
@@ -131,6 +132,7 @@ impl RolloutWriteState {
             TurnItem::SteerInput(item) => Projected::Item {
                 state: ItemState::Completed,
                 item: Item::UserMessage {
+                    origin: None,
                     client_user_message_id: None,
                     content: user_message_content(item),
                     entry: UserMessageEntry::Steer,

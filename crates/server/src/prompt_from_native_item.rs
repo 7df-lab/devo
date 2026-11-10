@@ -38,8 +38,14 @@ pub(crate) fn apply_prompt_native_item(
 ) {
     remember_tool_name(tool_names_by_id, &item);
     match item {
-        Item::UserMessage { content, .. } => {
+        Item::UserMessage {
+            content, origin, ..
+        } => {
             let (text, images) = split_user_content(&content);
+            let text = origin.as_ref().map_or_else(
+                || text.clone(),
+                |origin| devo_core::render_host_message(origin, &text),
+            );
             messages.push(user_message_with_local_images(text, &images));
         }
         Item::AssistantMessage { text, .. } if text.trim().is_empty() => {}

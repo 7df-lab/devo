@@ -223,6 +223,7 @@ mod tests {
             updated_at: Utc::now(),
             state,
             item: Item::UserMessage {
+                origin: None,
                 client_user_message_id: None,
                 content: vec![UserInput::Text {
                     text: "hi".to_owned(),

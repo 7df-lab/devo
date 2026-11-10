@@ -1085,6 +1085,7 @@ fn replay_omits_empty_agent_messages_from_history_and_prompt() {
         history_items,
         vec![
             crate::SessionHistoryEntry::item(devo_protocol::native::item::Item::UserMessage {
+                origin: None,
                 client_user_message_id: None,
                 content: vec![devo_protocol::native::item::UserInput::Text {
                     text: "hello".to_string(),

@@ -726,8 +726,10 @@ fn ensure_session_context_locked(state: &mut SessionActorState, turn_config: &Tu
 fn pop_queued_turn_input_data(
     item: devo_protocol::PendingInputItem,
 ) -> Option<QueuedTurnInputData> {
+    let host_origin = item.host_message_origin();
     match item.kind {
         devo_core::PendingInputKind::UserText { text } => Some(QueuedTurnInputData {
+            host_origin,
             queued_input_id: item.id,
             client_user_message_id: client_user_message_id_from_pending_metadata(
                 item.metadata.as_ref(),
@@ -761,6 +763,7 @@ fn pop_queued_turn_input_data(
                 })
                 .collect();
             Some(QueuedTurnInputData {
+                host_origin,
                 queued_input_id: item.id,
                 client_user_message_id: client_user_message_id_from_pending_metadata(
                     item.metadata.as_ref(),
@@ -864,6 +867,7 @@ mod tests {
         assert_eq!(
             popped,
             QueuedTurnInputData {
+                host_origin: None,
                 queued_input_id,
                 client_user_message_id: Some("stable-message-1".to_string()),
                 display_input: "queued prompt".to_string(),

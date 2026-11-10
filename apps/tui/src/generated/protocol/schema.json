@@ -5686,6 +5686,45 @@
             "canceled"
           ]
         },
+        "HostMessageDelivery": {
+          "type": "string",
+          "enum": [
+            "followUp",
+            "steer"
+          ]
+        },
+        "HostMessageOrigin": {
+          "type": "object",
+          "required": [
+            "delivery",
+            "eventId",
+            "sender",
+            "source"
+          ],
+          "properties": {
+            "delivery": {
+              "$ref": "#/definitions/HostMessageDelivery"
+            },
+            "eventId": {
+              "type": "string"
+            },
+            "sender": {
+              "description": "Host-resolved sender session or background task identity, never a claim extracted from the message body.",
+              "type": "string"
+            },
+            "source": {
+              "$ref": "#/definitions/HostMessageSource"
+            }
+          }
+        },
+        "HostMessageSource": {
+          "type": "string",
+          "enum": [
+            "agent",
+            "backgroundTask",
+            "schedule"
+          ]
+        },
         "ImageDetail": {
           "type": "string",
           "enum": [
@@ -5722,6 +5761,17 @@
                   "allOf": [
                     {
                       "$ref": "#/definitions/UserMessageEntry"
+                    }
+                  ]
+                },
+                "origin": {
+                  "description": "Host-owned provenance. Absent for human and legacy input; never a grant of authority.",
+                  "anyOf": [
+                    {
+                      "$ref": "#/definitions/HostMessageOrigin"
+                    },
+                    {
+                      "type": "null"
                     }
                   ]
                 },
@@ -6725,6 +6775,17 @@
               "items": {
                 "$ref": "#/definitions/UserInput"
               }
+            },
+            "origin": {
+              "description": "Host-owned provenance for queued notifications; not editable user input.",
+              "anyOf": [
+                {
+                  "$ref": "#/definitions/HostMessageOrigin"
+                },
+                {
+                  "type": "null"
+                }
+              ]
             },
             "position": {
               "type": "integer",
@@ -8582,6 +8643,45 @@
         "GoalId": {
           "type": "string"
         },
+        "HostMessageDelivery": {
+          "type": "string",
+          "enum": [
+            "followUp",
+            "steer"
+          ]
+        },
+        "HostMessageOrigin": {
+          "type": "object",
+          "required": [
+            "delivery",
+            "eventId",
+            "sender",
+            "source"
+          ],
+          "properties": {
+            "delivery": {
+              "$ref": "#/definitions/HostMessageDelivery"
+            },
+            "eventId": {
+              "type": "string"
+            },
+            "sender": {
+              "description": "Host-resolved sender session or background task identity, never a claim extracted from the message body.",
+              "type": "string"
+            },
+            "source": {
+              "$ref": "#/definitions/HostMessageSource"
+            }
+          }
+        },
+        "HostMessageSource": {
+          "type": "string",
+          "enum": [
+            "agent",
+            "backgroundTask",
+            "schedule"
+          ]
+        },
         "ImageDetail": {
           "type": "string",
           "enum": [
@@ -8618,6 +8718,17 @@
                   "allOf": [
                     {
                       "$ref": "#/definitions/UserMessageEntry"
+                    }
+                  ]
+                },
+                "origin": {
+                  "description": "Host-owned provenance. Absent for human and legacy input; never a grant of authority.",
+                  "anyOf": [
+                    {
+                      "$ref": "#/definitions/HostMessageOrigin"
+                    },
+                    {
+                      "type": "null"
                     }
                   ]
                 },
@@ -10427,6 +10538,45 @@
             "canceled"
           ]
         },
+        "HostMessageDelivery": {
+          "type": "string",
+          "enum": [
+            "followUp",
+            "steer"
+          ]
+        },
+        "HostMessageOrigin": {
+          "type": "object",
+          "required": [
+            "delivery",
+            "eventId",
+            "sender",
+            "source"
+          ],
+          "properties": {
+            "delivery": {
+              "$ref": "#/definitions/HostMessageDelivery"
+            },
+            "eventId": {
+              "type": "string"
+            },
+            "sender": {
+              "description": "Host-resolved sender session or background task identity, never a claim extracted from the message body.",
+              "type": "string"
+            },
+            "source": {
+              "$ref": "#/definitions/HostMessageSource"
+            }
+          }
+        },
+        "HostMessageSource": {
+          "type": "string",
+          "enum": [
+            "agent",
+            "backgroundTask",
+            "schedule"
+          ]
+        },
         "ImageDetail": {
           "type": "string",
           "enum": [
@@ -10463,6 +10613,17 @@
                   "allOf": [
                     {
                       "$ref": "#/definitions/UserMessageEntry"
+                    }
+                  ]
+                },
+                "origin": {
+                  "description": "Host-owned provenance. Absent for human and legacy input; never a grant of authority.",
+                  "anyOf": [
+                    {
+                      "$ref": "#/definitions/HostMessageOrigin"
+                    },
+                    {
+                      "type": "null"
                     }
                   ]
                 },
@@ -11466,6 +11627,17 @@
               "items": {
                 "$ref": "#/definitions/UserInput"
               }
+            },
+            "origin": {
+              "description": "Host-owned provenance for queued notifications; not editable user input.",
+              "anyOf": [
+                {
+                  "$ref": "#/definitions/HostMessageOrigin"
+                },
+                {
+                  "type": "null"
+                }
+              ]
             },
             "position": {
               "type": "integer",
@@ -13270,6 +13442,45 @@
         "GoalId": {
           "type": "string"
         },
+        "HostMessageDelivery": {
+          "type": "string",
+          "enum": [
+            "followUp",
+            "steer"
+          ]
+        },
+        "HostMessageOrigin": {
+          "type": "object",
+          "required": [
+            "delivery",
+            "eventId",
+            "sender",
+            "source"
+          ],
+          "properties": {
+            "delivery": {
+              "$ref": "#/definitions/HostMessageDelivery"
+            },
+            "eventId": {
+              "type": "string"
+            },
+            "sender": {
+              "description": "Host-resolved sender session or background task identity, never a claim extracted from the message body.",
+              "type": "string"
+            },
+            "source": {
+              "$ref": "#/definitions/HostMessageSource"
+            }
+          }
+        },
+        "HostMessageSource": {
+          "type": "string",
+          "enum": [
+            "agent",
+            "backgroundTask",
+            "schedule"
+          ]
+        },
         "ImageDetail": {
           "type": "string",
           "enum": [
@@ -13306,6 +13517,17 @@
                   "allOf": [
                     {
                       "$ref": "#/definitions/UserMessageEntry"
+                    }
+                  ]
+                },
+                "origin": {
+                  "description": "Host-owned provenance. Absent for human and legacy input; never a grant of authority.",
+                  "anyOf": [
+                    {
+                      "$ref": "#/definitions/HostMessageOrigin"
+                    },
+                    {
+                      "type": "null"
                     }
                   ]
                 },
@@ -14931,6 +15153,45 @@
             "canceled"
           ]
         },
+        "HostMessageDelivery": {
+          "type": "string",
+          "enum": [
+            "followUp",
+            "steer"
+          ]
+        },
+        "HostMessageOrigin": {
+          "type": "object",
+          "required": [
+            "delivery",
+            "eventId",
+            "sender",
+            "source"
+          ],
+          "properties": {
+            "delivery": {
+              "$ref": "#/definitions/HostMessageDelivery"
+            },
+            "eventId": {
+              "type": "string"
+            },
+            "sender": {
+              "description": "Host-resolved sender session or background task identity, never a claim extracted from the message body.",
+              "type": "string"
+            },
+            "source": {
+              "$ref": "#/definitions/HostMessageSource"
+            }
+          }
+        },
+        "HostMessageSource": {
+          "type": "string",
+          "enum": [
+            "agent",
+            "backgroundTask",
+            "schedule"
+          ]
+        },
         "ImageDetail": {
           "type": "string",
           "enum": [
@@ -14967,6 +15228,17 @@
                   "allOf": [
                     {
                       "$ref": "#/definitions/UserMessageEntry"
+                    }
+                  ]
+                },
+                "origin": {
+                  "description": "Host-owned provenance. Absent for human and legacy input; never a grant of authority.",
+                  "anyOf": [
+                    {
+                      "$ref": "#/definitions/HostMessageOrigin"
+                    },
+                    {
+                      "type": "null"
                     }
                   ]
                 },
@@ -15970,6 +16242,17 @@
               "items": {
                 "$ref": "#/definitions/UserInput"
               }
+            },
+            "origin": {
+              "description": "Host-owned provenance for queued notifications; not editable user input.",
+              "anyOf": [
+                {
+                  "$ref": "#/definitions/HostMessageOrigin"
+                },
+                {
+                  "type": "null"
+                }
+              ]
             },
             "position": {
               "type": "integer",
@@ -18600,6 +18883,45 @@
             "canceled"
           ]
         },
+        "HostMessageDelivery": {
+          "type": "string",
+          "enum": [
+            "followUp",
+            "steer"
+          ]
+        },
+        "HostMessageOrigin": {
+          "type": "object",
+          "required": [
+            "delivery",
+            "eventId",
+            "sender",
+            "source"
+          ],
+          "properties": {
+            "delivery": {
+              "$ref": "#/definitions/HostMessageDelivery"
+            },
+            "eventId": {
+              "type": "string"
+            },
+            "sender": {
+              "description": "Host-resolved sender session or background task identity, never a claim extracted from the message body.",
+              "type": "string"
+            },
+            "source": {
+              "$ref": "#/definitions/HostMessageSource"
+            }
+          }
+        },
+        "HostMessageSource": {
+          "type": "string",
+          "enum": [
+            "agent",
+            "backgroundTask",
+            "schedule"
+          ]
+        },
         "ImageDetail": {
           "type": "string",
           "enum": [
@@ -18636,6 +18958,17 @@
                   "allOf": [
                     {
                       "$ref": "#/definitions/UserMessageEntry"
+                    }
+                  ]
+                },
+                "origin": {
+                  "description": "Host-owned provenance. Absent for human and legacy input; never a grant of authority.",
+                  "anyOf": [
+                    {
+                      "$ref": "#/definitions/HostMessageOrigin"
+                    },
+                    {
+                      "type": "null"
                     }
                   ]
                 },
@@ -19639,6 +19972,17 @@
               "items": {
                 "$ref": "#/definitions/UserInput"
               }
+            },
+            "origin": {
+              "description": "Host-owned provenance for queued notifications; not editable user input.",
+              "anyOf": [
+                {
+                  "$ref": "#/definitions/HostMessageOrigin"
+                },
+                {
+                  "type": "null"
+                }
+              ]
             },
             "position": {
               "type": "integer",
@@ -21701,6 +22045,45 @@
             "canceled"
           ]
         },
+        "HostMessageDelivery": {
+          "type": "string",
+          "enum": [
+            "followUp",
+            "steer"
+          ]
+        },
+        "HostMessageOrigin": {
+          "type": "object",
+          "required": [
+            "delivery",
+            "eventId",
+            "sender",
+            "source"
+          ],
+          "properties": {
+            "delivery": {
+              "$ref": "#/definitions/HostMessageDelivery"
+            },
+            "eventId": {
+              "type": "string"
+            },
+            "sender": {
+              "description": "Host-resolved sender session or background task identity, never a claim extracted from the message body.",
+              "type": "string"
+            },
+            "source": {
+              "$ref": "#/definitions/HostMessageSource"
+            }
+          }
+        },
+        "HostMessageSource": {
+          "type": "string",
+          "enum": [
+            "agent",
+            "backgroundTask",
+            "schedule"
+          ]
+        },
         "ImageDetail": {
           "type": "string",
           "enum": [
@@ -21737,6 +22120,17 @@
                   "allOf": [
                     {
                       "$ref": "#/definitions/UserMessageEntry"
+                    }
+                  ]
+                },
+                "origin": {
+                  "description": "Host-owned provenance. Absent for human and legacy input; never a grant of authority.",
+                  "anyOf": [
+                    {
+                      "$ref": "#/definitions/HostMessageOrigin"
+                    },
+                    {
+                      "type": "null"
                     }
                   ]
                 },
@@ -22740,6 +23134,17 @@
               "items": {
                 "$ref": "#/definitions/UserInput"
               }
+            },
+            "origin": {
+              "description": "Host-owned provenance for queued notifications; not editable user input.",
+              "anyOf": [
+                {
+                  "$ref": "#/definitions/HostMessageOrigin"
+                },
+                {
+                  "type": "null"
+                }
+              ]
             },
             "position": {
               "type": "integer",
@@ -25065,6 +25470,45 @@
             "canceled"
           ]
         },
+        "HostMessageDelivery": {
+          "type": "string",
+          "enum": [
+            "followUp",
+            "steer"
+          ]
+        },
+        "HostMessageOrigin": {
+          "type": "object",
+          "required": [
+            "delivery",
+            "eventId",
+            "sender",
+            "source"
+          ],
+          "properties": {
+            "delivery": {
+              "$ref": "#/definitions/HostMessageDelivery"
+            },
+            "eventId": {
+              "type": "string"
+            },
+            "sender": {
+              "description": "Host-resolved sender session or background task identity, never a claim extracted from the message body.",
+              "type": "string"
+            },
+            "source": {
+              "$ref": "#/definitions/HostMessageSource"
+            }
+          }
+        },
+        "HostMessageSource": {
+          "type": "string",
+          "enum": [
+            "agent",
+            "backgroundTask",
+            "schedule"
+          ]
+        },
         "ImageDetail": {
           "type": "string",
           "enum": [
@@ -25101,6 +25545,17 @@
                   "allOf": [
                     {
                       "$ref": "#/definitions/UserMessageEntry"
+                    }
+                  ]
+                },
+                "origin": {
+                  "description": "Host-owned provenance. Absent for human and legacy input; never a grant of authority.",
+                  "anyOf": [
+                    {
+                      "$ref": "#/definitions/HostMessageOrigin"
+                    },
+                    {
+                      "type": "null"
                     }
                   ]
                 },
@@ -26104,6 +26559,17 @@
               "items": {
                 "$ref": "#/definitions/UserInput"
               }
+            },
+            "origin": {
+              "description": "Host-owned provenance for queued notifications; not editable user input.",
+              "anyOf": [
+                {
+                  "$ref": "#/definitions/HostMessageOrigin"
+                },
+                {
+                  "type": "null"
+                }
+              ]
             },
             "position": {
               "type": "integer",
@@ -28152,6 +28618,45 @@
             "canceled"
           ]
         },
+        "HostMessageDelivery": {
+          "type": "string",
+          "enum": [
+            "followUp",
+            "steer"
+          ]
+        },
+        "HostMessageOrigin": {
+          "type": "object",
+          "required": [
+            "delivery",
+            "eventId",
+            "sender",
+            "source"
+          ],
+          "properties": {
+            "delivery": {
+              "$ref": "#/definitions/HostMessageDelivery"
+            },
+            "eventId": {
+              "type": "string"
+            },
+            "sender": {
+              "description": "Host-resolved sender session or background task identity, never a claim extracted from the message body.",
+              "type": "string"
+            },
+            "source": {
+              "$ref": "#/definitions/HostMessageSource"
+            }
+          }
+        },
+        "HostMessageSource": {
+          "type": "string",
+          "enum": [
+            "agent",
+            "backgroundTask",
+            "schedule"
+          ]
+        },
         "ImageDetail": {
           "type": "string",
           "enum": [
@@ -28188,6 +28693,17 @@
                   "allOf": [
                     {
                       "$ref": "#/definitions/UserMessageEntry"
+                    }
+                  ]
+                },
+                "origin": {
+                  "description": "Host-owned provenance. Absent for human and legacy input; never a grant of authority.",
+                  "anyOf": [
+                    {
+                      "$ref": "#/definitions/HostMessageOrigin"
+                    },
+                    {
+                      "type": "null"
                     }
                   ]
                 },
@@ -29191,6 +29707,17 @@
               "items": {
                 "$ref": "#/definitions/UserInput"
               }
+            },
+            "origin": {
+              "description": "Host-owned provenance for queued notifications; not editable user input.",
+              "anyOf": [
+                {
+                  "$ref": "#/definitions/HostMessageOrigin"
+                },
+                {
+                  "type": "null"
+                }
+              ]
             },
             "position": {
               "type": "integer",
@@ -31243,6 +31770,45 @@
             "canceled"
           ]
         },
+        "HostMessageDelivery": {
+          "type": "string",
+          "enum": [
+            "followUp",
+            "steer"
+          ]
+        },
+        "HostMessageOrigin": {
+          "type": "object",
+          "required": [
+            "delivery",
+            "eventId",
+            "sender",
+            "source"
+          ],
+          "properties": {
+            "delivery": {
+              "$ref": "#/definitions/HostMessageDelivery"
+            },
+            "eventId": {
+              "type": "string"
+            },
+            "sender": {
+              "description": "Host-resolved sender session or background task identity, never a claim extracted from the message body.",
+              "type": "string"
+            },
+            "source": {
+              "$ref": "#/definitions/HostMessageSource"
+            }
+          }
+        },
+        "HostMessageSource": {
+          "type": "string",
+          "enum": [
+            "agent",
+            "backgroundTask",
+            "schedule"
+          ]
+        },
         "ImageDetail": {
           "type": "string",
           "enum": [
@@ -31279,6 +31845,17 @@
                   "allOf": [
                     {
                       "$ref": "#/definitions/UserMessageEntry"
+                    }
+                  ]
+                },
+                "origin": {
+                  "description": "Host-owned provenance. Absent for human and legacy input; never a grant of authority.",
+                  "anyOf": [
+                    {
+                      "$ref": "#/definitions/HostMessageOrigin"
+                    },
+                    {
+                      "type": "null"
                     }
                   ]
                 },
@@ -32282,6 +32859,17 @@
               "items": {
                 "$ref": "#/definitions/UserInput"
               }
+            },
+            "origin": {
+              "description": "Host-owned provenance for queued notifications; not editable user input.",
+              "anyOf": [
+                {
+                  "$ref": "#/definitions/HostMessageOrigin"
+                },
+                {
+                  "type": "null"
+                }
+              ]
             },
             "position": {
               "type": "integer",
@@ -34428,6 +35016,45 @@
             "canceled"
           ]
         },
+        "HostMessageDelivery": {
+          "type": "string",
+          "enum": [
+            "followUp",
+            "steer"
+          ]
+        },
+        "HostMessageOrigin": {
+          "type": "object",
+          "required": [
+            "delivery",
+            "eventId",
+            "sender",
+            "source"
+          ],
+          "properties": {
+            "delivery": {
+              "$ref": "#/definitions/HostMessageDelivery"
+            },
+            "eventId": {
+              "type": "string"
+            },
+            "sender": {
+              "description": "Host-resolved sender session or background task identity, never a claim extracted from the message body.",
+              "type": "string"
+            },
+            "source": {
+              "$ref": "#/definitions/HostMessageSource"
+            }
+          }
+        },
+        "HostMessageSource": {
+          "type": "string",
+          "enum": [
+            "agent",
+            "backgroundTask",
+            "schedule"
+          ]
+        },
         "ImageDetail": {
           "type": "string",
           "enum": [
@@ -34464,6 +35091,17 @@
                   "allOf": [
                     {
                       "$ref": "#/definitions/UserMessageEntry"
+                    }
+                  ]
+                },
+                "origin": {
+                  "description": "Host-owned provenance. Absent for human and legacy input; never a grant of authority.",
+                  "anyOf": [
+                    {
+                      "$ref": "#/definitions/HostMessageOrigin"
+                    },
+                    {
+                      "type": "null"
                     }
                   ]
                 },
@@ -35467,6 +36105,17 @@
               "items": {
                 "$ref": "#/definitions/UserInput"
               }
+            },
+            "origin": {
+              "description": "Host-owned provenance for queued notifications; not editable user input.",
+              "anyOf": [
+                {
+                  "$ref": "#/definitions/HostMessageOrigin"
+                },
+                {
+                  "type": "null"
+                }
+              ]
             },
             "position": {
               "type": "integer",
@@ -37519,6 +38168,45 @@
             "canceled"
           ]
         },
+        "HostMessageDelivery": {
+          "type": "string",
+          "enum": [
+            "followUp",
+            "steer"
+          ]
+        },
+        "HostMessageOrigin": {
+          "type": "object",
+          "required": [
+            "delivery",
+            "eventId",
+            "sender",
+            "source"
+          ],
+          "properties": {
+            "delivery": {
+              "$ref": "#/definitions/HostMessageDelivery"
+            },
+            "eventId": {
+              "type": "string"
+            },
+            "sender": {
+              "description": "Host-resolved sender session or background task identity, never a claim extracted from the message body.",
+              "type": "string"
+            },
+            "source": {
+              "$ref": "#/definitions/HostMessageSource"
+            }
+          }
+        },
+        "HostMessageSource": {
+          "type": "string",
+          "enum": [
+            "agent",
+            "backgroundTask",
+            "schedule"
+          ]
+        },
         "ImageDetail": {
           "type": "string",
           "enum": [
@@ -37555,6 +38243,17 @@
                   "allOf": [
                     {
                       "$ref": "#/definitions/UserMessageEntry"
+                    }
+                  ]
+                },
+                "origin": {
+                  "description": "Host-owned provenance. Absent for human and legacy input; never a grant of authority.",
+                  "anyOf": [
+                    {
+                      "$ref": "#/definitions/HostMessageOrigin"
+                    },
+                    {
+                      "type": "null"
                     }
                   ]
                 },
@@ -38558,6 +39257,17 @@
               "items": {
                 "$ref": "#/definitions/UserInput"
               }
+            },
+            "origin": {
+              "description": "Host-owned provenance for queued notifications; not editable user input.",
+              "anyOf": [
+                {
+                  "$ref": "#/definitions/HostMessageOrigin"
+                },
+                {
+                  "type": "null"
+                }
+              ]
             },
             "position": {
               "type": "integer",
@@ -40817,6 +41527,45 @@
             "canceled"
           ]
         },
+        "HostMessageDelivery": {
+          "type": "string",
+          "enum": [
+            "followUp",
+            "steer"
+          ]
+        },
+        "HostMessageOrigin": {
+          "type": "object",
+          "required": [
+            "delivery",
+            "eventId",
+            "sender",
+            "source"
+          ],
+          "properties": {
+            "delivery": {
+              "$ref": "#/definitions/HostMessageDelivery"
+            },
+            "eventId": {
+              "type": "string"
+            },
+            "sender": {
+              "description": "Host-resolved sender session or background task identity, never a claim extracted from the message body.",
+              "type": "string"
+            },
+            "source": {
+              "$ref": "#/definitions/HostMessageSource"
+            }
+          }
+        },
+        "HostMessageSource": {
+          "type": "string",
+          "enum": [
+            "agent",
+            "backgroundTask",
+            "schedule"
+          ]
+        },
         "ImageDetail": {
           "type": "string",
           "enum": [
@@ -40853,6 +41602,17 @@
                   "allOf": [
                     {
                       "$ref": "#/definitions/UserMessageEntry"
+                    }
+                  ]
+                },
+                "origin": {
+                  "description": "Host-owned provenance. Absent for human and legacy input; never a grant of authority.",
+                  "anyOf": [
+                    {
+                      "$ref": "#/definitions/HostMessageOrigin"
+                    },
+                    {
+                      "type": "null"
                     }
                   ]
                 },
@@ -41856,6 +42616,17 @@
               "items": {
                 "$ref": "#/definitions/UserInput"
               }
+            },
+            "origin": {
+              "description": "Host-owned provenance for queued notifications; not editable user input.",
+              "anyOf": [
+                {
+                  "$ref": "#/definitions/HostMessageOrigin"
+                },
+                {
+                  "type": "null"
+                }
+              ]
             },
             "position": {
               "type": "integer",
@@ -43361,6 +44132,17 @@
                 }
               ]
             },
+            "origin": {
+              "description": "Host-owned provenance. Absent for human and legacy input; never a grant of authority.",
+              "anyOf": [
+                {
+                  "$ref": "#/definitions/HostMessageOrigin"
+                },
+                {
+                  "type": "null"
+                }
+              ]
+            },
             "type": {
               "type": "string",
               "enum": [
@@ -44329,6 +45111,45 @@
         "GoalId": {
           "type": "string"
         },
+        "HostMessageDelivery": {
+          "type": "string",
+          "enum": [
+            "followUp",
+            "steer"
+          ]
+        },
+        "HostMessageOrigin": {
+          "type": "object",
+          "required": [
+            "delivery",
+            "eventId",
+            "sender",
+            "source"
+          ],
+          "properties": {
+            "delivery": {
+              "$ref": "#/definitions/HostMessageDelivery"
+            },
+            "eventId": {
+              "type": "string"
+            },
+            "sender": {
+              "description": "Host-resolved sender session or background task identity, never a claim extracted from the message body.",
+              "type": "string"
+            },
+            "source": {
+              "$ref": "#/definitions/HostMessageSource"
+            }
+          }
+        },
+        "HostMessageSource": {
+          "type": "string",
+          "enum": [
+            "agent",
+            "backgroundTask",
+            "schedule"
+          ]
+        },
         "ImageDetail": {
           "type": "string",
           "enum": [
@@ -45196,6 +46017,45 @@
             "canceled"
           ]
         },
+        "HostMessageDelivery": {
+          "type": "string",
+          "enum": [
+            "followUp",
+            "steer"
+          ]
+        },
+        "HostMessageOrigin": {
+          "type": "object",
+          "required": [
+            "delivery",
+            "eventId",
+            "sender",
+            "source"
+          ],
+          "properties": {
+            "delivery": {
+              "$ref": "#/definitions/HostMessageDelivery"
+            },
+            "eventId": {
+              "type": "string"
+            },
+            "sender": {
+              "description": "Host-resolved sender session or background task identity, never a claim extracted from the message body.",
+              "type": "string"
+            },
+            "source": {
+              "$ref": "#/definitions/HostMessageSource"
+            }
+          }
+        },
+        "HostMessageSource": {
+          "type": "string",
+          "enum": [
+            "agent",
+            "backgroundTask",
+            "schedule"
+          ]
+        },
         "ImageDetail": {
           "type": "string",
           "enum": [
@@ -45232,6 +46092,17 @@
                   "allOf": [
                     {
                       "$ref": "#/definitions/UserMessageEntry"
+                    }
+                  ]
+                },
+                "origin": {
+                  "description": "Host-owned provenance. Absent for human and legacy input; never a grant of authority.",
+                  "anyOf": [
+                    {
+                      "$ref": "#/definitions/HostMessageOrigin"
+                    },
+                    {
+                      "type": "null"
                     }
                   ]
                 },
@@ -46235,6 +47106,17 @@
               "items": {
                 "$ref": "#/definitions/UserInput"
               }
+            },
+            "origin": {
+              "description": "Host-owned provenance for queued notifications; not editable user input.",
+              "anyOf": [
+                {
+                  "$ref": "#/definitions/HostMessageOrigin"
+                },
+                {
+                  "type": "null"
+                }
+              ]
             },
             "position": {
               "type": "integer",
@@ -48271,6 +49153,45 @@
             "canceled"
           ]
         },
+        "HostMessageDelivery": {
+          "type": "string",
+          "enum": [
+            "followUp",
+            "steer"
+          ]
+        },
+        "HostMessageOrigin": {
+          "type": "object",
+          "required": [
+            "delivery",
+            "eventId",
+            "sender",
+            "source"
+          ],
+          "properties": {
+            "delivery": {
+              "$ref": "#/definitions/HostMessageDelivery"
+            },
+            "eventId": {
+              "type": "string"
+            },
+            "sender": {
+              "description": "Host-resolved sender session or background task identity, never a claim extracted from the message body.",
+              "type": "string"
+            },
+            "source": {
+              "$ref": "#/definitions/HostMessageSource"
+            }
+          }
+        },
+        "HostMessageSource": {
+          "type": "string",
+          "enum": [
+            "agent",
+            "backgroundTask",
+            "schedule"
+          ]
+        },
         "ImageDetail": {
           "type": "string",
           "enum": [
@@ -48307,6 +49228,17 @@
                   "allOf": [
                     {
                       "$ref": "#/definitions/UserMessageEntry"
+                    }
+                  ]
+                },
+                "origin": {
+                  "description": "Host-owned provenance. Absent for human and legacy input; never a grant of authority.",
+                  "anyOf": [
+                    {
+                      "$ref": "#/definitions/HostMessageOrigin"
+                    },
+                    {
+                      "type": "null"
                     }
                   ]
                 },
@@ -49310,6 +50242,17 @@
               "items": {
                 "$ref": "#/definitions/UserInput"
               }
+            },
+            "origin": {
+              "description": "Host-owned provenance for queued notifications; not editable user input.",
+              "anyOf": [
+                {
+                  "$ref": "#/definitions/HostMessageOrigin"
+                },
+                {
+                  "type": "null"
+                }
+              ]
             },
             "position": {
               "type": "integer",
@@ -51354,6 +52297,45 @@
             "canceled"
           ]
         },
+        "HostMessageDelivery": {
+          "type": "string",
+          "enum": [
+            "followUp",
+            "steer"
+          ]
+        },
+        "HostMessageOrigin": {
+          "type": "object",
+          "required": [
+            "delivery",
+            "eventId",
+            "sender",
+            "source"
+          ],
+          "properties": {
+            "delivery": {
+              "$ref": "#/definitions/HostMessageDelivery"
+            },
+            "eventId": {
+              "type": "string"
+            },
+            "sender": {
+              "description": "Host-resolved sender session or background task identity, never a claim extracted from the message body.",
+              "type": "string"
+            },
+            "source": {
+              "$ref": "#/definitions/HostMessageSource"
+            }
+          }
+        },
+        "HostMessageSource": {
+          "type": "string",
+          "enum": [
+            "agent",
+            "backgroundTask",
+            "schedule"
+          ]
+        },
         "ImageDetail": {
           "type": "string",
           "enum": [
@@ -51390,6 +52372,17 @@
                   "allOf": [
                     {
                       "$ref": "#/definitions/UserMessageEntry"
+                    }
+                  ]
+                },
+                "origin": {
+                  "description": "Host-owned provenance. Absent for human and legacy input; never a grant of authority.",
+                  "anyOf": [
+                    {
+                      "$ref": "#/definitions/HostMessageOrigin"
+                    },
+                    {
+                      "type": "null"
                     }
                   ]
                 },
@@ -52393,6 +53386,17 @@
               "items": {
                 "$ref": "#/definitions/UserInput"
               }
+            },
+            "origin": {
+              "description": "Host-owned provenance for queued notifications; not editable user input.",
+              "anyOf": [
+                {
+                  "$ref": "#/definitions/HostMessageOrigin"
+                },
+                {
+                  "type": "null"
+                }
+              ]
             },
             "position": {
               "type": "integer",
@@ -54429,6 +55433,45 @@
             "canceled"
           ]
         },
+        "HostMessageDelivery": {
+          "type": "string",
+          "enum": [
+            "followUp",
+            "steer"
+          ]
+        },
+        "HostMessageOrigin": {
+          "type": "object",
+          "required": [
+            "delivery",
+            "eventId",
+            "sender",
+            "source"
+          ],
+          "properties": {
+            "delivery": {
+              "$ref": "#/definitions/HostMessageDelivery"
+            },
+            "eventId": {
+              "type": "string"
+            },
+            "sender": {
+              "description": "Host-resolved sender session or background task identity, never a claim extracted from the message body.",
+              "type": "string"
+            },
+            "source": {
+              "$ref": "#/definitions/HostMessageSource"
+            }
+          }
+        },
+        "HostMessageSource": {
+          "type": "string",
+          "enum": [
+            "agent",
+            "backgroundTask",
+            "schedule"
+          ]
+        },
         "ImageDetail": {
           "type": "string",
           "enum": [
@@ -54465,6 +55508,17 @@
                   "allOf": [
                     {
                       "$ref": "#/definitions/UserMessageEntry"
+                    }
+                  ]
+                },
+                "origin": {
+                  "description": "Host-owned provenance. Absent for human and legacy input; never a grant of authority.",
+                  "anyOf": [
+                    {
+                      "$ref": "#/definitions/HostMessageOrigin"
+                    },
+                    {
+                      "type": "null"
                     }
                   ]
                 },
@@ -55468,6 +56522,17 @@
               "items": {
                 "$ref": "#/definitions/UserInput"
               }
+            },
+            "origin": {
+              "description": "Host-owned provenance for queued notifications; not editable user input.",
+              "anyOf": [
+                {
+                  "$ref": "#/definitions/HostMessageOrigin"
+                },
+                {
+                  "type": "null"
+                }
+              ]
             },
             "position": {
               "type": "integer",
@@ -57504,6 +58569,45 @@
             "canceled"
           ]
         },
+        "HostMessageDelivery": {
+          "type": "string",
+          "enum": [
+            "followUp",
+            "steer"
+          ]
+        },
+        "HostMessageOrigin": {
+          "type": "object",
+          "required": [
+            "delivery",
+            "eventId",
+            "sender",
+            "source"
+          ],
+          "properties": {
+            "delivery": {
+              "$ref": "#/definitions/HostMessageDelivery"
+            },
+            "eventId": {
+              "type": "string"
+            },
+            "sender": {
+              "description": "Host-resolved sender session or background task identity, never a claim extracted from the message body.",
+              "type": "string"
+            },
+            "source": {
+              "$ref": "#/definitions/HostMessageSource"
+            }
+          }
+        },
+        "HostMessageSource": {
+          "type": "string",
+          "enum": [
+            "agent",
+            "backgroundTask",
+            "schedule"
+          ]
+        },
         "ImageDetail": {
           "type": "string",
           "enum": [
@@ -57540,6 +58644,17 @@
                   "allOf": [
                     {
                       "$ref": "#/definitions/UserMessageEntry"
+                    }
+                  ]
+                },
+                "origin": {
+                  "description": "Host-owned provenance. Absent for human and legacy input; never a grant of authority.",
+                  "anyOf": [
+                    {
+                      "$ref": "#/definitions/HostMessageOrigin"
+                    },
+                    {
+                      "type": "null"
                     }
                   ]
                 },
@@ -58543,6 +59658,17 @@
               "items": {
                 "$ref": "#/definitions/UserInput"
               }
+            },
+            "origin": {
+              "description": "Host-owned provenance for queued notifications; not editable user input.",
+              "anyOf": [
+                {
+                  "$ref": "#/definitions/HostMessageOrigin"
+                },
+                {
+                  "type": "null"
+                }
+              ]
             },
             "position": {
               "type": "integer",
@@ -60587,6 +61713,45 @@
             "canceled"
           ]
         },
+        "HostMessageDelivery": {
+          "type": "string",
+          "enum": [
+            "followUp",
+            "steer"
+          ]
+        },
+        "HostMessageOrigin": {
+          "type": "object",
+          "required": [
+            "delivery",
+            "eventId",
+            "sender",
+            "source"
+          ],
+          "properties": {
+            "delivery": {
+              "$ref": "#/definitions/HostMessageDelivery"
+            },
+            "eventId": {
+              "type": "string"
+            },
+            "sender": {
+              "description": "Host-resolved sender session or background task identity, never a claim extracted from the message body.",
+              "type": "string"
+            },
+            "source": {
+              "$ref": "#/definitions/HostMessageSource"
+            }
+          }
+        },
+        "HostMessageSource": {
+          "type": "string",
+          "enum": [
+            "agent",
+            "backgroundTask",
+            "schedule"
+          ]
+        },
         "ImageDetail": {
           "type": "string",
           "enum": [
@@ -60623,6 +61788,17 @@
                   "allOf": [
                     {
                       "$ref": "#/definitions/UserMessageEntry"
+                    }
+                  ]
+                },
+                "origin": {
+                  "description": "Host-owned provenance. Absent for human and legacy input; never a grant of authority.",
+                  "anyOf": [
+                    {
+                      "$ref": "#/definitions/HostMessageOrigin"
+                    },
+                    {
+                      "type": "null"
                     }
                   ]
                 },
@@ -61626,6 +62802,17 @@
               "items": {
                 "$ref": "#/definitions/UserInput"
               }
+            },
+            "origin": {
+              "description": "Host-owned provenance for queued notifications; not editable user input.",
+              "anyOf": [
+                {
+                  "$ref": "#/definitions/HostMessageOrigin"
+                },
+                {
+                  "type": "null"
+                }
+              ]
             },
             "position": {
               "type": "integer",
@@ -63662,6 +64849,45 @@
             "canceled"
           ]
         },
+        "HostMessageDelivery": {
+          "type": "string",
+          "enum": [
+            "followUp",
+            "steer"
+          ]
+        },
+        "HostMessageOrigin": {
+          "type": "object",
+          "required": [
+            "delivery",
+            "eventId",
+            "sender",
+            "source"
+          ],
+          "properties": {
+            "delivery": {
+              "$ref": "#/definitions/HostMessageDelivery"
+            },
+            "eventId": {
+              "type": "string"
+            },
+            "sender": {
+              "description": "Host-resolved sender session or background task identity, never a claim extracted from the message body.",
+              "type": "string"
+            },
+            "source": {
+              "$ref": "#/definitions/HostMessageSource"
+            }
+          }
+        },
+        "HostMessageSource": {
+          "type": "string",
+          "enum": [
+            "agent",
+            "backgroundTask",
+            "schedule"
+          ]
+        },
         "ImageDetail": {
           "type": "string",
           "enum": [
@@ -63698,6 +64924,17 @@
                   "allOf": [
                     {
                       "$ref": "#/definitions/UserMessageEntry"
+                    }
+                  ]
+                },
+                "origin": {
+                  "description": "Host-owned provenance. Absent for human and legacy input; never a grant of authority.",
+                  "anyOf": [
+                    {
+                      "$ref": "#/definitions/HostMessageOrigin"
+                    },
+                    {
+                      "type": "null"
                     }
                   ]
                 },
@@ -64701,6 +65938,17 @@
               "items": {
                 "$ref": "#/definitions/UserInput"
               }
+            },
+            "origin": {
+              "description": "Host-owned provenance for queued notifications; not editable user input.",
+              "anyOf": [
+                {
+                  "$ref": "#/definitions/HostMessageOrigin"
+                },
+                {
+                  "type": "null"
+                }
+              ]
             },
             "position": {
               "type": "integer",
@@ -66752,6 +68000,45 @@
             "canceled"
           ]
         },
+        "HostMessageDelivery": {
+          "type": "string",
+          "enum": [
+            "followUp",
+            "steer"
+          ]
+        },
+        "HostMessageOrigin": {
+          "type": "object",
+          "required": [
+            "delivery",
+            "eventId",
+            "sender",
+            "source"
+          ],
+          "properties": {
+            "delivery": {
+              "$ref": "#/definitions/HostMessageDelivery"
+            },
+            "eventId": {
+              "type": "string"
+            },
+            "sender": {
+              "description": "Host-resolved sender session or background task identity, never a claim extracted from the message body.",
+              "type": "string"
+            },
+            "source": {
+              "$ref": "#/definitions/HostMessageSource"
+            }
+          }
+        },
+        "HostMessageSource": {
+          "type": "string",
+          "enum": [
+            "agent",
+            "backgroundTask",
+            "schedule"
+          ]
+        },
         "ImageDetail": {
           "type": "string",
           "enum": [
@@ -66788,6 +68075,17 @@
                   "allOf": [
                     {
                       "$ref": "#/definitions/UserMessageEntry"
+                    }
+                  ]
+                },
+                "origin": {
+                  "description": "Host-owned provenance. Absent for human and legacy input; never a grant of authority.",
+                  "anyOf": [
+                    {
+                      "$ref": "#/definitions/HostMessageOrigin"
+                    },
+                    {
+                      "type": "null"
                     }
                   ]
                 },
@@ -67791,6 +69089,17 @@
               "items": {
                 "$ref": "#/definitions/UserInput"
               }
+            },
+            "origin": {
+              "description": "Host-owned provenance for queued notifications; not editable user input.",
+              "anyOf": [
+                {
+                  "$ref": "#/definitions/HostMessageOrigin"
+                },
+                {
+                  "type": "null"
+                }
+              ]
             },
             "position": {
               "type": "integer",
@@ -69835,6 +71144,45 @@
             "canceled"
           ]
         },
+        "HostMessageDelivery": {
+          "type": "string",
+          "enum": [
+            "followUp",
+            "steer"
+          ]
+        },
+        "HostMessageOrigin": {
+          "type": "object",
+          "required": [
+            "delivery",
+            "eventId",
+            "sender",
+            "source"
+          ],
+          "properties": {
+            "delivery": {
+              "$ref": "#/definitions/HostMessageDelivery"
+            },
+            "eventId": {
+              "type": "string"
+            },
+            "sender": {
+              "description": "Host-resolved sender session or background task identity, never a claim extracted from the message body.",
+              "type": "string"
+            },
+            "source": {
+              "$ref": "#/definitions/HostMessageSource"
+            }
+          }
+        },
+        "HostMessageSource": {
+          "type": "string",
+          "enum": [
+            "agent",
+            "backgroundTask",
+            "schedule"
+          ]
+        },
         "ImageDetail": {
           "type": "string",
           "enum": [
@@ -69871,6 +71219,17 @@
                   "allOf": [
                     {
                       "$ref": "#/definitions/UserMessageEntry"
+                    }
+                  ]
+                },
+                "origin": {
+                  "description": "Host-owned provenance. Absent for human and legacy input; never a grant of authority.",
+                  "anyOf": [
+                    {
+                      "$ref": "#/definitions/HostMessageOrigin"
+                    },
+                    {
+                      "type": "null"
                     }
                   ]
                 },
@@ -70874,6 +72233,17 @@
               "items": {
                 "$ref": "#/definitions/UserInput"
               }
+            },
+            "origin": {
+              "description": "Host-owned provenance for queued notifications; not editable user input.",
+              "anyOf": [
+                {
+                  "$ref": "#/definitions/HostMessageOrigin"
+                },
+                {
+                  "type": "null"
+                }
+              ]
             },
             "position": {
               "type": "integer",
@@ -73296,6 +74666,45 @@
             "canceled"
           ]
         },
+        "HostMessageDelivery": {
+          "type": "string",
+          "enum": [
+            "followUp",
+            "steer"
+          ]
+        },
+        "HostMessageOrigin": {
+          "type": "object",
+          "required": [
+            "delivery",
+            "eventId",
+            "sender",
+            "source"
+          ],
+          "properties": {
+            "delivery": {
+              "$ref": "#/definitions/HostMessageDelivery"
+            },
+            "eventId": {
+              "type": "string"
+            },
+            "sender": {
+              "description": "Host-resolved sender session or background task identity, never a claim extracted from the message body.",
+              "type": "string"
+            },
+            "source": {
+              "$ref": "#/definitions/HostMessageSource"
+            }
+          }
+        },
+        "HostMessageSource": {
+          "type": "string",
+          "enum": [
+            "agent",
+            "backgroundTask",
+            "schedule"
+          ]
+        },
         "ImageDetail": {
           "type": "string",
           "enum": [
@@ -73332,6 +74741,17 @@
                   "allOf": [
                     {
                       "$ref": "#/definitions/UserMessageEntry"
+                    }
+                  ]
+                },
+                "origin": {
+                  "description": "Host-owned provenance. Absent for human and legacy input; never a grant of authority.",
+                  "anyOf": [
+                    {
+                      "$ref": "#/definitions/HostMessageOrigin"
+                    },
+                    {
+                      "type": "null"
                     }
                   ]
                 },
@@ -74335,6 +75755,17 @@
               "items": {
                 "$ref": "#/definitions/UserInput"
               }
+            },
+            "origin": {
+              "description": "Host-owned provenance for queued notifications; not editable user input.",
+              "anyOf": [
+                {
+                  "$ref": "#/definitions/HostMessageOrigin"
+                },
+                {
+                  "type": "null"
+                }
+              ]
             },
             "position": {
               "type": "integer",
@@ -77252,6 +78683,45 @@
             "canceled"
           ]
         },
+        "HostMessageDelivery": {
+          "type": "string",
+          "enum": [
+            "followUp",
+            "steer"
+          ]
+        },
+        "HostMessageOrigin": {
+          "type": "object",
+          "required": [
+            "delivery",
+            "eventId",
+            "sender",
+            "source"
+          ],
+          "properties": {
+            "delivery": {
+              "$ref": "#/definitions/HostMessageDelivery"
+            },
+            "eventId": {
+              "type": "string"
+            },
+            "sender": {
+              "description": "Host-resolved sender session or background task identity, never a claim extracted from the message body.",
+              "type": "string"
+            },
+            "source": {
+              "$ref": "#/definitions/HostMessageSource"
+            }
+          }
+        },
+        "HostMessageSource": {
+          "type": "string",
+          "enum": [
+            "agent",
+            "backgroundTask",
+            "schedule"
+          ]
+        },
         "ImageDetail": {
           "type": "string",
           "enum": [
@@ -77288,6 +78758,17 @@
                   "allOf": [
                     {
                       "$ref": "#/definitions/UserMessageEntry"
+                    }
+                  ]
+                },
+                "origin": {
+                  "description": "Host-owned provenance. Absent for human and legacy input; never a grant of authority.",
+                  "anyOf": [
+                    {
+                      "$ref": "#/definitions/HostMessageOrigin"
+                    },
+                    {
+                      "type": "null"
                     }
                   ]
                 },
@@ -78291,6 +79772,17 @@
               "items": {
                 "$ref": "#/definitions/UserInput"
               }
+            },
+            "origin": {
+              "description": "Host-owned provenance for queued notifications; not editable user input.",
+              "anyOf": [
+                {
+                  "$ref": "#/definitions/HostMessageOrigin"
+                },
+                {
+                  "type": "null"
+                }
+              ]
             },
             "position": {
               "type": "integer",
@@ -80384,6 +81876,45 @@
             "canceled"
           ]
         },
+        "HostMessageDelivery": {
+          "type": "string",
+          "enum": [
+            "followUp",
+            "steer"
+          ]
+        },
+        "HostMessageOrigin": {
+          "type": "object",
+          "required": [
+            "delivery",
+            "eventId",
+            "sender",
+            "source"
+          ],
+          "properties": {
+            "delivery": {
+              "$ref": "#/definitions/HostMessageDelivery"
+            },
+            "eventId": {
+              "type": "string"
+            },
+            "sender": {
+              "description": "Host-resolved sender session or background task identity, never a claim extracted from the message body.",
+              "type": "string"
+            },
+            "source": {
+              "$ref": "#/definitions/HostMessageSource"
+            }
+          }
+        },
+        "HostMessageSource": {
+          "type": "string",
+          "enum": [
+            "agent",
+            "backgroundTask",
+            "schedule"
+          ]
+        },
         "ImageDetail": {
           "type": "string",
           "enum": [
@@ -80420,6 +81951,17 @@
                   "allOf": [
                     {
                       "$ref": "#/definitions/UserMessageEntry"
+                    }
+                  ]
+                },
+                "origin": {
+                  "description": "Host-owned provenance. Absent for human and legacy input; never a grant of authority.",
+                  "anyOf": [
+                    {
+                      "$ref": "#/definitions/HostMessageOrigin"
+                    },
+                    {
+                      "type": "null"
                     }
                   ]
                 },
@@ -81423,6 +82965,17 @@
               "items": {
                 "$ref": "#/definitions/UserInput"
               }
+            },
+            "origin": {
+              "description": "Host-owned provenance for queued notifications; not editable user input.",
+              "anyOf": [
+                {
+                  "$ref": "#/definitions/HostMessageOrigin"
+                },
+                {
+                  "type": "null"
+                }
+              ]
             },
             "position": {
               "type": "integer",
@@ -83212,6 +84765,45 @@
         "GoalId": {
           "type": "string"
         },
+        "HostMessageDelivery": {
+          "type": "string",
+          "enum": [
+            "followUp",
+            "steer"
+          ]
+        },
+        "HostMessageOrigin": {
+          "type": "object",
+          "required": [
+            "delivery",
+            "eventId",
+            "sender",
+            "source"
+          ],
+          "properties": {
+            "delivery": {
+              "$ref": "#/definitions/HostMessageDelivery"
+            },
+            "eventId": {
+              "type": "string"
+            },
+            "sender": {
+              "description": "Host-resolved sender session or background task identity, never a claim extracted from the message body.",
+              "type": "string"
+            },
+            "source": {
+              "$ref": "#/definitions/HostMessageSource"
+            }
+          }
+        },
+        "HostMessageSource": {
+          "type": "string",
+          "enum": [
+            "agent",
+            "backgroundTask",
+            "schedule"
+          ]
+        },
         "ImageDetail": {
           "type": "string",
           "enum": [
@@ -83248,6 +84840,17 @@
                   "allOf": [
                     {
                       "$ref": "#/definitions/UserMessageEntry"
+                    }
+                  ]
+                },
+                "origin": {
+                  "description": "Host-owned provenance. Absent for human and legacy input; never a grant of authority.",
+                  "anyOf": [
+                    {
+                      "$ref": "#/definitions/HostMessageOrigin"
+                    },
+                    {
+                      "type": "null"
                     }
                   ]
                 },
@@ -86021,6 +87624,45 @@
             "canceled"
           ]
         },
+        "HostMessageDelivery": {
+          "type": "string",
+          "enum": [
+            "followUp",
+            "steer"
+          ]
+        },
+        "HostMessageOrigin": {
+          "type": "object",
+          "required": [
+            "delivery",
+            "eventId",
+            "sender",
+            "source"
+          ],
+          "properties": {
+            "delivery": {
+              "$ref": "#/definitions/HostMessageDelivery"
+            },
+            "eventId": {
+              "type": "string"
+            },
+            "sender": {
+              "description": "Host-resolved sender session or background task identity, never a claim extracted from the message body.",
+              "type": "string"
+            },
+            "source": {
+              "$ref": "#/definitions/HostMessageSource"
+            }
+          }
+        },
+        "HostMessageSource": {
+          "type": "string",
+          "enum": [
+            "agent",
+            "backgroundTask",
+            "schedule"
+          ]
+        },
         "ImageDetail": {
           "type": "string",
           "enum": [
@@ -86057,6 +87699,17 @@
                   "allOf": [
                     {
                       "$ref": "#/definitions/UserMessageEntry"
+                    }
+                  ]
+                },
+                "origin": {
+                  "description": "Host-owned provenance. Absent for human and legacy input; never a grant of authority.",
+                  "anyOf": [
+                    {
+                      "$ref": "#/definitions/HostMessageOrigin"
+                    },
+                    {
+                      "type": "null"
                     }
                   ]
                 },
@@ -87060,6 +88713,17 @@
               "items": {
                 "$ref": "#/definitions/UserInput"
               }
+            },
+            "origin": {
+              "description": "Host-owned provenance for queued notifications; not editable user input.",
+              "anyOf": [
+                {
+                  "$ref": "#/definitions/HostMessageOrigin"
+                },
+                {
+                  "type": "null"
+                }
+              ]
             },
             "position": {
               "type": "integer",
@@ -89110,6 +90774,45 @@
             "canceled"
           ]
         },
+        "HostMessageDelivery": {
+          "type": "string",
+          "enum": [
+            "followUp",
+            "steer"
+          ]
+        },
+        "HostMessageOrigin": {
+          "type": "object",
+          "required": [
+            "delivery",
+            "eventId",
+            "sender",
+            "source"
+          ],
+          "properties": {
+            "delivery": {
+              "$ref": "#/definitions/HostMessageDelivery"
+            },
+            "eventId": {
+              "type": "string"
+            },
+            "sender": {
+              "description": "Host-resolved sender session or background task identity, never a claim extracted from the message body.",
+              "type": "string"
+            },
+            "source": {
+              "$ref": "#/definitions/HostMessageSource"
+            }
+          }
+        },
+        "HostMessageSource": {
+          "type": "string",
+          "enum": [
+            "agent",
+            "backgroundTask",
+            "schedule"
+          ]
+        },
         "ImageDetail": {
           "type": "string",
           "enum": [
@@ -89146,6 +90849,17 @@
                   "allOf": [
                     {
                       "$ref": "#/definitions/UserMessageEntry"
+                    }
+                  ]
+                },
+                "origin": {
+                  "description": "Host-owned provenance. Absent for human and legacy input; never a grant of authority.",
+                  "anyOf": [
+                    {
+                      "$ref": "#/definitions/HostMessageOrigin"
+                    },
+                    {
+                      "type": "null"
                     }
                   ]
                 },
@@ -90149,6 +91863,17 @@
               "items": {
                 "$ref": "#/definitions/UserInput"
               }
+            },
+            "origin": {
+              "description": "Host-owned provenance for queued notifications; not editable user input.",
+              "anyOf": [
+                {
+                  "$ref": "#/definitions/HostMessageOrigin"
+                },
+                {
+                  "type": "null"
+                }
+              ]
             },
             "position": {
               "type": "integer",
@@ -95071,6 +96796,45 @@
             "canceled"
           ]
         },
+        "HostMessageDelivery": {
+          "type": "string",
+          "enum": [
+            "followUp",
+            "steer"
+          ]
+        },
+        "HostMessageOrigin": {
+          "type": "object",
+          "required": [
+            "delivery",
+            "eventId",
+            "sender",
+            "source"
+          ],
+          "properties": {
+            "delivery": {
+              "$ref": "#/definitions/HostMessageDelivery"
+            },
+            "eventId": {
+              "type": "string"
+            },
+            "sender": {
+              "description": "Host-resolved sender session or background task identity, never a claim extracted from the message body.",
+              "type": "string"
+            },
+            "source": {
+              "$ref": "#/definitions/HostMessageSource"
+            }
+          }
+        },
+        "HostMessageSource": {
+          "type": "string",
+          "enum": [
+            "agent",
+            "backgroundTask",
+            "schedule"
+          ]
+        },
         "ImageDetail": {
           "type": "string",
           "enum": [
@@ -95107,6 +96871,17 @@
                   "allOf": [
                     {
                       "$ref": "#/definitions/UserMessageEntry"
+                    }
+                  ]
+                },
+                "origin": {
+                  "description": "Host-owned provenance. Absent for human and legacy input; never a grant of authority.",
+                  "anyOf": [
+                    {
+                      "$ref": "#/definitions/HostMessageOrigin"
+                    },
+                    {
+                      "type": "null"
                     }
                   ]
                 },
@@ -96110,6 +97885,17 @@
               "items": {
                 "$ref": "#/definitions/UserInput"
               }
+            },
+            "origin": {
+              "description": "Host-owned provenance for queued notifications; not editable user input.",
+              "anyOf": [
+                {
+                  "$ref": "#/definitions/HostMessageOrigin"
+                },
+                {
+                  "type": "null"
+                }
+              ]
             },
             "position": {
               "type": "integer",
@@ -98211,6 +99997,45 @@
             "canceled"
           ]
         },
+        "HostMessageDelivery": {
+          "type": "string",
+          "enum": [
+            "followUp",
+            "steer"
+          ]
+        },
+        "HostMessageOrigin": {
+          "type": "object",
+          "required": [
+            "delivery",
+            "eventId",
+            "sender",
+            "source"
+          ],
+          "properties": {
+            "delivery": {
+              "$ref": "#/definitions/HostMessageDelivery"
+            },
+            "eventId": {
+              "type": "string"
+            },
+            "sender": {
+              "description": "Host-resolved sender session or background task identity, never a claim extracted from the message body.",
+              "type": "string"
+            },
+            "source": {
+              "$ref": "#/definitions/HostMessageSource"
+            }
+          }
+        },
+        "HostMessageSource": {
+          "type": "string",
+          "enum": [
+            "agent",
+            "backgroundTask",
+            "schedule"
+          ]
+        },
         "ImageDetail": {
           "type": "string",
           "enum": [
@@ -98247,6 +100072,17 @@
                   "allOf": [
                     {
                       "$ref": "#/definitions/UserMessageEntry"
+                    }
+                  ]
+                },
+                "origin": {
+                  "description": "Host-owned provenance. Absent for human and legacy input; never a grant of authority.",
+                  "anyOf": [
+                    {
+                      "$ref": "#/definitions/HostMessageOrigin"
+                    },
+                    {
+                      "type": "null"
                     }
                   ]
                 },
@@ -99250,6 +101086,17 @@
               "items": {
                 "$ref": "#/definitions/UserInput"
               }
+            },
+            "origin": {
+              "description": "Host-owned provenance for queued notifications; not editable user input.",
+              "anyOf": [
+                {
+                  "$ref": "#/definitions/HostMessageOrigin"
+                },
+                {
+                  "type": "null"
+                }
+              ]
             },
             "position": {
               "type": "integer",
@@ -101302,6 +103149,45 @@
             "canceled"
           ]
         },
+        "HostMessageDelivery": {
+          "type": "string",
+          "enum": [
+            "followUp",
+            "steer"
+          ]
+        },
+        "HostMessageOrigin": {
+          "type": "object",
+          "required": [
+            "delivery",
+            "eventId",
+            "sender",
+            "source"
+          ],
+          "properties": {
+            "delivery": {
+              "$ref": "#/definitions/HostMessageDelivery"
+            },
+            "eventId": {
+              "type": "string"
+            },
+            "sender": {
+              "description": "Host-resolved sender session or background task identity, never a claim extracted from the message body.",
+              "type": "string"
+            },
+            "source": {
+              "$ref": "#/definitions/HostMessageSource"
+            }
+          }
+        },
+        "HostMessageSource": {
+          "type": "string",
+          "enum": [
+            "agent",
+            "backgroundTask",
+            "schedule"
+          ]
+        },
         "ImageDetail": {
           "type": "string",
           "enum": [
@@ -101338,6 +103224,17 @@
                   "allOf": [
                     {
                       "$ref": "#/definitions/UserMessageEntry"
+                    }
+                  ]
+                },
+                "origin": {
+                  "description": "Host-owned provenance. Absent for human and legacy input; never a grant of authority.",
+                  "anyOf": [
+                    {
+                      "$ref": "#/definitions/HostMessageOrigin"
+                    },
+                    {
+                      "type": "null"
                     }
                   ]
                 },
@@ -102341,6 +104238,17 @@
               "items": {
                 "$ref": "#/definitions/UserInput"
               }
+            },
+            "origin": {
+              "description": "Host-owned provenance for queued notifications; not editable user input.",
+              "anyOf": [
+                {
+                  "$ref": "#/definitions/HostMessageOrigin"
+                },
+                {
+                  "type": "null"
+                }
+              ]
             },
             "position": {
               "type": "integer",
@@ -104396,6 +106304,45 @@
             "canceled"
           ]
         },
+        "HostMessageDelivery": {
+          "type": "string",
+          "enum": [
+            "followUp",
+            "steer"
+          ]
+        },
+        "HostMessageOrigin": {
+          "type": "object",
+          "required": [
+            "delivery",
+            "eventId",
+            "sender",
+            "source"
+          ],
+          "properties": {
+            "delivery": {
+              "$ref": "#/definitions/HostMessageDelivery"
+            },
+            "eventId": {
+              "type": "string"
+            },
+            "sender": {
+              "description": "Host-resolved sender session or background task identity, never a claim extracted from the message body.",
+              "type": "string"
+            },
+            "source": {
+              "$ref": "#/definitions/HostMessageSource"
+            }
+          }
+        },
+        "HostMessageSource": {
+          "type": "string",
+          "enum": [
+            "agent",
+            "backgroundTask",
+            "schedule"
+          ]
+        },
         "ImageDetail": {
           "type": "string",
           "enum": [
@@ -104432,6 +106379,17 @@
                   "allOf": [
                     {
                       "$ref": "#/definitions/UserMessageEntry"
+                    }
+                  ]
+                },
+                "origin": {
+                  "description": "Host-owned provenance. Absent for human and legacy input; never a grant of authority.",
+                  "anyOf": [
+                    {
+                      "$ref": "#/definitions/HostMessageOrigin"
+                    },
+                    {
+                      "type": "null"
                     }
                   ]
                 },
@@ -105435,6 +107393,17 @@
               "items": {
                 "$ref": "#/definitions/UserInput"
               }
+            },
+            "origin": {
+              "description": "Host-owned provenance for queued notifications; not editable user input.",
+              "anyOf": [
+                {
+                  "$ref": "#/definitions/HostMessageOrigin"
+                },
+                {
+                  "type": "null"
+                }
+              ]
             },
             "position": {
               "type": "integer",
@@ -107471,6 +109440,45 @@
             "canceled"
           ]
         },
+        "HostMessageDelivery": {
+          "type": "string",
+          "enum": [
+            "followUp",
+            "steer"
+          ]
+        },
+        "HostMessageOrigin": {
+          "type": "object",
+          "required": [
+            "delivery",
+            "eventId",
+            "sender",
+            "source"
+          ],
+          "properties": {
+            "delivery": {
+              "$ref": "#/definitions/HostMessageDelivery"
+            },
+            "eventId": {
+              "type": "string"
+            },
+            "sender": {
+              "description": "Host-resolved sender session or background task identity, never a claim extracted from the message body.",
+              "type": "string"
+            },
+            "source": {
+              "$ref": "#/definitions/HostMessageSource"
+            }
+          }
+        },
+        "HostMessageSource": {
+          "type": "string",
+          "enum": [
+            "agent",
+            "backgroundTask",
+            "schedule"
+          ]
+        },
         "ImageDetail": {
           "type": "string",
           "enum": [
@@ -107507,6 +109515,17 @@
                   "allOf": [
                     {
                       "$ref": "#/definitions/UserMessageEntry"
+                    }
+                  ]
+                },
+                "origin": {
+                  "description": "Host-owned provenance. Absent for human and legacy input; never a grant of authority.",
+                  "anyOf": [
+                    {
+                      "$ref": "#/definitions/HostMessageOrigin"
+                    },
+                    {
+                      "type": "null"
                     }
                   ]
                 },
@@ -108510,6 +110529,17 @@
               "items": {
                 "$ref": "#/definitions/UserInput"
               }
+            },
+            "origin": {
+              "description": "Host-owned provenance for queued notifications; not editable user input.",
+              "anyOf": [
+                {
+                  "$ref": "#/definitions/HostMessageOrigin"
+                },
+                {
+                  "type": "null"
+                }
+              ]
             },
             "position": {
               "type": "integer",
@@ -111034,6 +113064,45 @@
             "canceled"
           ]
         },
+        "HostMessageDelivery": {
+          "type": "string",
+          "enum": [
+            "followUp",
+            "steer"
+          ]
+        },
+        "HostMessageOrigin": {
+          "type": "object",
+          "required": [
+            "delivery",
+            "eventId",
+            "sender",
+            "source"
+          ],
+          "properties": {
+            "delivery": {
+              "$ref": "#/definitions/HostMessageDelivery"
+            },
+            "eventId": {
+              "type": "string"
+            },
+            "sender": {
+              "description": "Host-resolved sender session or background task identity, never a claim extracted from the message body.",
+              "type": "string"
+            },
+            "source": {
+              "$ref": "#/definitions/HostMessageSource"
+            }
+          }
+        },
+        "HostMessageSource": {
+          "type": "string",
+          "enum": [
+            "agent",
+            "backgroundTask",
+            "schedule"
+          ]
+        },
         "ImageDetail": {
           "type": "string",
           "enum": [
@@ -111070,6 +113139,17 @@
                   "allOf": [
                     {
                       "$ref": "#/definitions/UserMessageEntry"
+                    }
+                  ]
+                },
+                "origin": {
+                  "description": "Host-owned provenance. Absent for human and legacy input; never a grant of authority.",
+                  "anyOf": [
+                    {
+                      "$ref": "#/definitions/HostMessageOrigin"
+                    },
+                    {
+                      "type": "null"
                     }
                   ]
                 },
@@ -112073,6 +114153,17 @@
               "items": {
                 "$ref": "#/definitions/UserInput"
               }
+            },
+            "origin": {
+              "description": "Host-owned provenance for queued notifications; not editable user input.",
+              "anyOf": [
+                {
+                  "$ref": "#/definitions/HostMessageOrigin"
+                },
+                {
+                  "type": "null"
+                }
+              ]
             },
             "position": {
               "type": "integer",
@@ -114121,6 +116212,45 @@
             "canceled"
           ]
         },
+        "HostMessageDelivery": {
+          "type": "string",
+          "enum": [
+            "followUp",
+            "steer"
+          ]
+        },
+        "HostMessageOrigin": {
+          "type": "object",
+          "required": [
+            "delivery",
+            "eventId",
+            "sender",
+            "source"
+          ],
+          "properties": {
+            "delivery": {
+              "$ref": "#/definitions/HostMessageDelivery"
+            },
+            "eventId": {
+              "type": "string"
+            },
+            "sender": {
+              "description": "Host-resolved sender session or background task identity, never a claim extracted from the message body.",
+              "type": "string"
+            },
+            "source": {
+              "$ref": "#/definitions/HostMessageSource"
+            }
+          }
+        },
+        "HostMessageSource": {
+          "type": "string",
+          "enum": [
+            "agent",
+            "backgroundTask",
+            "schedule"
+          ]
+        },
         "ImageDetail": {
           "type": "string",
           "enum": [
@@ -114157,6 +116287,17 @@
                   "allOf": [
                     {
                       "$ref": "#/definitions/UserMessageEntry"
+                    }
+                  ]
+                },
+                "origin": {
+                  "description": "Host-owned provenance. Absent for human and legacy input; never a grant of authority.",
+                  "anyOf": [
+                    {
+                      "$ref": "#/definitions/HostMessageOrigin"
+                    },
+                    {
+                      "type": "null"
                     }
                   ]
                 },
@@ -115160,6 +117301,17 @@
               "items": {
                 "$ref": "#/definitions/UserInput"
               }
+            },
+            "origin": {
+              "description": "Host-owned provenance for queued notifications; not editable user input.",
+              "anyOf": [
+                {
+                  "$ref": "#/definitions/HostMessageOrigin"
+                },
+                {
+                  "type": "null"
+                }
+              ]
             },
             "position": {
               "type": "integer",
@@ -117218,6 +119370,45 @@
             "canceled"
           ]
         },
+        "HostMessageDelivery": {
+          "type": "string",
+          "enum": [
+            "followUp",
+            "steer"
+          ]
+        },
+        "HostMessageOrigin": {
+          "type": "object",
+          "required": [
+            "delivery",
+            "eventId",
+            "sender",
+            "source"
+          ],
+          "properties": {
+            "delivery": {
+              "$ref": "#/definitions/HostMessageDelivery"
+            },
+            "eventId": {
+              "type": "string"
+            },
+            "sender": {
+              "description": "Host-resolved sender session or background task identity, never a claim extracted from the message body.",
+              "type": "string"
+            },
+            "source": {
+              "$ref": "#/definitions/HostMessageSource"
+            }
+          }
+        },
+        "HostMessageSource": {
+          "type": "string",
+          "enum": [
+            "agent",
+            "backgroundTask",
+            "schedule"
+          ]
+        },
         "ImageDetail": {
           "type": "string",
           "enum": [
@@ -117254,6 +119445,17 @@
                   "allOf": [
                     {
                       "$ref": "#/definitions/UserMessageEntry"
+                    }
+                  ]
+                },
+                "origin": {
+                  "description": "Host-owned provenance. Absent for human and legacy input; never a grant of authority.",
+                  "anyOf": [
+                    {
+                      "$ref": "#/definitions/HostMessageOrigin"
+                    },
+                    {
+                      "type": "null"
                     }
                   ]
                 },
@@ -118257,6 +120459,17 @@
               "items": {
                 "$ref": "#/definitions/UserInput"
               }
+            },
+            "origin": {
+              "description": "Host-owned provenance for queued notifications; not editable user input.",
+              "anyOf": [
+                {
+                  "$ref": "#/definitions/HostMessageOrigin"
+                },
+                {
+                  "type": "null"
+                }
+              ]
             },
             "position": {
               "type": "integer",
@@ -121080,6 +123293,45 @@
             "canceled"
           ]
         },
+        "HostMessageDelivery": {
+          "type": "string",
+          "enum": [
+            "followUp",
+            "steer"
+          ]
+        },
+        "HostMessageOrigin": {
+          "type": "object",
+          "required": [
+            "delivery",
+            "eventId",
+            "sender",
+            "source"
+          ],
+          "properties": {
+            "delivery": {
+              "$ref": "#/definitions/HostMessageDelivery"
+            },
+            "eventId": {
+              "type": "string"
+            },
+            "sender": {
+              "description": "Host-resolved sender session or background task identity, never a claim extracted from the message body.",
+              "type": "string"
+            },
+            "source": {
+              "$ref": "#/definitions/HostMessageSource"
+            }
+          }
+        },
+        "HostMessageSource": {
+          "type": "string",
+          "enum": [
+            "agent",
+            "backgroundTask",
+            "schedule"
+          ]
+        },
         "ImageDetail": {
           "type": "string",
           "enum": [
@@ -121116,6 +123368,17 @@
                   "allOf": [
                     {
                       "$ref": "#/definitions/UserMessageEntry"
+                    }
+                  ]
+                },
+                "origin": {
+                  "description": "Host-owned provenance. Absent for human and legacy input; never a grant of authority.",
+                  "anyOf": [
+                    {
+                      "$ref": "#/definitions/HostMessageOrigin"
+                    },
+                    {
+                      "type": "null"
                     }
                   ]
                 },
@@ -122119,6 +124382,17 @@
               "items": {
                 "$ref": "#/definitions/UserInput"
               }
+            },
+            "origin": {
+              "description": "Host-owned provenance for queued notifications; not editable user input.",
+              "anyOf": [
+                {
+                  "$ref": "#/definitions/HostMessageOrigin"
+                },
+                {
+                  "type": "null"
+                }
+              ]
             },
             "position": {
               "type": "integer",
@@ -124163,6 +126437,45 @@
             "canceled"
           ]
         },
+        "HostMessageDelivery": {
+          "type": "string",
+          "enum": [
+            "followUp",
+            "steer"
+          ]
+        },
+        "HostMessageOrigin": {
+          "type": "object",
+          "required": [
+            "delivery",
+            "eventId",
+            "sender",
+            "source"
+          ],
+          "properties": {
+            "delivery": {
+              "$ref": "#/definitions/HostMessageDelivery"
+            },
+            "eventId": {
+              "type": "string"
+            },
+            "sender": {
+              "description": "Host-resolved sender session or background task identity, never a claim extracted from the message body.",
+              "type": "string"
+            },
+            "source": {
+              "$ref": "#/definitions/HostMessageSource"
+            }
+          }
+        },
+        "HostMessageSource": {
+          "type": "string",
+          "enum": [
+            "agent",
+            "backgroundTask",
+            "schedule"
+          ]
+        },
         "ImageDetail": {
           "type": "string",
           "enum": [
@@ -124199,6 +126512,17 @@
                   "allOf": [
                     {
                       "$ref": "#/definitions/UserMessageEntry"
+                    }
+                  ]
+                },
+                "origin": {
+                  "description": "Host-owned provenance. Absent for human and legacy input; never a grant of authority.",
+                  "anyOf": [
+                    {
+                      "$ref": "#/definitions/HostMessageOrigin"
+                    },
+                    {
+                      "type": "null"
                     }
                   ]
                 },
@@ -125202,6 +127526,17 @@
               "items": {
                 "$ref": "#/definitions/UserInput"
               }
+            },
+            "origin": {
+              "description": "Host-owned provenance for queued notifications; not editable user input.",
+              "anyOf": [
+                {
+                  "$ref": "#/definitions/HostMessageOrigin"
+                },
+                {
+                  "type": "null"
+                }
+              ]
             },
             "position": {
               "type": "integer",
@@ -127264,6 +129599,45 @@
             "canceled"
           ]
         },
+        "HostMessageDelivery": {
+          "type": "string",
+          "enum": [
+            "followUp",
+            "steer"
+          ]
+        },
+        "HostMessageOrigin": {
+          "type": "object",
+          "required": [
+            "delivery",
+            "eventId",
+            "sender",
+            "source"
+          ],
+          "properties": {
+            "delivery": {
+              "$ref": "#/definitions/HostMessageDelivery"
+            },
+            "eventId": {
+              "type": "string"
+            },
+            "sender": {
+              "description": "Host-resolved sender session or background task identity, never a claim extracted from the message body.",
+              "type": "string"
+            },
+            "source": {
+              "$ref": "#/definitions/HostMessageSource"
+            }
+          }
+        },
+        "HostMessageSource": {
+          "type": "string",
+          "enum": [
+            "agent",
+            "backgroundTask",
+            "schedule"
+          ]
+        },
         "ImageDetail": {
           "type": "string",
           "enum": [
@@ -127300,6 +129674,17 @@
                   "allOf": [
                     {
                       "$ref": "#/definitions/UserMessageEntry"
+                    }
+                  ]
+                },
+                "origin": {
+                  "description": "Host-owned provenance. Absent for human and legacy input; never a grant of authority.",
+                  "anyOf": [
+                    {
+                      "$ref": "#/definitions/HostMessageOrigin"
+                    },
+                    {
+                      "type": "null"
                     }
                   ]
                 },
@@ -128303,6 +130688,17 @@
               "items": {
                 "$ref": "#/definitions/UserInput"
               }
+            },
+            "origin": {
+              "description": "Host-owned provenance for queued notifications; not editable user input.",
+              "anyOf": [
+                {
+                  "$ref": "#/definitions/HostMessageOrigin"
+                },
+                {
+                  "type": "null"
+                }
+              ]
             },
             "position": {
               "type": "integer",
@@ -131127,6 +133523,45 @@
             "canceled"
           ]
         },
+        "HostMessageDelivery": {
+          "type": "string",
+          "enum": [
+            "followUp",
+            "steer"
+          ]
+        },
+        "HostMessageOrigin": {
+          "type": "object",
+          "required": [
+            "delivery",
+            "eventId",
+            "sender",
+            "source"
+          ],
+          "properties": {
+            "delivery": {
+              "$ref": "#/definitions/HostMessageDelivery"
+            },
+            "eventId": {
+              "type": "string"
+            },
+            "sender": {
+              "description": "Host-resolved sender session or background task identity, never a claim extracted from the message body.",
+              "type": "string"
+            },
+            "source": {
+              "$ref": "#/definitions/HostMessageSource"
+            }
+          }
+        },
+        "HostMessageSource": {
+          "type": "string",
+          "enum": [
+            "agent",
+            "backgroundTask",
+            "schedule"
+          ]
+        },
         "ImageDetail": {
           "type": "string",
           "enum": [
@@ -131163,6 +133598,17 @@
                   "allOf": [
                     {
                       "$ref": "#/definitions/UserMessageEntry"
+                    }
+                  ]
+                },
+                "origin": {
+                  "description": "Host-owned provenance. Absent for human and legacy input; never a grant of authority.",
+                  "anyOf": [
+                    {
+                      "$ref": "#/definitions/HostMessageOrigin"
+                    },
+                    {
+                      "type": "null"
                     }
                   ]
                 },
@@ -132166,6 +134612,17 @@
               "items": {
                 "$ref": "#/definitions/UserInput"
               }
+            },
+            "origin": {
+              "description": "Host-owned provenance for queued notifications; not editable user input.",
+              "anyOf": [
+                {
+                  "$ref": "#/definitions/HostMessageOrigin"
+                },
+                {
+                  "type": "null"
+                }
+              ]
             },
             "position": {
               "type": "integer",
@@ -134239,6 +136696,45 @@
             "canceled"
           ]
         },
+        "HostMessageDelivery": {
+          "type": "string",
+          "enum": [
+            "followUp",
+            "steer"
+          ]
+        },
+        "HostMessageOrigin": {
+          "type": "object",
+          "required": [
+            "delivery",
+            "eventId",
+            "sender",
+            "source"
+          ],
+          "properties": {
+            "delivery": {
+              "$ref": "#/definitions/HostMessageDelivery"
+            },
+            "eventId": {
+              "type": "string"
+            },
+            "sender": {
+              "description": "Host-resolved sender session or background task identity, never a claim extracted from the message body.",
+              "type": "string"
+            },
+            "source": {
+              "$ref": "#/definitions/HostMessageSource"
+            }
+          }
+        },
+        "HostMessageSource": {
+          "type": "string",
+          "enum": [
+            "agent",
+            "backgroundTask",
+            "schedule"
+          ]
+        },
         "ImageDetail": {
           "type": "string",
           "enum": [
@@ -134275,6 +136771,17 @@
                   "allOf": [
                     {
                       "$ref": "#/definitions/UserMessageEntry"
+                    }
+                  ]
+                },
+                "origin": {
+                  "description": "Host-owned provenance. Absent for human and legacy input; never a grant of authority.",
+                  "anyOf": [
+                    {
+                      "$ref": "#/definitions/HostMessageOrigin"
+                    },
+                    {
+                      "type": "null"
                     }
                   ]
                 },
@@ -135278,6 +137785,17 @@
               "items": {
                 "$ref": "#/definitions/UserInput"
               }
+            },
+            "origin": {
+              "description": "Host-owned provenance for queued notifications; not editable user input.",
+              "anyOf": [
+                {
+                  "$ref": "#/definitions/HostMessageOrigin"
+                },
+                {
+                  "type": "null"
+                }
+              ]
             },
             "position": {
               "type": "integer",
@@ -138215,6 +140733,45 @@
             "canceled"
           ]
         },
+        "HostMessageDelivery": {
+          "type": "string",
+          "enum": [
+            "followUp",
+            "steer"
+          ]
+        },
+        "HostMessageOrigin": {
+          "type": "object",
+          "required": [
+            "delivery",
+            "eventId",
+            "sender",
+            "source"
+          ],
+          "properties": {
+            "delivery": {
+              "$ref": "#/definitions/HostMessageDelivery"
+            },
+            "eventId": {
+              "type": "string"
+            },
+            "sender": {
+              "description": "Host-resolved sender session or background task identity, never a claim extracted from the message body.",
+              "type": "string"
+            },
+            "source": {
+              "$ref": "#/definitions/HostMessageSource"
+            }
+          }
+        },
+        "HostMessageSource": {
+          "type": "string",
+          "enum": [
+            "agent",
+            "backgroundTask",
+            "schedule"
+          ]
+        },
         "ImageDetail": {
           "type": "string",
           "enum": [
@@ -138251,6 +140808,17 @@
                   "allOf": [
                     {
                       "$ref": "#/definitions/UserMessageEntry"
+                    }
+                  ]
+                },
+                "origin": {
+                  "description": "Host-owned provenance. Absent for human and legacy input; never a grant of authority.",
+                  "anyOf": [
+                    {
+                      "$ref": "#/definitions/HostMessageOrigin"
+                    },
+                    {
+                      "type": "null"
                     }
                   ]
                 },
@@ -139254,6 +141822,17 @@
               "items": {
                 "$ref": "#/definitions/UserInput"
               }
+            },
+            "origin": {
+              "description": "Host-owned provenance for queued notifications; not editable user input.",
+              "anyOf": [
+                {
+                  "$ref": "#/definitions/HostMessageOrigin"
+                },
+                {
+                  "type": "null"
+                }
+              ]
             },
             "position": {
               "type": "integer",
@@ -141298,6 +143877,45 @@
             "canceled"
           ]
         },
+        "HostMessageDelivery": {
+          "type": "string",
+          "enum": [
+            "followUp",
+            "steer"
+          ]
+        },
+        "HostMessageOrigin": {
+          "type": "object",
+          "required": [
+            "delivery",
+            "eventId",
+            "sender",
+            "source"
+          ],
+          "properties": {
+            "delivery": {
+              "$ref": "#/definitions/HostMessageDelivery"
+            },
+            "eventId": {
+              "type": "string"
+            },
+            "sender": {
+              "description": "Host-resolved sender session or background task identity, never a claim extracted from the message body.",
+              "type": "string"
+            },
+            "source": {
+              "$ref": "#/definitions/HostMessageSource"
+            }
+          }
+        },
+        "HostMessageSource": {
+          "type": "string",
+          "enum": [
+            "agent",
+            "backgroundTask",
+            "schedule"
+          ]
+        },
         "ImageDetail": {
           "type": "string",
           "enum": [
@@ -141334,6 +143952,17 @@
                   "allOf": [
                     {
                       "$ref": "#/definitions/UserMessageEntry"
+                    }
+                  ]
+                },
+                "origin": {
+                  "description": "Host-owned provenance. Absent for human and legacy input; never a grant of authority.",
+                  "anyOf": [
+                    {
+                      "$ref": "#/definitions/HostMessageOrigin"
+                    },
+                    {
+                      "type": "null"
                     }
                   ]
                 },
@@ -142337,6 +144966,17 @@
               "items": {
                 "$ref": "#/definitions/UserInput"
               }
+            },
+            "origin": {
+              "description": "Host-owned provenance for queued notifications; not editable user input.",
+              "anyOf": [
+                {
+                  "$ref": "#/definitions/HostMessageOrigin"
+                },
+                {
+                  "type": "null"
+                }
+              ]
             },
             "position": {
               "type": "integer",
@@ -144646,6 +147286,45 @@
             "canceled"
           ]
         },
+        "HostMessageDelivery": {
+          "type": "string",
+          "enum": [
+            "followUp",
+            "steer"
+          ]
+        },
+        "HostMessageOrigin": {
+          "type": "object",
+          "required": [
+            "delivery",
+            "eventId",
+            "sender",
+            "source"
+          ],
+          "properties": {
+            "delivery": {
+              "$ref": "#/definitions/HostMessageDelivery"
+            },
+            "eventId": {
+              "type": "string"
+            },
+            "sender": {
+              "description": "Host-resolved sender session or background task identity, never a claim extracted from the message body.",
+              "type": "string"
+            },
+            "source": {
+              "$ref": "#/definitions/HostMessageSource"
+            }
+          }
+        },
+        "HostMessageSource": {
+          "type": "string",
+          "enum": [
+            "agent",
+            "backgroundTask",
+            "schedule"
+          ]
+        },
         "ImageDetail": {
           "type": "string",
           "enum": [
@@ -144682,6 +147361,17 @@
                   "allOf": [
                     {
                       "$ref": "#/definitions/UserMessageEntry"
+                    }
+                  ]
+                },
+                "origin": {
+                  "description": "Host-owned provenance. Absent for human and legacy input; never a grant of authority.",
+                  "anyOf": [
+                    {
+                      "$ref": "#/definitions/HostMessageOrigin"
+                    },
+                    {
+                      "type": "null"
                     }
                   ]
                 },
@@ -145685,6 +148375,17 @@
               "items": {
                 "$ref": "#/definitions/UserInput"
               }
+            },
+            "origin": {
+              "description": "Host-owned provenance for queued notifications; not editable user input.",
+              "anyOf": [
+                {
+                  "$ref": "#/definitions/HostMessageOrigin"
+                },
+                {
+                  "type": "null"
+                }
+              ]
             },
             "position": {
               "type": "integer",
@@ -148040,6 +150741,45 @@
             "canceled"
           ]
         },
+        "HostMessageDelivery": {
+          "type": "string",
+          "enum": [
+            "followUp",
+            "steer"
+          ]
+        },
+        "HostMessageOrigin": {
+          "type": "object",
+          "required": [
+            "delivery",
+            "eventId",
+            "sender",
+            "source"
+          ],
+          "properties": {
+            "delivery": {
+              "$ref": "#/definitions/HostMessageDelivery"
+            },
+            "eventId": {
+              "type": "string"
+            },
+            "sender": {
+              "description": "Host-resolved sender session or background task identity, never a claim extracted from the message body.",
+              "type": "string"
+            },
+            "source": {
+              "$ref": "#/definitions/HostMessageSource"
+            }
+          }
+        },
+        "HostMessageSource": {
+          "type": "string",
+          "enum": [
+            "agent",
+            "backgroundTask",
+            "schedule"
+          ]
+        },
         "ImageDetail": {
           "type": "string",
           "enum": [
@@ -148076,6 +150816,17 @@
                   "allOf": [
                     {
                       "$ref": "#/definitions/UserMessageEntry"
+                    }
+                  ]
+                },
+                "origin": {
+                  "description": "Host-owned provenance. Absent for human and legacy input; never a grant of authority.",
+                  "anyOf": [
+                    {
+                      "$ref": "#/definitions/HostMessageOrigin"
+                    },
+                    {
+                      "type": "null"
                     }
                   ]
                 },
@@ -149079,6 +151830,17 @@
               "items": {
                 "$ref": "#/definitions/UserInput"
               }
+            },
+            "origin": {
+              "description": "Host-owned provenance for queued notifications; not editable user input.",
+              "anyOf": [
+                {
+                  "$ref": "#/definitions/HostMessageOrigin"
+                },
+                {
+                  "type": "null"
+                }
+              ]
             },
             "position": {
               "type": "integer",
@@ -151626,6 +154388,45 @@
         "GoalId": {
           "type": "string"
         },
+        "HostMessageDelivery": {
+          "type": "string",
+          "enum": [
+            "followUp",
+            "steer"
+          ]
+        },
+        "HostMessageOrigin": {
+          "type": "object",
+          "required": [
+            "delivery",
+            "eventId",
+            "sender",
+            "source"
+          ],
+          "properties": {
+            "delivery": {
+              "$ref": "#/definitions/HostMessageDelivery"
+            },
+            "eventId": {
+              "type": "string"
+            },
+            "sender": {
+              "description": "Host-resolved sender session or background task identity, never a claim extracted from the message body.",
+              "type": "string"
+            },
+            "source": {
+              "$ref": "#/definitions/HostMessageSource"
+            }
+          }
+        },
+        "HostMessageSource": {
+          "type": "string",
+          "enum": [
+            "agent",
+            "backgroundTask",
+            "schedule"
+          ]
+        },
         "ImageDetail": {
           "type": "string",
           "enum": [
@@ -151662,6 +154463,17 @@
                   "allOf": [
                     {
                       "$ref": "#/definitions/UserMessageEntry"
+                    }
+                  ]
+                },
+                "origin": {
+                  "description": "Host-owned provenance. Absent for human and legacy input; never a grant of authority.",
+                  "anyOf": [
+                    {
+                      "$ref": "#/definitions/HostMessageOrigin"
+                    },
+                    {
+                      "type": "null"
                     }
                   ]
                 },
@@ -154240,6 +157052,45 @@
             "canceled"
           ]
         },
+        "HostMessageDelivery": {
+          "type": "string",
+          "enum": [
+            "followUp",
+            "steer"
+          ]
+        },
+        "HostMessageOrigin": {
+          "type": "object",
+          "required": [
+            "delivery",
+            "eventId",
+            "sender",
+            "source"
+          ],
+          "properties": {
+            "delivery": {
+              "$ref": "#/definitions/HostMessageDelivery"
+            },
+            "eventId": {
+              "type": "string"
+            },
+            "sender": {
+              "description": "Host-resolved sender session or background task identity, never a claim extracted from the message body.",
+              "type": "string"
+            },
+            "source": {
+              "$ref": "#/definitions/HostMessageSource"
+            }
+          }
+        },
+        "HostMessageSource": {
+          "type": "string",
+          "enum": [
+            "agent",
+            "backgroundTask",
+            "schedule"
+          ]
+        },
         "ImageDetail": {
           "type": "string",
           "enum": [
@@ -154276,6 +157127,17 @@
                   "allOf": [
                     {
                       "$ref": "#/definitions/UserMessageEntry"
+                    }
+                  ]
+                },
+                "origin": {
+                  "description": "Host-owned provenance. Absent for human and legacy input; never a grant of authority.",
+                  "anyOf": [
+                    {
+                      "$ref": "#/definitions/HostMessageOrigin"
+                    },
+                    {
+                      "type": "null"
                     }
                   ]
                 },
@@ -155279,6 +158141,17 @@
               "items": {
                 "$ref": "#/definitions/UserInput"
               }
+            },
+            "origin": {
+              "description": "Host-owned provenance for queued notifications; not editable user input.",
+              "anyOf": [
+                {
+                  "$ref": "#/definitions/HostMessageOrigin"
+                },
+                {
+                  "type": "null"
+                }
+              ]
             },
             "position": {
               "type": "integer",
@@ -157556,6 +160429,45 @@
         }
       },
       "definitions": {
+        "HostMessageDelivery": {
+          "type": "string",
+          "enum": [
+            "followUp",
+            "steer"
+          ]
+        },
+        "HostMessageOrigin": {
+          "type": "object",
+          "required": [
+            "delivery",
+            "eventId",
+            "sender",
+            "source"
+          ],
+          "properties": {
+            "delivery": {
+              "$ref": "#/definitions/HostMessageDelivery"
+            },
+            "eventId": {
+              "type": "string"
+            },
+            "sender": {
+              "description": "Host-resolved sender session or background task identity, never a claim extracted from the message body.",
+              "type": "string"
+            },
+            "source": {
+              "$ref": "#/definitions/HostMessageSource"
+            }
+          }
+        },
+        "HostMessageSource": {
+          "type": "string",
+          "enum": [
+            "agent",
+            "backgroundTask",
+            "schedule"
+          ]
+        },
         "ImageDetail": {
           "type": "string",
           "enum": [
@@ -157584,6 +160496,17 @@
               "items": {
                 "$ref": "#/definitions/UserInput"
               }
+            },
+            "origin": {
+              "description": "Host-owned provenance for queued notifications; not editable user input.",
+              "anyOf": [
+                {
+                  "$ref": "#/definitions/HostMessageOrigin"
+                },
+                {
+                  "type": "null"
+                }
+              ]
             },
             "position": {
               "type": "integer",
@@ -158056,6 +160979,45 @@
             }
           }
         },
+        "HostMessageDelivery": {
+          "type": "string",
+          "enum": [
+            "followUp",
+            "steer"
+          ]
+        },
+        "HostMessageOrigin": {
+          "type": "object",
+          "required": [
+            "delivery",
+            "eventId",
+            "sender",
+            "source"
+          ],
+          "properties": {
+            "delivery": {
+              "$ref": "#/definitions/HostMessageDelivery"
+            },
+            "eventId": {
+              "type": "string"
+            },
+            "sender": {
+              "description": "Host-resolved sender session or background task identity, never a claim extracted from the message body.",
+              "type": "string"
+            },
+            "source": {
+              "$ref": "#/definitions/HostMessageSource"
+            }
+          }
+        },
+        "HostMessageSource": {
+          "type": "string",
+          "enum": [
+            "agent",
+            "backgroundTask",
+            "schedule"
+          ]
+        },
         "ImageDetail": {
           "type": "string",
           "enum": [
@@ -158133,6 +161095,17 @@
               "items": {
                 "$ref": "#/definitions/UserInput"
               }
+            },
+            "origin": {
+              "description": "Host-owned provenance for queued notifications; not editable user input.",
+              "anyOf": [
+                {
+                  "$ref": "#/definitions/HostMessageOrigin"
+                },
+                {
+                  "type": "null"
+                }
+              ]
             },
             "position": {
               "type": "integer",
@@ -158774,6 +161747,45 @@
         }
       },
       "definitions": {
+        "HostMessageDelivery": {
+          "type": "string",
+          "enum": [
+            "followUp",
+            "steer"
+          ]
+        },
+        "HostMessageOrigin": {
+          "type": "object",
+          "required": [
+            "delivery",
+            "eventId",
+            "sender",
+            "source"
+          ],
+          "properties": {
+            "delivery": {
+              "$ref": "#/definitions/HostMessageDelivery"
+            },
+            "eventId": {
+              "type": "string"
+            },
+            "sender": {
+              "description": "Host-resolved sender session or background task identity, never a claim extracted from the message body.",
+              "type": "string"
+            },
+            "source": {
+              "$ref": "#/definitions/HostMessageSource"
+            }
+          }
+        },
+        "HostMessageSource": {
+          "type": "string",
+          "enum": [
+            "agent",
+            "backgroundTask",
+            "schedule"
+          ]
+        },
         "ImageDetail": {
           "type": "string",
           "enum": [
@@ -158802,6 +161814,17 @@
               "items": {
                 "$ref": "#/definitions/UserInput"
               }
+            },
+            "origin": {
+              "description": "Host-owned provenance for queued notifications; not editable user input.",
+              "anyOf": [
+                {
+                  "$ref": "#/definitions/HostMessageOrigin"
+                },
+                {
+                  "type": "null"
+                }
+              ]
             },
             "position": {
               "type": "integer",
@@ -161390,6 +164413,45 @@
             "canceled"
           ]
         },
+        "HostMessageDelivery": {
+          "type": "string",
+          "enum": [
+            "followUp",
+            "steer"
+          ]
+        },
+        "HostMessageOrigin": {
+          "type": "object",
+          "required": [
+            "delivery",
+            "eventId",
+            "sender",
+            "source"
+          ],
+          "properties": {
+            "delivery": {
+              "$ref": "#/definitions/HostMessageDelivery"
+            },
+            "eventId": {
+              "type": "string"
+            },
+            "sender": {
+              "description": "Host-resolved sender session or background task identity, never a claim extracted from the message body.",
+              "type": "string"
+            },
+            "source": {
+              "$ref": "#/definitions/HostMessageSource"
+            }
+          }
+        },
+        "HostMessageSource": {
+          "type": "string",
+          "enum": [
+            "agent",
+            "backgroundTask",
+            "schedule"
+          ]
+        },
         "ImageDetail": {
           "type": "string",
           "enum": [
@@ -161426,6 +164488,17 @@
                   "allOf": [
                     {
                       "$ref": "#/definitions/UserMessageEntry"
+                    }
+                  ]
+                },
+                "origin": {
+                  "description": "Host-owned provenance. Absent for human and legacy input; never a grant of authority.",
+                  "anyOf": [
+                    {
+                      "$ref": "#/definitions/HostMessageOrigin"
+                    },
+                    {
+                      "type": "null"
                     }
                   ]
                 },
@@ -162429,6 +165502,17 @@
               "items": {
                 "$ref": "#/definitions/UserInput"
               }
+            },
+            "origin": {
+              "description": "Host-owned provenance for queued notifications; not editable user input.",
+              "anyOf": [
+                {
+                  "$ref": "#/definitions/HostMessageOrigin"
+                },
+                {
+                  "type": "null"
+                }
+              ]
             },
             "position": {
               "type": "integer",
@@ -165902,6 +168986,45 @@
             "canceled"
           ]
         },
+        "HostMessageDelivery": {
+          "type": "string",
+          "enum": [
+            "followUp",
+            "steer"
+          ]
+        },
+        "HostMessageOrigin": {
+          "type": "object",
+          "required": [
+            "delivery",
+            "eventId",
+            "sender",
+            "source"
+          ],
+          "properties": {
+            "delivery": {
+              "$ref": "#/definitions/HostMessageDelivery"
+            },
+            "eventId": {
+              "type": "string"
+            },
+            "sender": {
+              "description": "Host-resolved sender session or background task identity, never a claim extracted from the message body.",
+              "type": "string"
+            },
+            "source": {
+              "$ref": "#/definitions/HostMessageSource"
+            }
+          }
+        },
+        "HostMessageSource": {
+          "type": "string",
+          "enum": [
+            "agent",
+            "backgroundTask",
+            "schedule"
+          ]
+        },
         "ImageDetail": {
           "type": "string",
           "enum": [
@@ -165938,6 +169061,17 @@
                   "allOf": [
                     {
                       "$ref": "#/definitions/UserMessageEntry"
+                    }
+                  ]
+                },
+                "origin": {
+                  "description": "Host-owned provenance. Absent for human and legacy input; never a grant of authority.",
+                  "anyOf": [
+                    {
+                      "$ref": "#/definitions/HostMessageOrigin"
+                    },
+                    {
+                      "type": "null"
                     }
                   ]
                 },
@@ -166941,6 +170075,17 @@
               "items": {
                 "$ref": "#/definitions/UserInput"
               }
+            },
+            "origin": {
+              "description": "Host-owned provenance for queued notifications; not editable user input.",
+              "anyOf": [
+                {
+                  "$ref": "#/definitions/HostMessageOrigin"
+                },
+                {
+                  "type": "null"
+                }
+              ]
             },
             "position": {
               "type": "integer",
@@ -168834,6 +171979,45 @@
         "GoalId": {
           "type": "string"
         },
+        "HostMessageDelivery": {
+          "type": "string",
+          "enum": [
+            "followUp",
+            "steer"
+          ]
+        },
+        "HostMessageOrigin": {
+          "type": "object",
+          "required": [
+            "delivery",
+            "eventId",
+            "sender",
+            "source"
+          ],
+          "properties": {
+            "delivery": {
+              "$ref": "#/definitions/HostMessageDelivery"
+            },
+            "eventId": {
+              "type": "string"
+            },
+            "sender": {
+              "description": "Host-resolved sender session or background task identity, never a claim extracted from the message body.",
+              "type": "string"
+            },
+            "source": {
+              "$ref": "#/definitions/HostMessageSource"
+            }
+          }
+        },
+        "HostMessageSource": {
+          "type": "string",
+          "enum": [
+            "agent",
+            "backgroundTask",
+            "schedule"
+          ]
+        },
         "ImageDetail": {
           "type": "string",
           "enum": [
@@ -168870,6 +172054,17 @@
                   "allOf": [
                     {
                       "$ref": "#/definitions/UserMessageEntry"
+                    }
+                  ]
+                },
+                "origin": {
+                  "description": "Host-owned provenance. Absent for human and legacy input; never a grant of authority.",
+                  "anyOf": [
+                    {
+                      "$ref": "#/definitions/HostMessageOrigin"
+                    },
+                    {
+                      "type": "null"
                     }
                   ]
                 },
@@ -170608,6 +173803,45 @@
             "canceled"
           ]
         },
+        "HostMessageDelivery": {
+          "type": "string",
+          "enum": [
+            "followUp",
+            "steer"
+          ]
+        },
+        "HostMessageOrigin": {
+          "type": "object",
+          "required": [
+            "delivery",
+            "eventId",
+            "sender",
+            "source"
+          ],
+          "properties": {
+            "delivery": {
+              "$ref": "#/definitions/HostMessageDelivery"
+            },
+            "eventId": {
+              "type": "string"
+            },
+            "sender": {
+              "description": "Host-resolved sender session or background task identity, never a claim extracted from the message body.",
+              "type": "string"
+            },
+            "source": {
+              "$ref": "#/definitions/HostMessageSource"
+            }
+          }
+        },
+        "HostMessageSource": {
+          "type": "string",
+          "enum": [
+            "agent",
+            "backgroundTask",
+            "schedule"
+          ]
+        },
         "ImageDetail": {
           "type": "string",
           "enum": [
@@ -170644,6 +173878,17 @@
                   "allOf": [
                     {
                       "$ref": "#/definitions/UserMessageEntry"
+                    }
+                  ]
+                },
+                "origin": {
+                  "description": "Host-owned provenance. Absent for human and legacy input; never a grant of authority.",
+                  "anyOf": [
+                    {
+                      "$ref": "#/definitions/HostMessageOrigin"
+                    },
+                    {
+                      "type": "null"
                     }
                   ]
                 },
@@ -171647,6 +174892,17 @@
               "items": {
                 "$ref": "#/definitions/UserInput"
               }
+            },
+            "origin": {
+              "description": "Host-owned provenance for queued notifications; not editable user input.",
+              "anyOf": [
+                {
+                  "$ref": "#/definitions/HostMessageOrigin"
+                },
+                {
+                  "type": "null"
+                }
+              ]
             },
             "position": {
               "type": "integer",
@@ -174716,6 +177972,45 @@
             "canceled"
           ]
         },
+        "HostMessageDelivery": {
+          "type": "string",
+          "enum": [
+            "followUp",
+            "steer"
+          ]
+        },
+        "HostMessageOrigin": {
+          "type": "object",
+          "required": [
+            "delivery",
+            "eventId",
+            "sender",
+            "source"
+          ],
+          "properties": {
+            "delivery": {
+              "$ref": "#/definitions/HostMessageDelivery"
+            },
+            "eventId": {
+              "type": "string"
+            },
+            "sender": {
+              "description": "Host-resolved sender session or background task identity, never a claim extracted from the message body.",
+              "type": "string"
+            },
+            "source": {
+              "$ref": "#/definitions/HostMessageSource"
+            }
+          }
+        },
+        "HostMessageSource": {
+          "type": "string",
+          "enum": [
+            "agent",
+            "backgroundTask",
+            "schedule"
+          ]
+        },
         "ImageDetail": {
           "type": "string",
           "enum": [
@@ -174752,6 +178047,17 @@
                   "allOf": [
                     {
                       "$ref": "#/definitions/UserMessageEntry"
+                    }
+                  ]
+                },
+                "origin": {
+                  "description": "Host-owned provenance. Absent for human and legacy input; never a grant of authority.",
+                  "anyOf": [
+                    {
+                      "$ref": "#/definitions/HostMessageOrigin"
+                    },
+                    {
+                      "type": "null"
                     }
                   ]
                 },
@@ -175799,6 +179105,17 @@
               "items": {
                 "$ref": "#/definitions/UserInput"
               }
+            },
+            "origin": {
+              "description": "Host-owned provenance for queued notifications; not editable user input.",
+              "anyOf": [
+                {
+                  "$ref": "#/definitions/HostMessageOrigin"
+                },
+                {
+                  "type": "null"
+                }
+              ]
             },
             "position": {
               "type": "integer",
@@ -180045,6 +183362,45 @@
             "canceled"
           ]
         },
+        "HostMessageDelivery": {
+          "type": "string",
+          "enum": [
+            "followUp",
+            "steer"
+          ]
+        },
+        "HostMessageOrigin": {
+          "type": "object",
+          "required": [
+            "delivery",
+            "eventId",
+            "sender",
+            "source"
+          ],
+          "properties": {
+            "delivery": {
+              "$ref": "#/definitions/HostMessageDelivery"
+            },
+            "eventId": {
+              "type": "string"
+            },
+            "sender": {
+              "description": "Host-resolved sender session or background task identity, never a claim extracted from the message body.",
+              "type": "string"
+            },
+            "source": {
+              "$ref": "#/definitions/HostMessageSource"
+            }
+          }
+        },
+        "HostMessageSource": {
+          "type": "string",
+          "enum": [
+            "agent",
+            "backgroundTask",
+            "schedule"
+          ]
+        },
         "ImageDetail": {
           "type": "string",
           "enum": [
@@ -180081,6 +183437,17 @@
                   "allOf": [
                     {
                       "$ref": "#/definitions/UserMessageEntry"
+                    }
+                  ]
+                },
+                "origin": {
+                  "description": "Host-owned provenance. Absent for human and legacy input; never a grant of authority.",
+                  "anyOf": [
+                    {
+                      "$ref": "#/definitions/HostMessageOrigin"
+                    },
+                    {
+                      "type": "null"
                     }
                   ]
                 },
@@ -181084,6 +184451,17 @@
               "items": {
                 "$ref": "#/definitions/UserInput"
               }
+            },
+            "origin": {
+              "description": "Host-owned provenance for queued notifications; not editable user input.",
+              "anyOf": [
+                {
+                  "$ref": "#/definitions/HostMessageOrigin"
+                },
+                {
+                  "type": "null"
+                }
+              ]
             },
             "position": {
               "type": "integer",
@@ -183138,6 +186516,45 @@
             "canceled"
           ]
         },
+        "HostMessageDelivery": {
+          "type": "string",
+          "enum": [
+            "followUp",
+            "steer"
+          ]
+        },
+        "HostMessageOrigin": {
+          "type": "object",
+          "required": [
+            "delivery",
+            "eventId",
+            "sender",
+            "source"
+          ],
+          "properties": {
+            "delivery": {
+              "$ref": "#/definitions/HostMessageDelivery"
+            },
+            "eventId": {
+              "type": "string"
+            },
+            "sender": {
+              "description": "Host-resolved sender session or background task identity, never a claim extracted from the message body.",
+              "type": "string"
+            },
+            "source": {
+              "$ref": "#/definitions/HostMessageSource"
+            }
+          }
+        },
+        "HostMessageSource": {
+          "type": "string",
+          "enum": [
+            "agent",
+            "backgroundTask",
+            "schedule"
+          ]
+        },
         "ImageDetail": {
           "type": "string",
           "enum": [
@@ -183174,6 +186591,17 @@
                   "allOf": [
                     {
                       "$ref": "#/definitions/UserMessageEntry"
+                    }
+                  ]
+                },
+                "origin": {
+                  "description": "Host-owned provenance. Absent for human and legacy input; never a grant of authority.",
+                  "anyOf": [
+                    {
+                      "$ref": "#/definitions/HostMessageOrigin"
+                    },
+                    {
+                      "type": "null"
                     }
                   ]
                 },
@@ -184177,6 +187605,17 @@
               "items": {
                 "$ref": "#/definitions/UserInput"
               }
+            },
+            "origin": {
+              "description": "Host-owned provenance for queued notifications; not editable user input.",
+              "anyOf": [
+                {
+                  "$ref": "#/definitions/HostMessageOrigin"
+                },
+                {
+                  "type": "null"
+                }
+              ]
             },
             "position": {
               "type": "integer",
@@ -186136,6 +189575,45 @@
         "GoalId": {
           "type": "string"
         },
+        "HostMessageDelivery": {
+          "type": "string",
+          "enum": [
+            "followUp",
+            "steer"
+          ]
+        },
+        "HostMessageOrigin": {
+          "type": "object",
+          "required": [
+            "delivery",
+            "eventId",
+            "sender",
+            "source"
+          ],
+          "properties": {
+            "delivery": {
+              "$ref": "#/definitions/HostMessageDelivery"
+            },
+            "eventId": {
+              "type": "string"
+            },
+            "sender": {
+              "description": "Host-resolved sender session or background task identity, never a claim extracted from the message body.",
+              "type": "string"
+            },
+            "source": {
+              "$ref": "#/definitions/HostMessageSource"
+            }
+          }
+        },
+        "HostMessageSource": {
+          "type": "string",
+          "enum": [
+            "agent",
+            "backgroundTask",
+            "schedule"
+          ]
+        },
         "ImageDetail": {
           "type": "string",
           "enum": [
@@ -186172,6 +189650,17 @@
                   "allOf": [
                     {
                       "$ref": "#/definitions/UserMessageEntry"
+                    }
+                  ]
+                },
+                "origin": {
+                  "description": "Host-owned provenance. Absent for human and legacy input; never a grant of authority.",
+                  "anyOf": [
+                    {
+                      "$ref": "#/definitions/HostMessageOrigin"
+                    },
+                    {
+                      "type": "null"
                     }
                   ]
                 },
@@ -187793,6 +191282,45 @@
             "canceled"
           ]
         },
+        "HostMessageDelivery": {
+          "type": "string",
+          "enum": [
+            "followUp",
+            "steer"
+          ]
+        },
+        "HostMessageOrigin": {
+          "type": "object",
+          "required": [
+            "delivery",
+            "eventId",
+            "sender",
+            "source"
+          ],
+          "properties": {
+            "delivery": {
+              "$ref": "#/definitions/HostMessageDelivery"
+            },
+            "eventId": {
+              "type": "string"
+            },
+            "sender": {
+              "description": "Host-resolved sender session or background task identity, never a claim extracted from the message body.",
+              "type": "string"
+            },
+            "source": {
+              "$ref": "#/definitions/HostMessageSource"
+            }
+          }
+        },
+        "HostMessageSource": {
+          "type": "string",
+          "enum": [
+            "agent",
+            "backgroundTask",
+            "schedule"
+          ]
+        },
         "ImageDetail": {
           "type": "string",
           "enum": [
@@ -187829,6 +191357,17 @@
                   "allOf": [
                     {
                       "$ref": "#/definitions/UserMessageEntry"
+                    }
+                  ]
+                },
+                "origin": {
+                  "description": "Host-owned provenance. Absent for human and legacy input; never a grant of authority.",
+                  "anyOf": [
+                    {
+                      "$ref": "#/definitions/HostMessageOrigin"
+                    },
+                    {
+                      "type": "null"
                     }
                   ]
                 },
@@ -188832,6 +192371,17 @@
               "items": {
                 "$ref": "#/definitions/UserInput"
               }
+            },
+            "origin": {
+              "description": "Host-owned provenance for queued notifications; not editable user input.",
+              "anyOf": [
+                {
+                  "$ref": "#/definitions/HostMessageOrigin"
+                },
+                {
+                  "type": "null"
+                }
+              ]
             },
             "position": {
               "type": "integer",
@@ -190638,6 +194188,45 @@
         "GoalId": {
           "type": "string"
         },
+        "HostMessageDelivery": {
+          "type": "string",
+          "enum": [
+            "followUp",
+            "steer"
+          ]
+        },
+        "HostMessageOrigin": {
+          "type": "object",
+          "required": [
+            "delivery",
+            "eventId",
+            "sender",
+            "source"
+          ],
+          "properties": {
+            "delivery": {
+              "$ref": "#/definitions/HostMessageDelivery"
+            },
+            "eventId": {
+              "type": "string"
+            },
+            "sender": {
+              "description": "Host-resolved sender session or background task identity, never a claim extracted from the message body.",
+              "type": "string"
+            },
+            "source": {
+              "$ref": "#/definitions/HostMessageSource"
+            }
+          }
+        },
+        "HostMessageSource": {
+          "type": "string",
+          "enum": [
+            "agent",
+            "backgroundTask",
+            "schedule"
+          ]
+        },
         "ImageDetail": {
           "type": "string",
           "enum": [
@@ -190674,6 +194263,17 @@
                   "allOf": [
                     {
                       "$ref": "#/definitions/UserMessageEntry"
+                    }
+                  ]
+                },
+                "origin": {
+                  "description": "Host-owned provenance. Absent for human and legacy input; never a grant of authority.",
+                  "anyOf": [
+                    {
+                      "$ref": "#/definitions/HostMessageOrigin"
+                    },
+                    {
+                      "type": "null"
                     }
                   ]
                 },
@@ -192614,6 +196214,45 @@
             "canceled"
           ]
         },
+        "HostMessageDelivery": {
+          "type": "string",
+          "enum": [
+            "followUp",
+            "steer"
+          ]
+        },
+        "HostMessageOrigin": {
+          "type": "object",
+          "required": [
+            "delivery",
+            "eventId",
+            "sender",
+            "source"
+          ],
+          "properties": {
+            "delivery": {
+              "$ref": "#/definitions/HostMessageDelivery"
+            },
+            "eventId": {
+              "type": "string"
+            },
+            "sender": {
+              "description": "Host-resolved sender session or background task identity, never a claim extracted from the message body.",
+              "type": "string"
+            },
+            "source": {
+              "$ref": "#/definitions/HostMessageSource"
+            }
+          }
+        },
+        "HostMessageSource": {
+          "type": "string",
+          "enum": [
+            "agent",
+            "backgroundTask",
+            "schedule"
+          ]
+        },
         "ImageDetail": {
           "type": "string",
           "enum": [
@@ -192650,6 +196289,17 @@
                   "allOf": [
                     {
                       "$ref": "#/definitions/UserMessageEntry"
+                    }
+                  ]
+                },
+                "origin": {
+                  "description": "Host-owned provenance. Absent for human and legacy input; never a grant of authority.",
+                  "anyOf": [
+                    {
+                      "$ref": "#/definitions/HostMessageOrigin"
+                    },
+                    {
+                      "type": "null"
                     }
                   ]
                 },
@@ -193653,6 +197303,17 @@
               "items": {
                 "$ref": "#/definitions/UserInput"
               }
+            },
+            "origin": {
+              "description": "Host-owned provenance for queued notifications; not editable user input.",
+              "anyOf": [
+                {
+                  "$ref": "#/definitions/HostMessageOrigin"
+                },
+                {
+                  "type": "null"
+                }
+              ]
             },
             "position": {
               "type": "integer",
@@ -195748,6 +199409,45 @@
             "canceled"
           ]
         },
+        "HostMessageDelivery": {
+          "type": "string",
+          "enum": [
+            "followUp",
+            "steer"
+          ]
+        },
+        "HostMessageOrigin": {
+          "type": "object",
+          "required": [
+            "delivery",
+            "eventId",
+            "sender",
+            "source"
+          ],
+          "properties": {
+            "delivery": {
+              "$ref": "#/definitions/HostMessageDelivery"
+            },
+            "eventId": {
+              "type": "string"
+            },
+            "sender": {
+              "description": "Host-resolved sender session or background task identity, never a claim extracted from the message body.",
+              "type": "string"
+            },
+            "source": {
+              "$ref": "#/definitions/HostMessageSource"
+            }
+          }
+        },
+        "HostMessageSource": {
+          "type": "string",
+          "enum": [
+            "agent",
+            "backgroundTask",
+            "schedule"
+          ]
+        },
         "ImageDetail": {
           "type": "string",
           "enum": [
@@ -195784,6 +199484,17 @@
                   "allOf": [
                     {
                       "$ref": "#/definitions/UserMessageEntry"
+                    }
+                  ]
+                },
+                "origin": {
+                  "description": "Host-owned provenance. Absent for human and legacy input; never a grant of authority.",
+                  "anyOf": [
+                    {
+                      "$ref": "#/definitions/HostMessageOrigin"
+                    },
+                    {
+                      "type": "null"
                     }
                   ]
                 },
@@ -196787,6 +200498,17 @@
               "items": {
                 "$ref": "#/definitions/UserInput"
               }
+            },
+            "origin": {
+              "description": "Host-owned provenance for queued notifications; not editable user input.",
+              "anyOf": [
+                {
+                  "$ref": "#/definitions/HostMessageOrigin"
+                },
+                {
+                  "type": "null"
+                }
+              ]
             },
             "position": {
               "type": "integer",
@@ -198906,6 +202628,45 @@
             "canceled"
           ]
         },
+        "HostMessageDelivery": {
+          "type": "string",
+          "enum": [
+            "followUp",
+            "steer"
+          ]
+        },
+        "HostMessageOrigin": {
+          "type": "object",
+          "required": [
+            "delivery",
+            "eventId",
+            "sender",
+            "source"
+          ],
+          "properties": {
+            "delivery": {
+              "$ref": "#/definitions/HostMessageDelivery"
+            },
+            "eventId": {
+              "type": "string"
+            },
+            "sender": {
+              "description": "Host-resolved sender session or background task identity, never a claim extracted from the message body.",
+              "type": "string"
+            },
+            "source": {
+              "$ref": "#/definitions/HostMessageSource"
+            }
+          }
+        },
+        "HostMessageSource": {
+          "type": "string",
+          "enum": [
+            "agent",
+            "backgroundTask",
+            "schedule"
+          ]
+        },
         "ImageDetail": {
           "type": "string",
           "enum": [
@@ -198942,6 +202703,17 @@
                   "allOf": [
                     {
                       "$ref": "#/definitions/UserMessageEntry"
+                    }
+                  ]
+                },
+                "origin": {
+                  "description": "Host-owned provenance. Absent for human and legacy input; never a grant of authority.",
+                  "anyOf": [
+                    {
+                      "$ref": "#/definitions/HostMessageOrigin"
+                    },
+                    {
+                      "type": "null"
                     }
                   ]
                 },
@@ -199945,6 +203717,17 @@
               "items": {
                 "$ref": "#/definitions/UserInput"
               }
+            },
+            "origin": {
+              "description": "Host-owned provenance for queued notifications; not editable user input.",
+              "anyOf": [
+                {
+                  "$ref": "#/definitions/HostMessageOrigin"
+                },
+                {
+                  "type": "null"
+                }
+              ]
             },
             "position": {
               "type": "integer",
@@ -202500,6 +206283,45 @@
             "canceled"
           ]
         },
+        "HostMessageDelivery": {
+          "type": "string",
+          "enum": [
+            "followUp",
+            "steer"
+          ]
+        },
+        "HostMessageOrigin": {
+          "type": "object",
+          "required": [
+            "delivery",
+            "eventId",
+            "sender",
+            "source"
+          ],
+          "properties": {
+            "delivery": {
+              "$ref": "#/definitions/HostMessageDelivery"
+            },
+            "eventId": {
+              "type": "string"
+            },
+            "sender": {
+              "description": "Host-resolved sender session or background task identity, never a claim extracted from the message body.",
+              "type": "string"
+            },
+            "source": {
+              "$ref": "#/definitions/HostMessageSource"
+            }
+          }
+        },
+        "HostMessageSource": {
+          "type": "string",
+          "enum": [
+            "agent",
+            "backgroundTask",
+            "schedule"
+          ]
+        },
         "ImageDetail": {
           "type": "string",
           "enum": [
@@ -202536,6 +206358,17 @@
                   "allOf": [
                     {
                       "$ref": "#/definitions/UserMessageEntry"
+                    }
+                  ]
+                },
+                "origin": {
+                  "description": "Host-owned provenance. Absent for human and legacy input; never a grant of authority.",
+                  "anyOf": [
+                    {
+                      "$ref": "#/definitions/HostMessageOrigin"
+                    },
+                    {
+                      "type": "null"
                     }
                   ]
                 },
@@ -203539,6 +207372,17 @@
               "items": {
                 "$ref": "#/definitions/UserInput"
               }
+            },
+            "origin": {
+              "description": "Host-owned provenance for queued notifications; not editable user input.",
+              "anyOf": [
+                {
+                  "$ref": "#/definitions/HostMessageOrigin"
+                },
+                {
+                  "type": "null"
+                }
+              ]
             },
             "position": {
               "type": "integer",
@@ -206003,6 +209847,45 @@
             "canceled"
           ]
         },
+        "HostMessageDelivery": {
+          "type": "string",
+          "enum": [
+            "followUp",
+            "steer"
+          ]
+        },
+        "HostMessageOrigin": {
+          "type": "object",
+          "required": [
+            "delivery",
+            "eventId",
+            "sender",
+            "source"
+          ],
+          "properties": {
+            "delivery": {
+              "$ref": "#/definitions/HostMessageDelivery"
+            },
+            "eventId": {
+              "type": "string"
+            },
+            "sender": {
+              "description": "Host-resolved sender session or background task identity, never a claim extracted from the message body.",
+              "type": "string"
+            },
+            "source": {
+              "$ref": "#/definitions/HostMessageSource"
+            }
+          }
+        },
+        "HostMessageSource": {
+          "type": "string",
+          "enum": [
+            "agent",
+            "backgroundTask",
+            "schedule"
+          ]
+        },
         "ImageDetail": {
           "type": "string",
           "enum": [
@@ -206039,6 +209922,17 @@
                   "allOf": [
                     {
                       "$ref": "#/definitions/UserMessageEntry"
+                    }
+                  ]
+                },
+                "origin": {
+                  "description": "Host-owned provenance. Absent for human and legacy input; never a grant of authority.",
+                  "anyOf": [
+                    {
+                      "$ref": "#/definitions/HostMessageOrigin"
+                    },
+                    {
+                      "type": "null"
                     }
                   ]
                 },
@@ -207042,6 +210936,17 @@
               "items": {
                 "$ref": "#/definitions/UserInput"
               }
+            },
+            "origin": {
+              "description": "Host-owned provenance for queued notifications; not editable user input.",
+              "anyOf": [
+                {
+                  "$ref": "#/definitions/HostMessageOrigin"
+                },
+                {
+                  "type": "null"
+                }
+              ]
             },
             "position": {
               "type": "integer",
@@ -209650,6 +213555,45 @@
             "canceled"
           ]
         },
+        "HostMessageDelivery": {
+          "type": "string",
+          "enum": [
+            "followUp",
+            "steer"
+          ]
+        },
+        "HostMessageOrigin": {
+          "type": "object",
+          "required": [
+            "delivery",
+            "eventId",
+            "sender",
+            "source"
+          ],
+          "properties": {
+            "delivery": {
+              "$ref": "#/definitions/HostMessageDelivery"
+            },
+            "eventId": {
+              "type": "string"
+            },
+            "sender": {
+              "description": "Host-resolved sender session or background task identity, never a claim extracted from the message body.",
+              "type": "string"
+            },
+            "source": {
+              "$ref": "#/definitions/HostMessageSource"
+            }
+          }
+        },
+        "HostMessageSource": {
+          "type": "string",
+          "enum": [
+            "agent",
+            "backgroundTask",
+            "schedule"
+          ]
+        },
         "ImageDetail": {
           "type": "string",
           "enum": [
@@ -209686,6 +213630,17 @@
                   "allOf": [
                     {
                       "$ref": "#/definitions/UserMessageEntry"
+                    }
+                  ]
+                },
+                "origin": {
+                  "description": "Host-owned provenance. Absent for human and legacy input; never a grant of authority.",
+                  "anyOf": [
+                    {
+                      "$ref": "#/definitions/HostMessageOrigin"
+                    },
+                    {
+                      "type": "null"
                     }
                   ]
                 },
@@ -210689,6 +214644,17 @@
               "items": {
                 "$ref": "#/definitions/UserInput"
               }
+            },
+            "origin": {
+              "description": "Host-owned provenance for queued notifications; not editable user input.",
+              "anyOf": [
+                {
+                  "$ref": "#/definitions/HostMessageOrigin"
+                },
+                {
+                  "type": "null"
+                }
+              ]
             },
             "position": {
               "type": "integer",
@@ -212737,6 +216703,45 @@
             "canceled"
           ]
         },
+        "HostMessageDelivery": {
+          "type": "string",
+          "enum": [
+            "followUp",
+            "steer"
+          ]
+        },
+        "HostMessageOrigin": {
+          "type": "object",
+          "required": [
+            "delivery",
+            "eventId",
+            "sender",
+            "source"
+          ],
+          "properties": {
+            "delivery": {
+              "$ref": "#/definitions/HostMessageDelivery"
+            },
+            "eventId": {
+              "type": "string"
+            },
+            "sender": {
+              "description": "Host-resolved sender session or background task identity, never a claim extracted from the message body.",
+              "type": "string"
+            },
+            "source": {
+              "$ref": "#/definitions/HostMessageSource"
+            }
+          }
+        },
+        "HostMessageSource": {
+          "type": "string",
+          "enum": [
+            "agent",
+            "backgroundTask",
+            "schedule"
+          ]
+        },
         "ImageDetail": {
           "type": "string",
           "enum": [
@@ -212773,6 +216778,17 @@
                   "allOf": [
                     {
                       "$ref": "#/definitions/UserMessageEntry"
+                    }
+                  ]
+                },
+                "origin": {
+                  "description": "Host-owned provenance. Absent for human and legacy input; never a grant of authority.",
+                  "anyOf": [
+                    {
+                      "$ref": "#/definitions/HostMessageOrigin"
+                    },
+                    {
+                      "type": "null"
                     }
                   ]
                 },
@@ -213776,6 +217792,17 @@
               "items": {
                 "$ref": "#/definitions/UserInput"
               }
+            },
+            "origin": {
+              "description": "Host-owned provenance for queued notifications; not editable user input.",
+              "anyOf": [
+                {
+                  "$ref": "#/definitions/HostMessageOrigin"
+                },
+                {
+                  "type": "null"
+                }
+              ]
             },
             "position": {
               "type": "integer",
@@ -215493,6 +219520,45 @@
         }
       ],
       "definitions": {
+        "HostMessageDelivery": {
+          "type": "string",
+          "enum": [
+            "followUp",
+            "steer"
+          ]
+        },
+        "HostMessageOrigin": {
+          "type": "object",
+          "required": [
+            "delivery",
+            "eventId",
+            "sender",
+            "source"
+          ],
+          "properties": {
+            "delivery": {
+              "$ref": "#/definitions/HostMessageDelivery"
+            },
+            "eventId": {
+              "type": "string"
+            },
+            "sender": {
+              "description": "Host-resolved sender session or background task identity, never a claim extracted from the message body.",
+              "type": "string"
+            },
+            "source": {
+              "$ref": "#/definitions/HostMessageSource"
+            }
+          }
+        },
+        "HostMessageSource": {
+          "type": "string",
+          "enum": [
+            "agent",
+            "backgroundTask",
+            "schedule"
+          ]
+        },
         "ImageDetail": {
           "type": "string",
           "enum": [
@@ -215524,6 +219590,17 @@
               "items": {
                 "$ref": "#/definitions/UserInput"
               }
+            },
+            "origin": {
+              "description": "Host-owned provenance for queued notifications; not editable user input.",
+              "anyOf": [
+                {
+                  "$ref": "#/definitions/HostMessageOrigin"
+                },
+                {
+                  "type": "null"
+                }
+              ]
             },
             "position": {
               "type": "integer",
@@ -216278,6 +220355,45 @@
             "canceled"
           ]
         },
+        "HostMessageDelivery": {
+          "type": "string",
+          "enum": [
+            "followUp",
+            "steer"
+          ]
+        },
+        "HostMessageOrigin": {
+          "type": "object",
+          "required": [
+            "delivery",
+            "eventId",
+            "sender",
+            "source"
+          ],
+          "properties": {
+            "delivery": {
+              "$ref": "#/definitions/HostMessageDelivery"
+            },
+            "eventId": {
+              "type": "string"
+            },
+            "sender": {
+              "description": "Host-resolved sender session or background task identity, never a claim extracted from the message body.",
+              "type": "string"
+            },
+            "source": {
+              "$ref": "#/definitions/HostMessageSource"
+            }
+          }
+        },
+        "HostMessageSource": {
+          "type": "string",
+          "enum": [
+            "agent",
+            "backgroundTask",
+            "schedule"
+          ]
+        },
         "ImageDetail": {
           "type": "string",
           "enum": [
@@ -216314,6 +220430,17 @@
                   "allOf": [
                     {
                       "$ref": "#/definitions/UserMessageEntry"
+                    }
+                  ]
+                },
+                "origin": {
+                  "description": "Host-owned provenance. Absent for human and legacy input; never a grant of authority.",
+                  "anyOf": [
+                    {
+                      "$ref": "#/definitions/HostMessageOrigin"
+                    },
+                    {
+                      "type": "null"
                     }
                   ]
                 },
@@ -217317,6 +221444,17 @@
               "items": {
                 "$ref": "#/definitions/UserInput"
               }
+            },
+            "origin": {
+              "description": "Host-owned provenance for queued notifications; not editable user input.",
+              "anyOf": [
+                {
+                  "$ref": "#/definitions/HostMessageOrigin"
+                },
+                {
+                  "type": "null"
+                }
+              ]
             },
             "position": {
               "type": "integer",
@@ -219393,6 +223531,45 @@
             "canceled"
           ]
         },
+        "HostMessageDelivery": {
+          "type": "string",
+          "enum": [
+            "followUp",
+            "steer"
+          ]
+        },
+        "HostMessageOrigin": {
+          "type": "object",
+          "required": [
+            "delivery",
+            "eventId",
+            "sender",
+            "source"
+          ],
+          "properties": {
+            "delivery": {
+              "$ref": "#/definitions/HostMessageDelivery"
+            },
+            "eventId": {
+              "type": "string"
+            },
+            "sender": {
+              "description": "Host-resolved sender session or background task identity, never a claim extracted from the message body.",
+              "type": "string"
+            },
+            "source": {
+              "$ref": "#/definitions/HostMessageSource"
+            }
+          }
+        },
+        "HostMessageSource": {
+          "type": "string",
+          "enum": [
+            "agent",
+            "backgroundTask",
+            "schedule"
+          ]
+        },
         "ImageDetail": {
           "type": "string",
           "enum": [
@@ -219429,6 +223606,17 @@
                   "allOf": [
                     {
                       "$ref": "#/definitions/UserMessageEntry"
+                    }
+                  ]
+                },
+                "origin": {
+                  "description": "Host-owned provenance. Absent for human and legacy input; never a grant of authority.",
+                  "anyOf": [
+                    {
+                      "$ref": "#/definitions/HostMessageOrigin"
+                    },
+                    {
+                      "type": "null"
                     }
                   ]
                 },
@@ -220432,6 +224620,17 @@
               "items": {
                 "$ref": "#/definitions/UserInput"
               }
+            },
+            "origin": {
+              "description": "Host-owned provenance for queued notifications; not editable user input.",
+              "anyOf": [
+                {
+                  "$ref": "#/definitions/HostMessageOrigin"
+                },
+                {
+                  "type": "null"
+                }
+              ]
             },
             "position": {
               "type": "integer",
@@ -223160,6 +227359,45 @@
             "canceled"
           ]
         },
+        "HostMessageDelivery": {
+          "type": "string",
+          "enum": [
+            "followUp",
+            "steer"
+          ]
+        },
+        "HostMessageOrigin": {
+          "type": "object",
+          "required": [
+            "delivery",
+            "eventId",
+            "sender",
+            "source"
+          ],
+          "properties": {
+            "delivery": {
+              "$ref": "#/definitions/HostMessageDelivery"
+            },
+            "eventId": {
+              "type": "string"
+            },
+            "sender": {
+              "description": "Host-resolved sender session or background task identity, never a claim extracted from the message body.",
+              "type": "string"
+            },
+            "source": {
+              "$ref": "#/definitions/HostMessageSource"
+            }
+          }
+        },
+        "HostMessageSource": {
+          "type": "string",
+          "enum": [
+            "agent",
+            "backgroundTask",
+            "schedule"
+          ]
+        },
         "ImageDetail": {
           "type": "string",
           "enum": [
@@ -223196,6 +227434,17 @@
                   "allOf": [
                     {
                       "$ref": "#/definitions/UserMessageEntry"
+                    }
+                  ]
+                },
+                "origin": {
+                  "description": "Host-owned provenance. Absent for human and legacy input; never a grant of authority.",
+                  "anyOf": [
+                    {
+                      "$ref": "#/definitions/HostMessageOrigin"
+                    },
+                    {
+                      "type": "null"
                     }
                   ]
                 },
@@ -224199,6 +228448,17 @@
               "items": {
                 "$ref": "#/definitions/UserInput"
               }
+            },
+            "origin": {
+              "description": "Host-owned provenance for queued notifications; not editable user input.",
+              "anyOf": [
+                {
+                  "$ref": "#/definitions/HostMessageOrigin"
+                },
+                {
+                  "type": "null"
+                }
+              ]
             },
             "position": {
               "type": "integer",
@@ -226261,6 +230521,45 @@
             "canceled"
           ]
         },
+        "HostMessageDelivery": {
+          "type": "string",
+          "enum": [
+            "followUp",
+            "steer"
+          ]
+        },
+        "HostMessageOrigin": {
+          "type": "object",
+          "required": [
+            "delivery",
+            "eventId",
+            "sender",
+            "source"
+          ],
+          "properties": {
+            "delivery": {
+              "$ref": "#/definitions/HostMessageDelivery"
+            },
+            "eventId": {
+              "type": "string"
+            },
+            "sender": {
+              "description": "Host-resolved sender session or background task identity, never a claim extracted from the message body.",
+              "type": "string"
+            },
+            "source": {
+              "$ref": "#/definitions/HostMessageSource"
+            }
+          }
+        },
+        "HostMessageSource": {
+          "type": "string",
+          "enum": [
+            "agent",
+            "backgroundTask",
+            "schedule"
+          ]
+        },
         "ImageDetail": {
           "type": "string",
           "enum": [
@@ -226297,6 +230596,17 @@
                   "allOf": [
                     {
                       "$ref": "#/definitions/UserMessageEntry"
+                    }
+                  ]
+                },
+                "origin": {
+                  "description": "Host-owned provenance. Absent for human and legacy input; never a grant of authority.",
+                  "anyOf": [
+                    {
+                      "$ref": "#/definitions/HostMessageOrigin"
+                    },
+                    {
+                      "type": "null"
                     }
                   ]
                 },
@@ -227300,6 +231610,17 @@
               "items": {
                 "$ref": "#/definitions/UserInput"
               }
+            },
+            "origin": {
+              "description": "Host-owned provenance for queued notifications; not editable user input.",
+              "anyOf": [
+                {
+                  "$ref": "#/definitions/HostMessageOrigin"
+                },
+                {
+                  "type": "null"
+                }
+              ]
             },
             "position": {
               "type": "integer",
@@ -229348,6 +233669,45 @@
             "canceled"
           ]
         },
+        "HostMessageDelivery": {
+          "type": "string",
+          "enum": [
+            "followUp",
+            "steer"
+          ]
+        },
+        "HostMessageOrigin": {
+          "type": "object",
+          "required": [
+            "delivery",
+            "eventId",
+            "sender",
+            "source"
+          ],
+          "properties": {
+            "delivery": {
+              "$ref": "#/definitions/HostMessageDelivery"
+            },
+            "eventId": {
+              "type": "string"
+            },
+            "sender": {
+              "description": "Host-resolved sender session or background task identity, never a claim extracted from the message body.",
+              "type": "string"
+            },
+            "source": {
+              "$ref": "#/definitions/HostMessageSource"
+            }
+          }
+        },
+        "HostMessageSource": {
+          "type": "string",
+          "enum": [
+            "agent",
+            "backgroundTask",
+            "schedule"
+          ]
+        },
         "ImageDetail": {
           "type": "string",
           "enum": [
@@ -229384,6 +233744,17 @@
                   "allOf": [
                     {
                       "$ref": "#/definitions/UserMessageEntry"
+                    }
+                  ]
+                },
+                "origin": {
+                  "description": "Host-owned provenance. Absent for human and legacy input; never a grant of authority.",
+                  "anyOf": [
+                    {
+                      "$ref": "#/definitions/HostMessageOrigin"
+                    },
+                    {
+                      "type": "null"
                     }
                   ]
                 },
@@ -230387,6 +234758,17 @@
               "items": {
                 "$ref": "#/definitions/UserInput"
               }
+            },
+            "origin": {
+              "description": "Host-owned provenance for queued notifications; not editable user input.",
+              "anyOf": [
+                {
+                  "$ref": "#/definitions/HostMessageOrigin"
+                },
+                {
+                  "type": "null"
+                }
+              ]
             },
             "position": {
               "type": "integer",

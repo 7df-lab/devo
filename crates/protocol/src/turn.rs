@@ -200,6 +200,16 @@ pub struct PendingInputItem {
 }
 
 impl PendingInputItem {
+    /// Read host-owned provenance from a durable pending entry. Native input RPCs
+    /// build metadata themselves and cannot set this field from client payloads.
+    pub fn host_message_origin(&self) -> Option<crate::native::host_message::HostMessageOrigin> {
+        self.metadata
+            .as_ref()?
+            .get("host_message_origin")
+            .cloned()
+            .and_then(|value| serde_json::from_value(value).ok())
+    }
+
     pub fn new(
         kind: PendingInputKind,
         metadata: Option<serde_json::Value>,

@@ -157,7 +157,7 @@ export function CustomProviderDialog({
 			for (const m of models) {
 				const mid = m.id.trim()
 				if (mid) {
-					catalogModels[mid] = { ...existing?.models[mid], name: m.name.trim() || undefined }
+					catalogModels[mid] = { ...existing?.models?.[mid], name: m.name.trim() || undefined }
 				}
 			}
 
@@ -369,7 +369,7 @@ export function CustomProviderDialog({
 										value={m.id}
 										onChange={(e) => updateModel(i, "id", e.target.value)}
 										className="flex-1"
-										disabled={saving || !!existing?.models[m.id]}
+										disabled={saving || !!existing?.models?.[m.id]}
 									/>
 									<Input
 										placeholder="Display name"
@@ -382,7 +382,7 @@ export function CustomProviderDialog({
 										variant="ghost"
 										size="sm"
 										onClick={() => removeModel(i)}
-										disabled={saving || models.length <= 1 || !!existing?.models[m.id]}
+										disabled={saving || models.length <= 1 || !!existing?.models?.[m.id]}
 									>
 										<Trash2Icon className="size-3.5 stroke-[1.5]" />
 									</Button>

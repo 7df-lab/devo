@@ -1,3 +1,4 @@
+import { hostMessageLabel, type HostMessageOrigin } from "../../lib/host-message"
 import { cn } from "@devo/ui/lib/utils"
 import {
 	CirclePauseIcon,
@@ -25,6 +26,7 @@ export interface ComposerGoal {
 }
 
 export interface ComposerQueueItem {
+	origin?: HostMessageOrigin
 	id: string
 	text: string
 	status: ComposerQueueItemStatus
@@ -208,7 +210,7 @@ function QueueItemRow({
 				)}
 			/>
 			<div className="min-w-0 flex flex-1 items-center gap-1.5">
-				<span className="truncate">{preview || "(empty)"}</span>
+				<span className="truncate">{item.origin && <span className="font-medium">{hostMessageLabel(item.origin)}: </span>}{preview || "(empty)"}</span>
 				{item.fileCount ? (
 					<span className="shrink-0 rounded bg-muted px-1.5 text-[11px] text-muted-foreground">
 						{item.fileCount} file{item.fileCount === 1 ? "" : "s"}
@@ -219,6 +221,7 @@ function QueueItemRow({
 				) : null}
 			</div>
 			<div className="flex shrink-0 items-center gap-0.5">
+				{!item.origin && <>
 				<button
 					type="button"
 					disabled={!canAct || !onSteer}
@@ -239,6 +242,7 @@ function QueueItemRow({
 				>
 					<PencilIcon className="size-3.5 stroke-[1.5]" />
 				</RowIconButton>
+				</>}
 				<RowIconButton
 					label="Remove queued message"
 					disabled={busy || !onRemove}

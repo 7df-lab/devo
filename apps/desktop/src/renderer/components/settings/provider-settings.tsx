@@ -249,9 +249,8 @@ export function ProviderSettings() {
 					open={!!connectionDetail}
 					onOpenChange={(open) => { if (!open) setConnectionDetail(null) }}
 					onChanged={handleSaved}
-					onEdit={isDesktopOAuthProvider(connectionDetail.id) ? undefined : () => {
-						const current = catalog.providers.find((provider) => provider.id === connectionDetail.id) ?? connectionDetail
-						setEditingProvider({ ...current, models: catalog.connectionModels[current.id] ?? {} })
+					onEdit={isDesktopOAuthProvider(connectionDetail.id) ? undefined : (current) => {
+						setEditingProvider(current)
 						setConnectionDetail(null)
 						setCustomDialogOpen(true)
 					}}

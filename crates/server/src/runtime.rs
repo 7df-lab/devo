@@ -117,6 +117,7 @@ mod goal_handlers;
 mod handlers;
 mod history_cache;
 mod hooks;
+mod host_messages;
 mod interaction_items;
 mod items;
 mod kernel_host;
@@ -281,6 +282,7 @@ pub struct ServerRuntime {
 #[derive(Debug, Clone, PartialEq, Eq)]
 pub(crate) enum TurnInputMode {
     VisibleUserMessage,
+    HostMessage(devo_protocol::native::host_message::HostMessageOrigin),
     HiddenGoalContinuation {
         goal: devo_protocol::ThreadGoal,
     },
@@ -332,8 +334,14 @@ pub(crate) enum TurnStartQueuePolicy {
 }
 
 impl TurnInputMode {
+    fn host_origin(&self) -> Option<&devo_protocol::native::host_message::HostMessageOrigin> {
+        match self {
+            Self::HostMessage(origin) => Some(origin),
+            _ => None,
+        }
+    }
     fn emits_user_message(&self) -> bool {
-        matches!(self, Self::VisibleUserMessage)
+        matches!(self, Self::VisibleUserMessage | Self::HostMessage(_))
     }
 }
 

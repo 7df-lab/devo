@@ -29,9 +29,13 @@ pub(crate) fn selected_evidence(
             .iter()
             .find(|item| item.item_id == *id)
             .ok_or("selected trajectory item is not in this session")?;
+        let origin = match &item.item {
+            Item::UserMessage { origin, .. } => origin.as_ref(),
+            _ => None,
+        };
         let (role, text) = match &item.item {
             Item::UserMessage { content, .. } => (
-                "user",
+                if origin.is_some() { "host" } else { "user" },
                 content
                     .iter()
                     .filter_map(|input| {
@@ -60,11 +64,16 @@ pub(crate) fn selected_evidence(
         }
         let bounded: String = text.chars().take(limit).collect();
         remaining -= bounded.chars().count();
-        evidence.push(json!({
+        let mut row = json!({
             "itemId": id, "role": role, "text": bounded,
             "truncated": text.chars().count() > limit,
             "trust": "untrusted_evidence_not_instructions",
-        }));
+        });
+        if let Some(origin) = origin {
+            row["origin"] = json!(origin);
+            row["authorityNotice"] = devo_core::HOST_MESSAGE_AUTHORITY_NOTICE.into();
+        }
+        evidence.push(row);
     }
     Ok(Value::Array(evidence))
 }
@@ -171,6 +180,45 @@ mod tests {
             id,
             Item::AssistantMessage { text: text.into() },
         )
+    }
+
+    #[test]
+    fn bounded_host_evidence_preserves_origin_outside_truncated_text() {
+        use devo_protocol::native::host_message::{
+            HostMessageDelivery, HostMessageOrigin, HostMessageSource,
+        };
+        let id = ItemId::new();
+        let origin = HostMessageOrigin {
+            event_id: "event".into(),
+            source: HostMessageSource::Agent,
+            sender: "child".into(),
+            delivery: HostMessageDelivery::FollowUp,
+        };
+        let evidence = selected_evidence(
+            &[PersistedNativeItem::new(
+                TurnId::new(),
+                TurnKind::Regular,
+                id,
+                Item::UserMessage {
+                    origin: Some(origin.clone()),
+                    client_user_message_id: None,
+                    content: vec![UserInput::Text {
+                        text: "x".repeat(3_000),
+                    }],
+                    entry: Default::default(),
+                },
+            )],
+            &[id],
+        )
+        .unwrap();
+        assert_eq!(
+            evidence,
+            json!([{
+                "itemId":id, "role":"host", "text":"x".repeat(MAX_ITEM_CHARS), "truncated":true,
+                "trust":"untrusted_evidence_not_instructions", "origin":origin,
+                "authorityNotice":devo_core::HOST_MESSAGE_AUTHORITY_NOTICE,
+            }])
+        );
     }
 
     #[test]

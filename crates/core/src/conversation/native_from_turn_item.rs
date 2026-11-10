@@ -21,11 +21,13 @@ use super::{CommandExecutionItem, TextItem, ToolCallItem, ToolResultItem, TurnIt
 pub fn native_item_from_turn_item(item: &TurnItem) -> Option<Item> {
     match item {
         TurnItem::UserMessage(text) => Some(Item::UserMessage {
+            origin: None,
             client_user_message_id: None,
             content: user_message_content(text),
             entry: UserMessageEntry::TurnStart,
         }),
         TurnItem::SteerInput(text) => Some(Item::UserMessage {
+            origin: None,
             client_user_message_id: None,
             content: user_message_content(text),
             entry: UserMessageEntry::Steer,
@@ -160,6 +162,7 @@ mod tests {
         assert_eq!(
             item,
             Item::UserMessage {
+                origin: None,
                 client_user_message_id: None,
                 content: vec![UserInput::Text {
                     text: "hello".into(),

@@ -14,6 +14,7 @@ import {
 	SESSION_SLASH_COMMAND_RESULT_CUSTOM_TYPE,
 } from "../../../core/messages.js";
 import { AgentMessageComponent } from "./agent-message.js";
+import { CustomMessageComponent } from "./custom-message.js";
 import { AssistantMessageComponent } from "./assistant-message.js";
 import { BashExecutionComponent } from "./bash-execution.js";
 import {
@@ -266,6 +267,9 @@ export function buildConversationComponents(
 				new InjectedPromptMessageComponent(message, options.markdownTheme);
 			component.setExpanded(expanded);
 			components.push(component);
+		} else if (message.role === "custom" && message.display &&
+			["Agent message", "Background notification", "Scheduled notification", "Host notification"].includes(message.customType)) {
+			components.push(new CustomMessageComponent(message, undefined, options.markdownTheme));
 		} else if (message.role === "user") {
 			const text = readUserText(message.content);
 			const hasContent =
