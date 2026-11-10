@@ -34,7 +34,9 @@ Object.assign(globalThis, {
 	IS_REACT_ACT_ENVIRONMENT: true,
 })
 dom.HTMLElement.prototype.scrollIntoView = () => {}
-const navigate = mock(() => {})
+const navigate = mock(
+	(_options: { to: string; params: { projectSlug: string; sessionId: string } }) => {},
+)
 mock.module("@tanstack/react-router", () => ({
 	useNavigate: () => navigate,
 	useParams: () => ({}),
@@ -75,7 +77,7 @@ const transport: DevoNativeTransport = {
 }
 let root: Root | undefined
 let mount: HTMLElement
-const close = mock(() => {})
+const close = mock((_open: boolean) => {})
 function Harness({ open }: { open: boolean }) {
 	const ids = useAtomValue(sessionIdsAtom)
 	const agents = [...ids].map((id) => {
@@ -349,7 +351,9 @@ test("Retry keyboard activation cannot select a matching session and returns foc
 	)!
 	await act(async () => {
 		retry.focus()
-		retry.dispatchEvent(new dom.KeyboardEvent("keydown", { key: "Enter", bubbles: true }))
+		retry.dispatchEvent(
+			new dom.KeyboardEvent("keydown", { key: "Enter", bubbles: true }) as unknown as Event,
+		)
 		// happy-dom does not synthesize the browser's button activation click.
 		retry.click()
 	})
