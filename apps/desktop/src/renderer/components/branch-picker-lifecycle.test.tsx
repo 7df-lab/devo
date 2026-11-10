@@ -389,9 +389,10 @@ for (const dialog of ["dirty", "active", "dirty-to-active"] as const) {
 		await click("main")
 		await click("feature")
 		const popup = document.querySelector('[role="dialog"]') as HTMLElement
-		const animation = deferred<void>()
+		const animation = deferred<Animation>()
 		// Real Base UI retains this popup until its exit animation settles.
-		popup.getAnimations = () => [{ finished: animation.promise }] as Animation[]
+		const runningAnimation = { finished: animation.promise } as Animation
+		popup.getAnimations = () => [runningAnimation]
 		await click(dialog === "active" ? "Switch Anyway" : "Stash & Switch")
 		expect(popup.isConnected).toBe(true)
 		expect(popup.hasAttribute("data-closed")).toBe(true)
@@ -407,7 +408,7 @@ for (const dialog of ["dirty", "active", "dirty-to-active"] as const) {
 			await click("Switch Anyway")
 		}
 		expect(button("Switching...").disabled).toBe(true)
-		await act(async () => animation.resolve())
+		await act(async () => animation.resolve(runningAnimation))
 		await act(async () => button("Switching...").click())
 		expect(Boolean(document.querySelector('[placeholder="Search branches..."]'))).toBe(false)
 		expect(fetchGitStatus.mock.calls).toEqual([["/project-a"]])
