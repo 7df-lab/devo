@@ -365,9 +365,16 @@ impl ServerRuntime {
             .lock()
             .await
             .retain(|(id, _)| *id != turn.turn_id());
-        handle
-            .begin_runtime_turn(turn.clone(), turn_config.clone())
-            .await;
+        {
+            let _admission_guard = handle.lock_state_change().await;
+            // Recovery retains the turn ID, but starts a new execution attempt.
+            // Reopen only after durable recovery admission succeeds, alongside
+            // publishing the active turn, so queued steering sees both together.
+            handle.reopen_queue_steer(turn.turn_id());
+            handle
+                .begin_runtime_turn(turn.clone(), turn_config.clone())
+                .await;
+        }
         let mut items = saved.execution.items.clone();
         items.extend(saved.execution.interrupted_outcomes());
         let restored = saved

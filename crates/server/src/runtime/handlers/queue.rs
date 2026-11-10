@@ -141,6 +141,7 @@ impl ServerRuntime {
                         })
                         .unwrap_or_default(),
                     enqueued_at: chrono::Utc::now(),
+                    recovery_required: false,
                 };
                 self.broadcast_queue_updated(
                     legacy_session_id,
@@ -221,6 +222,15 @@ impl ServerRuntime {
             }
         };
         let legacy_session_id = params.session_id;
+        let Some(handle) = self.session(legacy_session_id).await else {
+            return self.error_response(
+                request_id,
+                ProtocolErrorCode::SessionNotFound,
+                "session does not exist",
+            );
+        };
+        let state_change_guard = handle.lock_state_change().await;
+
         let Some(reservation) = self
             .session_turn_reservation_snapshot(legacy_session_id)
             .await
@@ -292,7 +302,7 @@ impl ServerRuntime {
             let mut queue = reservation
                 .pending_turn_queue
                 .lock()
-                .expect("pending turn queue mutex should not be poisoned");
+                .expect("pending queue mutex poisoned");
             let Some(index) = queue.iter().position(|item| item.id == pending_id) else {
                 return self.error_response(
                     request_id,
@@ -307,61 +317,67 @@ impl ServerRuntime {
                     "host notifications cannot be edited as human input",
                 );
             }
-            if let Some(kind) = new_kind {
-                queue[index].kind = kind;
-            }
-            if let Some(position) = params.position {
-                let item = queue.remove(index).expect("index just validated");
-                let target = (position.saturating_sub(1) as usize).min(queue.len());
-                queue.insert(target, item);
-            }
-            native_queue_entries(&queue)
-                .into_iter()
-                .find(|entry| entry.queue_item_id == params.queue_item_id)
-                .expect("entry just updated")
-        };
-
-        if !reservation.ephemeral {
-            let ordered: Vec<PendingInputItem> = {
-                reservation
-                    .pending_turn_queue
-                    .lock()
-                    .expect("pending turn queue mutex should not be poisoned")
-                    .iter()
-                    .cloned()
-                    .collect()
-            };
-            let updated = ordered
-                .iter()
-                .find(|item| item.id == pending_id)
-                .expect("entry just updated");
-            if let Err(error) =
-                self.deps
-                    .db
-                    .update_pending_content(&legacy_session_id, QueueType::Turn, updated)
-            {
-                tracing::warn!(
-                    session_id = %legacy_session_id,
-                    error = %error,
-                    "failed to persist queue entry update"
+            if super::queue_steer::requires_queue_review(&queue[index]) {
+                return self.error_response(
+                    request_id,
+                    ProtocolErrorCode::InvalidParams,
+                    "review recovered input before retrying or discarding it",
                 );
             }
-            if params.position.is_some() {
-                let ordered_ids: Vec<QueueItemId> = ordered.iter().map(|item| item.id).collect();
-                if let Err(error) = self.deps.db.set_pending_positions(
-                    &legacy_session_id,
-                    QueueType::Turn,
-                    &ordered_ids,
-                ) {
-                    tracing::warn!(
-                        session_id = %legacy_session_id,
-                        error = %error,
-                        "failed to persist queue reorder"
-                    );
+            if params.position.is_some()
+                && queue.iter().any(super::queue_steer::requires_queue_review)
+            {
+                return self.error_response(
+                    request_id,
+                    ProtocolErrorCode::InvalidParams,
+                    "review recovered input before reordering the queue",
+                );
+            }
+            let mut candidate = queue.clone();
+            if let Some(kind) = new_kind {
+                candidate[index].kind = kind;
+            }
+            if let Some(position) = params.position {
+                let item = candidate.remove(index).expect("validated queue index");
+                let target = (position.saturating_sub(1) as usize).min(candidate.len());
+                candidate.insert(target, item);
+            }
+            let updated = candidate
+                .iter()
+                .find(|item| item.id == pending_id)
+                .expect("updated queue item");
+            if !reservation.ephemeral {
+                let ordered: Vec<_> = candidate.iter().map(|item| item.id).collect();
+                match self
+                    .deps
+                    .db
+                    .update_queue_entry(&legacy_session_id, updated, &ordered)
+                {
+                    Ok(true) => {}
+                    Ok(false) => {
+                        return self.error_response(
+                            request_id,
+                            ProtocolErrorCode::QueueItemNotFound,
+                            "queue item is no longer persisted",
+                        );
+                    }
+                    Err(error) => {
+                        return self.error_response(
+                            request_id,
+                            ProtocolErrorCode::InternalError,
+                            format!("could not persist queue update: {error}"),
+                        );
+                    }
                 }
             }
-        }
+            *queue = candidate;
+            native_queue_entries(&queue)
+                .into_iter()
+                .find(|entry| entry.queue_item_id == pending_id)
+                .expect("updated queue entry")
+        };
 
+        drop(state_change_guard);
         self.broadcast_queue_updated(
             legacy_session_id,
             QueueChange::Updated,
@@ -393,6 +409,15 @@ impl ServerRuntime {
                 }
             };
         let legacy_session_id = params.session_id;
+        let Some(handle) = self.session(legacy_session_id).await else {
+            return self.error_response(
+                request_id,
+                ProtocolErrorCode::SessionNotFound,
+                "session does not exist",
+            );
+        };
+        let state_change_guard = handle.lock_state_change().await;
+
         let pending_id = params.queue_item_id;
         // Remove through the shared queue mutex (01 §4.3 last-write-wins),
         // not an actor command: queue ops must stay zero-hop at decision points.
@@ -418,6 +443,47 @@ impl ServerRuntime {
                     "queue item is no longer queued",
                 );
             };
+            if !reservation.ephemeral {
+                let removed = if super::queue_steer::requires_queue_review(&queue[index]) {
+                    if let Err(error) = self.deps.db.update_pending_content(
+                        &legacy_session_id,
+                        QueueType::Turn,
+                        &queue[index],
+                    ) {
+                        return self.error_response(
+                            request_id,
+                            ProtocolErrorCode::InternalError,
+                            format!("could not reconcile held queue input: {error}"),
+                        );
+                    }
+                    self.deps
+                        .db
+                        .discard_held_queue_steer(&legacy_session_id, &pending_id)
+                } else {
+                    self.deps.db.remove_pending_by_id(
+                        &legacy_session_id,
+                        QueueType::Turn,
+                        &pending_id,
+                    )
+                };
+                match removed {
+                    Ok(true) => {}
+                    Ok(false) => {
+                        return self.error_response(
+                            request_id,
+                            ProtocolErrorCode::QueueItemNotFound,
+                            "queue item is no longer persisted",
+                        );
+                    }
+                    Err(error) => {
+                        return self.error_response(
+                            request_id,
+                            ProtocolErrorCode::InternalError,
+                            format!("could not persist queue removal: {error}"),
+                        );
+                    }
+                }
+            }
             queue.remove(index).is_some()
         };
         if !removed {
@@ -434,18 +500,7 @@ impl ServerRuntime {
                 "Queued child input was removed before execution.".to_string(),
             );
         }
-        if !reservation.ephemeral
-            && let Err(error) =
-                self.deps
-                    .db
-                    .remove_pending_by_id(&legacy_session_id, QueueType::Turn, &pending_id)
-        {
-            tracing::warn!(
-                session_id = %legacy_session_id,
-                error = %error,
-                "failed to remove queue entry from database"
-            );
-        }
+        drop(state_change_guard);
         self.broadcast_queue_updated(
             legacy_session_id,
             QueueChange::Removed,
@@ -453,6 +508,10 @@ impl ServerRuntime {
             None,
         )
         .await;
+        let runtime = Arc::clone(self);
+        tokio::spawn(async move {
+            runtime.drain_queue_if_idle(legacy_session_id).await;
+        });
         serde_json::to_value(SuccessResponse {
             id: request_id,
             result: SessionQueueRemoveResult {},
@@ -804,6 +863,7 @@ impl ServerRuntime {
                     _ => String::new(),
                 },
                 enqueued_at: item.created_at,
+                recovery_required: super::queue_steer::requires_queue_review(&item),
             });
         self.broadcast_queue_updated(
             legacy_session_id,
@@ -958,6 +1018,7 @@ pub(crate) fn native_queue_entries(queue: &VecDeque<PendingInputItem>) -> Vec<Qu
                     .take(80)
                     .collect(),
                 enqueued_at: item.created_at,
+                recovery_required: super::queue_steer::requires_queue_review(item),
             }
         })
         .collect()

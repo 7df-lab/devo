@@ -11,6 +11,8 @@ use devo_protocol::native::ids::{SessionId, TurnId};
 use devo_protocol::native::item::ContextOccupancy;
 use devo_protocol::{PendingInputItem, PendingInputKind, QueueItemId, SessionTitleState};
 
+mod queue_steer;
+
 /// Queue type for pending messages.
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 pub enum QueueType {
@@ -319,6 +321,19 @@ impl Database {
                 created_at INTEGER NOT NULL,
                 position INTEGER NOT NULL DEFAULT 0
             );
+
+            CREATE TABLE IF NOT EXISTS queue_steer_receipts (
+                session_id TEXT NOT NULL REFERENCES sessions(id) ON DELETE CASCADE,
+                pending_input_id TEXT NOT NULL,
+                turn_id TEXT NOT NULL,
+                PRIMARY KEY (session_id, pending_input_id)
+            );
+
+            CREATE TRIGGER IF NOT EXISTS delete_queue_steer_receipts
+                AFTER DELETE ON sessions
+                BEGIN
+                    DELETE FROM queue_steer_receipts WHERE session_id = OLD.id;
+                END;
 
             CREATE INDEX IF NOT EXISTS idx_pending_session
                 ON pending_messages(session_id, queue_type);

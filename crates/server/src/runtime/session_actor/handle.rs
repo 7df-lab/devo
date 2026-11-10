@@ -37,6 +37,9 @@ pub(crate) struct SessionHandle {
     tx: mpsc::Sender<SessionCommand>,
     max_turns: Option<u32>,
     state_change_gate: Arc<tokio::sync::Mutex<()>>,
+    closed_queue_steer_turn: Arc<std::sync::Mutex<Option<TurnId>>>,
+    ephemeral_queue_steer_receipts:
+        Arc<std::sync::Mutex<std::collections::HashMap<devo_core::QueueItemId, TurnId>>>,
 }
 
 impl SessionHandle {
@@ -66,6 +69,8 @@ impl SessionHandle {
             tx,
             max_turns,
             state_change_gate: Arc::new(tokio::sync::Mutex::new(())),
+            closed_queue_steer_turn: Arc::default(),
+            ephemeral_queue_steer_receipts: Arc::default(),
         };
         tokio::spawn(super::actor_loop::run_session_actor(state, rx, runtime));
         handle
@@ -79,6 +84,55 @@ impl SessionHandle {
     /// admission, such as two-phase rollback commit and message edit.
     pub(crate) async fn lock_state_change(&self) -> tokio::sync::OwnedMutexGuard<()> {
         Arc::clone(&self.state_change_gate).lock_owned().await
+    }
+
+    /// Called under the admission gate before finalization begins.
+    pub(crate) fn close_queue_steer(&self, turn_id: TurnId) {
+        *self
+            .closed_queue_steer_turn
+            .lock()
+            .expect("queue steer mutex poisoned") = Some(turn_id);
+    }
+
+    /// Reopens a new execution attempt of the same turn under the admission gate.
+    pub(crate) fn reopen_queue_steer(&self, turn_id: TurnId) {
+        let mut closed = self
+            .closed_queue_steer_turn
+            .lock()
+            .expect("queue steer mutex poisoned");
+        if *closed == Some(turn_id) {
+            *closed = None;
+        }
+    }
+
+    pub(crate) fn queue_steer_closed(&self, turn_id: TurnId) -> bool {
+        *self
+            .closed_queue_steer_turn
+            .lock()
+            .expect("queue steer mutex poisoned")
+            == Some(turn_id)
+    }
+
+    pub(crate) fn ephemeral_queue_steer_receipt(
+        &self,
+        id: devo_core::QueueItemId,
+    ) -> Option<TurnId> {
+        self.ephemeral_queue_steer_receipts
+            .lock()
+            .expect("queue receipt mutex poisoned")
+            .get(&id)
+            .copied()
+    }
+
+    pub(crate) fn remember_ephemeral_queue_steer(
+        &self,
+        id: devo_core::QueueItemId,
+        turn_id: TurnId,
+    ) {
+        self.ephemeral_queue_steer_receipts
+            .lock()
+            .expect("queue receipt mutex poisoned")
+            .insert(id, turn_id);
     }
 
     /// Non-blocking enqueue for fire-and-forget updates from turn streams.

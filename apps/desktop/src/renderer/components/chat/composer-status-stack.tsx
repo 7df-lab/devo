@@ -35,6 +35,8 @@ export interface ComposerQueueItem {
 	fileCount?: number
 	createdAtMs?: number
 	error?: string
+	canEdit?: boolean
+	recoveryRequired?: boolean
 }
 
 interface ComposerStatusStackProps {
@@ -46,10 +48,11 @@ interface ComposerStatusStackProps {
 	onPauseGoal?: () => void
 	onResumeGoal?: () => void
 	onClearGoal?: () => void
+	onRetryQueueItem?: (item: ComposerQueueItem) => void
 	onSteerQueueItem?: (item: ComposerQueueItem) => void
 	onEditQueueItem?: (item: ComposerQueueItem) => void
 	onRemoveQueueItem?: (item: ComposerQueueItem) => void
-	onReorderQueueItem?: (fromIndex: number, toIndex: number) => void
+	onReorderQueueItem?: (fromId: string, toId: string) => void
 	onQueueDragStart?: (itemId: string) => void
 	onQueueDragEnd?: () => void
 }
@@ -136,24 +139,26 @@ function queueItemBusy(status: ComposerQueueItemStatus): boolean {
 }
 
 interface QueueItemRowProps {
+	reorderDisabled?: boolean
 	item: ComposerQueueItem
-	index: number
 	dragging?: boolean
 	dragOver?: boolean
+	onRetry?: (item: ComposerQueueItem) => void
 	onSteer?: (item: ComposerQueueItem) => void
 	onEdit?: (item: ComposerQueueItem) => void
 	onRemove?: (item: ComposerQueueItem) => void
-	onDragStart?: (index: number) => void
-	onDragEnter?: (index: number) => void
+	onDragStart?: (itemId: string) => void
+	onDragEnter?: (itemId: string) => void
 	onDragEnd?: () => void
-	onDrop?: (index: number) => void
+	onDrop?: (itemId: string) => void
 }
 
 function QueueItemRow({
+	reorderDisabled,
 	item,
-	index,
 	dragging,
 	dragOver,
+	onRetry,
 	onSteer,
 	onEdit,
 	onRemove,
@@ -163,35 +168,37 @@ function QueueItemRow({
 	onDrop,
 }: QueueItemRowProps) {
 	const busy = queueItemBusy(item.status)
-	const canAct = item.status === "queued"
-	const canEdit = !busy && (item.fileCount ?? 0) === 0
+	const canAct = item.status === "queued" && !item.recoveryRequired
+	const canDrag = canAct && !reorderDisabled
+	const canEdit = !busy && !item.recoveryRequired && item.canEdit !== false && (item.fileCount ?? 0) === 0
 	const preview = queueRenderPreview(item.text)
 
 	const handleDragStart = (event: DragEvent<HTMLDivElement>) => {
-		if (!canAct) {
+		if (!canDrag) {
 			event.preventDefault()
 			return
 		}
 		event.dataTransfer.effectAllowed = "move"
 		event.dataTransfer.setData("text/plain", item.id)
-		onDragStart?.(index)
+		onDragStart?.(item.id)
 	}
 
 	const handleDragOver = (event: DragEvent<HTMLDivElement>) => {
-		if (!canAct) return
+		if (!canDrag) return
 		event.preventDefault()
 		event.dataTransfer.dropEffect = "move"
-		onDragEnter?.(index)
+		onDragEnter?.(item.id)
 	}
 
 	const handleDrop = (event: DragEvent<HTMLDivElement>) => {
 		event.preventDefault()
-		onDrop?.(index)
+		if (!canDrag) return
+		onDrop?.(item.id)
 	}
 
 	return (
 		<div
-			draggable={canAct}
+			draggable={canDrag}
 			onDragStart={handleDragStart}
 			onDragOver={handleDragOver}
 			onDragEnter={handleDragOver}
@@ -206,7 +213,7 @@ function QueueItemRow({
 			<GripVerticalIcon
 				className={cn(
 					"size-3.5 shrink-0 cursor-grab stroke-[1.5] text-muted-foreground/40 active:cursor-grabbing",
-					!canAct && "opacity-30",
+					!canDrag && "opacity-30",
 				)}
 			/>
 			<div className="min-w-0 flex flex-1 items-center gap-1.5">
@@ -216,16 +223,19 @@ function QueueItemRow({
 						{item.fileCount} file{item.fileCount === 1 ? "" : "s"}
 					</span>
 				) : null}
-				{item.status === "error" && item.error ? (
-					<span className="shrink-0 text-[11px] text-destructive">{item.error}</span>
+				{item.recoveryRequired ? (
+					<span role="alert" className="text-[11px] text-destructive">Recovery required. Prior effects may have occurred; retrying may repeat them.</span>
+				) : null}
+				{item.error ? (
+					<span role="alert" title={item.error} className="min-w-0 truncate text-[11px] text-destructive">{item.error}</span>
 				) : null}
 			</div>
 			<div className="flex shrink-0 items-center gap-0.5">
 				{!item.origin && <>
 				<button
 					type="button"
-					disabled={!canAct || !onSteer}
-					onClick={() => onSteer?.(item)}
+					disabled={item.recoveryRequired ? busy || !onRetry : !canAct || !onSteer}
+					onClick={() => item.recoveryRequired ? onRetry?.(item) : onSteer?.(item)}
 					className="inline-flex h-7 shrink-0 items-center gap-1 rounded-md px-2 text-[12px] font-medium text-muted-foreground transition-colors hover:bg-muted hover:text-foreground disabled:pointer-events-none disabled:opacity-50"
 				>
 					{item.status === "steering" ? (
@@ -233,7 +243,7 @@ function QueueItemRow({
 					) : (
 						<CornerDownRightIcon className="size-3.5 stroke-[1.5]" />
 					)}
-					Steer
+					{item.recoveryRequired ? "Retry" : "Steer"}
 				</button>
 				<RowIconButton
 					label="Edit queued message"
@@ -264,10 +274,11 @@ function QueueItemRow({
 interface ComposerQueueListProps {
 	items: ComposerQueueItem[]
 	draggingQueueItemId?: string | null
+	onRetry?: (item: ComposerQueueItem) => void
 	onSteer?: (item: ComposerQueueItem) => void
 	onEdit?: (item: ComposerQueueItem) => void
 	onRemove?: (item: ComposerQueueItem) => void
-	onReorder?: (fromIndex: number, toIndex: number) => void
+	onReorder?: (fromId: string, toId: string) => void
 	onDragStart?: (itemId: string) => void
 	onDragEnd?: () => void
 }
@@ -275,6 +286,7 @@ interface ComposerQueueListProps {
 function ComposerQueueList({
 	items,
 	draggingQueueItemId,
+	onRetry,
 	onSteer,
 	onEdit,
 	onRemove,
@@ -282,37 +294,38 @@ function ComposerQueueList({
 	onDragStart,
 	onDragEnd,
 }: ComposerQueueListProps) {
-	const [dragIndex, setDragIndex] = useState<number | null>(null)
-	const [hoverIndex, setHoverIndex] = useState<number | null>(null)
+	const [dragItemId, setDragItemId] = useState<string | null>(null)
+	const [hoverItemId, setHoverItemId] = useState<string | null>(null)
 
 	if (items.length === 0) return null
 
 	return (
 		<>
-			{items.map((item, index) => (
+			{items.map((item) => (
 				<QueueItemRow
 					key={item.id}
 					item={item}
-					index={index}
+					reorderDisabled={items.some((entry) => entry.recoveryRequired)}
 					dragging={draggingQueueItemId === item.id}
-					dragOver={hoverIndex === index && dragIndex !== null && dragIndex !== index}
+					dragOver={hoverItemId === item.id && dragItemId !== null && dragItemId !== item.id}
+					onRetry={onRetry}
 					onSteer={onSteer}
 					onEdit={onEdit}
 					onRemove={onRemove}
-					onDragStart={(nextIndex) => {
-						setDragIndex(nextIndex)
+					onDragStart={(itemId) => {
+						setDragItemId(itemId)
 						onDragStart?.(item.id)
 					}}
-					onDragEnter={setHoverIndex}
+					onDragEnter={setHoverItemId}
 					onDragEnd={() => {
-						setDragIndex(null)
-						setHoverIndex(null)
+						setDragItemId(null)
+						setHoverItemId(null)
 						onDragEnd?.()
 					}}
-					onDrop={(toIndex) => {
-						if (dragIndex !== null) onReorder?.(dragIndex, toIndex)
-						setDragIndex(null)
-						setHoverIndex(null)
+					onDrop={(targetId) => {
+						if (dragItemId !== null) onReorder?.(dragItemId, targetId)
+						setDragItemId(null)
+						setHoverItemId(null)
 						onDragEnd?.()
 					}}
 				/>
@@ -404,6 +417,7 @@ export function ComposerStatusStack({
 	onPauseGoal,
 	onResumeGoal,
 	onClearGoal,
+	onRetryQueueItem,
 	onSteerQueueItem,
 	onEditQueueItem,
 	onRemoveQueueItem,
@@ -431,6 +445,7 @@ export function ComposerStatusStack({
 				<ComposerQueueList
 					items={queueItems}
 					draggingQueueItemId={draggingQueueItemId}
+					onRetry={onRetryQueueItem}
 					onSteer={onSteerQueueItem}
 					onEdit={onEditQueueItem}
 					onRemove={onRemoveQueueItem}

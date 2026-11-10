@@ -44,7 +44,7 @@ class Transport {
 			case "session/queue/update": return { entry: { ...this.entry, position: params.position ?? 0 } }
 			case "session/queue/remove": return {}
 			case "session/queue/push": return { outcome: "queued", entry: this.entry }
-			case "turn/steer": return { outcome: "injected", itemId: "steer-1" }
+			case "session/queue/steer": return { outcome: "accepted", queueItemId: params.queueItemId, turnId: params.expectedTurnId }
 			default: throw Error(`Unexpected method: ${method}`)
 		}
 	}
@@ -103,10 +103,14 @@ for (const [source, label] of Object.entries({ agent: "Agent message", backgroun
 			await queue.steerQueueItem(queue.queueItems[0])
 		})
 		expect(transport.requests.slice(before)).toEqual([])
-		await act(async () => { await queue.reorderQueueItem(0, 1) })
-		expect(transport.requests.at(-1)).toEqual({ method: "session/queue/update", params: { sessionId: session.id, queueItemId: "queue-1", position: 1 } })
+		await act(async () => {
+            transport.emit("queue/updated", { sessionId: session.id, queue: [transport.entry, { ...transport.entry, queueItemId: "queue-2", position: 1 }], change: "added" })
+            await Bun.sleep(5)
+        })
+        await act(async () => { await queue.reorderQueueItem("queue-1", "queue-2") })
+		expect(transport.requests.at(-1)).toEqual({ method: "session/queue/update", params: { sessionId: session.id, queueItemId: "queue-1", position: 2 } })
 		expect(queue.queueItems[0].origin).toEqual(origin)
-		await act(async () => { await queue.removeQueueItem(queue.queueItems[0]) })
+		await act(async () => { await queue.removeQueueItem(queue.queueItems.find(item => item.id === "queue-1")!) })
 		expect(transport.requests.at(-1)).toEqual({ method: "session/queue/remove", params: { sessionId: session.id, queueItemId: "queue-1" } })
 		await act(async () => { await client.session.queue.push({ sessionId: session.id, parts: [{ type: "text", text: "request" }] }); await Bun.sleep(5) })
 		expect(queue.queueItems[0].origin).toEqual(origin)
@@ -130,6 +134,7 @@ test("human queue entries still expose and execute edit/steer", async () => {
 		transport.emit("turn/started", { sessionId: session.id, turn: { id: "turn-1", sessionId: session.id, status: "inProgress", startedAt: at } })
 		await Bun.sleep(5)
 	})
+	const beforeSteer = transport.requests.length
 	await act(async () => { await queue.steerQueueItem(queue.queueItems[0]) })
-	expect(transport.requests.slice(-2).map(request => request.method)).toEqual(["turn/steer", "session/queue/remove"])
+	expect(transport.requests.slice(beforeSteer).filter(request => request.method !== "session/queue/list")).toEqual([{ method: "session/queue/steer", params: { sessionId: session.id, queueItemId: "queue-1", expectedTurnId: "turn-1" } }])
 })

@@ -7,7 +7,7 @@ use devo_protocol::native::usage::TurnUsage;
 use super::super::ServerRuntime;
 use super::failure::{turn_agent_error_from_error, turn_failure_reason_from_error};
 use super::types::{TurnEventStreamSummary, TurnQueryOutcome};
-use crate::db::{QueueType, SessionStats};
+use crate::db::SessionStats;
 use crate::runtime::session_actor::SessionActorState;
 use devo_protocol::native::session::SessionStatus;
 
@@ -28,6 +28,12 @@ impl ServerRuntime {
             query_outcome,
             event_summary,
         } = params;
+        // Admission must close before terminal I/O: the actor still advertises
+        // this turn until MergeTurn, so its active-turn snapshot is too late.
+        if let Some(handle) = self.session(session_id).await {
+            let _guard = handle.lock_state_change().await;
+            handle.close_queue_steer(turn.turn_id());
+        }
         let TurnQueryOutcome {
             result,
             mut session_total_input_tokens,
@@ -303,46 +309,43 @@ impl ServerRuntime {
                 queue.push_back(item.clone());
             }
         }
+        let mut held_ids = Vec::new();
         if !is_ephemeral {
-            // The database mirrors the same degradation, but only for ids that
-            // remain in the shared in-memory turn queue. A steer already
-            // drained by follow-up scheduling was consumed into its next turn;
-            // retaining or moving its steer row would leave an orphan and make
-            // a restart resurrect a duplicate. Every other steer row is dropped.
-            let queued_ids: std::collections::HashSet<devo_core::QueueItemId> = state
+            // Settlement is one transaction: a crash cannot fall between
+            // deleting a steer and preserving the unconsumed queued original.
+            let queue = state
                 .pending_turn_queue
                 .lock()
-                .expect("pending turn queue mutex should not be poisoned")
-                .iter()
-                .map(|item| item.id)
-                .collect();
-            match self.deps.db.drain_pending(&session_id, QueueType::Steer) {
-                Ok(rows) => {
-                    for item in &rows {
-                        if !queued_ids.contains(&item.id) {
-                            continue;
-                        }
-                        if let Err(error) =
-                            self.deps
-                                .db
-                                .push_pending(&session_id, QueueType::Turn, item)
-                        {
-                            tracing::warn!(
-                                session_id = %session_id,
-                                error = %error,
-                                "failed to degrade steer input into the turn queue"
-                            );
-                        }
+                .expect("pending queue mutex poisoned");
+            let ordered: Vec<_> = queue.iter().cloned().collect();
+            if let Err(error) = self.deps.db.settle_queue_steers(&session_id, &ordered) {
+                tracing::error!(%session_id, %error, "failed to settle queue steers; recovery remains held");
+                // Fail closed: a failed settlement must not auto-execute input
+                // while its durable receipt is still uncertain.
+                drop(queue);
+                let mut queue = state
+                    .pending_turn_queue
+                    .lock()
+                    .expect("pending queue mutex poisoned");
+                for item in queue.iter_mut() {
+                    if !matches!(
+                        self.deps.db.queue_steer_receipt(&session_id, &item.id),
+                        Ok(None)
+                    ) {
+                        crate::runtime::handlers::queue_steer::hold_for_review(item);
+                        held_ids.push(item.id);
                     }
                 }
-                Err(err) => {
-                    tracing::warn!(
-                        session_id = %session_id,
-                        error = %err,
-                        "failed to drain steer input messages from database"
-                    );
-                }
             }
+        }
+        for id in held_ids {
+            self.broadcast_queue_updated(
+                session_id,
+                devo_protocol::native::queue::QueueChange::Updated,
+                id,
+                None,
+            )
+            .await;
         }
         for item in &leftover {
             self.broadcast_queue_updated(

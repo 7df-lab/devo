@@ -29,6 +29,10 @@ pub struct QueueEntry {
     /// Short single-line preview for list rendering.
     pub preview: String,
     pub enqueued_at: DateTime<Utc>,
+    /// Admission happened before a crash, but consumption is uncertain.
+    /// Never auto-drain; explicit retry or discard requires user review.
+    #[serde(default, skip_serializing_if = "std::ops::Not::not")]
+    pub recovery_required: bool,
 }
 
 #[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize, Deserialize, JsonSchema, TS)]

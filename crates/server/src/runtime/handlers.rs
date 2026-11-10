@@ -11,6 +11,7 @@ mod message_edit;
 mod message_edit_restore;
 mod native_surface;
 mod queue;
+pub(crate) mod queue_steer;
 pub(super) mod rollback;
 pub(super) mod rollback_plan;
 mod rollback_workspace;

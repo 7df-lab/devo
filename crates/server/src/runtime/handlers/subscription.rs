@@ -655,6 +655,7 @@ impl ServerRuntime {
                     input,
                     preview,
                     enqueued_at: item.created_at,
+                    recovery_required: super::queue_steer::requires_queue_review(&item),
                 }
             })
             .collect())

@@ -604,13 +604,18 @@ export type PromptAsyncOutcome =
 	| { outcome: "started"; turnId?: string }
 	| { outcome: "queued"; queueItemId: string }
 
+export type QueueSteerOutcome =
+	| { outcome: "accepted"; queueItemId: string; turnId: string }
+	| { outcome: "keptQueued"; entry: QueueWireEntry }
+
 export type QueueWireEntry = {
 	origin?: HostMessageOrigin
+	recoveryRequired?: boolean
 	queueItemId: string
 	position: number
 	preview: string
 	enqueuedAt?: string
-	input?: Array<{ type: string; text?: string }>
+	input?: UserInput[]
 }
 
 function parseQueueWireEntries(value: unknown): QueueWireEntry[] {
@@ -628,19 +633,13 @@ function parseQueueWireEntries(value: unknown): QueueWireEntry[] {
 			}
 			return {
 				...(origin ? { origin: origin as HostMessageOrigin } : {}),
+				recoveryRequired: entry.recoveryRequired === true ? true : undefined,
 				queueItemId: String(entry.queueItemId ?? ""),
 				position: Number(entry.position ?? 0),
 				preview: String(entry.preview ?? ""),
 				enqueuedAt: typeof entry.enqueuedAt === "string" ? entry.enqueuedAt : undefined,
-				input: Array.isArray(entry.input)
-					? entry.input.map((part) => {
-							const record = objectRecord(part)
-							return {
-								type: String(record?.type ?? "text"),
-								text: typeof record?.text === "string" ? record.text : undefined,
-							}
-						})
-					: undefined,
+				// Preserve attachments, skill names, and mentions when steering.
+				input: Array.isArray(entry.input) ? entry.input as UserInput[] : undefined,
 			}
 		})
 		.filter((entry) => entry.queueItemId.length > 0)
@@ -836,6 +835,7 @@ class NativeClient {
 	private turnSessions = new Map<string, string>()
 	private activeTurnIds = new Map<string, string>()
 	private queueEntriesBySession = new Map<string, QueueWireEntry[]>()
+	private queueProjectionRevision = new Map<string, number>()
 	/** Native itemId → callId (for command output deltas). */
 	private nativeItemCallIds = new Map<string, string>()
 	private sessionDiscovery = new Map<string, Promise<Session | undefined>>()
@@ -924,17 +924,25 @@ class NativeClient {
 				// Historical sessions show up in session/list but are not
 				// addressable until session/resume. Composer refresh races
 				// message load on open, so wait for load before queue/list.
+				let revision = this.queueProjectionRevision.get(params.sessionId) ?? 0
 				try {
 					await this.ensureSessionReady(params.sessionId)
+					revision = this.queueProjectionRevision.get(params.sessionId) ?? 0
 					const result = (await this.requestCanonical("session/queue/list", {
 						sessionId: params.sessionId,
 					})) as { entries?: unknown }
 					const entries = parseQueueWireEntries(result.entries)
-					this.emitQueueSnapshot(params.sessionId, entries, "sync")
+					// Preserve any newer notification or completed refresh while this
+					// snapshot was in flight; callers still receive their own response.
+					if ((this.queueProjectionRevision.get(params.sessionId) ?? 0) === revision) {
+						this.emitQueueSnapshot(params.sessionId, entries, "sync")
+					}
 					return { data: { entries } }
 				} catch (error) {
 					if (isSessionNotFoundError(error)) {
-						this.emitQueueSnapshot(params.sessionId, [], "sync")
+						if ((this.queueProjectionRevision.get(params.sessionId) ?? 0) === revision) {
+							this.emitQueueSnapshot(params.sessionId, [], "sync")
+						}
 						return { data: { entries: [] } }
 					}
 					throw error
@@ -951,6 +959,7 @@ class NativeClient {
 				parts?: PromptPartInput[]
 				position?: number
 			}) => {
+				const revision = this.queueProjectionRevision.get(params.sessionId) ?? 0
 				const result = (await this.requestCanonical("session/queue/update", {
 					sessionId: params.sessionId,
 					queueItemId: params.queueItemId,
@@ -960,7 +969,7 @@ class NativeClient {
 					...(params.position !== undefined ? { position: params.position } : {}),
 				})) as { entry?: unknown }
 				const entry = objectRecord(result.entry)
-				if (entry) {
+				if (entry && (this.queueProjectionRevision.get(params.sessionId) ?? 0) === revision) {
 					const entries = parseQueueWireEntries([entry])
 					if (entries[0]) {
 						const current = this.queueEntriesForSession(params.sessionId)
@@ -979,6 +988,26 @@ class NativeClient {
 				}
 				return { data: result }
 			},
+			steer: async (params: { sessionId: string; queueItemId: string; expectedTurnId: string }) => {
+				// The durable server receipt is authoritative, even with an empty client cache.
+				// Never fall back to injecting input and deleting in separate requests.
+				const result = await this.requestCanonical("session/queue/steer", params) as QueueSteerOutcome
+				// Admission receipts do not prove current absence; keptQueued is also
+				// only a point-in-time snapshot. A newer notification may already
+				// hold or remove this identity. Refresh rather than overwriting it
+				// from either response, and retain cached state if refresh fails.
+				await this.session.queue.list({ sessionId: params.sessionId }).catch(() => {})
+				return { data: result }
+			},
+			retry: async (params: { sessionId: string; queueItemId: string }) => {
+				try {
+					return { data: await this.requestCanonical("session/queue/retry", params) }
+				} finally {
+					// A lost reply may still have replaced the held entry. Refresh, but
+					// never repeat this consequential recovery request automatically.
+					await this.session.queue.list({ sessionId: params.sessionId }).catch(() => {})
+				}
+			},
 			remove: async (params: { sessionId: string; queueItemId: string }) => {
 				await this.requestCanonical("session/queue/remove", {
 					sessionId: params.sessionId,
@@ -987,15 +1016,22 @@ class NativeClient {
 				return { data: null }
 			},
 		},
-		steer: async (params: { sessionId: string; parts: PromptPartInput[] }) => {
+		steer: async (params:
+			| { sessionId: string; parts: PromptPartInput[] }
+			| { sessionId: string; queueItemId: string }
+		) => {
 			const expectedTurnId = this.activeTurnIds.get(params.sessionId)
+			if ("queueItemId" in params) {
+				return this.session.queue.steer({ ...params, expectedTurnId: expectedTurnId ?? "" })
+			}
 			if (!expectedTurnId) {
 				throw new Error("No active turn to steer")
 			}
+			const input = userInputsFromPromptParts(params.parts)
 			const result = await this.requestCanonical("turn/steer", {
 				sessionId: params.sessionId,
 				expectedTurnId,
-				input: userInputsFromPromptParts(params.parts),
+				input,
 				idempotencyKey: crypto.randomUUID(),
 			})
 			return { data: result }
@@ -2842,6 +2878,7 @@ class NativeClient {
 		this.items.delete(sessionId)
 		this.activeTurnIds.delete(sessionId)
 		this.queueEntriesBySession.delete(sessionId)
+		this.queueProjectionRevision.set(sessionId, (this.queueProjectionRevision.get(sessionId) ?? 0) + 1)
 		return { directory, known }
 	}
 
@@ -2954,6 +2991,7 @@ class NativeClient {
 	}
 
 	private emitQueueSnapshot(sessionId: string, entries: QueueWireEntry[], change: string): void {
+		this.queueProjectionRevision.set(sessionId, (this.queueProjectionRevision.get(sessionId) ?? 0) + 1)
 		this.queueEntriesBySession.set(sessionId, entries)
 		const directory = this.sessionDirectories.get(sessionId) ?? this.options.directory ?? defaultCwd()
 		this.emit(directory, {
@@ -2988,6 +3026,7 @@ class NativeClient {
 			input: userInputsFromPromptParts(params.parts),
 			idempotencyKey: crypto.randomUUID(),
 		}
+		let revision = this.queueProjectionRevision.get(params.sessionId) ?? 0
 		let result: Record<string, unknown>
 		try {
 			result = await this.requestCanonical("session/queue/push", request) as Record<string, unknown>
@@ -3000,6 +3039,7 @@ class NativeClient {
 			this.resumedSessions.delete(params.sessionId)
 			this.subscriptions.delete(params.sessionId)
 			await this.ensureSessionReady(params.sessionId)
+			revision = this.queueProjectionRevision.get(params.sessionId) ?? 0
 			result = await this.requestCanonical("session/queue/push", request) as Record<string, unknown>
 		}
 		const outcome = String(result.outcome ?? "")
@@ -3007,13 +3047,15 @@ class NativeClient {
 			const entry = objectRecord(result.entry) ?? result
 			const entries = parseQueueWireEntries([entry])
 			if (entries[0]) {
-				const current = this.queueEntriesForSession(params.sessionId)
-				const merged = [...current.filter((item) => item.queueItemId !== entries[0].queueItemId), entries[0]]
-				this.emitQueueSnapshot(
-					params.sessionId,
-					merged.sort((left, right) => left.position - right.position),
-					"added",
-				)
+				if ((this.queueProjectionRevision.get(params.sessionId) ?? 0) === revision) {
+					const current = this.queueEntriesForSession(params.sessionId)
+					const merged = [...current.filter((item) => item.queueItemId !== entries[0].queueItemId), entries[0]]
+					this.emitQueueSnapshot(
+						params.sessionId,
+						merged.sort((left, right) => left.position - right.position),
+						"added",
+					)
+				}
 				return { outcome: "queued", queueItemId: entries[0].queueItemId }
 			}
 			return { outcome: "queued", queueItemId: String(entry.queueItemId ?? "") }
