@@ -10,6 +10,9 @@ One selection owns the picker from its status check through the dirty-worktree
 and active-session confirmations to checkout completion. Repeated selections and
 confirmation clicks do not start duplicate operations during that lifetime.
 Canceling either confirmation releases the picker without changing Git state.
+Closing-dialog controls are disabled during their exit animation. Any delayed
+dismissal or confirmation is checked against its original request and phase;
+it cannot release an already-dispatched checkout or cancel a later confirmation.
 Sessions that become active while the status check is pending still trigger the
 active-session warning.
 

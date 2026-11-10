@@ -77,7 +77,8 @@ function ProjectBranchPicker({
 		selectBranch,
 		stashAndSwitch,
 		proceed,
-		cancel,
+		cancelDirty,
+		cancelWarning,
 	} = useBranchPicker({
 		directory,
 		currentBranch,
@@ -177,7 +178,7 @@ function ProjectBranchPicker({
 				status={operation?.status ?? null}
 				targetBranch={operation?.branch ?? ""}
 				onStashAndSwitch={stashAndSwitch}
-				onCancel={cancel}
+				onCancel={cancelDirty}
 			/>
 
 			{/* Active session warning dialog */}
@@ -186,7 +187,7 @@ function ProjectBranchPicker({
 				targetBranch={operation?.branch ?? ""}
 				sessionCount={activeSessionCount}
 				onProceed={proceed}
-				onCancel={cancel}
+				onCancel={cancelWarning}
 			/>
 		</>
 	)
@@ -380,10 +381,12 @@ function DirtyStateDialog({
 				)}
 
 				<DialogFooter>
-					<Button variant="outline" onClick={onCancel}>
+					<Button variant="outline" onClick={onCancel} disabled={!open}>
 						Cancel
 					</Button>
-					<Button onClick={onStashAndSwitch}>Stash & Switch</Button>
+					<Button onClick={onStashAndSwitch} disabled={!open}>
+						Stash & Switch
+					</Button>
 				</DialogFooter>
 			</DialogContent>
 		</Dialog>
@@ -426,10 +429,10 @@ function ActiveSessionWarningDialog({
 				</DialogHeader>
 
 				<DialogFooter>
-					<Button variant="outline" onClick={onCancel}>
+					<Button variant="outline" onClick={onCancel} disabled={!open}>
 						Cancel
 					</Button>
-					<Button variant="destructive" onClick={onProceed}>
+					<Button variant="destructive" onClick={onProceed} disabled={!open}>
 						Switch Anyway
 					</Button>
 				</DialogFooter>

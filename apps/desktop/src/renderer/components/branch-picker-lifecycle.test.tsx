@@ -55,6 +55,7 @@ mock.module("../services/backend", () => ({
 }))
 const { createRoot } = await import("react-dom/client")
 const { BranchPicker } = await import("./branch-picker")
+const { useBranchPicker } = await import("./use-branch-picker")
 const onBranchChanged = mock((_branch: string) => {})
 let root: Root | undefined
 let mount: HTMLElement
@@ -375,3 +376,87 @@ for (const dialog of ["dirty", "active"] as const) {
 		expect(button("main").disabled).toBe(false)
 	})
 }
+
+for (const dialog of ["dirty", "active", "dirty-to-active"] as const) {
+	test(`the exiting ${dialog} dialog cannot release checkout admission`, async () => {
+		const pending = deferred<{ success: boolean; stashed: boolean }>()
+		gitCheckout.mockImplementationOnce(() => pending.promise)
+		gitStashAndCheckout.mockImplementationOnce(() => pending.promise)
+		if (dialog !== "active") {
+			fetchGitStatus.mockResolvedValue({ ...cleanStatus, isClean: false, modified: 1 })
+		}
+		await render("/project-a", dialog === "dirty" ? 0 : 1)
+		await click("main")
+		await click("feature")
+		const popup = document.querySelector('[role="dialog"]') as HTMLElement
+		const animation = deferred<void>()
+		// Real Base UI retains this popup until its exit animation settles.
+		popup.getAnimations = () => [{ finished: animation.promise }] as Animation[]
+		await click(dialog === "active" ? "Switch Anyway" : "Stash & Switch")
+		expect(popup.isConnected).toBe(true)
+		expect(popup.hasAttribute("data-closed")).toBe(true)
+		const cancel = [...popup.querySelectorAll("button")].find(
+			(element) => element.textContent === "Cancel",
+		)
+		if (!cancel) throw new Error("Missing exiting dialog Cancel")
+		expect(cancel.disabled).toBe(true)
+		await act(async () => cancel.click())
+		if (dialog === "dirty-to-active") {
+			expect(document.body.textContent).toContain("Active Sessions")
+			expect(gitStashAndCheckout.mock.calls).toEqual([])
+			await click("Switch Anyway")
+		}
+		expect(button("Switching...").disabled).toBe(true)
+		await act(async () => animation.resolve())
+		await act(async () => button("Switching...").click())
+		expect(Boolean(document.querySelector('[placeholder="Search branches..."]'))).toBe(false)
+		expect(fetchGitStatus.mock.calls).toEqual([["/project-a"]])
+		expect(gitCheckout.mock.calls).toEqual(dialog === "active" ? [["/project-a", "feature"]] : [])
+		expect(gitStashAndCheckout.mock.calls).toEqual(
+			dialog === "active" ? [] : [["/project-a", "feature"]],
+		)
+		await act(async () => pending.resolve({ success: true, stashed: true }))
+		expect(onBranchChanged.mock.calls).toEqual([["feature"]])
+		expect(button("feature").disabled).toBe(false)
+	})
+}
+
+test("delayed confirmation handlers cannot act on a newer request or a dispatched checkout", async () => {
+	let controls: ReturnType<typeof useBranchPicker> | undefined
+	function Probe() {
+		controls = useBranchPicker({
+			directory: "/project-a",
+			currentBranch: "main",
+			activeSessionCount: 0,
+			onBranchChanged,
+		})
+		return null
+	}
+	const pending = deferred<{ success: boolean; stashed: boolean }>()
+	gitStashAndCheckout.mockImplementationOnce(() => pending.promise)
+	fetchGitStatus.mockResolvedValue({ ...cleanStatus, isClean: false, modified: 1 })
+	await render()
+	await act(async () => root?.render(<Probe />))
+	await act(async () => controls?.selectBranch("feature"))
+	const oldConfirmation = controls
+	await act(async () => controls?.cancelDirty())
+	await act(async () => controls?.selectBranch("other"))
+	await act(async () => {
+		oldConfirmation?.cancelDirty()
+		oldConfirmation?.stashAndSwitch()
+	})
+	expect(controls?.operation?.phase).toBe("dirty")
+	expect(controls?.operation?.branch).toBe("other")
+	expect(gitStashAndCheckout.mock.calls).toEqual([])
+	const currentConfirmation = controls
+	await act(async () => controls?.stashAndSwitch())
+	await act(async () => {
+		currentConfirmation?.cancelDirty()
+		currentConfirmation?.stashAndSwitch()
+	})
+	expect(controls?.operation?.phase).toBe("switching")
+	expect(gitStashAndCheckout.mock.calls).toEqual([["/project-a", "other"]])
+	await act(async () => pending.resolve({ success: true, stashed: true }))
+	expect(onBranchChanged.mock.calls).toEqual([["other"]])
+	expect(controls?.operation).toBeNull()
+})

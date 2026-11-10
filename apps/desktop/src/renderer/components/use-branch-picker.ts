@@ -75,10 +75,22 @@ export function useBranchPicker({
 	const isCurrent = (request: BranchOperation) =>
 		mounted.current && activeOperation.current === request
 
-	const cancel = () => {
+	const finish = (request: BranchOperation) => {
+		if (!isCurrent(request)) return
 		activeOperation.current = null
 		setOperation(null)
 	}
+
+	// Exit animations can retain old dialog controls after a phase transition.
+	// Capture this render's request as well as its phase, never a newer request.
+	const renderedRequest = activeOperation.current
+	const confirmation = (phase: "dirty" | "warning") =>
+		renderedRequest &&
+		operation?.phase === phase &&
+		renderedRequest.phase === phase &&
+		isCurrent(renderedRequest)
+			? renderedRequest
+			: null
 
 	const checkout = async (request: BranchOperation) => {
 		if (!isCurrent(request) || request.phase === "switching") return
@@ -109,7 +121,7 @@ export function useBranchPicker({
 				setSwitchError(error instanceof Error ? error.message : "Checkout failed")
 			}
 		} finally {
-			if (isCurrent(request)) cancel()
+			finish(request)
 		}
 	}
 
@@ -146,13 +158,13 @@ export function useBranchPicker({
 		} catch (error) {
 			if (!isCurrent(request)) return
 			setSwitchError(error instanceof Error ? error.message : "Failed to check status")
-			cancel()
+			finish(request)
 		}
 	}
 
 	const stashAndSwitch = () => {
-		const request = activeOperation.current
-		if (!request || !isCurrent(request) || request.phase !== "dirty") return
+		const request = confirmation("dirty")
+		if (!request) return
 		request.stash = true
 		if (sessionCount.current > 0) {
 			request.phase = "warning"
@@ -163,8 +175,8 @@ export function useBranchPicker({
 	}
 
 	const proceed = () => {
-		const request = activeOperation.current
-		if (!request || !isCurrent(request) || request.phase !== "warning") return
+		const request = confirmation("warning")
+		if (!request) return
 		void checkout(request)
 	}
 
@@ -181,6 +193,13 @@ export function useBranchPicker({
 		selectBranch,
 		stashAndSwitch,
 		proceed,
-		cancel,
+		cancelDirty: () => {
+			const request = confirmation("dirty")
+			if (request) finish(request)
+		},
+		cancelWarning: () => {
+			const request = confirmation("warning")
+			if (request) finish(request)
+		},
 	}
 }
