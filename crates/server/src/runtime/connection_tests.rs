@@ -4479,7 +4479,9 @@ async fn native_metadata_update_branches() -> Result<()> {
         result.session.settings.permission_profile,
         devo_protocol::native::model::PermissionProfile::AutoReview
     );
-    assert_eq!(result.session.version, 2);
+    // Initial sandbox persistence consumes epoch 1. This user update uses
+    // epoch 2, and the canonical version is epoch + 1 (an opaque conflict token).
+    assert_eq!(result.session.version, 3);
     let rollout_path = env
         .runtime
         .rollout_store
