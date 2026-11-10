@@ -1,4 +1,3 @@
-import { SESSION_HISTORY_UNAVAILABLE } from "@devo-ai/sdk/v2/client"
 import {
 	CommandDialog,
 	CommandEmpty,
@@ -9,6 +8,7 @@ import {
 	CommandSeparator,
 	CommandShortcut,
 } from "@devo/ui/components/command"
+import { SESSION_HISTORY_UNAVAILABLE } from "@devo-ai/sdk/v2/client"
 import { useNavigate, useParams } from "@tanstack/react-router"
 import { useAtom, useAtomValue, useSetAtom } from "jotai"
 import {
@@ -33,15 +33,14 @@ import {
 	SunMoonIcon,
 	Undo2Icon,
 } from "lucide-react"
-import { useCallback, useEffect, useMemo, useState } from "react"
+import { useCallback, useEffect, useMemo, useRef, useState } from "react"
 import { sessionMetricsFamily } from "../atoms/derived/session-metrics"
-import { setSessionsAtom } from "../atoms/sessions"
-import { appStore } from "../atoms/store"
 import { automationsEnabledAtom, toggleAutomationsAtom } from "../atoms/feature-flags"
 import { isMockModeAtom, toggleMockModeAtom } from "../atoms/mock-mode"
 import { lastProjectDirectoryAtom, opaqueWindowsAtom } from "../atoms/preferences"
 import { isReactScanAtom, toggleReactScanAtom } from "../atoms/react-scan"
 import { useProjectList } from "../hooks/use-agents"
+import { usePaletteSessionSearch } from "../hooks/use-palette-session-search"
 import {
 	useAvailableThemes,
 	useColorScheme,
@@ -50,12 +49,12 @@ import {
 	useSetTheme,
 } from "../hooks/use-theme"
 import { createLogger } from "../lib/logger"
-import { formatShortcut } from "../lib/shortcut-display"
 import { navigateToNewChat } from "../lib/project-selection"
-import { shouldToggleCommandPalette } from "./root-layout-keyboard"
+import { formatShortcut } from "../lib/shortcut-display"
 import type { ColorScheme } from "../lib/themes"
 import type { Agent } from "../lib/types"
-import { getBaseClient, reloadConfig } from "../services/connection-manager"
+import { reloadConfig } from "../services/connection-manager"
+import { shouldToggleCommandPalette } from "./root-layout-keyboard"
 
 interface CommandPaletteProps {
 	open: boolean
@@ -96,8 +95,8 @@ export function CommandPalette({ open, onOpenChange, agents, onForkSession }: Co
 	const toggleAutomations = useSetAtom(toggleAutomationsAtom)
 	const [reloading, setReloading] = useState(false)
 	const [query, setQuery] = useState("")
-	const [searching, setSearching] = useState(false)
-	const [searchFailed, setSearchFailed] = useState(false)
+	const searchInput = useRef<HTMLInputElement>(null)
+	const { status: searchStatus, retry: retrySearch } = usePaletteSessionSearch(open, query)
 	const newSessionShortcut = formatShortcut(["mod", "N"])
 
 	const isElectron = typeof window !== "undefined" && "devo" in window
@@ -143,41 +142,9 @@ export function CommandPalette({ open, onOpenChange, agents, onForkSession }: Co
 		return () => document.removeEventListener("keydown", handleKeyDown)
 	}, [open, onOpenChange])
 
-	// Sidebar pagination must not limit the conversations searchable here.
 	useEffect(() => {
-		const search = query.trim()
-		if (!open || search.length < 2) {
-			setSearching(false)
-			setSearchFailed(false)
-			if (!open) setQuery("")
-			return
-		}
-		let cancelled = false
-		setSearching(true)
-		setSearchFailed(false)
-		const timeout = window.setTimeout(async () => {
-			try {
-				const client = getBaseClient()
-				if (!client) throw new Error("Not connected to the server")
-				const { data: sessions } = await client.session.list({ search, limit: 50 })
-				if (!cancelled) {
-					// Preserve existing live statuses and sidebar pagination state.
-					appStore.set(setSessionsAtom, { sessions, statuses: {}, directory: "" })
-				}
-			} catch (err) {
-				if (!cancelled) {
-					setSearchFailed(true)
-					log.error("Session search failed", {}, err)
-				}
-			} finally {
-				if (!cancelled) setSearching(false)
-			}
-		}, 250)
-		return () => {
-			cancelled = true
-			window.clearTimeout(timeout)
-		}
-	}, [open, query])
+		if (!open) setQuery("")
+	}, [open])
 
 	const activeSessions = useMemo(
 		() => (open ? agents.filter((a) => a.status === "running" || a.status === "waiting") : []),
@@ -193,11 +160,44 @@ export function CommandPalette({ open, onOpenChange, agents, onForkSession }: Co
 			onOpenChange={onOpenChange}
 			className="devo-command-palette w-[calc(100%-2rem)] sm:max-w-2xl"
 		>
-			<CommandInput placeholder="Type a command or search..." value={query} onValueChange={setQuery} />
+			<CommandInput
+				ref={searchInput}
+				placeholder="Type a command or search..."
+				value={query}
+				onValueChange={setQuery}
+			/>
+			{(searchStatus === "loading" || searchStatus === "offline" || searchStatus === "error") && (
+				<div className="flex items-center gap-2 px-3 py-2 text-xs text-muted-foreground">
+					<output aria-live="polite" className="flex-1">
+						{searchStatus === "loading"
+							? "Searching sessions…"
+							: searchStatus === "offline"
+								? "Runtime disconnected. Showing loaded sessions. Search will resume when connected."
+								: "Session search failed. Showing loaded sessions."}
+					</output>
+					{searchStatus === "error" && (
+						<button
+							type="button"
+							onClick={() => {
+								retrySearch()
+								searchInput.current?.focus()
+							}}
+							onKeyDown={(event) => {
+								if (event.key === "Enter" || event.key === " ") event.stopPropagation()
+							}}
+							aria-label="Retry session search"
+							className="inline-flex shrink-0 items-center gap-1 rounded-md px-2 py-1 text-foreground hover:bg-accent focus-visible:outline-none focus-visible:ring-2 focus-visible:ring-ring"
+						>
+							<RefreshCwIcon className="size-3.5 stroke-[1.5]" />
+							Retry
+						</button>
+					)}
+				</div>
+			)}
 			<CommandList className="max-h-[min(32rem,60vh)]">
-				<CommandEmpty>
-					{searching ? "Searching sessions…" : searchFailed ? "Session search failed. Try again." : "No results found."}
-				</CommandEmpty>
+				{(searchStatus === "idle" || searchStatus === "ready") && (
+					<CommandEmpty>No results found.</CommandEmpty>
+				)}
 
 				<CommandGroup heading="Actions">
 					<CommandItem
@@ -224,29 +224,29 @@ export function CommandPalette({ open, onOpenChange, agents, onForkSession }: Co
 							</CommandItem>
 						</>
 					)}
-				{hasSession && (
-					<CommandItem
-						onSelect={() => {
-							// Compact is handled via slash command — just close and navigate
-							onOpenChange(false)
-						}}
-						disabled
-					>
-						<SparklesIcon />
-						<span>Compact Conversation</span>
-					</CommandItem>
-				)}
-				{hasSession && onForkSession && (
-					<CommandItem
-						onSelect={async () => {
-							onOpenChange(false)
-							await onForkSession()
-						}}
-					>
-						<SplitIcon />
-						<span>Fork Session</span>
-					</CommandItem>
-				)}
+					{hasSession && (
+						<CommandItem
+							onSelect={() => {
+								// Compact is handled via slash command — just close and navigate
+								onOpenChange(false)
+							}}
+							disabled
+						>
+							<SparklesIcon />
+							<span>Compact Conversation</span>
+						</CommandItem>
+					)}
+					{hasSession && onForkSession && (
+						<CommandItem
+							onSelect={async () => {
+								onOpenChange(false)
+								await onForkSession()
+							}}
+						>
+							<SplitIcon />
+							<span>Fork Session</span>
+						</CommandItem>
+					)}
 					<CommandItem onSelect={handleReloadConfig} disabled={reloading}>
 						<RefreshCwIcon />
 						<span>{reloading ? "Reloading..." : "Reload Config"}</span>

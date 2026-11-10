@@ -5,6 +5,7 @@
 	"license": "MIT",
 	"type": "module",
 	"exports": {
+		"./v2/session-projection": "./src/v2/session-projection.ts",
 		"./v2/client": "./src/v2/client.ts",
 		"./v2/protocol-validation": "./src/v2/protocol-validation.ts",
 		"./v2/native-client-support": "./src/v2/native-client-support.ts",
