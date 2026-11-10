@@ -110,7 +110,9 @@ impl UsageLedger {
                         parent;
                     session_id
                 });
-            state.projection.register_session(id, parent);
+            state
+                .projection
+                .register_session(id, parent, index.session.updated_at);
             let Some(path) = index.rollout_path else {
                 continue;
             };
@@ -128,9 +130,11 @@ impl UsageLedger {
     ) -> Result<()> {
         self.load_session(summary.session_id())?;
         let mut state = self.state.lock().expect("usage ledger lock");
-        state
-            .projection
-            .register_session(summary.session_id(), summary.parent_session_id());
+        state.projection.register_session(
+            summary.session_id(),
+            summary.parent_session_id(),
+            summary.native.usage.updated_at,
+        );
         if summary.ephemeral {
             state.ephemeral.insert(summary.session_id());
         }

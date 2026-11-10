@@ -61,7 +61,7 @@ fn resumed_legacy_baseline_keeps_original_child_coverage_boundary() {
     let t3 = t2 + chrono::Duration::seconds(1);
     let t4 = t3 + chrono::Duration::seconds(1);
     let mut projection = projection::Projection::default();
-    projection.register_session(child, Some(root));
+    projection.register_session(child, Some(root), t1);
     projection.observe(at(
         super::replay_tests::legacy_turn(root, root_turn, 50),
         t1,

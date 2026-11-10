@@ -18,6 +18,7 @@ use legacy::{Candidate, Component, LegacyComponent};
 pub(super) struct Projection {
     records: HashMap<String, UsageRecord>,
     sessions: HashSet<SessionId>,
+    session_usage_timestamps: HashMap<SessionId, DateTime<Utc>>,
     parents: HashMap<SessionId, SessionId>,
     legacy_candidates: HashMap<(SessionId, TurnId), Vec<Candidate>>,
     legacy_turns: HashMap<(SessionId, TurnId, Component), LegacyComponent>,
@@ -34,6 +35,10 @@ impl Projection {
         match line {
             RolloutLine::SessionMeta { session, .. } => {
                 self.sessions.insert(session.id);
+                self.session_usage_timestamps
+                    .entry(session.id)
+                    .and_modify(|at| *at = (*at).max(session.usage.updated_at))
+                    .or_insert(session.usage.updated_at);
                 if session.fork_from_id.is_some() {
                     self.fork_created_at.insert(session.id, session.created_at);
                 }
@@ -113,7 +118,16 @@ impl Projection {
         }
     }
 
-    pub(super) fn register_session(&mut self, session_id: SessionId, parent: Option<SessionId>) {
+    pub(super) fn register_session(
+        &mut self,
+        session_id: SessionId,
+        parent: Option<SessionId>,
+        usage_updated_at: DateTime<Utc>,
+    ) {
+        self.session_usage_timestamps
+            .entry(session_id)
+            .and_modify(|at| *at = (*at).max(usage_updated_at))
+            .or_insert(usage_updated_at);
         self.sessions.insert(session_id);
         if let Some(parent) = parent {
             self.parents.insert(session_id, parent);
@@ -219,6 +233,15 @@ impl Projection {
             add_totals(&mut total, &usage);
             add_totals(purposes.entry(record.purpose).or_default(), &usage);
             updated_at = updated_at.max(record.recorded_at);
+        }
+        // Registration alone is not a usage update. Preserve the indexed or
+        // canonical metadata timestamp when no request records exist yet.
+        if updated_at == DateTime::<Utc>::UNIX_EPOCH {
+            updated_at = self
+                .session_usage_timestamps
+                .get(&session_id)
+                .copied()
+                .unwrap_or(updated_at);
         }
         let mut legacy = UsageTotals::default();
         let baselines = self

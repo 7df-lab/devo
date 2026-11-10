@@ -555,3 +555,26 @@ mod replay_tests;
 
 #[path = "legacy_boundary_tests.rs"]
 mod legacy_boundary_tests;
+
+#[test]
+fn registered_session_without_calls_preserves_usage_timestamp() {
+    let id = SessionId::new();
+    let timestamp = chrono::DateTime::from_timestamp(1_700_000_000, 0).unwrap();
+    let mut projection = projection::Projection::default();
+    projection.register_session(id, /*parent*/ None, timestamp);
+    assert_eq!(
+        projection.session(id),
+        Some(devo_protocol::native::usage::SessionUsage {
+            total: Default::default(),
+            by_purpose: Vec::new(),
+            legacy: None,
+            updated_at: timestamp,
+        })
+    );
+    projection.register_session(
+        id,
+        /*parent*/ None,
+        timestamp - chrono::Duration::seconds(1),
+    );
+    assert_eq!(projection.session(id).unwrap().updated_at, timestamp);
+}
