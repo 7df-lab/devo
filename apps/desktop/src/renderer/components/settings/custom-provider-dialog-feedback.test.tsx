@@ -34,12 +34,14 @@ let mount: HTMLElement
 const onSaved = mock(() => {})
 const onOpenChange = mock((_open: boolean) => {})
 
-async function render() {
+async function render(props: Partial<Parameters<typeof CustomProviderDialog>[0]> = {}) {
 	mount = document.createElement("div")
 	document.body.append(mount)
 	root = createRoot(mount)
 	await act(async () =>
-		root?.render(<CustomProviderDialog open onOpenChange={onOpenChange} onSaved={onSaved} />),
+		root?.render(
+			<CustomProviderDialog open onOpenChange={onOpenChange} onSaved={onSaved} {...props} />,
+		),
 	)
 }
 async function click(label: string) {
@@ -148,4 +150,104 @@ test("cancel remains available after validation without saving", async () => {
 	expect(onOpenChange).toHaveBeenCalledWith(false)
 	expect(upsert).not.toHaveBeenCalled()
 	expect(onSaved).not.toHaveBeenCalled()
+})
+
+for (const url of [
+	"not-a-url",
+	"localhost:11434",
+	"ftp://localhost/v1",
+	"http://",
+	"http:localhost",
+]) {
+	test(`invalid endpoint ${url} stays in the form without saving`, async () => {
+		await render()
+		await fill("provider-id", "local")
+		await fill("base-url", url)
+		await click("Add Provider")
+		expect(document.querySelector('[role="alert"]')?.textContent).toBe(
+			"Base URL must be a valid http:// or https:// URL",
+		)
+		expect(document.activeElement).toBe(document.getElementById("base-url"))
+		expect(document.getElementById("base-url")?.getAttribute("aria-invalid")).toBe("true")
+		expect(upsert).not.toHaveBeenCalled()
+		expect(onSaved).not.toHaveBeenCalled()
+		expect(onOpenChange).not.toHaveBeenCalled()
+	})
+}
+
+test("adding an existing connection is blocked, then a fresh ID can be saved without a key", async () => {
+	await render({ connectedIds: new Set(["local"]) })
+	await fill("provider-id", "  local  ")
+	await fill("base-url", "http://localhost:11434")
+	await click("Add Provider")
+	expect(document.querySelector('[role="alert"]')?.textContent).toContain("already connected")
+	expect(document.activeElement).toBe(document.getElementById("provider-id"))
+	expect(upsert).not.toHaveBeenCalled()
+	expect(onSaved).not.toHaveBeenCalled()
+	await fill("provider-id", "another-local")
+	await click("Add Provider")
+	expect(upsert).toHaveBeenCalledWith({
+		provider: {
+			id: "another-local",
+			name: "another-local",
+			baseUrl: "http://localhost:11434",
+			wireApis: ["openai_chat_completions"],
+			models: {},
+			enabled: true,
+		},
+	})
+	expect(onSaved).toHaveBeenCalledTimes(1)
+})
+
+test("connected built-ins cannot be overwritten through the Add flow", async () => {
+	await render({
+		connectedIds: new Set(["openai"]),
+		templateIds: new Set(["openai"]),
+	})
+	await fill("provider-id", "openai")
+	await fill("base-url", "http://localhost:1234/v1")
+	await click("Add Provider")
+	expect(document.querySelector('[role="alert"]')?.textContent).toContain("already connected")
+	expect(upsert).not.toHaveBeenCalled()
+})
+
+test("explicit Edit still updates the selected connected provider", async () => {
+	await render({
+		connectedIds: new Set(["local"]),
+		provider: {
+			id: "local",
+			name: "Local",
+			baseUrl: "http://localhost:11434/v1",
+			wireApis: ["openai_chat_completions"],
+			models: { "qwen:latest": {} },
+			enabled: true,
+		},
+	})
+	await fill("base-url", "http://localhost:1234/v1")
+	await click("Save")
+	expect(upsert).toHaveBeenCalledWith({
+		provider: {
+			id: "local",
+			name: "Local",
+			baseUrl: "http://localhost:1234/v1",
+			wireApis: ["openai_chat_completions"],
+			models: { "qwen:latest": { name: undefined } },
+			headers: {},
+			enabled: true,
+		},
+	})
+	expect(onSaved).toHaveBeenCalledTimes(1)
+})
+
+test("the alternate built-in ID suggestion skips existing custom connections", async () => {
+	await render({ templateIds: new Set(["openai"]), connectedIds: new Set(["openai-custom"]) })
+	await fill("provider-id", "openai")
+	await fill("base-url", "http://localhost:1234/v1")
+	await click("Add Provider")
+	await click("Use openai-custom-2")
+	expect((document.getElementById("provider-id") as HTMLInputElement).value).toBe("openai-custom-2")
+	expect(upsert).not.toHaveBeenCalled()
+	await click("Add Provider")
+	expect(upsert).toHaveBeenCalledTimes(1)
+	expect(onSaved).toHaveBeenCalledTimes(1)
 })

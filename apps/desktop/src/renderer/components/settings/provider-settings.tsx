@@ -47,6 +47,7 @@ export function ProviderSettings() {
 	// Dialog state
 	const [connectTemplate, setConnectTemplate] = useState<CatalogProviderInfo | null>(null)
 	const [customDialogOpen, setCustomDialogOpen] = useState(false)
+	const [editingProvider, setEditingProvider] = useState<CatalogProviderInfo | undefined>()
 	const [connectionDetail, setConnectionDetail] = useState<CatalogProviderInfo | null>(null)
 	const [disconnectTarget, setDisconnectTarget] = useState<CatalogProviderInfo | null>(null)
 	const [disconnecting, setDisconnecting] = useState(false)
@@ -228,9 +229,15 @@ export function ProviderSettings() {
 
 			{customDialogOpen && (
 				<CustomProviderDialog
+					key={editingProvider?.id ?? "new"}
+					provider={editingProvider}
 					templateIds={catalog?.templateIds ?? new Set()}
+					connectedIds={catalog?.connectedIds ?? new Set()}
 					open={customDialogOpen}
-					onOpenChange={setCustomDialogOpen}
+					onOpenChange={(open) => {
+						setCustomDialogOpen(open)
+						if (!open) setEditingProvider(undefined)
+					}}
 					onSaved={handleConnected}
 				/>
 			)}
@@ -242,6 +249,11 @@ export function ProviderSettings() {
 					open={!!connectionDetail}
 					onOpenChange={(open) => { if (!open) setConnectionDetail(null) }}
 					onChanged={handleSaved}
+					onEdit={isDesktopOAuthProvider(connectionDetail.id) ? undefined : (current) => {
+						setEditingProvider(current)
+						setConnectionDetail(null)
+						setCustomDialogOpen(true)
+					}}
 				/>
 			)}
 

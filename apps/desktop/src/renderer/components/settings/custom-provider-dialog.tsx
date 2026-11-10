@@ -1,11 +1,6 @@
 /**
- * Dialog for creating or editing a custom provider Connection.
- *
- * All fields are user-editable: id, name, base URL, wire API, API key,
- * models, and optional request headers.
- *
- * New providers that reuse a built-in template id must confirm overlay
- * (or pick another id) before save.
+ * Create or edit a provider Connection. Add requires an unused connection ID;
+ * reusing a built-in template ID requires explicit overlay confirmation.
  */
 
 import { Button } from "@devo/ui/components/button"
@@ -33,6 +28,7 @@ import { PlusIcon, Trash2Icon } from "lucide-react"
 import { useCallback, useEffect, useId, useMemo, useRef, useState } from "react"
 import { getBaseClient } from "../../services/connection-manager"
 import { isBuiltinTemplateProviderId, suggestNonTemplateProviderId } from "./custom-provider-id"
+import { isValidProviderBaseUrl } from "./provider-base-url"
 
 const WIRE_API_OPTIONS: Array<{ value: CatalogWireApi; label: string }> = [
 	{ value: "openai_chat_completions", label: "OpenAI Chat Completions" },
@@ -46,6 +42,8 @@ interface CustomProviderDialogProps {
 	provider?: CatalogProviderInfo
 	/** Built-in template ids from `provider/list` — used to detect collisions. */
 	templateIds?: ReadonlySet<string>
+	/** Existing Connections cannot be replaced through the Add flow. */
+	connectedIds?: ReadonlySet<string>
 	open: boolean
 	onOpenChange: (open: boolean) => void
 	onSaved: () => void
@@ -64,6 +62,7 @@ interface HeaderEntry {
 export function CustomProviderDialog({
 	provider: existing,
 	templateIds = new Set(),
+	connectedIds = new Set(),
 	open,
 	onOpenChange,
 	onSaved,
@@ -115,8 +114,8 @@ export function CustomProviderDialog({
 	}, [open])
 
 	const suggestedAlternateId = useMemo(
-		() => suggestNonTemplateProviderId(providerId, templateIds),
-		[providerId, templateIds],
+		() => suggestNonTemplateProviderId(providerId, new Set([...templateIds, ...connectedIds])),
+		[providerId, templateIds, connectedIds],
 	)
 
 	const addModel = useCallback(() => {
@@ -158,7 +157,7 @@ export function CustomProviderDialog({
 			for (const m of models) {
 				const mid = m.id.trim()
 				if (mid) {
-					catalogModels[mid] = { name: m.name.trim() || undefined }
+					catalogModels[mid] = { ...existing?.models?.[mid], name: m.name.trim() || undefined }
 				}
 			}
 
@@ -170,13 +169,14 @@ export function CustomProviderDialog({
 			}
 
 			const provider: CatalogProviderInfo = {
+				...existing,
 				id,
 				name: displayName.trim() || id,
 				baseUrl: baseUrl.trim(),
-				wireApis: [wireApi],
+				wireApis: [...new Set([wireApi, ...(existing?.wireApis ?? [])])],
 				models: catalogModels,
-				enabled: true,
-				...(Object.keys(catalogHeaders).length > 0 ? { headers: catalogHeaders } : {}),
+				enabled: existing?.enabled ?? true,
+				...(existing || Object.keys(catalogHeaders).length > 0 ? { headers: catalogHeaders } : {}),
 			}
 
 			await client.provider.upsert({
@@ -198,7 +198,7 @@ export function CustomProviderDialog({
 				setSaving(false)
 			}
 		}
-	}, [providerId, displayName, baseUrl, wireApi, apiKey, models, headers, onOpenChange, onSaved])
+	}, [existing, providerId, displayName, baseUrl, wireApi, apiKey, models, headers, onOpenChange, onSaved])
 
 	const handleSave = useCallback(async () => {
 		const id = providerId.trim()
@@ -207,8 +207,25 @@ export function CustomProviderDialog({
 			providerIdInput.current?.focus()
 			return
 		}
+		if (!isEdit && connectedIds.has(id)) {
+			setError({
+				message: "Provider ID is already connected. Manage that provider or choose a different ID.",
+				field: "provider-id",
+			})
+			providerIdInput.current?.focus()
+			return
+		}
 		if (!baseUrl.trim()) {
 			setError({ message: "Base URL is required", field: "base-url" })
+			baseUrlInput.current?.focus()
+			return
+		}
+
+		if (!isValidProviderBaseUrl(baseUrl)) {
+			setError({
+				message: "Base URL must be a valid http:// or https:// URL",
+				field: "base-url",
+			})
 			baseUrlInput.current?.focus()
 			return
 		}
@@ -220,7 +237,7 @@ export function CustomProviderDialog({
 		}
 
 		await persistProvider()
-	}, [providerId, baseUrl, isEdit, templateIds, persistProvider])
+	}, [providerId, baseUrl, isEdit, templateIds, connectedIds, persistProvider])
 
 	const handleOverlayBuiltin = useCallback(async () => {
 		setBuiltinConflictOpen(false)
@@ -336,13 +353,15 @@ export function CustomProviderDialog({
 								disabled={saving}
 							/>
 							<p className="text-[12px] text-muted-foreground">
-								Optional if you authenticate via request headers.
+								Optional for local servers that do not require authentication, or when using request
+								headers.
 							</p>
 						</div>
 
 						{/* Models */}
 						<div className="flex flex-col gap-2">
 							<Label className="text-[13px]">Models</Label>
+							{isEdit && <p className="text-[12px] text-muted-foreground">Remove saved models from connection details.</p>}
 							{models.map((m, i) => (
 								<div key={i} className="flex items-center gap-2">
 									<Input
@@ -350,7 +369,7 @@ export function CustomProviderDialog({
 										value={m.id}
 										onChange={(e) => updateModel(i, "id", e.target.value)}
 										className="flex-1"
-										disabled={saving}
+										disabled={saving || !!existing?.models?.[m.id]}
 									/>
 									<Input
 										placeholder="Display name"
@@ -363,7 +382,7 @@ export function CustomProviderDialog({
 										variant="ghost"
 										size="sm"
 										onClick={() => removeModel(i)}
-										disabled={saving || models.length <= 1}
+										disabled={saving || models.length <= 1 || !!existing?.models?.[m.id]}
 									>
 										<Trash2Icon className="size-3.5 stroke-[1.5]" />
 									</Button>

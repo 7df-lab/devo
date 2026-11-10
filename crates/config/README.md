@@ -624,3 +624,11 @@ key argument is written to the user-scoped `auth.json`; only its credential id
 is stored in `providers.json`. Project config may still override resolved
 settings. Disconnecting a Connection removes its user overlay; built-in
 provider templates are never modified.
+
+Provider writes validate explicitly supplied provider and model base URLs before
+changing configuration or credentials. Use an absolute `http://` or `https://`
+endpoint; loopback HTTP is supported and an API key is optional for local
+servers that do not require authentication. Bare OpenAI-compatible host URLs
+use `/v1`; explicit endpoint paths are preserved. In Desktop, **Add Custom
+Provider** requires an unused connection ID. Manage the existing connection to
+edit it instead of adding another connection with the same ID.
