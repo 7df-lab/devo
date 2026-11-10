@@ -170,6 +170,12 @@ async fn build_registry_with_mcp_layer(
         },
         McpDiscoveryMode::SessionRegistryOnly => Vec::new(),
     };
+    builder.mcp_tools = mcp_tools.clone();
+    // Explicit session registries (including ACP) retain their publication owner,
+    // even when they currently advertise no tools or are layered into a turn.
+    builder.mcp_publication_owner = session_registry
+        .and_then(|registry| registry.mcp_publication_owner.clone())
+        .or_else(|| Some(Arc::clone(&mcp_manager)));
     let exposure = build_mcp_tool_exposure(&mcp_tools);
     for info in exposure.direct_tools {
         let spec = mcp_tool_spec(&info);
@@ -192,6 +198,15 @@ async fn build_registry_with_mcp_layer(
         ));
     }
     if let Some(session_registry) = session_registry {
+        for info in &session_registry.mcp_tools {
+            if !builder
+                .mcp_tools
+                .iter()
+                .any(|registered| registered.flat_name == info.flat_name)
+            {
+                builder.mcp_tools.push(info.clone());
+            }
+        }
         for (name, handler) in session_registry.all_handlers() {
             let is_session_only_mcp = name.starts_with(crate::mcp::MCP_TOOL_PREFIX)
                 && !mcp_handlers

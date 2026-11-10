@@ -561,7 +561,9 @@ export function ModelEditDialog({
 	])
 
 	return (
-		<Dialog open={open} onOpenChange={onOpenChange}>
+		<Dialog open={open} onOpenChange={(nextOpen) => {
+			if (!saving) onOpenChange(nextOpen)
+		}}>
 			<DialogContent className="sm:max-w-2xl gap-0 p-0 overflow-hidden">
 				<div className="border-b border-border/50 px-6 py-4">
 					<DialogHeader className="gap-1">

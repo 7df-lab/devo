@@ -67,6 +67,7 @@ impl ModelProviderSDK for PythonGoalProvider {
                     }],
                     stop_reason: Some(StopReason::ToolUse),
                     usage: Usage {
+                        reported: true,
                         input_tokens: 10,
                         output_tokens: 4,
                         ..Default::default()

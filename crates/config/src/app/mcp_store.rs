@@ -13,6 +13,24 @@ use super::AppConfigStore;
 use super::ensure_toml_table;
 
 impl AppConfigStore {
+    /// Explicit workspace-owned MCP server records, even when their current
+    /// values equal the user-global defaults. Equal values do not share ownership.
+    pub fn workspace_mcp_server_ids(&self) -> Result<Vec<McpServerId>, super::AppConfigError> {
+        let Some(root) = &self.workspace_root else {
+            return Ok(Vec::new());
+        };
+        let path = self.loader.project_config_path(root);
+        if !path.exists() {
+            return Ok(Vec::new());
+        }
+        let value = super::read_config_value(&path)?;
+        Ok(value
+            .get("mcp_servers")
+            .and_then(toml::Value::as_table)
+            .map(|table| table.keys().cloned().map(McpServerId).collect())
+            .unwrap_or_default())
+    }
+
     /// Upserts one MCP server record into the user-level `config.toml`.
     ///
     /// Replaces an existing server table with the same `id`, otherwise creates it.

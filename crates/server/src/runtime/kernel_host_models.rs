@@ -19,6 +19,14 @@ fn optional_string<'a>(params: &'a Value, key: &str) -> Result<Option<&'a str>, 
 }
 
 pub(super) async fn spawn(bridge: &HostBridge, params: &Value) -> Value {
+    spawn_with_runtime(bridge.runtime(), bridge.session_id, params).await
+}
+
+pub(super) async fn spawn_with_runtime(
+    runtime: Option<std::sync::Arc<super::ServerRuntime>>,
+    session_id: devo_protocol::native::ids::SessionId,
+    params: &Value,
+) -> Value {
     let result = async {
         let prompt = params
             .get("prompt")
@@ -33,12 +41,10 @@ pub(super) async fn spawn(bridge: &HostBridge, params: &Value) -> Value {
             optional_string(kwargs, "name")?.ok_or_else(|| "rlm.run requires name".to_string())?;
         let model = optional_string(kwargs, "model")?.map(str::to_string);
         let thinking = optional_string(kwargs, "thinking")?.map(str::to_string);
-        let runtime = bridge
-            .runtime()
-            .ok_or_else(|| "runtime not available for rlm.run".to_string())?;
+        let runtime = runtime.ok_or_else(|| "runtime not available for rlm.run".to_string())?;
         let spawned = runtime
             .spawn_agent(SpawnAgentParams {
-                session_id: bridge.session_id,
+                session_id,
                 message: prompt.to_string(),
                 model,
                 thinking,

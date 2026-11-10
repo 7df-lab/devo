@@ -52,7 +52,9 @@ pub(crate) fn preserved_item_ids_from_compacted(
             continue;
         }
         match &item.item {
-            Item::UserMessage { content, .. } => {
+            Item::UserMessage {
+                content, origin, ..
+            } => {
                 let text = content
                     .iter()
                     .filter_map(|part| match part {
@@ -61,6 +63,10 @@ pub(crate) fn preserved_item_ids_from_compacted(
                     })
                     .collect::<Vec<_>>()
                     .join("\n");
+                let text = origin.as_ref().map_or_else(
+                    || text.clone(),
+                    |origin| devo_core::render_host_message(origin, &text),
+                );
                 journal.push((item.item_id, PromptAnchor::UserText(text)));
             }
             Item::AssistantMessage { text, .. } => {
@@ -508,6 +514,43 @@ mod tests {
     use super::*;
 
     #[test]
+    fn host_origin_survives_compaction_suffix_matching() {
+        use devo_protocol::native::host_message::{
+            HostMessageDelivery, HostMessageOrigin, HostMessageSource,
+        };
+        let origin = HostMessageOrigin {
+            event_id: "event".into(),
+            source: HostMessageSource::Agent,
+            sender: "child".into(),
+            delivery: HostMessageDelivery::FollowUp,
+        };
+        let id = ItemId::new();
+        let persisted = vec![PersistedNativeItem::new(
+            TurnId::new(),
+            TurnKind::Regular,
+            id,
+            Item::UserMessage {
+                origin: Some(origin.clone()),
+                client_user_message_id: None,
+                content: vec![UserInput::Text {
+                    text: "result".into(),
+                }],
+                entry: Default::default(),
+            },
+        )];
+        let compacted = vec![
+            ResponseItem::Message(devo_core::Message::assistant_text("summary")),
+            ResponseItem::Message(devo_core::Message::user(devo_core::render_host_message(
+                &origin, "result",
+            ))),
+        ];
+        assert_eq!(
+            preserved_item_ids_from_compacted(&persisted, &compacted),
+            vec![id]
+        );
+    }
+
+    #[test]
     fn preserved_item_ids_match_complete_command_execution_pair() {
         let command_item_id = ItemId::new();
         let command_input = serde_json::json!({ "cmd": "printf ok" });
@@ -565,6 +608,7 @@ mod tests {
                 TurnKind::Regular,
                 user_id,
                 Item::UserMessage {
+                    origin: None,
                     client_user_message_id: None,
                     content: vec![UserInput::Text {
                         text: "update the plan".to_string(),
@@ -656,6 +700,7 @@ mod tests {
                 TurnKind::Regular,
                 user_id,
                 Item::UserMessage {
+                    origin: None,
                     client_user_message_id: None,
                     content: vec![UserInput::Text {
                         text: "run the tool".to_string(),
@@ -726,6 +771,7 @@ mod tests {
             TurnKind::Regular,
             user_id,
             Item::UserMessage {
+                origin: None,
                 client_user_message_id: None,
                 content: vec![UserInput::Text {
                     text: "real message".to_string(),

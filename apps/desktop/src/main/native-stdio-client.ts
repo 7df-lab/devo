@@ -52,7 +52,7 @@ export function requestTimeoutMsForMethod(method: string, fallbackMs: number): n
 	if (method === "model/catalog/refresh" || method === "provider/discover") {
 		return Math.max(fallbackMs, MODEL_CATALOG_REQUEST_TIMEOUT_MS)
 	}
-	if (method === "mcp/tools" || method === "mcp/set_enabled") {
+	if (method === "mcp/tools" || method === "mcp/set_enabled" || method === "mcp/reconnect") {
 		return Math.max(fallbackMs, MCP_ADMIN_REQUEST_TIMEOUT_MS)
 	}
 	if (method === "workspace/changes/read") {

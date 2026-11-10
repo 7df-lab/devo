@@ -92,6 +92,9 @@ impl ServerRuntime {
                 None
             }
         };
+        if work_id.starts_with("agent:") {
+            self.rlm_child_changed.notify_waiters();
+        }
         let Some(deferred) = deferred else {
             return;
         };
@@ -199,6 +202,18 @@ impl ServerRuntime {
             .sessions
             .get(&session_id)
             .is_some_and(|state| !state.pending.is_empty())
+    }
+
+    /// Admission tickets bridge mailbox drain and queued-turn activation, so
+    /// collection cannot report a child settled while accepted work is in transit.
+    pub(super) fn has_pending_subagent_work(&self, child_id: SessionId) -> bool {
+        let prefix = format!("agent:{child_id}:");
+        self.background_work
+            .lock()
+            .expect("background work mutex poisoned")
+            .sessions
+            .values()
+            .any(|state| state.pending.iter().any(|id| id.starts_with(&prefix)))
     }
 
     pub(super) fn clear_background_work(&self, session_id: SessionId) {

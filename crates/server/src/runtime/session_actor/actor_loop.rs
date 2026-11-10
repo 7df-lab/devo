@@ -41,6 +41,7 @@ pub(super) async fn run_session_actor(
             }
             SessionCommand::MergeTurn { working, reply } => {
                 state.merge_turn_working_set(*working);
+                _runtime.refresh_actor_usage(&mut state);
                 let _ = reply.send(());
             }
             SessionCommand::GetSummary { reply } => {
@@ -160,7 +161,14 @@ pub(super) async fn run_session_actor(
                     require_idle_session,
                     "PopQueuedTurnInput"
                 );
-                let popped = queue.pop_front().and_then(pop_queued_turn_input_data);
+                let popped = if queue
+                    .front()
+                    .is_some_and(crate::runtime::handlers::queue_steer::requires_queue_review)
+                {
+                    None
+                } else {
+                    queue.pop_front().and_then(pop_queued_turn_input_data)
+                };
                 let _ = reply.send(popped);
             }
             SessionCommand::EnqueuePendingTurnInput { item } => {
@@ -432,8 +440,8 @@ pub(super) async fn run_session_actor(
                     state.core.set_prompt_messages(prompt_messages);
                 }
             }
-            SessionCommand::ApplyParentUsageSnapshot { snapshot } => {
-                snapshot.apply_to_actor_state(&mut state);
+            SessionCommand::RefreshUsage => {
+                _runtime.refresh_actor_usage(&mut state);
             }
             SessionCommand::InterruptActiveTurn { reply } => {
                 let now = Utc::now();
@@ -590,6 +598,21 @@ pub(super) async fn run_session_actor(
                 state.tool_registry = tool_registry;
                 let _ = reply.send(());
             }
+            SessionCommand::ReplaceMcpServerTools {
+                server_id,
+                tools,
+                manager,
+                reply,
+            } => {
+                if Arc::ptr_eq(&state.runtime_context.mcp_manager, &manager)
+                    && let Some(registry) = &state.tool_registry
+                {
+                    state.tool_registry = Some(Arc::new(
+                        registry.replace_mcp_server_tools(&server_id, tools, manager),
+                    ));
+                }
+                let _ = reply.send(());
+            }
             SessionCommand::GetRuntimeContext { reply } => {
                 let _ = reply.send(Arc::clone(&state.runtime_context));
             }
@@ -726,8 +749,10 @@ fn ensure_session_context_locked(state: &mut SessionActorState, turn_config: &Tu
 fn pop_queued_turn_input_data(
     item: devo_protocol::PendingInputItem,
 ) -> Option<QueuedTurnInputData> {
+    let host_origin = item.host_message_origin();
     match item.kind {
         devo_core::PendingInputKind::UserText { text } => Some(QueuedTurnInputData {
+            host_origin,
             queued_input_id: item.id,
             client_user_message_id: client_user_message_id_from_pending_metadata(
                 item.metadata.as_ref(),
@@ -761,6 +786,7 @@ fn pop_queued_turn_input_data(
                 })
                 .collect();
             Some(QueuedTurnInputData {
+                host_origin,
                 queued_input_id: item.id,
                 client_user_message_id: client_user_message_id_from_pending_metadata(
                     item.metadata.as_ref(),
@@ -864,6 +890,7 @@ mod tests {
         assert_eq!(
             popped,
             QueuedTurnInputData {
+                host_origin: None,
                 queued_input_id,
                 client_user_message_id: Some("stable-message-1".to_string()),
                 display_input: "queued prompt".to_string(),

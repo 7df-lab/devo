@@ -154,6 +154,55 @@ impl ServerRuntime {
             }
         }
 
+        // The SQLite stats row is only a cache. Replay every admitted call,
+        // including requests persisted before a crashed turn ever finalized.
+        self.usage_ledger.load_session(session_id)?;
+        if let Some(usage) = self.usage_ledger.session_usage(session_id) {
+            runtime_session.summary.usage = usage.clone();
+            let mut core = runtime_session.core_session.lock().await;
+            core.total_input_tokens = usage.total.input_tokens as usize;
+            core.total_output_tokens = usage.total.output_tokens as usize;
+            core.total_tokens = usage.total.total_tokens as usize;
+            core.total_cache_creation_tokens = usage.total.cache_creation_input_tokens as usize;
+            core.total_cache_read_tokens = usage.total.cache_read_input_tokens as usize;
+            if let Some(latest) = self.usage_ledger.latest_query(session_id) {
+                // Compaction lowers context without a TurnQuery. Compare durable
+                // checkpoint/call order, not equal counters (two requests may
+                // report identical usage on opposite sides of a compaction).
+                if self.usage_ledger.query_after_context_checkpoint(session_id)
+                    || runtime_session.summary.last_context_occupancy.is_none()
+                {
+                    runtime_session.summary.last_context_occupancy = None;
+                    if let Some(input) = self.usage_ledger.latest_input(session_id) {
+                        core.last_input_tokens = input as usize;
+                    }
+                    core.last_turn_tokens = latest.display_total_tokens() as usize;
+                }
+                runtime_session.summary.last_query_total_tokens =
+                    latest.display_total_tokens() as usize;
+                runtime_session.summary.last_query_usage = Some(latest);
+            }
+            let stats = crate::db::SessionStats {
+                total_input_tokens: core.total_input_tokens,
+                total_output_tokens: core.total_output_tokens,
+                total_tokens: core.total_tokens,
+                total_cache_creation_tokens: core.total_cache_creation_tokens,
+                total_cache_read_tokens: core.total_cache_read_tokens,
+                last_input_tokens: core.last_input_tokens,
+                turn_count: core.turn_count,
+                prompt_token_estimate: core.prompt_token_estimate,
+                last_context_occupancy: runtime_session.summary.last_context_occupancy.clone(),
+            };
+            self.deps.db.update_stats(&session_id, &stats)?;
+            for turn in runtime_session.turns_by_id.values_mut() {
+                turn.native.usage = Some(self.usage_ledger.turn_usage(session_id, turn.native.id));
+            }
+        }
+
+        // A receipt proves admission, not consumption. Recover these rows
+        // before legacy replay, without inferring execution from user bubbles.
+        self.deps.db.recover_interrupted_queue_steers(&session_id)?;
+
         // Restore the turn queue non-destructively: SQLite stays the durable
         // mirror until items are consumed or removed, so a restart before the
         // queue drains does not lose pending input.
@@ -460,6 +509,9 @@ impl ServerRuntime {
     /// persists interrupted turn records. Called on graceful shutdown.
     pub async fn shutdown(self: &Arc<Self>) {
         self.schedule_wake_cancel.cancel();
+        // Wait for an already admitted durable dispatch before snapshotting sessions.
+        let schedule_drain = self.schedule_store.lock_dispatch().await;
+        drop(schedule_drain);
         self.command_exec_manager.terminate_all().await;
         let session_handles = self.list_session_handles().await;
 
@@ -620,6 +672,7 @@ fn materialized_steer_keys(history: &devo_core::CanonicalHistory) -> Materialize
             entry: UserMessageEntry::Steer,
             content,
             client_user_message_id,
+            ..
         } = &envelope.item
         else {
             continue;
@@ -697,6 +750,7 @@ mod tests {
                 updated_at: now,
                 state: devo_protocol::native::item::ItemState::Completed,
                 item: Item::UserMessage {
+                    origin: None,
                     client_user_message_id: Some(client_user_message_id.to_string()),
                     content: vec![UserInput::Text {
                         text: "original steer".to_string(),

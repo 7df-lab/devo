@@ -3,8 +3,10 @@
  * Projection stays inside the adapter — InteractiveMode never sees Native method names.
  */
 
+import { nativeCumulativeUsage } from "./usage.js";
 import {
   nativeGoalToAgentGoal,
+  nativeItemToAgentMessages,
   occupancyToContextUsage,
   pythonKernelStateMessageFromNativeItem,
 } from "./messages.js";
@@ -182,37 +184,7 @@ function extractTurnErrorMessage(turn: Record<string, unknown>): string {
   return "Error";
 }
 
-function userMessageFromNative(content: unknown) {
-  const parts = Array.isArray(content) ? content : [];
-  const out: Array<Record<string, unknown>> = [];
-  for (const c of parts) {
-    if (!c || typeof c !== "object") continue;
-    const part = c as Record<string, unknown>;
-    if (
-      part.type === "text" ||
-      (part.text != null && part.type !== "localImage" && part.type !== "image")
-    ) {
-      const text = String(part.text ?? "");
-      if (text) out.push({ type: "text", text });
-      continue;
-    }
-    if (part.type === "localImage" || part.type === "image") {
-      const label =
-        part.path != null
-          ? `[image:${String(part.path)}]`
-          : part.uri != null
-            ? "[image]"
-            : "[image]";
-      out.push({ type: "text", text: label });
-    }
-  }
-  if (out.length === 0) out.push({ type: "text", text: "" });
-  return {
-    role: "user",
-    content: out,
-    timestamp: Date.now(),
-  };
-}
+
 
 function decodeBase64Utf8(b64: string): string {
   if (!b64) return "";
@@ -265,7 +237,10 @@ function sessionActionsFromQueue(params: Record<string, unknown>): Record<string
   for (const entry of queue) {
     if (!entry || typeof entry !== "object") continue;
     const text = queuePreviewText(entry as Record<string, unknown>);
-    if (text) followUps.push(text);
+    const origin = (entry as Record<string, unknown>).origin as Record<string, unknown> | undefined;
+    const labels: Record<string, string> = { agent: "Agent message", backgroundTask: "Background notification", schedule: "Scheduled notification" };
+    const label = origin ? `[${labels[String(origin.source)] ?? "Host notification"} · ${String(origin.sender ?? "Host")}] ` : "";
+    if (text) followUps.push(label + text);
   }
   return {
     queuedCount: followUps.length,
@@ -284,7 +259,7 @@ function contextUsageEvent(params: Record<string, unknown>): Record<string, unkn
         : undefined;
     const tokens = Number(query?.totalTokens ?? params.lastQueryInputTokens ?? 0);
     const contextWindow = Number(params.contextWindow ?? params.context_window ?? 0);
-    if (!tokens && !contextWindow) return null;
+    if (!Number.isFinite(tokens) || tokens <= 0) return null;
     const percent =
       contextWindow > 0 ? Math.min(100, Math.round((tokens / contextWindow) * 1000) / 10) : 0;
     return {
@@ -331,11 +306,11 @@ function projectItemStarted(
     events.push(...closeImAssistantStreamIfOpen(state));
     events.push({
       type: "message_start",
-      message: userMessageFromNative(item.content),
+      message: nativeItemToAgentMessages(envelope)[0],
     });
     events.push({
       type: "message_end",
-      message: userMessageFromNative(item.content),
+      message: nativeItemToAgentMessages(envelope)[0],
     });
   } else if (type === "assistantMessage") {
     state.openAssistantItem = key;
@@ -897,14 +872,24 @@ export function nativeNotificationToPiEvents(
     ];
   }
 
-  // ── Usage ──
-  if (
-    method === "context/usageUpdated" ||
-    method === "turn/usage/updated" ||
-    method === "session/usage/updated"
-  ) {
+  // Context is session-local latest-request occupancy. Spend is cumulative.
+  if (method === "context/usageUpdated") {
     const event = contextUsageEvent(p);
     return event ? [event] : [];
+  }
+  if (method === "turn/usage/updated" || method === "session/usage/updated") {
+    const events: Record<string, unknown>[] = [];
+    if (method === "turn/usage/updated") {
+      const context = contextUsageEvent(p);
+      if (context) events.push(context);
+    }
+    const usage = p.usage as { total?: unknown; legacy?: unknown } | undefined;
+    const cumulativeUsage = nativeCumulativeUsage(
+      method === "turn/usage/updated" ? p.sessionTotals : usage?.total,
+      usage?.legacy,
+    );
+    if (cumulativeUsage) events.push({ type: "session_usage_update", cumulativeUsage });
+    return events;
   }
 
   // ── Auth ──

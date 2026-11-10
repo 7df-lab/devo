@@ -22,7 +22,6 @@ use super::state::{ApprovalCacheSnapshot, DeferredItems, SessionActorState, Spaw
 use super::turn_working::TurnWorkingSet;
 use crate::execution::PendingApproval;
 use crate::execution::PersistedTurnItem;
-use crate::runtime::subagent_usage::ParentUsageSnapshot;
 use crate::runtime::turn_exec::ExecuteTurnRequest;
 use crate::runtime_session_summary::RuntimeSessionSummary;
 use crate::turn::RuntimeTurn;
@@ -38,6 +37,9 @@ pub(crate) struct SessionHandle {
     tx: mpsc::Sender<SessionCommand>,
     max_turns: Option<u32>,
     state_change_gate: Arc<tokio::sync::Mutex<()>>,
+    closed_queue_steer_turn: Arc<std::sync::Mutex<Option<TurnId>>>,
+    ephemeral_queue_steer_receipts:
+        Arc<std::sync::Mutex<std::collections::HashMap<devo_core::QueueItemId, TurnId>>>,
 }
 
 impl SessionHandle {
@@ -67,6 +69,8 @@ impl SessionHandle {
             tx,
             max_turns,
             state_change_gate: Arc::new(tokio::sync::Mutex::new(())),
+            closed_queue_steer_turn: Arc::default(),
+            ephemeral_queue_steer_receipts: Arc::default(),
         };
         tokio::spawn(super::actor_loop::run_session_actor(state, rx, runtime));
         handle
@@ -80,6 +84,55 @@ impl SessionHandle {
     /// admission, such as two-phase rollback commit and message edit.
     pub(crate) async fn lock_state_change(&self) -> tokio::sync::OwnedMutexGuard<()> {
         Arc::clone(&self.state_change_gate).lock_owned().await
+    }
+
+    /// Called under the admission gate before finalization begins.
+    pub(crate) fn close_queue_steer(&self, turn_id: TurnId) {
+        *self
+            .closed_queue_steer_turn
+            .lock()
+            .expect("queue steer mutex poisoned") = Some(turn_id);
+    }
+
+    /// Reopens a new execution attempt of the same turn under the admission gate.
+    pub(crate) fn reopen_queue_steer(&self, turn_id: TurnId) {
+        let mut closed = self
+            .closed_queue_steer_turn
+            .lock()
+            .expect("queue steer mutex poisoned");
+        if *closed == Some(turn_id) {
+            *closed = None;
+        }
+    }
+
+    pub(crate) fn queue_steer_closed(&self, turn_id: TurnId) -> bool {
+        *self
+            .closed_queue_steer_turn
+            .lock()
+            .expect("queue steer mutex poisoned")
+            == Some(turn_id)
+    }
+
+    pub(crate) fn ephemeral_queue_steer_receipt(
+        &self,
+        id: devo_core::QueueItemId,
+    ) -> Option<TurnId> {
+        self.ephemeral_queue_steer_receipts
+            .lock()
+            .expect("queue receipt mutex poisoned")
+            .get(&id)
+            .copied()
+    }
+
+    pub(crate) fn remember_ephemeral_queue_steer(
+        &self,
+        id: devo_core::QueueItemId,
+        turn_id: TurnId,
+    ) {
+        self.ephemeral_queue_steer_receipts
+            .lock()
+            .expect("queue receipt mutex poisoned")
+            .insert(id, turn_id);
     }
 
     /// Non-blocking enqueue for fire-and-forget updates from turn streams.
@@ -581,17 +634,8 @@ impl SessionHandle {
             .await;
     }
 
-    #[allow(dead_code)]
-    pub(crate) async fn apply_parent_usage_snapshot(&self, snapshot: ParentUsageSnapshot) {
-        let _ = self
-            .send(SessionCommand::ApplyParentUsageSnapshot { snapshot })
-            .await;
-    }
-
-    /// Best-effort usage apply for callers that must not block on the mailbox
-    /// (child/parent turn event streams).
-    pub(crate) fn try_apply_parent_usage_snapshot(&self, snapshot: ParentUsageSnapshot) -> bool {
-        self.try_send(SessionCommand::ApplyParentUsageSnapshot { snapshot })
+    pub(crate) async fn refresh_usage(&self) {
+        let _ = self.tx.send(SessionCommand::RefreshUsage).await;
     }
 
     pub(crate) fn try_touch_last_activity(&self) -> bool {
@@ -809,6 +853,27 @@ impl SessionHandle {
         if !self
             .send(SessionCommand::SetToolRegistry {
                 tool_registry,
+                reply: reply_tx,
+            })
+            .await
+        {
+            return false;
+        }
+        reply_rx.await.is_ok()
+    }
+
+    pub(crate) async fn replace_mcp_server_tools(
+        &self,
+        server_id: devo_core::McpServerId,
+        tools: Vec<devo_core::McpToolInfo>,
+        manager: Arc<dyn devo_core::McpManager>,
+    ) -> bool {
+        let (reply_tx, reply_rx) = oneshot::channel();
+        if !self
+            .send(SessionCommand::ReplaceMcpServerTools {
+                server_id,
+                tools,
+                manager,
                 reply: reply_tx,
             })
             .await

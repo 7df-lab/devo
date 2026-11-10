@@ -119,3 +119,9 @@ describe("ChatTurnComponent Native transcript", () => {
 		})
 	})
 })
+
+test("host origin selects a notification instead of human editing controls", () => {
+	const source = readFileSync(new URL("./chat-turn.tsx", import.meta.url), "utf8")
+	expect(source).toContain("turn.userMessage.info.item.origin != null ? (")
+	expect(source).toContain("<HostMessageBlock text={userText} origin={turn.userMessage.info.item.origin} />")
+})

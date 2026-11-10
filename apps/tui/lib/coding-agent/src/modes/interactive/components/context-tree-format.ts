@@ -1,3 +1,4 @@
+import { formatCumulativeContext } from "./cumulative-usage-format.js";
 import type { Usage } from "@earendil-works/pi-ai";
 import { truncateToWidth, visibleWidth } from "@earendil-works/pi-tui";
 import type { ContextTreeNode } from "../../../core/context-tree.js";
@@ -95,7 +96,7 @@ function countNodes(root: ContextTreeNode): number {
 function sumOwnUsage(root: ContextTreeNode): Usage {
 	const total = emptyUsage();
 	const walk = (node: ContextTreeNode): void => {
-		addAssistantUsage(total, node.ownUsage);
+		if (node.ownUsage) addAssistantUsage(total, node.ownUsage);
 		for (const child of node.children) {
 			walk(child);
 		}
@@ -110,10 +111,11 @@ function sumOwnUsage(root: ContextTreeNode): Usage {
  * context-window utilization, followed by grand totals.
  */
 export function formatContextTree(root: ContextTreeNode, width: number): string {
+	if (root.cumulativeUsage) return formatCumulativeContext(root, root.cumulativeUsage);
 	const rows = flattenContextTree(root);
 
-	const tokenCells = rows.map((row) => formatTokenCount(spentTokens(row.node.ownUsage)));
-	const costCells = rows.map((row) => formatCost(row.node.ownUsage.cost.total));
+	const tokenCells = rows.map((row) => row.node.ownUsage ? formatTokenCount(spentTokens(row.node.ownUsage)) : "unknown");
+	const costCells = rows.map((row) => row.node.ownUsage ? formatCost(row.node.ownUsage.cost.total) : "unknown");
 	const tokenHeader = "tokens";
 	const costHeader = "cost";
 	const contextHeader = "context";

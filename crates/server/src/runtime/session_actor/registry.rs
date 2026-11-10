@@ -207,14 +207,26 @@ impl ServerRuntime {
         &self,
         session_id: SessionId,
     ) -> Option<crate::runtime_session_summary::RuntimeSessionSummary> {
-        if let Some(stream) = self.active_stream_state(session_id).await {
-            let stream = stream.lock().await;
-            if let Some(inline) = stream.turn_inline.as_ref() {
-                return Some(inline.summary.clone());
-            }
+        let inline_summary = if let Some(stream) = self.active_stream_state(session_id).await {
+            stream
+                .lock()
+                .await
+                .turn_inline
+                .as_ref()
+                .map(|inline| inline.summary.clone())
+        } else {
+            None
+        };
+        let mut summary = match inline_summary {
+            Some(summary) => summary,
+            None => self.session(session_id).await?.summary().await?,
+        };
+        // Reads do not depend on the notification task or actor mailbox catching
+        // up after a model request returns.
+        if let Some(usage) = self.usage_ledger.session_usage(session_id) {
+            summary.usage = usage;
         }
-        let handle = self.session(session_id).await?;
-        handle.summary().await
+        Some(summary)
     }
 
     /// Reads the session's collaboration mode, preferring the in-flight turn's

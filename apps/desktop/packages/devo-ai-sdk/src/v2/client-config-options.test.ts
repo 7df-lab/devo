@@ -148,6 +148,7 @@ describe("Native desktop SDK config option cache", () => {
 		expect(transport.requests.map((request) => request.method)).toEqual([
 			"initialize",
 			"model/preferences/read",
+			"model/preferences/read",
 		])
 	})
 
@@ -266,6 +267,7 @@ describe("Native default model preferences", () => {
 	test("saving effort without a chat never creates or resumes a session", async () => {
 		const transport = new FakeTransport((method, params) => {
 			if (method === "initialize") return initializeResult
+			if (method === "model/preferences/read") return { preferences: { ...modelPreferences, reasoningEffort: "high" } }
 			if (method === "model/preferences/write") {
 				expect(params).toEqual({ cwd: "/repo", patch: { reasoningEffort: "high" } })
 				return { preferences: { ...modelPreferences, reasoningEffort: "high" } }
@@ -275,7 +277,7 @@ describe("Native default model preferences", () => {
 		const client = createDevoClient({ directory: "/repo", transport })
 		await client.model.preferences.write({ patch: { reasoningEffort: "high" } })
 		expect((await client.config.providers()).data.providers[0].models["test-openai"].currentVariant).toBe("high")
-		expect(transport.requests.map(request => request.method)).toEqual(["initialize", "model/preferences/write"])
+		expect(transport.requests.map(request => request.method)).toEqual(["initialize", "model/preferences/write", "model/preferences/read"])
 	})
 
 	test("rapid model and effort choices write in order without session startup", async () => {

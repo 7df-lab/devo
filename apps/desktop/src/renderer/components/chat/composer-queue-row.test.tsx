@@ -8,6 +8,7 @@ function render(item: Partial<ComposerQueueItem>) {
 		onEditQueueItem={() => {}}
 		onRemoveQueueItem={() => {}}
 		onSteerQueueItem={() => {}}
+		onRetryQueueItem={() => {}}
 	/>)
 }
 
@@ -25,9 +26,25 @@ describe("composer queue row", () => {
 		expect(editButton).toContain('disabled=""')
 	})
 
-	test("labels a successful steer with failed cleanup as removal-only retry", () => {
-		const html = render({ steered: true, canEdit: false, error: "Remove unavailable" })
-		expect(html).toContain("Retry removal")
-		expect(html).not.toContain(">Steer<")
+	test("a held entry disables dragging every row without disabling ordinary steering", () => {
+		const html = renderToStaticMarkup(<ComposerStatusStack
+			queueItems={[
+				{ id: "held", text: "held", status: "queued", recoveryRequired: true },
+				{ id: "normal", text: "normal", status: "queued" },
+			]}
+			onSteerQueueItem={() => {}}
+		/>)
+		expect(html.match(/draggable="false"/g)?.length).toBe(2)
+		expect(html).not.toContain('draggable="true"')
+		expect(html).toContain(">Steer</button>")
+	})
+
+	test("held recovery warns of prior effects, disables editing and dragging, and preserves retry and discard", () => {
+		const html = render({ recoveryRequired: true })
+		expect(html).toContain("Prior effects may have occurred")
+		expect(html).toContain(">Retry</button>")
+		expect(html).toContain('draggable="false"')
+		expect(html.match(/<button[^>]*aria-label="Edit queued message"[^>]*>/)?.[0]).toContain('disabled=""')
+		expect(html.match(/<button[^>]*aria-label="Remove queued message"[^>]*>/)?.[0]).not.toContain('disabled=""')
 	})
 })

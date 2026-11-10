@@ -1,5 +1,8 @@
 // @ts-nocheck
 
+import { sessionUsageFromProtocol } from "./native-usage"
+export { sessionUsageFromProtocol, newerSessionUsage, type SessionUsageSummary } from "./native-usage"
+
 import {
 	AsyncEventQueue,
 	type SessionConfigOption,
@@ -20,6 +23,7 @@ import {
 	recentNativeItems,
 } from "./native-item"
 export type { NativeItemEnvelope } from "./native-item"
+export type { HostMessageOrigin } from "./generated/native"
 export {
 	assistantOrReasoningText,
 	compareNativeItems,
@@ -32,6 +36,7 @@ export {
 	userMessageText,
 } from "./native-item"
 import type {
+	HostMessageOrigin,
 	ModelListResult,
 	CredentialListResult,
 	ModelCatalogRefreshParams,
@@ -76,6 +81,22 @@ export type {
 	ReferenceSearchResult,
 	ReferenceSearchSnapshot,
 } from "./reference-search-session"
+
+import {
+	objectRecord,
+	parseTimestampMs,
+	projectNativeSession,
+} from "./session-projection"
+import { SessionRosterEvents } from "./session-roster-events"
+export type { SessionRosterChange } from "./session-roster-events"
+
+import type { SessionRosterParams, SessionRosterPage } from "./session-roster"
+export type { Session as NativeSession } from "./generated/native"
+export type { SessionRosterParams, SessionRosterPage } from "./session-roster"
+
+/** Legacy undo/redo is not an alias for destructive Native rollback. */
+export const SESSION_HISTORY_UNAVAILABLE =
+	"Session undo and redo are not supported. No rollback was performed."
 
 export type JsonRpcId = number | string
 
@@ -294,9 +315,6 @@ type PendingPermission = {
 	native?: boolean
 }
 
-function objectRecord(value: unknown): Record<string, unknown> | undefined {
-	return value && typeof value === "object" ? (value as Record<string, unknown>) : undefined
-}
 
 /** Canonical Native plan-entry statuses — no snake_case reshape. */
 function planStatus(status: string): string {
@@ -440,9 +458,6 @@ function nativeItemNotificationMethod(envelope: Record<string, unknown>): "item/
 	return "item/started"
 }
 
-function stringOrUndefined(value: unknown): string | undefined {
-	return typeof value === "string" && value.length > 0 ? value : undefined
-}
 
 function numberFromProtocol(value: unknown): number {
 	if (typeof value === "number" && Number.isFinite(value)) return value
@@ -541,21 +556,7 @@ function sessionConfigOptionsFromModelPreferences(preferences: ModelPreferencesW
 	return options
 }
 
-function parseTimestampMs(value: unknown): number | undefined {
-	if (typeof value === "number" && Number.isFinite(value)) return value
-	if (typeof value !== "string") return undefined
-	const parsed = Date.parse(value)
-	return Number.isFinite(parsed) ? parsed : undefined
-}
 
-function parseTitleState(value: unknown): string | undefined {
-	if (typeof value === "string") return value
-	if (value && typeof value === "object") {
-		const keys = Object.keys(value as Record<string, unknown>)
-		if (keys.length === 1) return keys[0]
-	}
-	return undefined
-}
 
 type LoadedSessionLimit = number | null
 type SessionSettingsPatch = {
@@ -603,7 +604,13 @@ export type PromptAsyncOutcome =
 	| { outcome: "started"; turnId?: string }
 	| { outcome: "queued"; queueItemId: string }
 
+export type QueueSteerOutcome =
+	| { outcome: "accepted"; queueItemId: string; turnId: string }
+	| { outcome: "keptQueued"; entry: QueueWireEntry }
+
 export type QueueWireEntry = {
+	origin?: HostMessageOrigin
+	recoveryRequired?: boolean
 	queueItemId: string
 	position: number
 	preview: string
@@ -616,16 +623,25 @@ function parseQueueWireEntries(value: unknown): QueueWireEntry[] {
 	return value
 		.map((entry) => objectRecord(entry))
 		.filter((entry): entry is Record<string, unknown> => !!entry)
-		.map((entry) => ({
-			queueItemId: String(entry.queueItemId ?? ""),
-			position: Number(entry.position ?? 0),
-			preview: String(entry.preview ?? ""),
-			enqueuedAt: typeof entry.enqueuedAt === "string" ? entry.enqueuedAt : undefined,
-			// Native results are schema-validated before reaching this parser.
-			// Retain every input field so steering cannot discard attachments,
-			// skill names, or file mentions from the queued message.
-			input: Array.isArray(entry.input) ? entry.input as UserInput[] : undefined,
-		}))
+		.map((entry) => {
+			const origin = objectRecord(entry.origin)
+			if (entry.origin != null && (!origin ||
+				typeof origin.eventId !== "string" || typeof origin.sender !== "string" ||
+				!["agent", "backgroundTask", "schedule"].includes(origin.source) ||
+				!["followUp", "steer"].includes(origin.delivery))) {
+				throw new Error("Invalid host message origin in queue entry")
+			}
+			return {
+				...(origin ? { origin: origin as HostMessageOrigin } : {}),
+				recoveryRequired: entry.recoveryRequired === true ? true : undefined,
+				queueItemId: String(entry.queueItemId ?? ""),
+				position: Number(entry.position ?? 0),
+				preview: String(entry.preview ?? ""),
+				enqueuedAt: typeof entry.enqueuedAt === "string" ? entry.enqueuedAt : undefined,
+				// Preserve attachments, skill names, and mentions when steering.
+				input: Array.isArray(entry.input) ? entry.input as UserInput[] : undefined,
+			}
+		})
 		.filter((entry) => entry.queueItemId.length > 0)
 		.sort((left, right) => left.position - right.position)
 }
@@ -795,9 +811,11 @@ class NativeClient {
 	private disposed = false
 	private unsubscribeTransport: (() => void) | null = null
 	private events = new AsyncEventQueue<GlobalEvent>()
+	private rosterEvents = new SessionRosterEvents()
 	private sessions = new Map<string, Session>()
 	private sessionDirectories = new Map<string, string>()
 	private sessionStatuses = new Map<string, SessionStatus>()
+	private contextUsageRevisions = new Map<string, number>()
 	private promptStartedAtBySession = new Map<string, number>()
 	/** Session transcript: Native ItemEnvelope keyed by itemId (no Message/Part dual). */
 	private items = new Map<string, Map<string, NativeItemEnvelope>>()
@@ -817,6 +835,7 @@ class NativeClient {
 	private turnSessions = new Map<string, string>()
 	private activeTurnIds = new Map<string, string>()
 	private queueEntriesBySession = new Map<string, QueueWireEntry[]>()
+	private queueProjectionRevision = new Map<string, number>()
 	/** Native itemId → callId (for command output deltas). */
 	private nativeItemCallIds = new Map<string, string>()
 	private sessionDiscovery = new Map<string, Promise<Session | undefined>>()
@@ -832,6 +851,7 @@ class NativeClient {
 	dispose(): void {
 		if (this.disposed) return
 		this.disposed = true
+		this.rosterEvents.clear()
 		const unsubscribe = this.unsubscribeTransport
 		this.unsubscribeTransport = null
 		try {
@@ -845,6 +865,11 @@ class NativeClient {
 		list: async () => ({ data: await this.listProjects() }),
 	}
 	session = {
+		/** Observe existing Native traffic without consuming the global event stream. */
+		observeRoster: this.rosterEvents.subscribe,
+		/** A single read-only Native roster page. Does not resume sessions or load transcripts. */
+		roster: async (params: SessionRosterParams): Promise<SessionRosterPage> =>
+			await this.requestCanonical("session/list", params) as SessionRosterPage,
 		list: async (params?: { limit?: number; roots?: boolean; search?: string }) => ({
 			data: await this.listSessions(params),
 		}),
@@ -899,17 +924,25 @@ class NativeClient {
 				// Historical sessions show up in session/list but are not
 				// addressable until session/resume. Composer refresh races
 				// message load on open, so wait for load before queue/list.
+				let revision = this.queueProjectionRevision.get(params.sessionId) ?? 0
 				try {
 					await this.ensureSessionReady(params.sessionId)
+					revision = this.queueProjectionRevision.get(params.sessionId) ?? 0
 					const result = (await this.requestCanonical("session/queue/list", {
 						sessionId: params.sessionId,
 					})) as { entries?: unknown }
 					const entries = parseQueueWireEntries(result.entries)
-					this.emitQueueSnapshot(params.sessionId, entries, "sync")
+					// Preserve any newer notification or completed refresh while this
+					// snapshot was in flight; callers still receive their own response.
+					if ((this.queueProjectionRevision.get(params.sessionId) ?? 0) === revision) {
+						this.emitQueueSnapshot(params.sessionId, entries, "sync")
+					}
 					return { data: { entries } }
 				} catch (error) {
 					if (isSessionNotFoundError(error)) {
-						this.emitQueueSnapshot(params.sessionId, [], "sync")
+						if ((this.queueProjectionRevision.get(params.sessionId) ?? 0) === revision) {
+							this.emitQueueSnapshot(params.sessionId, [], "sync")
+						}
 						return { data: { entries: [] } }
 					}
 					throw error
@@ -926,6 +959,7 @@ class NativeClient {
 				parts?: PromptPartInput[]
 				position?: number
 			}) => {
+				const revision = this.queueProjectionRevision.get(params.sessionId) ?? 0
 				const result = (await this.requestCanonical("session/queue/update", {
 					sessionId: params.sessionId,
 					queueItemId: params.queueItemId,
@@ -935,7 +969,7 @@ class NativeClient {
 					...(params.position !== undefined ? { position: params.position } : {}),
 				})) as { entry?: unknown }
 				const entry = objectRecord(result.entry)
-				if (entry) {
+				if (entry && (this.queueProjectionRevision.get(params.sessionId) ?? 0) === revision) {
 					const entries = parseQueueWireEntries([entry])
 					if (entries[0]) {
 						const current = this.queueEntriesForSession(params.sessionId)
@@ -954,6 +988,26 @@ class NativeClient {
 				}
 				return { data: result }
 			},
+			steer: async (params: { sessionId: string; queueItemId: string; expectedTurnId: string }) => {
+				// The durable server receipt is authoritative, even with an empty client cache.
+				// Never fall back to injecting input and deleting in separate requests.
+				const result = await this.requestCanonical("session/queue/steer", params) as QueueSteerOutcome
+				// Admission receipts do not prove current absence; keptQueued is also
+				// only a point-in-time snapshot. A newer notification may already
+				// hold or remove this identity. Refresh rather than overwriting it
+				// from either response, and retain cached state if refresh fails.
+				await this.session.queue.list({ sessionId: params.sessionId }).catch(() => {})
+				return { data: result }
+			},
+			retry: async (params: { sessionId: string; queueItemId: string }) => {
+				try {
+					return { data: await this.requestCanonical("session/queue/retry", params) }
+				} finally {
+					// A lost reply may still have replaced the held entry. Refresh, but
+					// never repeat this consequential recovery request automatically.
+					await this.session.queue.list({ sessionId: params.sessionId }).catch(() => {})
+				}
+			},
 			remove: async (params: { sessionId: string; queueItemId: string }) => {
 				await this.requestCanonical("session/queue/remove", {
 					sessionId: params.sessionId,
@@ -967,16 +1021,13 @@ class NativeClient {
 			| { sessionId: string; queueItemId: string }
 		) => {
 			const expectedTurnId = this.activeTurnIds.get(params.sessionId)
+			if ("queueItemId" in params) {
+				return this.session.queue.steer({ ...params, expectedTurnId: expectedTurnId ?? "" })
+			}
 			if (!expectedTurnId) {
 				throw new Error("No active turn to steer")
 			}
-			const input = "queueItemId" in params
-				? this.queueEntriesForSession(params.sessionId)
-					.find((entry) => entry.queueItemId === params.queueItemId)?.input
-				: userInputsFromPromptParts(params.parts)
-			if (!input?.length) {
-				throw new Error("Queued message is no longer available to steer")
-			}
+			const input = userInputsFromPromptParts(params.parts)
 			const result = await this.requestCanonical("turn/steer", {
 				sessionId: params.sessionId,
 				expectedTurnId,
@@ -1054,9 +1105,28 @@ class NativeClient {
 			const { directory } = this.forgetSession(params.sessionId)
 			this.emitSessionDeleted(params.sessionId, directory)
 		},
-		// `session.get` is a durable snapshot read. It intentionally does not
-		// resume the server actor; callers that need history use `messages`,
-		// while metadata updates can write the snapshot directly.
+		/** Independent exact-ID read. Neither consumes nor populates SDK caches.
+		 * Use when a discarded UI lifecycle must not supply a later lookup. */
+		read: async (params: { sessionId: string }) => {
+			try {
+				const result = await this.requestCanonical("session/read", params) as {
+					session: Record<string, unknown>
+				}
+				return {
+					data: projectNativeSession(
+						result.session,
+						/*existing*/ undefined,
+						this.options.directory ?? defaultCwd(),
+					),
+				}
+			} catch (error) {
+				if (isSessionNotFoundError(error)) return { data: undefined }
+				throw error
+			}
+		},
+		// `session.get` may reuse cached metadata or pending discovery. Call
+		// `session.read` for fresh identity validation across UI lifecycles.
+		// Neither path resumes work or loads history.
 		get: async (params: { sessionId: string }) => ({
 			data: await this.getSessionById(params.sessionId),
 		}),
@@ -1082,12 +1152,12 @@ class NativeClient {
 				throw error
 			}
 		},
-		revert: async (params: { sessionId: string }) => ({
-			data: this.sessions.get(params.sessionId),
-		}),
-		unrevert: async (params: { sessionId: string }) => ({
-			data: this.sessions.get(params.sessionId),
-		}),
+		revert: async (_params: { sessionId: string }): Promise<{ data: Session | undefined }> => {
+			throw new Error(SESSION_HISTORY_UNAVAILABLE)
+		},
+		unrevert: async (_params: { sessionId: string }): Promise<{ data: Session | undefined }> => {
+			throw new Error(SESSION_HISTORY_UNAVAILABLE)
+		},
 		command: async (params: { sessionId: string; command: string; arguments?: string }) => {
 			const suffix = params.arguments ? ` ${params.arguments}` : ""
 			await this.session.promptAsync({
@@ -1369,9 +1439,18 @@ class NativeClient {
 	}
 
 	config = {
-		providers: async () => ({
-			data: providerDataFromConfigOptions(await this.ensureCurrentConfigOptions()),
-		}),
+		providers: async () => {
+			// Selectable routes must come from a fresh Native read, never an ACP
+			// session cache that retains the current model as a placeholder.
+			const result = await this.requestCanonical("model/preferences/read", {
+				...(this.options.directory ? { cwd: this.options.directory } : {}),
+			}) as { preferences: ModelPreferencesWire }
+			return {
+				data: providerDataFromConfigOptions(
+					sessionConfigOptionsFromModelPreferences(result.preferences),
+				),
+			}
+		},
 		get: async () => ({ data: configDataFromConfigOptions(await this.ensureCurrentConfigOptions()) }),
 		setOption: async (params: { configID: string; value: string }) => ({
 			data: configDataFromConfigOptions(
@@ -1406,10 +1485,13 @@ class NativeClient {
 	context = {
 		usage: {
 			read: async (params: { sessionId: string }) => {
+				const revision = this.advanceContextUsageRevision(params.sessionId)
 				const result = (await this.requestCanonical("context/usage/read", {
 					sessionId: params.sessionId,
 				})) as { occupancy?: unknown }
-				this.emitContextUsage(params.sessionId, result.occupancy)
+				if (this.contextUsageRevisions.get(params.sessionId) === revision) {
+					this.emitContextUsage(params.sessionId, result.occupancy)
+				}
 				return { data: result.occupancy }
 			},
 		},
@@ -1426,6 +1508,10 @@ class NativeClient {
 			}
 			return { data: result.tools ?? [] }
 		},
+		/** Restart the configured transport and rediscover tools; does not perform login. */
+		reconnect: async (params: { name: string }) => ({
+			data: await this.requestCanonical("mcp/reconnect", { name: params.name }),
+		}),
 		setEnabled: async (params: { name: string; enabled: boolean }) => ({
 			data: await this.requestCanonical("mcp/set_enabled", params),
 		}),
@@ -1641,6 +1727,7 @@ class NativeClient {
 	}
 
 	private async resumeSessionOnce(sessionId: string): Promise<void> {
+		const revision = this.advanceContextUsageRevision(sessionId)
 		try {
 			const resumed = (await this.requestCanonical("session/resume", { sessionId })) as {
 				session: Record<string, unknown>; lastContextOccupancy?: unknown; last_context_occupancy?: unknown
@@ -1649,7 +1736,9 @@ class NativeClient {
 			this.emit(enriched.directory ?? this.options.directory ?? defaultCwd(), {
 				type: "session.updated", properties: { info: enriched, session: enriched },
 			})
-			this.emitContextUsage(sessionId, resumed.lastContextOccupancy ?? resumed.last_context_occupancy)
+			if (this.contextUsageRevisions.get(sessionId) === revision) {
+				this.emitContextUsage(sessionId, resumed.lastContextOccupancy ?? resumed.last_context_occupancy)
+			}
 			await this.ensureSessionSubscription(sessionId)
 			this.resumedSessions.add(sessionId)
 			this.sessionsNeedingResume.delete(sessionId)
@@ -1684,8 +1773,14 @@ class NativeClient {
 	private async discoverSession(sessionId: string): Promise<Session | undefined> {
 		const pending = this.sessionDiscovery.get(sessionId)
 		if (pending) return pending
-		const discovery = this.listSessions()
-			.then((sessions) => sessions.find((session) => session.id === sessionId))
+		// Child sessions are absent from the default root-only roster. Resolve an
+		// exact ID without scanning the roster or resuming any work.
+		const discovery = this.requestCanonical("session/read", { sessionId })
+			.then((result) => this.rememberNativeSession(result.session))
+			.catch((error) => {
+				if (isSessionNotFoundError(error)) return undefined
+				throw error
+			})
 			.finally(() => {
 				this.sessionDiscovery.delete(sessionId)
 			})
@@ -1694,87 +1789,12 @@ class NativeClient {
 	}
 
 	private rememberNativeSession(info: Record<string, unknown>): Session {
-		const id = String(info.id ?? "")
-		if (!id) throw new Error("Native session is missing id")
-		const existing = this.sessions.get(id)
-		const usage = objectRecord(info.usage)
-		const total = objectRecord(usage?.total)
-		const created = parseTimestampMs(info.createdAt) ?? existing?.time.created ?? Date.now()
-		const wireActivity = parseTimestampMs(info.lastActivityAt)
-		const existingActivity = Math.max(existing?.time.lastActivity ?? 0, existing?.time.updated ?? 0)
-		// Never let resume/snapshot lower a known activity timestamp — that alone
-		// can reshuffle the sidebar. Prefer the newer of wire vs in-memory.
-		const updated =
-			wireActivity != null
-				? Math.max(wireActivity, existingActivity)
-				: existingActivity > 0
-					? existingActivity
-					: created
-		const parent = objectRecord(info.parent)
-		const forkFromId =
-			typeof info.forkFromId === "string"
-				? info.forkFromId
-				: typeof info.fork_from_id === "string"
-					? info.fork_from_id
-					: existing?.forkFromId
-		const atTurnId =
-			typeof info.atTurnId === "string"
-				? info.atTurnId
-				: typeof info.fork_at_turn_id === "string"
-					? info.fork_at_turn_id
-					: existing?.atTurnId
-		const titleState = parseTitleState(info.titleState ?? info.title_state)
-		// Persisted per-session turn settings (model / reasoning effort / mode).
-		// The server restores these on resume; without them the Desktop composer
-		// cannot re-seed per-session selections after a restart and every
-		// session falls back to the project default.
-		const wireModel = objectRecord(info.model)
-		const wireSettings = objectRecord(info.settings)
-		const sessionModel = wireModel
-			? {
-					provider:
-						typeof wireModel.provider === "string"
-							? wireModel.provider
-							: existing?.model?.provider,
-					model:
-						typeof wireModel.model === "string"
-							? wireModel.model
-							: existing?.model?.model,
-					reasoningEffort:
-						stringOrUndefined(wireModel.reasoningEffort ?? wireModel.reasoning_effort) ??
-						existing?.model?.reasoningEffort,
-			  }
-			: existing?.model
-		const sessionSettings = wireSettings
-			? {
-					mode: stringOrUndefined(wireSettings.mode) ?? existing?.settings?.mode,
-					reasoningEffort:
-						stringOrUndefined(wireSettings.reasoningEffort ?? wireSettings.reasoning_effort) ??
-						existing?.settings?.reasoningEffort,
-					permissionProfile:
-						stringOrUndefined(wireSettings.permissionProfile ?? wireSettings.permission_profile) ??
-						existing?.settings?.permissionProfile,
-			  }
-			: existing?.settings
-		const session: Session = {
-			id,
-			title: typeof info.title === "string" ? info.title : existing?.title,
-			titleState: titleState ?? existing?.titleState ?? "Unset",
-			parentId: typeof parent?.sessionId === "string" ? parent.sessionId : existing?.parentId,
-			forkFromId,
-			atTurnId,
-			time: { created, updated, lastActivity: updated },
-			directory: String(info.cwd ?? existing?.directory ?? this.options.directory ?? defaultCwd()),
-			model: sessionModel,
-			settings: sessionSettings,
-			totalInputTokens: Number(total?.inputTokens ?? existing?.totalInputTokens ?? 0),
-			totalOutputTokens: Number(total?.outputTokens ?? existing?.totalOutputTokens ?? 0),
-			totalTokens: Number(total?.totalTokens ?? existing?.totalTokens ?? 0),
-			totalCacheCreationTokens: Number(total?.cacheCreationInputTokens ?? existing?.totalCacheCreationTokens ?? 0),
-			totalCacheReadTokens: Number(total?.cacheReadInputTokens ?? existing?.totalCacheReadTokens ?? 0),
-			promptTokenEstimate: Number(total?.inputTokens ?? existing?.promptTokenEstimate ?? 0),
-			lastQueryTotalTokens: existing?.lastQueryTotalTokens ?? 0,
-		}
+		const session = projectNativeSession(
+			info,
+			this.sessions.get(String(info.id ?? "")),
+			this.options.directory ?? defaultCwd(),
+		)
+		const id = session.id
 		this.sessions.set(id, session)
 		this.sessionDirectories.set(id, session.directory ?? defaultCwd())
 		// Durable snapshots (session/list, resume, metadata) often report Idle
@@ -1789,6 +1809,7 @@ class NativeClient {
 			id,
 			snapshotBusy ? { type: "busy" } : existingInFlight ? existingStatus : { type: "idle" },
 		)
+		this.emitSessionUsage(id, info.usage)
 		return session
 	}
 
@@ -1929,6 +1950,7 @@ class NativeClient {
 
 	private handleTransportEvent(event: DevoNativeTransportEvent): void {
 		if (this.disposed) return
+		this.rosterEvents.handle(event)
         if (event.type === "closed" || (event.type === "notification" &&
             (event.method?.startsWith("turn/") || event.method === "session/metadataUpdated"))) {
             for (const listener of this.recoveryListeners) listener()
@@ -2281,24 +2303,28 @@ class NativeClient {
 			if (sessionId) this.emitContextUsage(sessionId, value.occupancy)
 			return true
 		}
-		if (method === "turn/usage/updated" || method === "session/usage/updated") {
+		if (method === "turn/usage/updated") {
 			const sessionId = String(value.sessionId ?? "")
-			const usage = objectRecord(value.usage) ?? {}
-			// Native usage uses the same camelCase query shape as the TUI.
-			const query = objectRecord(usage.query) ?? {}
+			const query = objectRecord(objectRecord(value.usage)?.query) ?? {}
 			const used = Number(query.totalTokens ?? 0)
 			const size = Number(value.contextWindow ?? 0)
 			if (sessionId) {
+				// Missing/placeholder usage may change the window, never erase a known context.
+				if (used > 0 || size > 0) this.advanceContextUsageRevision(sessionId)
 				this.emit(this.sessionDirectories.get(sessionId) ?? this.options.directory ?? defaultCwd(), {
-					type: "session.usage.updated",
+					type: "context.tokens.updated",
 					properties: {
-						sessionId: sessionId,
-						used,
-						size,
-						cost: 0,
+						sessionId, used: used > 0 ? used : undefined, size,
+						...(value.sessionTotals ? { sessionTotals: sessionUsageFromProtocol(value.sessionTotals) } : {}),
 					},
 				})
+				this.emitSessionUsage(sessionId, value.sessionTotals)
 			}
+			return true
+		}
+		if (method === "session/usage/updated") {
+			const sessionId = String(value.sessionId ?? "")
+			if (sessionId) this.emitSessionUsage(sessionId, value.usage)
 			return true
 		}
 		if (method === "model/queryRetrying") {
@@ -2852,6 +2878,7 @@ class NativeClient {
 		this.items.delete(sessionId)
 		this.activeTurnIds.delete(sessionId)
 		this.queueEntriesBySession.delete(sessionId)
+		this.queueProjectionRevision.set(sessionId, (this.queueProjectionRevision.get(sessionId) ?? 0) + 1)
 		return { directory, known }
 	}
 
@@ -2964,6 +2991,7 @@ class NativeClient {
 	}
 
 	private emitQueueSnapshot(sessionId: string, entries: QueueWireEntry[], change: string): void {
+		this.queueProjectionRevision.set(sessionId, (this.queueProjectionRevision.get(sessionId) ?? 0) + 1)
 		this.queueEntriesBySession.set(sessionId, entries)
 		const directory = this.sessionDirectories.get(sessionId) ?? this.options.directory ?? defaultCwd()
 		this.emit(directory, {
@@ -2998,6 +3026,7 @@ class NativeClient {
 			input: userInputsFromPromptParts(params.parts),
 			idempotencyKey: crypto.randomUUID(),
 		}
+		let revision = this.queueProjectionRevision.get(params.sessionId) ?? 0
 		let result: Record<string, unknown>
 		try {
 			result = await this.requestCanonical("session/queue/push", request) as Record<string, unknown>
@@ -3010,6 +3039,7 @@ class NativeClient {
 			this.resumedSessions.delete(params.sessionId)
 			this.subscriptions.delete(params.sessionId)
 			await this.ensureSessionReady(params.sessionId)
+			revision = this.queueProjectionRevision.get(params.sessionId) ?? 0
 			result = await this.requestCanonical("session/queue/push", request) as Record<string, unknown>
 		}
 		const outcome = String(result.outcome ?? "")
@@ -3017,13 +3047,15 @@ class NativeClient {
 			const entry = objectRecord(result.entry) ?? result
 			const entries = parseQueueWireEntries([entry])
 			if (entries[0]) {
-				const current = this.queueEntriesForSession(params.sessionId)
-				const merged = [...current.filter((item) => item.queueItemId !== entries[0].queueItemId), entries[0]]
-				this.emitQueueSnapshot(
-					params.sessionId,
-					merged.sort((left, right) => left.position - right.position),
-					"added",
-				)
+				if ((this.queueProjectionRevision.get(params.sessionId) ?? 0) === revision) {
+					const current = this.queueEntriesForSession(params.sessionId)
+					const merged = [...current.filter((item) => item.queueItemId !== entries[0].queueItemId), entries[0]]
+					this.emitQueueSnapshot(
+						params.sessionId,
+						merged.sort((left, right) => left.position - right.position),
+						"added",
+					)
+				}
 				return { outcome: "queued", queueItemId: entries[0].queueItemId }
 			}
 			return { outcome: "queued", queueItemId: String(entry.queueItemId ?? "") }
@@ -3228,9 +3260,25 @@ class NativeClient {
 		return this.currentConfigOptions()
 	}
 
+	private emitSessionUsage(sessionId: string, value: unknown): void {
+		const usage = sessionUsageFromProtocol(value)
+		if (!usage) return
+		this.emit(this.sessionDirectories.get(sessionId) ?? this.options.directory ?? defaultCwd(), {
+			type: "session.usage.updated",
+			properties: { sessionId, usage },
+		})
+	}
+
+	private advanceContextUsageRevision(sessionId: string): number {
+		const revision = (this.contextUsageRevisions.get(sessionId) ?? 0) + 1
+		this.contextUsageRevisions.set(sessionId, revision)
+		return revision
+	}
+
 	private emitContextUsage(sessionId: string, occupancyValue: unknown): boolean {
 		const occupancy = contextOccupancyFromProtocol(occupancyValue)
 		if (!occupancy) return false
+		this.advanceContextUsageRevision(sessionId)
 		this.emit(this.sessionDirectories.get(sessionId) ?? this.options.directory ?? defaultCwd(), {
 			type: "context.usage.updated",
 			properties: { sessionId: sessionId, occupancy },

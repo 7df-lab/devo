@@ -1,3 +1,4 @@
+import type { CumulativeUsage } from "./usage-display.js";
 import { existsSync, readdirSync, statSync } from "node:fs";
 import { basename, join } from "node:path";
 import type { AssistantMessage, Usage } from "@earendil-works/pi-ai";
@@ -20,8 +21,11 @@ export interface ContextTreeNode {
 	label: string;
 	status: "active" | RlmChildAgentStatus;
 	model?: { provider: string; id: string };
-	ownUsage: Usage;
-	totalUsage: Usage;
+	/** Null when the source cannot attribute own spend separately from children. */
+	ownUsage: Usage | null;
+	totalUsage: Usage | null;
+	/** Authoritative Native session total, including children and overhead. */
+	cumulativeUsage?: CumulativeUsage;
 	contextUsage?: ContextUsage;
 	children: ContextTreeNode[];
 }

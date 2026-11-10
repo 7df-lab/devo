@@ -1,3 +1,5 @@
+import { sessionUsageFromProtocol } from "@devo-ai/sdk/v2/client"
+import { sessionMetricsFamily } from "./derived/session-metrics"
 import { describe, expect, test } from "bun:test"
 import { processEvent } from "./actions/event-processor"
 import { sessionNativeFamily } from "./session-native"
@@ -52,12 +54,11 @@ describe("Native session renderer state", () => {
 			},
 		})
 		processEvent({
-			type: "session.usage.updated",
+			type: "context.tokens.updated",
 			properties: {
 				sessionId: sessionID,
 				used: 42,
 				size: 100,
-				cost: { amount: 1, currency: "USD" },
 			},
 		})
 		processEvent({
@@ -82,7 +83,6 @@ describe("Native session renderer state", () => {
 			usage: {
 				used: 48_000,
 				size: 190_000,
-				cost: { amount: 1, currency: "USD" },
 			},
 			occupancy: {
 				totalTokens: 48_000,
@@ -112,7 +112,7 @@ describe("Native session renderer state", () => {
 			},
 		})
 		processEvent({
-			type: "session.usage.updated",
+			type: "context.tokens.updated",
 			properties: {
 				sessionId: sessionID,
 				used: 48_000,
@@ -323,4 +323,36 @@ test("keeps replayed provider failures scoped to their original turns", () => {
 		{ id: "failed-turn-first-PAYMENT_REQUIRED-Insufficient Balance", turnId: "turn-first", message: "Insufficient Balance", phase: "failed", code: "PAYMENT_REQUIRED" },
 		{ id: "failed-turn-last-PAYMENT_REQUIRED-Insufficient Balance", turnId: "turn-last", message: "Insufficient Balance", phase: "failed", code: "PAYMENT_REQUIRED" },
 	])
+})
+
+
+test("cumulative usage updates metrics mid-turn without replacing current context", () => {
+	const sessionId = "live-usage-multi-call"
+	const first = { totalTokens: 120, inputTokens: 100, outputTokens: 20, reasoningTokens: 0, cacheReadInputTokens: 50, cacheCreationInputTokens: 10, callCount: 1, meteredCallCount: 1, unreportedFields: [] }
+	const second = { ...first, totalTokens: 350, inputTokens: 300, outputTokens: 50, cacheReadInputTokens: 100, cacheCreationInputTokens: 40, callCount: 2, meteredCallCount: 2, unreportedFields: [] }
+	processEvent({ type: "context.tokens.updated", properties: { sessionId, used: 230, size: 1000 } })
+	processEvent({ type: "session.usage.updated", properties: { sessionId, usage: sessionUsageFromProtocol(first) } })
+	expect(appStore.get(sessionMetricsFamily(sessionId)).tokensRaw).toBe(120)
+	processEvent({ type: "session.usage.updated", properties: { sessionId, usage: sessionUsageFromProtocol(second) } })
+	const metrics = appStore.get(sessionMetricsFamily(sessionId))
+	expect(metrics.raw.tokens).toEqual({ input: 300, output: 50, reasoning: 0, cacheRead: 100, cacheWrite: 40, total: 350 })
+	expect(metrics.cost).toBe("Unknown")
+	expect(metrics.cacheEfficiency).toBeCloseTo(100 / 300 * 100)
+	expect(appStore.get(sessionNativeFamily(sessionId)).usage).toEqual({ used: 230, size: 1000, cost: undefined })
+	// Delayed snapshots and their context samples cannot roll back live state.
+	processEvent({ type: "context.tokens.updated", properties: { sessionId, used: 120, size: 1000, sessionTotals: sessionUsageFromProtocol(first) } })
+	expect(appStore.get(sessionNativeFamily(sessionId)).usage?.used).toBe(230)
+	// Empty request-start samples preserve the latest known context.
+	processEvent({ type: "session.usage.updated", properties: { sessionId, usage: sessionUsageFromProtocol(first) } })
+	processEvent({ type: "context.tokens.updated", properties: { sessionId, used: 0, size: 1000 } })
+	expect(appStore.get(sessionMetricsFamily(sessionId)).tokensRaw).toBe(350)
+	expect(appStore.get(sessionNativeFamily(sessionId)).usage).toEqual({ used: 230, size: 1000, cost: undefined })
+})
+
+test("unknown provider metering is not presented as free zero usage", () => {
+	const sessionId = "unknown-provider-usage"
+	processEvent({ type: "session.usage.updated", properties: { sessionId, usage: sessionUsageFromProtocol({ totalTokens: 0, inputTokens: 0, outputTokens: 0, callCount: 1, meteredCallCount: 0 }) } })
+	const metrics = appStore.get(sessionMetricsFamily(sessionId))
+	expect({ cost: metrics.cost, tokens: metrics.tokens, costRaw: metrics.costRaw, tokensRaw: metrics.tokensRaw }).toEqual({ cost: "Unknown", tokens: "Unknown", costRaw: null, tokensRaw: null })
+	expect(metrics.raw.tokens).toEqual({ input: null, output: null, reasoning: null, cacheRead: null, cacheWrite: null, total: null })
 })

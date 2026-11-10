@@ -647,6 +647,7 @@ impl ServerRuntime {
             .map(|(index, item)| {
                 let (input, preview) = queue_entry_content(&item);
                 QueueEntry {
+                    origin: item.host_message_origin(),
                     queue_item_id: item.id,
                     // 1-based, matching `native_queue_entries` (in-memory
                     // path) and `session/queue/list`.
@@ -654,6 +655,7 @@ impl ServerRuntime {
                     input,
                     preview,
                     enqueued_at: item.created_at,
+                    recovery_required: super::queue_steer::requires_queue_review(&item),
                 }
             })
             .collect())

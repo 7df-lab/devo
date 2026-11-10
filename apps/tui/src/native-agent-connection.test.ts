@@ -1079,7 +1079,8 @@ test("getSessionStats uses context/usage/read", async () => {
   const { conn } = await bootConnection();
   const stats = await conn.getSessionStats();
   assert.equal(stats.sessionId, "sess_test");
-  assert.equal(stats.tokens.input, 100);
+  assert.equal(stats.tokens.input, null);
+  assert.equal(stats.contextUsage?.tokens, 100);
   assert.ok(stats.contextUsage);
   assert.equal(
     stats.sessionFile,
@@ -1089,16 +1090,17 @@ test("getSessionStats uses context/usage/read", async () => {
   await conn.dispose();
 });
 
-test("getContextTree returns InteractiveMode-shaped ownUsage so /context can format", async () => {
+test("getContextTree does not invent spend from context occupancy", async () => {
   const { conn } = await bootConnection();
   await conn.getSessionStats(); // warm occupancy → contextUsage
   const tree = await conn.getContextTree();
   assert.equal(tree.id, "root");
   assert.equal(tree.status, "active");
-  assert.equal(typeof tree.ownUsage.input, "number");
-  assert.equal(typeof tree.ownUsage.cost.total, "number");
+  assert.equal(tree.ownUsage, null);
+  assert.equal(tree.totalUsage, null);
   assert.ok(Array.isArray(tree.children));
-  assert.equal(tree.ownUsage.input, 100);
+  assert.equal(tree.cumulativeUsage.tokens.input, null);
+  assert.equal(tree.contextUsage?.tokens, 100);
   await conn.dispose();
 });
 
@@ -2182,5 +2184,192 @@ test("explicit login setup ignores API keys and MCP OAuth", async () => {
   await conn.completeExplicitOAuthLogin("openai", { type: "api_key", key: "test-key" });
   await conn.completeExplicitOAuthLogin("mcp:test", { type: "oauth", access: "test-access" });
   assert.deepEqual(fake.requests, []);
+  await conn.dispose();
+});
+
+function meteredTotals(input: number, output: number, calls: number) {
+  return { inputTokens: input, outputTokens: output, totalTokens: input + output,
+    cacheReadInputTokens: 70, cacheCreationInputTokens: 10,
+    callCount: calls, meteredCallCount: calls };
+}
+
+function pushUsage(conn: NativeAgentConnection, params: Record<string, unknown>, method = "turn/usage/updated") {
+  conn.pushChunk(`${JSON.stringify({ jsonrpc: "2.0", method, params })}\n`);
+}
+
+test("two requests in one turn update actual cumulative stats immediately without waiting for turn completion", async () => {
+  let occupancy = 0;
+  const { conn } = await bootConnection([(method, _params, respond) => {
+    if (method !== "context/usage/read") return false;
+    respond({ occupancy: { totalTokens: occupancy, contextWindowTokens: 1000 } });
+    return true;
+  }]);
+  const events: unknown[] = [];
+  conn.subscribe((event) => {
+    if (event.type === "session_event" && event.event.type === "session_usage_update") events.push(event.event);
+  });
+  occupancy = 120;
+  pushUsage(conn, { sessionId: "sess_test", turnId: "t1", contextWindow: 1000,
+    usage: { query: meteredTotals(100, 20, 1) }, sessionTotals: meteredTotals(100, 20, 1) });
+  assert.deepEqual((await conn.getSessionStats()).tokens, { input: 100, output: 20, cacheRead: 70, cacheWrite: 10, total: 120 });
+  occupancy = 230;
+  pushUsage(conn, { sessionId: "sess_test", turnId: "t1", contextWindow: 1000,
+    usage: { query: meteredTotals(200, 30, 1) }, sessionTotals: meteredTotals(300, 50, 2) });
+  const stats = await conn.getSessionStats();
+  assert.deepEqual({ tokens: stats.tokens, context: stats.contextUsage, cost: stats.cost }, {
+    tokens: { input: 300, output: 50, cacheRead: 70, cacheWrite: 10, total: 350 },
+    context: { tokens: 230, contextWindow: 1000, percent: 23 }, cost: null,
+  });
+  assert.equal(events.length, 2);
+  const tree = await conn.getContextTree();
+  assert.deepEqual(tree.cumulativeUsage, stats.cumulativeUsage);
+  assert.equal(tree.ownUsage, null, "descendant-inclusive spend is not own usage");
+  await conn.dispose();
+});
+
+test("session total events, zero placeholders, delayed totals and child notifications preserve parent context", async () => {
+  const { conn } = await bootConnection();
+  pushUsage(conn, { sessionId: "sess_test", contextWindow: 1000,
+    usage: { query: meteredTotals(200, 30, 1) }, sessionTotals: meteredTotals(300, 50, 2) });
+  pushUsage(conn, { sessionId: "sess_test", contextWindow: 1000, usage: { query: { totalTokens: 0 } } });
+  pushUsage(conn, { sessionId: "sess_test", usage: { total: meteredTotals(330, 60, 3), byPurpose: [] } }, "session/usage/updated");
+  pushUsage(conn, { sessionId: "child_1", contextWindow: 5000,
+    usage: { query: meteredTotals(900, 100, 1) }, sessionTotals: meteredTotals(900, 100, 1) });
+  pushUsage(conn, { sessionId: "sess_test", usage: { total: meteredTotals(100, 20, 1) } }, "session/usage/updated");
+  pushUsage(conn, { sessionId: "sess_test", contextWindow: 1000,
+    usage: { query: meteredTotals(100, 20, 1) }, sessionTotals: meteredTotals(100, 20, 1) });
+  const state = await conn.getState();
+  assert.deepEqual({ context: state.contextUsage, tokens: state.cumulativeUsage?.tokens }, {
+    context: { tokens: 230, contextWindow: 1000, percent: 23 },
+    tokens: { input: 330, output: 60, cacheRead: 70, cacheWrite: 10, total: 390 },
+  });
+  await conn.dispose();
+});
+
+test("initial, resumed and reconnected snapshots restore cumulative totals without deriving them from context", async () => {
+  let restored = false;
+  const totals = meteredTotals(300, 50, 2);
+  const { conn } = await bootConnection([(method, params, respond) => {
+    if (method === "session/new") {
+      respond({ session: { id: "sess_test", usage: { total: totals } } });
+      return true;
+    }
+    if (method === "session/resume") {
+      restored = true;
+      respond({ session: { id: params.sessionId, usage: { total: meteredTotals(400, 60, 3) } },
+        lastContextOccupancy: { totalTokens: 230, contextWindowTokens: 1000 } });
+      return true;
+    }
+    if (method === "subscription/create" && restored) {
+      respond({ subscriptionId: "sub-restored", snapshots: [{ data: {
+        session: { id: "restored", usage: { total: meteredTotals(500, 70, 4), byPurpose: [] } },
+      } }] });
+      return true;
+    }
+    if (method === "context/usage/read") {
+      respond({ occupancy: { totalTokens: restored ? 230 : 120, contextWindowTokens: 1000 } });
+      return true;
+    }
+    return false;
+  }]);
+  assert.deepEqual((await conn.getSessionStats()).tokens, { input: 300, output: 50, cacheRead: 70, cacheWrite: 10, total: 350 });
+  await conn.switchSession("restored");
+  const stats = await conn.getSessionStats();
+  assert.deepEqual({ tokens: stats.tokens, context: stats.contextUsage }, {
+    tokens: { input: 500, output: 70, cacheRead: 70, cacheWrite: 10, total: 570 },
+    context: { tokens: 230, contextWindow: 1000, percent: 23 },
+  });
+  await conn.dispose();
+});
+
+test("a late context read cannot overwrite a newer live model request", async () => {
+  let pending: ((value: unknown) => void) | undefined;
+  let delay = false;
+  const { conn } = await bootConnection([(method, _params, respond) => {
+    if (method !== "context/usage/read" || !delay) return false;
+    pending = respond;
+    return true;
+  }]);
+  delay = true;
+  const reading = conn.getSessionStats();
+  assert.ok(pending);
+  pushUsage(conn, { sessionId: "sess_test", contextWindow: 1000,
+    usage: { query: meteredTotals(200, 30, 1) }, sessionTotals: meteredTotals(300, 50, 2) });
+  pending({ occupancy: { totalTokens: 100, contextWindowTokens: 1000 } });
+  const stats = await reading;
+  assert.deepEqual(stats.contextUsage, { tokens: 230, contextWindow: 1000, percent: 23 });
+  await conn.dispose();
+});
+
+test("reload refreshes canonical session totals and a new session does not inherit spend", async () => {
+  let totals = meteredTotals(100, 20, 1);
+  const { conn } = await bootConnection([(method, params, respond) => {
+    if (method !== "session/read") return false;
+    respond({ session: { id: params.sessionId, usage: { total: totals } } });
+    return true;
+  }]);
+  assert.equal((await conn.getSessionStats()).tokens.total, 120);
+  totals = meteredTotals(300, 50, 2);
+  await conn.reload();
+  assert.equal((await conn.getState()).cumulativeUsage?.tokens.total, 350);
+  await conn.newSession();
+  assert.equal((await conn.getState()).cumulativeUsage, undefined);
+  await conn.dispose();
+});
+for (const [source, label] of Object.entries({ agent: "Agent message", backgroundTask: "Background notification", schedule: "Scheduled notification" })) {
+  test(`fork picker labels ${source} and retains context-only fork identity`, async () => {
+    const origin = { source, sender: "worker-1", eventId: "event-1", delivery: "followUp" };
+    const { conn, fake } = await bootConnection([
+      (method, _params, respond) => {
+        if (method === "session/items/list") {
+          respond({ data: [
+            { id: "human-1", turnId: "turn_human", item: { type: "userMessage", content: [{ type: "text", text: "Human request" }] } },
+            { id: "host-1", turnId: "turn_host", item: { type: "userMessage", content: [{ type: "text", text: "Host result ready" }], origin } },
+          ], nextCursor: null });
+          return true;
+        }
+        if (method === "session/tree/read") {
+          respond({ tree: [{ entry: { id: "human-1", parentId: null }, children: [
+            { entry: { id: "host-1", parentId: "human-1", type: "custom_message", details: { origin } }, children: [] },
+          ] }], leafId: "host-1" });
+          return true;
+        }
+        return false;
+      },
+    ]);
+    try {
+      const messages = await conn.getUserMessagesForForking();
+      assert.deepEqual(messages, [
+        { entryId: "turn_human", text: "Human request" },
+        { entryId: "turn_host", text: `[${label} · worker-1] Host result ready` },
+      ]);
+      const { UserMessageSelectorComponent } = await import("../lib/coding-agent/src/modes/interactive/components/user-message-selector.js");
+      const { initTheme } = await import("../lib/coding-agent/src/modes/interactive/theme/theme.js");
+      initTheme("dark", false);
+      const selector = new UserMessageSelectorComponent(messages.map(message => ({ id: message.entryId, text: message.text })), () => {}, () => {}, "turn_host");
+      const rendered = selector.render(120).join("\n").replace(/\x1b\[[0-9;]*m/g, "");
+      assert.ok(rendered.includes(label));
+      assert.ok(rendered.includes("worker-1"));
+      assert.ok(rendered.includes("Host result ready"));
+      assert.ok(rendered.includes("Select a message"));
+      const result = await conn.fork(messages[1].entryId);
+      assert.equal(result.cancelled, false);
+      assert.equal("selectedText" in result, false);
+      assert.equal(fake.requests.find(request => request.method === "session/fork")?.params.atTurnId, "turn_host");
+    } finally {
+      await conn.dispose();
+    }
+  });
+}
+
+
+test("authoritative zero context clears positive occupancy while placeholders do not", async () => {
+  const { conn } = await bootConnection();
+  pushUsage(conn, { sessionId: "sess_test", occupancy: { totalTokens: 180, contextWindowTokens: 1000 } }, "context/usageUpdated");
+  assert.equal((await conn.getState()).contextUsage?.tokens, 180);
+  pushUsage(conn, { sessionId: "sess_test", contextWindow: 1000, usage: { query: { totalTokens: 0 } } });
+  assert.equal((await conn.getState()).contextUsage?.tokens, 180);
+  pushUsage(conn, { sessionId: "sess_test", occupancy: { totalTokens: 0, contextWindowTokens: 1000 } }, "context/usageUpdated");
+  assert.deepEqual((await conn.getState()).contextUsage, { tokens: 0, contextWindow: 1000, percent: 0 });
   await conn.dispose();
 });

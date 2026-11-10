@@ -238,15 +238,19 @@ fn hosted_web_fetch_input(item: &Value) -> Value {
 }
 
 pub(super) fn parse_usage(value: &Value) -> Option<Usage> {
-    Some(Usage {
-        input_tokens: value
-            .get("input_tokens")
-            .or_else(|| value.get("prompt_tokens"))
-            .and_then(Value::as_u64)? as usize,
-        output_tokens: value
-            .get("output_tokens")
-            .or_else(|| value.get("completion_tokens"))
-            .and_then(Value::as_u64)? as usize,
+    let input_tokens = value
+        .get("input_tokens")
+        .or_else(|| value.get("prompt_tokens"))
+        .and_then(Value::as_u64);
+    let output_tokens = value
+        .get("output_tokens")
+        .or_else(|| value.get("completion_tokens"))
+        .and_then(Value::as_u64);
+    let usage = Usage {
+        unreported_fields: None,
+        reported: input_tokens.is_some() || output_tokens.is_some(),
+        input_tokens: input_tokens.unwrap_or(0) as usize,
+        output_tokens: output_tokens.unwrap_or(0) as usize,
         cache_creation_input_tokens: None,
         cache_read_input_tokens: value
             .pointer("/input_tokens_details/cached_tokens")
@@ -264,7 +268,12 @@ pub(super) fn parse_usage(value: &Value) -> Option<Usage> {
             .get("total_tokens")
             .and_then(Value::as_u64)
             .map(|tokens| tokens as usize),
-    })
+    }
+    .with_field_coverage(
+        input_tokens.map(|n| n as usize),
+        output_tokens.map(|n| n as usize),
+    );
+    usage.is_reported().then_some(usage)
 }
 
 fn parse_status_reason(value: &str) -> StopReason {

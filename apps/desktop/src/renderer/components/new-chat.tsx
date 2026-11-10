@@ -872,6 +872,7 @@ export function NewChat() {
 									<div className="ml-auto flex min-w-0 items-center gap-0.5">
 										{hasToolbar && (
 											<PromptToolbar
+												directory={selectedDirectory || null}
 												agents={devoAgents ?? []}
 												selectedAgent={selectedAgent}
 												defaultAgent={config?.defaultAgent}

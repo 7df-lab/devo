@@ -125,6 +125,49 @@ pub struct TurnResumeResult {
 
 // ── session/queue/* ──
 
+/// Transfer an existing queue identity, never a reconstructed display preview.
+/// Retries return the durable admission receipt for the same session and item.
+#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize, JsonSchema, TS)]
+#[serde(rename_all = "camelCase")]
+pub struct SessionQueueSteerParams {
+    pub session_id: SessionId,
+    pub queue_item_id: QueueItemId,
+    pub expected_turn_id: TurnId,
+}
+
+/// Admission does not prove consumption or exactly-once external effects.
+#[derive(Debug, Clone, PartialEq, Serialize, Deserialize, JsonSchema, TS)]
+#[serde(
+    tag = "outcome",
+    rename_all = "camelCase",
+    rename_all_fields = "camelCase"
+)]
+pub enum SessionQueueSteerResult {
+    Accepted {
+        #[schemars(rename = "queueItemId")]
+        #[ts(rename = "queueItemId")]
+        queue_item_id: QueueItemId,
+        #[schemars(rename = "turnId")]
+        #[ts(rename = "turnId")]
+        turn_id: TurnId,
+    },
+    KeptQueued {
+        entry: QueueEntry,
+    },
+}
+
+/// Explicitly release held recovery input after reviewing possible prior effects.
+/// The server assigns a fresh queue identity; this request is never auto-retried.
+#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize, JsonSchema, TS)]
+#[serde(rename_all = "camelCase")]
+pub struct SessionQueueRetryParams {
+    pub session_id: SessionId,
+    pub queue_item_id: QueueItemId,
+}
+
+#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize, JsonSchema, TS)]
+pub struct SessionQueueRetryResult {}
+
 /// If the session is idle the input immediately executes as a new turn
 /// (`started`); otherwise it is queued as an editable pre-item.
 #[derive(Debug, Clone, PartialEq, Serialize, Deserialize, JsonSchema, TS)]

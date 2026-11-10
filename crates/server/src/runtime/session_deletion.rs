@@ -721,6 +721,9 @@ impl ServerRuntime {
         self.clear_background_work(session_id);
         self.agent_mailboxes.lock().await.remove(&session_id);
         self.agent_output_buffers.lock().await.remove(&session_id);
+        self.rlm_lazy_children.lock().await.remove(&session_id);
+        self.rlm_progress_notes.lock().await.remove(&session_id);
+        self.rlm_child_changed.notify_waiters();
         self.agent_wait_cursors.lock().await.remove(&session_id);
         {
             let mut registries = self.agent_registries.lock().await;

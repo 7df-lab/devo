@@ -60,7 +60,7 @@ export function ProviderSetupStep({
 			})
 			.sort((a, b) => compareConnectedFirst(data.connectedIds, a, b))
 	}, [catalog.data, search])
-	const connectedCount = catalog.data?.connectedIds.size ?? 0
+	const configuredCount = catalog.data?.connectedIds.size ?? 0
 	const detail = catalog.data?.providers.find(
 		(provider) => provider.id === detailId,
 	)
@@ -138,7 +138,10 @@ export function ProviderSetupStep({
 				)}
 				<p className="text-xs text-muted-foreground" aria-live="polite">
 					{providers.length} provider{providers.length === 1 ? "" : "s"} ·{" "}
-					{connectedCount} connected
+					{configuredCount} configured
+				</p>
+				<p className="text-xs text-muted-foreground">
+					Saving a connection does not verify model access.
 				</p>
 				<div
 					className="grid h-[42vh] auto-rows-min grid-cols-1 gap-2 overflow-y-auto p-1 sm:grid-cols-2"
@@ -151,7 +154,7 @@ export function ProviderSetupStep({
 						</div>
 					) : (
 						providers.map((provider) => {
-							const isConnected =
+							const isConfigured =
 								catalog.data?.connectedIds.has(provider.id) ?? false
 							const count = Object.values(provider.models ?? {}).filter(
 								(model) => model.enabled !== false,
@@ -161,7 +164,7 @@ export function ProviderSetupStep({
 									key={provider.id}
 									type="button"
 									onClick={() =>
-										isConnected
+										isConfigured
 											? setDetailId(provider.id)
 											: setConnection(provider)
 									}
@@ -178,10 +181,10 @@ export function ProviderSetupStep({
 										</div>
 										<div className="mt-0.5 text-xs text-muted-foreground">
 											{count} model{count === 1 ? "" : "s"}
-											{isConnected ? " · Connected" : ""}
+											{isConfigured ? " · Configured" : ""}
 										</div>
 									</div>
-									{isConnected && (
+									{isConfigured && (
 										<CheckIcon
 											className="size-3.5 shrink-0 stroke-[1.5] text-emerald-600"
 											aria-hidden="true"
@@ -205,12 +208,12 @@ export function ProviderSetupStep({
 					size="lg"
 					className="min-w-40"
 					onClick={() =>
-						connectedCount > 0 ? onComplete(connectedCount) : onSkip()
+						configuredCount > 0 ? onComplete(configuredCount) : onSkip()
 					}
 				>
-					{connectedCount > 0 ? "Continue" : "I'll do this later"}
+					{configuredCount > 0 ? "Continue" : "I'll do this later"}
 				</Button>
-				{connectedCount === 0 && (
+				{configuredCount === 0 && (
 					<p className="text-xs text-muted-foreground">
 						You can connect a provider later in Settings.
 					</p>

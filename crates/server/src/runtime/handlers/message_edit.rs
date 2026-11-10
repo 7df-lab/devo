@@ -1,3 +1,7 @@
+mod preflight;
+#[cfg(test)]
+mod tests;
+
 use super::super::*;
 use super::message_edit_restore::{
     apply_safe_workspace_restore, candidate_files, core_restore_policy,
@@ -14,14 +18,6 @@ struct MessageEditRequest {
     client_edit_id: Option<String>,
     workspace_restore_policy:
         Option<devo_protocol::native::rpc_session::MessageEditWorkspaceRestore>,
-}
-
-#[derive(serde::Serialize, serde::Deserialize)]
-struct MessageEditResult {
-    edit_id: String,
-    replacement_message_id: devo_protocol::ItemId,
-    replacement_turn_id: Option<TurnId>,
-    edit_state: String,
 }
 
 impl ServerRuntime {
@@ -111,171 +107,8 @@ impl ServerRuntime {
             client_edit_id: Some(params.idempotency_key.clone()),
             workspace_restore_policy: Some(params.workspace_restore),
         };
-        let response = self
-            .handle_message_edit(connection_id, request_id.clone(), edit_params)
-            .await;
-        let Ok(success) =
-            serde_json::from_value::<SuccessResponse<MessageEditResult>>(response.clone())
-        else {
-            return response;
-        };
-        let result = success.result;
-
-        // Facade envelope for the superseding UserMessage revision (same
-        // concession as the other facade items: seq 0, history is the truth).
-        let now = Utc::now();
-        let item = devo_protocol::native::item::ItemEnvelope {
-            id: devo_protocol::native::ids::ItemId::from_string(
-                result.replacement_message_id.to_string(),
-            ),
-            session_id: params.session_id,
-            turn_id: result
-                .replacement_turn_id
-                .expect("message edit must produce a replacement turn"),
-            seq: 0,
-            revision: params.expected_revision + 1,
-            created_at: now,
-            updated_at: now,
-            state: devo_protocol::native::item::ItemState::Completed,
-            item: devo_protocol::native::item::Item::UserMessage {
-                client_user_message_id: None,
-                content: params.content.clone(),
-                entry: match params.mode {
-                    devo_protocol::native::rpc_session::MessageEditMode::Normal => {
-                        devo_protocol::native::item::UserMessageEntry::TurnStart
-                    }
-                    devo_protocol::native::rpc_session::MessageEditMode::QueuedOnly => {
-                        devo_protocol::native::item::UserMessageEntry::Queue
-                    }
-                },
-            },
-            parent_id: None,
-        };
-        serde_json::to_value(SuccessResponse {
-            id: request_id,
-            result: devo_protocol::native::rpc_session::SessionMessageEditResult {
-                item,
-                replacement_turn_id: result.replacement_turn_id.map(|turn_id| {
-                    devo_protocol::native::ids::TurnId::from_string(turn_id.to_string())
-                }),
-                edit_state: match result.edit_state.as_str() {
-                    "queued" => devo_protocol::native::rpc_session::MessageEditState::Queued,
-                    _ => devo_protocol::native::rpc_session::MessageEditState::Accepted,
-                },
-            },
-        })
-        .expect("serialize canonical session/message/edit response")
-    }
-
-    /// Current revision of one item in the rollout-backed canonical history.
-    async fn native_item_revision(
-        &self,
-        session_id: SessionId,
-        item_id: &str,
-    ) -> Result<Option<u32>, String> {
-        let indexed_path = self
-            .deps
-            .db
-            .get_session_index(&session_id)
-            .ok()
-            .flatten()
-            .and_then(|index| index.rollout_path);
-        let Some(rollout_path) = self
-            .rollout_store
-            .resolve_session_journal(
-                &session_id,
-                indexed_path.as_deref(),
-                crate::persistence::JournalVisibility::Live,
-            )
-            .map_err(|error| format!("resolve session journal: {error}"))?
-        else {
-            return Ok(None);
-        };
-        let history = devo_core::read_canonical_history_for_session(&rollout_path, &session_id)
-            .map_err(|error| format!("read session history: {error}"))?;
-        Ok(history
-            .items
-            .iter()
-            .find(|item| item.id.as_str() == item_id)
-            .map(|item| item.revision))
-    }
-
-    /// Interrupts the session's active turn before message edit takes the
-    /// state-change gate. Validates the edit target against durable
-    /// canonical history first — active-turn user messages live in the turn
-    /// working set until MergeTurn, so `export_runtime_session` is not
-    /// authoritative mid-turn.
-    async fn interrupt_active_turn_before_message_edit(
-        self: &Arc<Self>,
-        connection_id: u64,
-        request_id: serde_json::Value,
-        _session_handle: &SessionHandle,
-        params: &MessageEditRequest,
-    ) -> Result<(), serde_json::Value> {
-        let Some(active_turn_id) = self.runtime_active_turn_id(params.session_id).await else {
-            return Ok(());
-        };
-        let expected_target_message_id = params
-            .expected_target_message_id
-            .or(params.target_message_id);
-        let Some(expected) = expected_target_message_id else {
-            return Err(self.error_response(
-                request_id,
-                ProtocolErrorCode::InvalidContentParts,
-                "session/message/edit requires a target item id",
-            ));
-        };
-        let native_session_id =
-            devo_protocol::native::ids::SessionId::from_string(params.session_id.to_string());
-        let history = match self
-            .load_canonical_history(&request_id, native_session_id)
+        self.handle_message_edit(connection_id, request_id, edit_params)
             .await
-        {
-            Ok(history) => history,
-            Err(response) => return Err(response),
-        };
-        let Some(latest_user) = history.items.iter().rev().find(|item| {
-            matches!(
-                &item.item,
-                devo_protocol::native::item::Item::UserMessage { .. }
-            )
-        }) else {
-            return Err(self.error_response(
-                request_id,
-                ProtocolErrorCode::OlderMessageRequiresFork,
-                "no immediately previous user message is available to edit",
-            ));
-        };
-        if latest_user.id.as_str() != expected.to_string() {
-            return Err(self.error_response(
-                request_id,
-                ProtocolErrorCode::ExpectedTargetMessageMismatch,
-                "expected target message does not match the current editable message",
-            ));
-        }
-
-        let interrupt_response = self
-            .interrupt_turn(
-                request_id.clone(),
-                serde_json::to_value(TurnInterruptParams {
-                    session_id: params.session_id,
-                    turn_id: active_turn_id,
-                    reason: Some("interrupted by session/message/edit".to_string()),
-                })
-                .expect("serialize internal turn interruption"),
-            )
-            .await;
-        if interrupt_response.get("error").is_some() {
-            return Err(interrupt_response);
-        }
-        let _ = self
-            .command_exec_manager
-            .terminate_session(
-                params.session_id,
-                crate::runtime::command_exec::SessionCommandOwner::Connection(connection_id),
-            )
-            .await;
-        Ok(())
     }
 
     async fn handle_message_edit(
@@ -318,7 +151,7 @@ impl ServerRuntime {
         };
 
         // Interrupt any active turn before taking `state_change_gate` so the
-        // mailbox stays short while we wait for terminalization (up to 5s).
+        // mailbox stays short while we wait for terminalization and release.
         if let Err(response) = self
             .interrupt_active_turn_before_message_edit(
                 connection_id,
@@ -436,11 +269,14 @@ impl ServerRuntime {
         let expected_target_message_id = params
             .expected_target_message_id
             .or(params.target_message_id);
+        // Editing only replaces one turn. Skipping host descendants here would
+        // retain them in live context but detach them from the canonical tree.
         let Some(target) = session
             .persisted_turn_items
             .iter()
             .rev()
-            .find(|item| crate::persisted_native_item::is_user_message(&item.item))
+            .find(|item| crate::persisted_native_item::is_turn_input(&item.item))
+            .filter(|item| crate::persisted_native_item::is_human_turn_input(&item.item))
         else {
             return self.error_response(
                 request_id,
@@ -705,28 +541,21 @@ impl ServerRuntime {
                 Err(response) => return response,
             };
             let parents = devo_core::resolve_parent_map(&history);
-            let branch_parent = parents
-                .get(&target_message_id)
-                .cloned()
-                .flatten()
-                .or_else(|| {
-                    // Target may be the last user message without edges yet:
-                    // parent is previous tree-visible item, or root.
-                    let mut visible: Vec<_> = history
-                        .items
-                        .iter()
-                        .filter(|item| devo_core::is_tree_visible_item(&item.item))
-                        .collect();
-                    visible.sort_by_key(|item| item.seq);
-                    let idx = visible
-                        .iter()
-                        .position(|item| item.id == target_message_id)?;
-                    if idx == 0 {
-                        None
-                    } else {
-                        Some(visible[idx - 1].id)
-                    }
-                });
+            // The resolved map already infers legacy edges. An explicit None is
+            // a root, not a missing edge: falling back to the preceding seq
+            // would reconnect repeated root edits to a superseded branch.
+            let branch_parent = parents.get(&target_message_id).copied().flatten();
+            let Some(target_item) = history
+                .items
+                .iter()
+                .find(|item| item.id == target_message_id)
+            else {
+                return self.error_response(
+                    request_id,
+                    ProtocolErrorCode::InvalidContentParts,
+                    "editable message does not exist in canonical history",
+                );
+            };
             let leaf_epoch = history.leaf_epoch.saturating_add(1);
             let mut envelope = devo_protocol::native::wire_projector::typed_item_envelope(
                 replacement_runtime_turn.native.session_id,
@@ -739,6 +568,7 @@ impl ServerRuntime {
                 None,
             );
             envelope.parent_id = branch_parent;
+            envelope.revision = target_item.revision.saturating_add(1);
             if let Err(error) = self.rollout_store.append_tree_edge_at(
                 &rollout_path,
                 params.session_id,
@@ -767,7 +597,7 @@ impl ServerRuntime {
         };
         if let Err(error) = self
             .rollout_store
-            .append_canonical_item_at(&rollout_path, replacement_envelope)
+            .append_canonical_item_at(&rollout_path, replacement_envelope.clone())
         {
             return self.error_response(
                 request_id,
@@ -814,7 +644,7 @@ impl ServerRuntime {
         let branch_turn_count = session
             .persisted_turn_items
             .iter()
-            .filter(|item| crate::persisted_native_item::is_user_message(&item.item))
+            .filter(|item| crate::persisted_native_item::is_turn_input(&item.item))
             .count()
             .saturating_sub(1);
         session.latest_compaction_snapshot = None;
@@ -932,40 +762,29 @@ impl ServerRuntime {
             },
         )
         .await;
-        self.emit_native_item_started(
-            replacement_runtime_turn.native.session_id,
-            replacement_runtime_turn.native.id,
-            replacement_native_message_id,
-            // The replacement message id is reused as-is; no new item
-            // sequence is allocated on this path.
-            None,
-            crate::runtime::items::native_user_message_item(
-                display_input.clone(),
-                &resolved_input.image_paths,
-                devo_protocol::native::item::UserMessageEntry::TurnStart,
-            ),
+        // Project the exact durable envelope so live sorting, revisions and
+        // ancestry agree with session/items/list and a cold resume.
+        let mut started_envelope = replacement_envelope.clone();
+        started_envelope.state = devo_protocol::native::item::ItemState::Running;
+        self.broadcast_notification(
+            devo_protocol::native::event::ServerNotification::ItemStarted {
+                item: Box::new(started_envelope),
+            },
         )
         .await;
-        self.emit_native_item_completed(
-            replacement_runtime_turn.native.session_id,
-            replacement_runtime_turn.native.id,
-            replacement_native_message_id,
-            None,
-            crate::runtime::items::native_user_message_item(
-                display_input,
-                &resolved_input.image_paths,
-                devo_protocol::native::item::UserMessageEntry::TurnStart,
-            ),
+        self.broadcast_notification(
+            devo_protocol::native::event::ServerNotification::ItemCompleted {
+                item: Box::new(replacement_envelope.clone()),
+            },
         )
         .await;
 
         serde_json::to_value(SuccessResponse {
             id: request_id,
-            result: MessageEditResult {
-                edit_id: edit_record.edit_id.0.to_string(),
-                replacement_message_id,
+            result: devo_protocol::native::rpc_session::SessionMessageEditResult {
+                item: replacement_envelope,
                 replacement_turn_id: Some(replacement_turn_id),
-                edit_state: "accepted".to_string(),
+                edit_state: devo_protocol::native::rpc_session::MessageEditState::Accepted,
             },
         })
         .expect("serialize session/message/edit response")

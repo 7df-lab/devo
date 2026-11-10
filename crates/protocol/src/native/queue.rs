@@ -19,12 +19,20 @@ use super::item::UserInput;
 #[serde(rename_all = "camelCase")]
 pub struct QueueEntry {
     pub queue_item_id: QueueItemId,
+    /// Host-owned provenance for queued notifications; not editable user input.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    #[ts(optional)]
+    pub origin: Option<super::host_message::HostMessageOrigin>,
     pub position: u32,
     /// Full editable content; `session/queue/update` replaces it wholesale.
     pub input: Vec<UserInput>,
     /// Short single-line preview for list rendering.
     pub preview: String,
     pub enqueued_at: DateTime<Utc>,
+    /// Admission happened before a crash, but consumption is uncertain.
+    /// Never auto-drain; explicit retry or discard requires user review.
+    #[serde(default, skip_serializing_if = "std::ops::Not::not")]
+    pub recovery_required: bool,
 }
 
 #[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize, Deserialize, JsonSchema, TS)]

@@ -19,6 +19,7 @@ use crate::ServerRuntime;
 use crate::db::Database;
 use crate::execution::ServerRuntimeDependencies;
 use crate::load_server_provider;
+use crate::provider_config::NO_PROVIDER_CONFIGURED_MESSAGE;
 use crate::resolve_listen_targets;
 use crate::run_listeners_with_internal_proxy;
 use crate::singleton::ServerControlAction;
@@ -36,6 +37,10 @@ pub enum ServerTransportMode {
     Stdio,
     #[value(name = "websocket")]
     WebSocket,
+    /// Independent authenticated loopback runtime, with no public listener.
+    Daemon,
+    /// Attach to an existing daemon only; never start a runtime.
+    Attach,
 }
 
 /// Command-line arguments accepted by the standalone server process entrypoint.
@@ -115,14 +120,29 @@ pub async fn run_server_process(
     args: ServerProcessArgs,
     options: ServerProcessRunOptions,
 ) -> Result<()> {
-    let resolver = FileSystemConfigPathResolver::from_env()?;
+    let mut resolver = FileSystemConfigPathResolver::from_env()?;
     let action = args.action()?;
     // Decide whether this process is the one true server or a lightweight proxy/
     // control client. Lock file lives under DEVO_HOME (see singleton.rs).
+    if matches!(
+        args.transport,
+        ServerTransportMode::Daemon | ServerTransportMode::Attach
+    ) {
+        resolver = FileSystemConfigPathResolver::new(crate::singleton_files::daemon_home(
+            &resolver.user_config_dir(),
+        )?);
+    }
     let singleton_role = acquire_singleton_role(&resolver.user_config_dir())?;
     let real_server_guard = match singleton_role {
         SingletonRole::Real(guard) => match action {
-            ServerProcessAction::Run => guard,
+            ServerProcessAction::Run => {
+                if args.transport == ServerTransportMode::Attach {
+                    anyhow::bail!(
+                        "no daemon is running; start one explicitly with devo daemon start"
+                    );
+                }
+                guard
+            }
             ServerProcessAction::Status | ServerProcessAction::Shutdown => {
                 // We hold the lock but were not asked to run — no metadata file yet.
                 println!("devo server is not running");
@@ -131,12 +151,26 @@ pub async fn run_server_process(
         },
         SingletonRole::Proxy(metadata) => match action {
             ServerProcessAction::Run => {
+                if matches!(
+                    args.transport,
+                    ServerTransportMode::Daemon | ServerTransportMode::Attach
+                ) {
+                    let status = run_server_control(&metadata, ServerControlAction::Status).await?;
+                    if status.lifetime != crate::singleton::ServerLifetime::Daemon {
+                        anyhow::bail!(
+                            "a client-owned server is running; stop it explicitly before starting a daemon"
+                        );
+                    }
+                }
                 let result = run_server_control(
                     &metadata,
                     ServerControlAction::EnableProtocols(args.protocols.clone()),
                 )
                 .await?;
-                if args.transport == ServerTransportMode::Stdio {
+                if matches!(
+                    args.transport,
+                    ServerTransportMode::Stdio | ServerTransportMode::Attach
+                ) {
                     tracing::info!(
                         pid = metadata.pid,
                         endpoint = %metadata.endpoint,
@@ -166,6 +200,12 @@ pub async fn run_server_process(
                 return Ok(());
             }
             ServerProcessAction::Shutdown => {
+                let status = run_server_control(&metadata, ServerControlAction::Status).await?;
+                if status.lifetime == crate::singleton::ServerLifetime::Daemon {
+                    anyhow::bail!(
+                        "refusing legacy shutdown of an independent daemon; use devo daemon stop explicitly"
+                    );
+                }
                 let result = run_server_control(&metadata, ServerControlAction::Shutdown).await?;
                 print_existing_server_status(
                     &metadata,
@@ -180,8 +220,14 @@ pub async fn run_server_process(
     let internal_proxy = InternalProxyEndpoint::bind().await?;
     // Persist ws://127.0.0.1:<port> + random token into server.lock.json so
     // proxy/control processes know where and how to connect.
-    let singleton_metadata =
-        real_server_guard.publish_endpoint(internal_proxy.endpoint().to_string())?;
+    let singleton_metadata = real_server_guard.publish_endpoint(
+        internal_proxy.endpoint().to_string(),
+        if args.transport == ServerTransportMode::Daemon {
+            crate::singleton::ServerLifetime::Daemon
+        } else {
+            crate::singleton::ServerLifetime::Client
+        },
+    )?;
 
     if let Err(error) =
         devo_core::migrate_session_defaults_to_config_toml(&resolver.user_config_dir())
@@ -212,13 +258,18 @@ pub async fn run_server_process(
         .effective_config()
         .clone();
     let effective_listen = match args.transport {
+        ServerTransportMode::Daemon | ServerTransportMode::Attach => Vec::new(),
         ServerTransportMode::Config => config.server.listen.clone(),
         ServerTransportMode::Stdio => vec!["stdio://".to_string()],
         ServerTransportMode::WebSocket => {
             vec![format!("ws://{DEFAULT_WEBSOCKET_BIND_ADDRESS}")]
         }
     };
-    let listen_targets = resolve_listen_targets(&effective_listen)?;
+    let listen_targets = if args.transport == ServerTransportMode::Daemon {
+        Vec::new()
+    } else {
+        resolve_listen_targets(&effective_listen)?
+    };
     let effective_listen = listen_targets
         .iter()
         .map(|target| match target {
@@ -255,7 +306,7 @@ pub async fn run_server_process(
         .unwrap_or_default();
     if !config.has_provider_configuration() {
         tracing::warn!(
-            "No provider configured. Run `devo onboard` to complete setup; continuing with onboarding-capable server"
+            "{NO_PROVIDER_CONFIGURED_MESSAGE} Continuing with onboarding-capable server."
         );
     }
     let provider = load_server_provider(
@@ -274,6 +325,13 @@ pub async fn run_server_process(
     let db_path = resolver.user_config_dir().join("devo.db");
     tracing::info!(db_path = %db_path.display(), "opening database");
     let db = Arc::new(Database::open(db_path)?);
+
+    // A due job must not be retired as missing while the durable journal index
+    // is still rebuilding. Finish recovery before constructing the wake loop.
+    let index_store =
+        crate::persistence::RolloutStore::new(resolver.user_config_dir(), Some(Arc::clone(&db)));
+    let index_db = Arc::clone(&db);
+    tokio::task::spawn_blocking(move || index_store.index_rollout_metadata(&index_db)).await??;
 
     let registry = Arc::new(registry);
     let provider_router = Arc::clone(&provider.provider_router);
@@ -313,19 +371,6 @@ pub async fn run_server_process(
             serde_json::Map::from_iter([("trigger".to_string(), serde_json::json!("init"))]),
         )
         .await;
-    // Rebuild SQLite session index from on-disk SessionMeta headers. Always
-    // refresh: empty DBs with pre-seeded rollouts (restore / stress corpora)
-    // otherwise stay invisible to session/list and session/resume.
-    {
-        let rollout_store = runtime.rollout_store();
-        let db = runtime.deps_db();
-        tokio::task::spawn_blocking(move || match rollout_store.index_rollout_metadata(&db) {
-            Ok(()) => tracing::info!("rollout metadata index refresh completed"),
-            Err(error) => {
-                tracing::warn!(%error, "rollout metadata index refresh failed");
-            }
-        });
-    }
     // Delivery-log reconciliation (08 §7): backfill event_log rows a crash
     // prevented the append path from writing. Runs in the background;
     // session/list correctness never depends on it.
@@ -351,38 +396,50 @@ pub async fn run_server_process(
     }
 
     let shutdown_signal = tokio_util::sync::CancellationToken::new();
-    let internal_proxy_control = InternalProxyControl::new(shutdown_signal.clone());
+    let internal_proxy_control = if args.transport == ServerTransportMode::Daemon {
+        InternalProxyControl::daemon(shutdown_signal.clone())
+    } else {
+        InternalProxyControl::new(shutdown_signal.clone())
+    };
     let external_shutdown = options.external_shutdown.clone();
 
-    // Concurrent listeners: configured stdio/ws targets + internal proxy task.
-    // Returns when any listener exits; shutdown also via Ctrl+C, external token,
-    // or internal-proxy `server/shutdown` (cancels shutdown_signal).
-    tokio::select! {
-        result = run_listeners_with_internal_proxy(
-            runtime.clone(),
-            &effective_listen,
-            internal_proxy,
-            singleton_metadata.token.clone(),
-            internal_proxy_control,
-        ) => {
-            result?;
+    let listener_runtime = runtime.clone();
+    let mut listeners = tokio::spawn(async move {
+        if args.transport == ServerTransportMode::Daemon {
+            crate::transport::run_daemon_listener(
+                listener_runtime,
+                internal_proxy,
+                singleton_metadata.token,
+                internal_proxy_control,
+            )
+            .await
+        } else {
+            run_listeners_with_internal_proxy(
+                listener_runtime,
+                &effective_listen,
+                internal_proxy,
+                singleton_metadata.token,
+                internal_proxy_control,
+            )
+            .await
         }
-        result = tokio::signal::ctrl_c() => {
-            result?;
-            tracing::info!("server shutdown requested");
-        }
-        _ = wait_for_external_shutdown(external_shutdown.as_ref()) => {
-            tracing::info!("server shutdown requested from external process controller");
-        }
-        _ = shutdown_signal.cancelled() => {
-            tracing::info!("server shutdown requested from singleton control");
-        }
-    }
+    });
+    let finished = tokio::select! {
+        result = &mut listeners => Some(result),
+        result = crate::daemon::wait_for_shutdown_signal() => { result?; None },
+        _ = wait_for_external_shutdown(external_shutdown.as_ref()) => None,
+    };
+    shutdown_signal.cancel();
+    let listener_result = match finished {
+        Some(result) => result,
+        None => listeners.await,
+    };
 
     tracing::info!("terminating unified exec processes");
     registry.terminate_unified_exec_processes().await;
     tracing::info!("completing deferred items for active turns");
     runtime.shutdown().await;
+    listener_result??;
     Ok(())
 }
 

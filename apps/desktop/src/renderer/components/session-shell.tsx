@@ -20,8 +20,9 @@ import {
 	updateMountedSessionIds,
 } from "../hooks/use-session-keep-alive-logic"
 import { SessionPanelHeader } from "./agent-detail"
-import { ChatInputSection, ChatView, type ChatScrollHandle } from "./chat/chat-view"
+import { ChatInputSection, type ChatScrollHandle, ChatView } from "./chat/chat-view"
 import { ReviewSideRail } from "./review/review-side-rail"
+import { SessionResolutionState } from "./session-resolution-state"
 
 interface SessionShellProps {
 	activeSessionId: string | null
@@ -48,22 +49,8 @@ function SessionTranscriptPanel({
 
 	if (!agent) {
 		if (!isActive) return null
-		if (controller.resolving) {
-			return (
-				<div className="flex h-full items-center justify-center">
-					<div className="size-4 animate-spin rounded-full border-2 border-muted-foreground/20 border-t-muted-foreground/60" />
-				</div>
-			)
-		}
 		return (
-			<div className="flex h-full items-center justify-center">
-				<div className="text-center">
-					<p className="text-sm font-medium text-muted-foreground">Session not found</p>
-					<p className="mt-1 text-xs text-muted-foreground/60">
-						This session may have been deleted or is not yet loaded
-					</p>
-				</div>
-			</div>
+			<SessionResolutionState state={controller.resolution} onRetry={controller.retryResolution} />
 		)
 	}
 
@@ -130,11 +117,12 @@ export function SessionShell({ activeSessionId, evictRef }: SessionShellProps) {
 
 	useEffect(() => {
 		const handleKeyDown = (event: KeyboardEvent) => {
-			if ((event.metaKey || event.ctrlKey) && event.shiftKey && event.key === "d") {
+			if (event.defaultPrevented || event.isComposing || event.keyCode === 229) return
+			if ((event.metaKey || event.ctrlKey) && event.shiftKey && event.key.toLowerCase() === "d") {
 				event.preventDefault()
 				setReviewPanelOpen((prev) => !prev)
 			}
-			if ((event.metaKey || event.ctrlKey) && event.shiftKey && event.key === "f") {
+			if ((event.metaKey || event.ctrlKey) && event.shiftKey && event.key.toLowerCase() === "f") {
 				event.preventDefault()
 				if (reviewPanelOpen) {
 					setReviewSettings((prev) => ({ ...prev, expanded: !prev.expanded }))
@@ -173,6 +161,12 @@ export function SessionShell({ activeSessionId, evictRef }: SessionShellProps) {
 		}
 	}, [activeAgent?.name, activeAgent?.sessionId])
 
+	useEffect(() => {
+		if (!isEditingTitle) return
+		titleInputRef.current?.focus()
+		titleInputRef.current?.select()
+	}, [isEditingTitle])
+
 	useLayoutEffect(() => {
 		if (setupPhase) {
 			setComposerInset(0)
@@ -184,9 +178,7 @@ export function SessionShell({ activeSessionId, evictRef }: SessionShellProps) {
 
 		const updateComposerInset = () => {
 			const nextInset = Math.ceil(composer.getBoundingClientRect().height)
-			setComposerInset((currentInset) =>
-				currentInset === nextInset ? currentInset : nextInset,
-			)
+			setComposerInset((currentInset) => (currentInset === nextInset ? currentInset : nextInset))
 		}
 
 		updateComposerInset()

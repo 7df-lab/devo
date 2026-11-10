@@ -14,7 +14,6 @@
 
 use std::fs;
 use std::fs::File;
-use std::fs::OpenOptions;
 use std::io::ErrorKind;
 use std::path::Path;
 use std::path::PathBuf;
@@ -47,6 +46,7 @@ const METADATA_READ_RETRIES: usize = 100;
 const METADATA_READ_RETRY_DELAY: Duration = Duration::from_millis(50);
 pub(crate) const SERVER_CONTROL_STATUS_METHOD: &str = "server/status";
 pub(crate) const SERVER_CONTROL_SHUTDOWN_METHOD: &str = "server/shutdown";
+pub(crate) const DAEMON_CONTROL_SHUTDOWN_METHOD: &str = "daemon/shutdown";
 pub(crate) const SERVER_CONTROL_ENABLE_PROTOCOLS_METHOD: &str = "server/protocols/enable";
 const SERVER_CONTROL_REQUEST_ID: u64 = 1;
 
@@ -61,8 +61,16 @@ pub(crate) enum SingletonRole {
     Proxy(ServerLockMetadata),
 }
 
+#[derive(Debug, Clone, Copy, Default, PartialEq, Eq, Serialize, Deserialize)]
+#[serde(rename_all = "snake_case")]
+pub(crate) enum ServerLifetime {
+    #[default]
+    Client,
+    Daemon,
+}
+
 /// Published in `server.lock.json` while the real server is running.
-#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
+#[derive(Clone, PartialEq, Eq, Serialize, Deserialize)]
 pub(crate) struct ServerLockMetadata {
     pub(crate) version: u32,
     pub(crate) pid: u32,
@@ -71,12 +79,29 @@ pub(crate) struct ServerLockMetadata {
     /// Must be sent as the first WebSocket text frame after connect.
     pub(crate) token: String,
     pub(crate) started_at: String,
+    #[serde(default)]
+    pub(crate) lifetime: ServerLifetime,
+}
+
+impl std::fmt::Debug for ServerLockMetadata {
+    fn fmt(&self, formatter: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
+        formatter
+            .debug_struct("ServerLockMetadata")
+            .field("version", &self.version)
+            .field("pid", &self.pid)
+            .field("endpoint", &self.endpoint)
+            .field("token", &"[redacted]")
+            .field("started_at", &self.started_at)
+            .field("lifetime", &self.lifetime)
+            .finish()
+    }
 }
 
 #[derive(Debug, Clone, PartialEq, Eq)]
 pub(crate) enum ServerControlAction {
     Status,
     Shutdown,
+    ShutdownDaemon,
     EnableProtocols(ProtocolSet),
 }
 
@@ -85,13 +110,14 @@ impl ServerControlAction {
         match self {
             ServerControlAction::Status => SERVER_CONTROL_STATUS_METHOD,
             ServerControlAction::Shutdown => SERVER_CONTROL_SHUTDOWN_METHOD,
+            ServerControlAction::ShutdownDaemon => DAEMON_CONTROL_SHUTDOWN_METHOD,
             ServerControlAction::EnableProtocols(_) => SERVER_CONTROL_ENABLE_PROTOCOLS_METHOD,
         }
     }
 
     fn params(&self) -> Option<serde_json::Value> {
         match self {
-            Self::Status | Self::Shutdown => None,
+            Self::Status | Self::Shutdown | Self::ShutdownDaemon => None,
             Self::EnableProtocols(protocols) => Some(serde_json::json!({
                 "protocols": protocols.names(),
             })),
@@ -102,6 +128,7 @@ impl ServerControlAction {
 #[derive(Debug, Clone, PartialEq, Eq)]
 pub(crate) struct ServerControlResult {
     pub(crate) status: String,
+    pub(crate) lifetime: ServerLifetime,
     pub(crate) enabled_protocols: Option<ProtocolSet>,
 }
 
@@ -113,6 +140,7 @@ impl ServerLockMetadata {
             endpoint,
             token,
             started_at: Utc::now().to_rfc3339(),
+            lifetime: ServerLifetime::Client,
         }
     }
 }
@@ -120,6 +148,18 @@ impl ServerLockMetadata {
 /// One-shot control RPC against the real server's internal proxy
 /// (`devo server --status` / `--shutdown` from a proxy process).
 pub(crate) async fn run_server_control(
+    metadata: &ServerLockMetadata,
+    action: ServerControlAction,
+) -> Result<ServerControlResult> {
+    tokio::time::timeout(
+        Duration::from_secs(5),
+        run_server_control_inner(metadata, action),
+    )
+    .await
+    .context("singleton control request timed out")?
+}
+
+async fn run_server_control_inner(
     metadata: &ServerLockMetadata,
     action: ServerControlAction,
 ) -> Result<ServerControlResult> {
@@ -166,15 +206,22 @@ pub(crate) struct RealServerGuard {
 
 impl RealServerGuard {
     /// Writes `server.lock.json` so proxy/control clients can find this server.
-    pub(crate) fn publish_endpoint(&self, endpoint: String) -> Result<ServerLockMetadata> {
-        let metadata = ServerLockMetadata::new(endpoint, Uuid::new_v4().to_string());
+    pub(crate) fn publish_endpoint(
+        &self,
+        endpoint: String,
+        lifetime: ServerLifetime,
+    ) -> Result<ServerLockMetadata> {
+        let mut metadata = ServerLockMetadata::new(endpoint, Uuid::new_v4().to_string());
+        metadata.lifetime = lifetime;
         let encoded = serde_json::to_vec_pretty(&metadata).context("serialize server metadata")?;
-        fs::write(&self.metadata_path, encoded).with_context(|| {
-            format!(
-                "write server singleton metadata {}",
-                self.metadata_path.display()
-            )
-        })?;
+        crate::singleton_files::publish_metadata(&self.metadata_path, &encoded).with_context(
+            || {
+                format!(
+                    "write server singleton metadata {}",
+                    self.metadata_path.display()
+                )
+            },
+        )?;
         Ok(metadata)
     }
 }
@@ -197,26 +244,47 @@ pub(crate) fn acquire_singleton_role(devo_home: &Path) -> Result<SingletonRole> 
     fs::create_dir_all(devo_home)
         .with_context(|| format!("create DEVO_HOME {}", devo_home.display()))?;
     let lock_path = lock_path(devo_home);
-    let lock_file = OpenOptions::new()
-        .create(true)
-        .truncate(false)
-        .read(true)
-        .write(true)
-        .open(&lock_path)
+    let lock_file = crate::singleton_files::open_lock(&lock_path)
         .with_context(|| format!("open server singleton lock {}", lock_path.display()))?;
 
-    match lock_file.try_lock_exclusive() {
-        Ok(()) => Ok(SingletonRole::Real(RealServerGuard {
-            lock_file,
-            metadata_path: metadata_path(devo_home),
-        })),
-        Err(error) if is_lock_temporarily_unavailable(&error) => {
-            // Real server may be mid-startup; retry until metadata appears.
-            Ok(SingletonRole::Proxy(read_metadata_with_retry(devo_home)?))
+    for _ in 0..METADATA_READ_RETRIES {
+        match lock_file.try_lock_exclusive() {
+            Ok(()) => {
+                let _ = fs::remove_file(metadata_path(devo_home));
+                return Ok(SingletonRole::Real(RealServerGuard {
+                    lock_file,
+                    metadata_path: metadata_path(devo_home),
+                }));
+            }
+            Err(error) if is_lock_temporarily_unavailable(&error) => {
+                if let Ok(metadata) = read_metadata(devo_home) {
+                    return Ok(SingletonRole::Proxy(metadata));
+                }
+                std::thread::sleep(METADATA_READ_RETRY_DELAY);
+            }
+            Err(error) => return Err(error).context("acquire singleton owner lock"),
         }
-        Err(error) => {
-            Err(error).with_context(|| format!("lock server singleton {}", lock_path.display()))
+    }
+    bail!("singleton owner has not published valid metadata; retry after startup completes")
+}
+
+/// A status probe never publishes/removes metadata or keeps an owner guard.
+pub(crate) fn probe_singleton(home: &Path) -> Result<Option<ServerLockMetadata>> {
+    if !owner_lock_held(home)? {
+        return Ok(None);
+    }
+    read_metadata(home).map(Some)
+}
+
+pub(crate) fn owner_lock_held(home: &Path) -> Result<bool> {
+    let file = crate::singleton_files::open_lock(&lock_path(home))?;
+    match file.try_lock_exclusive() {
+        Ok(()) => {
+            file.unlock()?;
+            Ok(false)
         }
+        Err(error) if is_lock_temporarily_unavailable(&error) => Ok(true),
+        Err(error) => Err(error).context("probe singleton owner lock"),
     }
 }
 
@@ -316,6 +384,12 @@ fn decode_server_control_response(text: &str) -> Result<ServerControlResult> {
         })
         .transpose()?;
     Ok(ServerControlResult {
+        lifetime: value
+            .pointer("/result/lifetime")
+            .cloned()
+            .map(serde_json::from_value)
+            .transpose()?
+            .unwrap_or_default(),
         status,
         enabled_protocols,
     })
@@ -339,24 +413,9 @@ fn is_lock_temporarily_unavailable(error: &std::io::Error) -> bool {
     }
 }
 
-/// Polls until the real server writes metadata (startup race with lock holder).
-fn read_metadata_with_retry(devo_home: &Path) -> Result<ServerLockMetadata> {
-    let mut last_error = None;
-    for _ in 0..METADATA_READ_RETRIES {
-        match read_metadata(devo_home) {
-            Ok(metadata) => return Ok(metadata),
-            Err(error) => {
-                last_error = Some(error);
-                std::thread::sleep(METADATA_READ_RETRY_DELAY);
-            }
-        }
-    }
-    Err(last_error.expect("metadata read should have failed at least once"))
-}
-
 fn read_metadata(devo_home: &Path) -> Result<ServerLockMetadata> {
     let path = metadata_path(devo_home);
-    let encoded = fs::read(&path)
+    let encoded = crate::singleton_files::read_metadata(&path)
         .with_context(|| format!("read server singleton metadata {}", path.display()))?;
     let metadata: ServerLockMetadata =
         serde_json::from_slice(&encoded).context("decode server singleton metadata")?;
@@ -365,6 +424,20 @@ fn read_metadata(devo_home: &Path) -> Result<ServerLockMetadata> {
             "unsupported server singleton metadata version {}; expected {METADATA_VERSION}",
             metadata.version
         );
+    }
+    let uri: tokio_tungstenite::tungstenite::http::Uri = metadata
+        .endpoint
+        .parse()
+        .context("invalid singleton endpoint")?;
+    if uri.scheme_str() != Some("ws")
+        || !matches!(uri.host(), Some("127.0.0.1" | "[::1]"))
+        || uri.port_u16().is_none()
+        || uri.path() != "/"
+        || uri.query().is_some()
+        || metadata.endpoint.contains('@')
+        || metadata.endpoint.contains('#')
+    {
+        bail!("singleton endpoint must be an authenticated numeric loopback WebSocket");
     }
     Ok(metadata)
 }
@@ -421,6 +494,7 @@ mod tests {
             .expect("decode response"),
             ServerControlResult {
                 status: "running".to_string(),
+                lifetime: ServerLifetime::Client,
                 enabled_protocols: None,
             }
         );
@@ -435,6 +509,7 @@ mod tests {
             .expect("decode response"),
             ServerControlResult {
                 status: "running".to_string(),
+                lifetime: ServerLifetime::Client,
                 enabled_protocols: Some(ProtocolSet::all()),
             }
         );
@@ -463,13 +538,73 @@ mod tests {
         };
 
         let metadata = guard
-            .publish_endpoint("ws://127.0.0.1:0".to_string())
+            .publish_endpoint("ws://127.0.0.1:0".to_string(), ServerLifetime::Client)
             .expect("publish endpoint");
         let encoded = fs::read_to_string(metadata_path(temp_dir.path())).expect("metadata file");
         let persisted: ServerLockMetadata = serde_json::from_str(&encoded).expect("metadata json");
 
         assert_eq!(persisted, metadata);
         assert!(!encoded.contains("working_root"));
+    }
+
+    #[test]
+    fn metadata_only_accepts_numeric_loopback_and_redacts_debug_token() {
+        let home = TempDir::new().unwrap();
+        for endpoint in ["ws://127.0.0.1:3210", "ws://[::1]:3210/"] {
+            let metadata = ServerLockMetadata::new(endpoint.into(), "secret-test-token".into());
+            crate::singleton_files::publish_metadata(
+                &metadata_path(home.path()),
+                &serde_json::to_vec(&metadata).unwrap(),
+            )
+            .unwrap();
+            assert_eq!(read_metadata(home.path()).unwrap(), metadata);
+            assert!(!format!("{metadata:?}").contains("secret-test-token"));
+        }
+        for endpoint in [
+            "ws://example.com:3210",
+            "ws://localhost:3210",
+            "wss://127.0.0.1:3210",
+            "ws://127.0.0.1:3210/other",
+            "ws://127.0.0.1:3210/?query",
+            "ws://token@127.0.0.1:3210/",
+            "ws://127.0.0.1:3210/#fragment",
+        ] {
+            let metadata = ServerLockMetadata::new(endpoint.into(), "secret-test-token".into());
+            crate::singleton_files::publish_metadata(
+                &metadata_path(home.path()),
+                &serde_json::to_vec(&metadata).unwrap(),
+            )
+            .unwrap();
+            assert!(read_metadata(home.path()).is_err(), "{endpoint}");
+        }
+    }
+
+    #[test]
+    fn status_probe_preserves_metadata_and_never_keeps_ownership() {
+        let home = TempDir::new().unwrap();
+        let SingletonRole::Real(guard) = acquire_singleton_role(home.path()).unwrap() else {
+            panic!("owner");
+        };
+        let metadata = guard
+            .publish_endpoint("ws://127.0.0.1:3210".into(), ServerLifetime::Daemon)
+            .unwrap();
+        assert_eq!(
+            probe_singleton(home.path()).unwrap(),
+            Some(metadata.clone())
+        );
+        drop(guard);
+        // Simulate a crash residue: an absent owner must not remove it on status.
+        crate::singleton_files::publish_metadata(
+            &metadata_path(home.path()),
+            &serde_json::to_vec(&metadata).unwrap(),
+        )
+        .unwrap();
+        assert_eq!(probe_singleton(home.path()).unwrap(), None);
+        assert!(metadata_path(home.path()).exists());
+        assert!(matches!(
+            acquire_singleton_role(home.path()).unwrap(),
+            SingletonRole::Real(_)
+        ));
     }
 
     #[test]
@@ -480,7 +615,7 @@ mod tests {
             panic!("expected real server role");
         };
         guard
-            .publish_endpoint("ws://127.0.0.1:0".to_string())
+            .publish_endpoint("ws://127.0.0.1:0".to_string(), ServerLifetime::Client)
             .expect("publish endpoint");
         let metadata_path = metadata_path(temp_dir.path());
 

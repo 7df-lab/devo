@@ -7,7 +7,7 @@
  * the rest of the desktop UI.
  *
  * Fill amount matches TUI status-bar semantics: prefer live
- * `session.usage.updated` (TurnUsageUpdated / last-query display total) so
+ * `context.tokens.updated` (TurnUsageUpdated / last-query display total) so
  * the ring moves mid-turn; occupancy.totalTokens is only a fallback when no
  * usage has arrived yet. Occupancy still supplies the window size and the
  * category breakdown.
@@ -51,7 +51,7 @@ export function ContextUsageButton({ sessionId }: ContextUsageButtonProps) {
 	const used = usageUsed > 0 ? usageUsed : (occupancy?.totalTokens ?? 0)
 	// Prefer occupancy's effective window (same basis as finalize / TUI). Fall
 	// back to usage.size only when occupancy has not arrived yet. Both stay in
-	// sync via context.usage.updated / session.usage.updated.
+	// sync via context.usage.updated / context.tokens.updated.
 	const windowTokens =
 		occupancy?.contextWindowTokens && occupancy.contextWindowTokens > 0
 			? occupancy.contextWindowTokens

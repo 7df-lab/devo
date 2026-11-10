@@ -4,7 +4,6 @@ use tokio::sync::mpsc;
 
 use crate::runtime::ServerRuntime;
 use crate::runtime::session_actor::TurnWorkingSet;
-use crate::runtime::subagent_usage::UsageTotals;
 use crate::runtime::turn_exec::{
     ExecuteTurnRequest, FinalizeTurnParams, QUERY_EVENT_CHANNEL_CAPACITY, TurnModelQueryParams,
     spawn_turn_event_stream,
@@ -57,7 +56,7 @@ pub(crate) async fn execute_turn_task(
             &turn,
             &display_input,
             &input_image_paths,
-            input_mode.emits_user_message() && !user_message_already_emitted,
+            (!user_message_already_emitted).then_some(&input_mode),
             client_user_message_id.as_deref(),
         )
         .await;
@@ -72,15 +71,11 @@ pub(crate) async fn execute_turn_task(
         Some(&turn_config.model),
     ));
     step_started = std::time::Instant::now();
-    if usage_parent_session_id.is_none() {
-        runtime
-            .begin_parent_usage_turn_with_base(
-                session_id,
-                turn_id,
-                UsageTotals::from_session_summary(&working.state.summary),
-                usage_context_window,
-            )
-            .await;
+    if let Err(error) = runtime
+        .usage_ledger
+        .initialize_session(&working.state.summary)
+    {
+        tracing::warn!(%session_id, %error, "failed to initialize usage projection");
     }
     let usage_ledger_ms = step_started.elapsed().as_millis() as u64;
 
@@ -130,7 +125,6 @@ pub(crate) async fn execute_turn_task(
             turn,
             query_outcome,
             event_summary,
-            usage_parent_session_id: usage_parent_session_id.as_ref().map(|id| *id),
         })
         .await;
 

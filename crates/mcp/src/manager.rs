@@ -19,7 +19,11 @@ use rmcp::model::ProtocolVersion;
 use rmcp::model::Tool;
 use serde_json::Value;
 use tokio::sync::RwLock;
-use tracing::{info, warn};
+use tracing::warn;
+
+#[path = "reconnect.rs"]
+mod reconnect;
+use reconnect::OperationSlot;
 
 use devo_core::mcp::McpAuthConfig;
 use devo_core::mcp::McpAuthState;
@@ -41,6 +45,9 @@ const MCP_OPERATION_TIMEOUT: Duration = Duration::from_secs(10);
 /// Runtime MCP manager that owns active RMCP clients.
 pub struct RmcpMcpManager {
     config: RwLock<McpConfig>,
+    operation_gate: tokio::sync::Mutex<()>,
+    operations: HashMap<McpServerId, Arc<OperationSlot>>,
+    tool_cache: RwLock<HashMap<McpServerId, Vec<McpToolInfo>>>,
     oauth_store_mode: OAuthCredentialsStoreMode,
     clients: RwLock<HashMap<McpServerId, Arc<RmcpClient>>>,
     statuses: RwLock<HashMap<McpServerId, McpServerStatus>>,
@@ -60,7 +67,15 @@ impl RmcpMcpManager {
             statuses.insert(server_id.clone(), empty_status(server_id, startup_state));
         }
 
+        let operations = config
+            .servers
+            .iter()
+            .map(|record| (record.id.clone(), Arc::new(OperationSlot::default())))
+            .collect();
         Self {
+            operation_gate: tokio::sync::Mutex::new(()),
+            operations,
+            tool_cache: RwLock::new(HashMap::new()),
             config: RwLock::new(config),
             oauth_store_mode,
             clients: RwLock::new(HashMap::with_capacity(server_count)),
@@ -72,18 +87,15 @@ impl RmcpMcpManager {
         if let Some(client) = self.clients.read().await.get(&record.id).cloned() {
             return Ok(client);
         }
-
-        // Client startup can perform process or network I/O, so avoid holding
-        // the write lock while creating it. Concurrent callers may race to
-        // create a transient duplicate; the second cache check prevents a later
-        // finisher from replacing the client that already became shared state.
-        let client = Arc::new(create_client(record, self.oauth_store_mode).await?);
-        let mut clients = self.clients.write().await;
-        if let Some(client) = clients.get(&record.id) {
-            return Ok(Arc::clone(client));
-        }
-        clients.insert(record.id.clone(), Arc::clone(&client));
-        Ok(client)
+        self.refresh(&record.id).await?;
+        self.clients
+            .read()
+            .await
+            .get(&record.id)
+            .cloned()
+            .ok_or_else(|| McpError::McpServerUnavailable {
+                server_id: record.id.clone(),
+            })
     }
 
     async fn record(&self, server_id: &McpServerId) -> Result<McpServerRecord, McpError> {
@@ -113,32 +125,6 @@ impl RmcpMcpManager {
             .cloned()
             .collect()
     }
-
-    async fn stop_server(&self, server_id: &McpServerId) -> McpServerStatus {
-        self.clients.write().await.remove(server_id);
-        let status = empty_status(server_id.clone(), McpStartupState::Disabled);
-        self.statuses
-            .write()
-            .await
-            .insert(server_id.clone(), status.clone());
-        status
-    }
-
-    async fn mark_failed(&self, server_id: &McpServerId, message: &str) -> McpServerStatus {
-        warn!(
-            server_id = %server_id,
-            error = %message,
-            "MCP server startup failed"
-        );
-        self.clients.write().await.remove(server_id);
-        let mut status = empty_status(server_id.clone(), McpStartupState::Failed);
-        status.last_refreshed_at = Some(chrono::Utc::now());
-        self.statuses
-            .write()
-            .await
-            .insert(server_id.clone(), status.clone());
-        status
-    }
 }
 
 fn empty_status(server_id: McpServerId, startup_state: McpStartupState) -> McpServerStatus {
@@ -156,127 +142,131 @@ fn empty_status(server_id: McpServerId, startup_state: McpStartupState) -> McpSe
 #[async_trait]
 impl McpManager for RmcpMcpManager {
     async fn statuses(&self) -> Result<Vec<McpServerStatus>, McpError> {
-        Ok(self.statuses.read().await.values().cloned().collect())
+        Ok(self
+            .statuses
+            .read()
+            .await
+            .values()
+            .cloned()
+            .map(|mut status| {
+                // Cancellation releases the reservation synchronously. Never leave
+                // an orphan Starting state that prevents a later explicit retry.
+                if status.startup_state == McpStartupState::Starting
+                    && !self.operations[&status.server_id].is_busy()
+                {
+                    status.startup_state = McpStartupState::Stopped;
+                }
+                status
+            })
+            .collect())
     }
 
     async fn discover_tools(&self) -> Result<Vec<McpToolInfo>, McpError> {
         let records = self.discoverable_tool_records().await;
-        let mut tools = Vec::with_capacity(records.len());
-        for record in &records {
-            match self.refresh(&record.id).await {
-                Ok(_) => {
-                    let Some(client) = self.clients.read().await.get(&record.id).cloned() else {
-                        warn!(
-                            server_id = %record.id,
-                            "MCP refresh succeeded but no client is registered"
-                        );
-                        continue;
-                    };
-                    match client
-                        .list_tools_with_connector_ids(None, Some(MCP_OPERATION_TIMEOUT))
-                        .await
-                    {
-                        Ok(list) => {
-                            info!(
-                                server_id = %record.id,
-                                tool_count = list.tools.len(),
-                                tool_names = ?list.tools.iter().map(|t| t.tool.name.to_string()).collect::<Vec<_>>(),
-                                "MCP tools listed"
-                            );
-                            tools.reserve(list.tools.len());
-                            for tool in list.tools {
-                                tools.push(mcp_tool_info_from_rmcp_tool(
-                                    record,
-                                    tool.tool,
-                                    tool.connector_description,
-                                    /*supports_parallel_tool_calls*/ false,
-                                ));
-                            }
-                        }
-                        Err(err) => {
-                            warn!(
-                                server_id = %record.id,
-                                error = %err,
-                                "failed to list MCP tools"
-                            );
-                        }
-                    }
-                }
+        let mut tools = Vec::new();
+        for record in records {
+            match self
+                .discover_server(&record.id, reconnect::ConnectionMode::Reuse)
+                .await
+            {
+                Ok((_, discovered)) => tools.extend(discovered),
                 Err(err) => {
-                    warn!(
-                        server_id = %record.id,
-                        error = %err,
-                        "failed to refresh MCP server"
-                    );
+                    warn!(server_id = %record.id, error = %err, "failed to refresh MCP server")
                 }
             }
         }
-        info!(
-            discoverable_servers = records.len(),
-            total_tools = tools.len(),
-            "MCP discover_tools completed"
-        );
+        // Manual/auto-start-disabled servers must not be started implicitly,
+        // but a verified explicit connection still belongs in later registries.
+        let connected_manual = {
+            let config = self.config.read().await;
+            config
+                .servers
+                .iter()
+                .filter(|record| {
+                    record.enabled
+                        && tools_capability_allowed(record)
+                        && (!config.auto_start
+                            || matches!(record.startup_policy, McpStartupPolicy::Manual))
+                })
+                .map(|record| record.id.clone())
+                .collect::<Vec<_>>()
+        };
+        for server_id in connected_manual {
+            let slot = &self.operations[&server_id];
+            loop {
+                let completed = slot.completed.notified();
+                tokio::pin!(completed);
+                completed.as_mut().enable();
+                let gate = self.operation_gate.lock().await;
+                if !slot.is_busy() {
+                    tools.extend(self.cached_tools(&server_id).await?);
+                    break;
+                }
+                // Observe an explicit connection attempt without starting or
+                // retrying a manual server, even if that attempt is cancelled.
+                drop(gate);
+                completed.await;
+            }
+        }
         Ok(tools)
     }
 
     async fn refresh(&self, server_id: &McpServerId) -> Result<McpServerStatus, McpError> {
-        let record = self.record(server_id).await?;
-        if !record.enabled {
-            return Err(McpError::McpServerUnavailable {
+        self.discover_server(server_id, reconnect::ConnectionMode::Reuse)
+            .await
+            .map(|(status, _)| status)
+    }
+
+    async fn reconnect(&self, server_id: &McpServerId) -> Result<McpServerStatus, McpError> {
+        self.discover_server(server_id, reconnect::ConnectionMode::Replace)
+            .await
+            .map(|(status, _)| status)
+    }
+
+    async fn cached_tools(&self, server_id: &McpServerId) -> Result<Vec<McpToolInfo>, McpError> {
+        self.record(server_id).await?;
+        Ok(self
+            .tool_cache
+            .read()
+            .await
+            .get(server_id)
+            .cloned()
+            .unwrap_or_default())
+    }
+
+    async fn configure_enabled(
+        &self,
+        server_id: &McpServerId,
+        enabled: bool,
+    ) -> Result<McpServerStatus, McpError> {
+        let _gate = self.operation_gate.lock().await;
+        let mut config = self.config.write().await;
+        let record = config
+            .servers
+            .iter_mut()
+            .find(|record| &record.id == server_id)
+            .ok_or_else(|| McpError::McpServerUnavailable {
                 server_id: server_id.clone(),
-            });
+            })?;
+        if enabled && record.enabled {
+            let mut status = self.statuses.read().await[server_id].clone();
+            if status.startup_state == McpStartupState::Starting
+                && !self.operations[server_id].is_busy()
+            {
+                status.startup_state = McpStartupState::Stopped;
+            }
+            return Ok(status);
         }
-
-        self.statuses.write().await.insert(
-            server_id.clone(),
-            empty_status(server_id.clone(), McpStartupState::Starting),
-        );
-
-        let client = match self.ensure_client(&record).await {
-            Ok(client) => client,
-            Err(err) => {
-                let message = err.to_string();
-                self.mark_failed(server_id, &message).await;
-                return Err(err);
-            }
-        };
-        let tools = if tools_capability_allowed(&record) {
-            match client.list_tools(None, Some(MCP_OPERATION_TIMEOUT)).await {
-                Ok(list) => list
-                    .tools
-                    .into_iter()
-                    .map(|tool| McpToolDescriptor {
-                        server_id: server_id.clone(),
-                        name: tool.name.into_owned(),
-                        description: tool
-                            .description
-                            .map(std::borrow::Cow::into_owned)
-                            .unwrap_or_default(),
-                        input_schema: Value::Object(Arc::unwrap_or_clone(tool.input_schema)),
-                    })
-                    .collect(),
-                Err(err) => {
-                    let message = err.to_string();
-                    self.mark_failed(server_id, &message).await;
-                    return Err(McpError::McpProtocolError {
-                        server_id: server_id.clone(),
-                        message,
-                    });
-                }
-            }
+        record.enabled = enabled;
+        self.operations[server_id].invalidate();
+        self.clients.write().await.remove(server_id);
+        self.tool_cache.write().await.remove(server_id);
+        let state = if enabled {
+            McpStartupState::NotStarted
         } else {
-            Vec::new()
+            McpStartupState::Disabled
         };
-
-        let status = McpServerStatus {
-            server_id: server_id.clone(),
-            startup_state: McpStartupState::Ready,
-            auth_state: McpAuthState::Authenticated,
-            tools,
-            resources: Vec::new(),
-            resource_templates: Vec::new(),
-            last_refreshed_at: Some(chrono::Utc::now()),
-        };
+        let status = empty_status(server_id.clone(), state);
         self.statuses
             .write()
             .await
@@ -289,20 +279,9 @@ impl McpManager for RmcpMcpManager {
         server_id: &McpServerId,
         enabled: bool,
     ) -> Result<McpServerStatus, McpError> {
-        {
-            let mut config = self.config.write().await;
-            let record = config
-                .servers
-                .iter_mut()
-                .find(|record| &record.id == server_id)
-                .ok_or_else(|| McpError::McpServerUnavailable {
-                    server_id: server_id.clone(),
-                })?;
-            record.enabled = enabled;
-        }
-
+        let status = self.configure_enabled(server_id, enabled).await?;
         if !enabled {
-            return Ok(self.stop_server(server_id).await);
+            return Ok(status);
         }
 
         match self.refresh(server_id).await {

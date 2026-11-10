@@ -136,7 +136,12 @@ impl ServerRuntime {
     ) -> Option<String> {
         history_items.iter().find_map(|entry| {
             let devo_protocol::SessionHistoryEntry::Item {
-                item: devo_protocol::native::item::Item::UserMessage { content, .. },
+                item:
+                    devo_protocol::native::item::Item::UserMessage {
+                        content,
+                        origin: None,
+                        ..
+                    },
             } = entry
             else {
                 return None;

@@ -1,3 +1,4 @@
+import { newerSessionUsage } from "@devo-ai/sdk/v2/client"
 import { toast } from "sonner"
 import { createLogger } from "../../lib/logger"
 import { queryClient } from "../../lib/query-client"
@@ -285,10 +286,24 @@ export function processEvent(event: Event): void {
 		}
 
 		case "session.usage.updated": {
+			const { sessionId, usage } = event.properties
+			if (!sessionId || !usage) break
+			const current = appStore.get(sessionNativeFamily(sessionId))
+			set(sessionNativeFamily(sessionId), {
+				...current,
+				cumulativeUsage: newerSessionUsage(current.cumulativeUsage, usage),
+			})
+			break
+		}
+
+		case "context.tokens.updated": {
 			const sessionId = event.properties.sessionId
 			if (!sessionId) break
 			const current = appStore.get(sessionNativeFamily(sessionId))
-			const nextUsed = Number(event.properties.used ?? 0)
+			const totals = event.properties.sessionTotals
+			if (totals && current.cumulativeUsage && newerSessionUsage(current.cumulativeUsage, totals) === current.cumulativeUsage) break
+			const reportedUsed = Number(event.properties.used)
+			const nextUsed = Number.isFinite(reportedUsed) && reportedUsed > 0 ? reportedUsed : Number(current.usage?.used ?? 0)
 			const nextSize = Number(event.properties.size ?? 0)
 			const previousSize = Number(current.usage?.size ?? 0)
 			const occupancyWindow = Number(current.occupancy?.contextWindowTokens ?? 0)
@@ -306,7 +321,7 @@ export function processEvent(event: Event): void {
 				usage: {
 					used: nextUsed,
 					size: stableSize,
-					cost: event.properties.cost,
+					cost: current.usage?.cost,
 				},
 			})
 			break

@@ -59,6 +59,8 @@ impl UsageReplyProvider {
 
     fn usage(&self) -> Usage {
         Usage {
+            unreported_fields: None,
+            reported: true,
             input_tokens: self.input_tokens,
             output_tokens: self.output_tokens,
             cache_creation_input_tokens: None,
@@ -865,6 +867,7 @@ async fn failed_turn_resume_restores_terminal_history_without_prompt_contaminati
         }
     };
     let user_message = |text: &str| Item::UserMessage {
+        origin: None,
         client_user_message_id: None,
         content: vec![UserInput::Text {
             text: text.to_string(),
@@ -1364,6 +1367,8 @@ impl AutoCompactTestProvider {
 
     fn usage(&self) -> Usage {
         Usage {
+            unreported_fields: None,
+            reported: true,
             input_tokens: self.input_tokens,
             output_tokens: self.output_tokens,
             cache_creation_input_tokens: None,
@@ -1962,10 +1967,16 @@ async fn wait_for_turn_completed(
 
 async fn wait_for_turn_usage_updated(
     notifications_rx: &mut mpsc::Receiver<serde_json::Value>,
+    minimum_calls: u64,
 ) -> Result<devo_protocol::native::usage::UsageTotals> {
     timeout(Duration::from_secs(5), async {
         while let Some(value) = notifications_rx.recv().await {
-            if value.get("method") == Some(&serde_json::json!("turn/usage/updated")) {
+            if value.get("method") == Some(&serde_json::json!("turn/usage/updated"))
+                && value["params"]["sessionTotals"]["callCount"]
+                    .as_u64()
+                    .unwrap_or(0)
+                    >= minimum_calls
+            {
                 return serde_json::from_value(value["params"]["sessionTotals"].clone())
                     .context("decode Native turn/usage/updated session totals");
             }
@@ -2131,7 +2142,7 @@ async fn first_usage_update_after_resume_preserves_historical_session_totals() -
         serde_json::json!({}),
     )
     .await?;
-    let first_usage = wait_for_turn_usage_updated(&mut notifications_rx).await?;
+    let first_usage = wait_for_turn_usage_updated(&mut notifications_rx, 1).await?;
     assert_eq!(first_usage.input_tokens, 100);
     wait_for_turn_completed(&mut notifications_rx).await?;
 
@@ -2154,7 +2165,7 @@ async fn first_usage_update_after_resume_preserves_historical_session_totals() -
         serde_json::json!({}),
     )
     .await?;
-    let post_resume_usage = wait_for_turn_usage_updated(&mut rebuilt_notifications_rx).await?;
+    let post_resume_usage = wait_for_turn_usage_updated(&mut rebuilt_notifications_rx, 2).await?;
     assert_eq!(post_resume_usage.input_tokens, 200);
     assert_eq!(post_resume_usage.output_tokens, 50);
     assert_eq!(post_resume_usage.cache_read_input_tokens, 100);

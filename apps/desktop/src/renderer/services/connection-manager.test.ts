@@ -1,3 +1,5 @@
+import { sessionUsageFromProtocol } from "@devo-ai/sdk/v2/client"
+import { sessionNativeFamily } from "../atoms/session-native"
 import { afterEach, beforeEach, describe, expect, mock, test } from "bun:test"
 import type { DevoClient } from "@devo-ai/sdk/v2/client"
 import type { Event, Session } from "../lib/types"
@@ -129,6 +131,13 @@ describe("connection manager project event bridge", () => {
 		delete (globalThis as unknown as { cancelAnimationFrame?: unknown }).cancelAnimationFrame
 	})
 
+	test("a disconnected exact-ID lookup reports connection failure instead of a missing child", async () => {
+		const manager = await import(`./connection-manager?case=disconnected-${Date.now()}`)
+		activeManager = manager
+		manager.disconnect()
+		await expect(manager.fetchSessionById("cold-child")).rejects.toThrow("Connect to the runtime")
+	})
+
 	test("forwards project-scoped session status events into renderer state", async () => {
 		const directory = "/repo/project-status-bridge"
 		const session: Session = {
@@ -154,6 +163,34 @@ describe("connection manager project event bridge", () => {
 		await new Promise((resolve) => setTimeout(resolve, 5))
 
 		expect(appStore.get(sessionFamily(session.id))?.status).toEqual({ type: "busy" })
+	})
+
+	test("frame batching preserves context and usage notification order", async () => {
+		const directory = "/repo/usage-frame-order"
+		const sessionId = "usage-frame-order"
+		const manager = await import(`./connection-manager?case=usage-order-${Date.now()}`)
+		activeManager = manager
+		await manager.connectToDevo("devo://stdio")
+		manager.getProjectClient(directory)
+		const stream = streamFor(directory)
+		const totals = sessionUsageFromProtocol({ totalTokens: 350, inputTokens: 300, outputTokens: 50, callCount: 2, meteredCallCount: 2, unreportedFields: [] })!
+		// The first event starts a frame. These subsequent events must retain
+		// their receive order even though only occupancy is coalesced.
+		stream.push({ type: "session.status", properties: { sessionId, status: { type: "busy" } } })
+		stream.push({ type: "context.usage.updated", properties: { sessionId, occupancy: { totalTokens: 100, contextWindowTokens: 1000 } } })
+		stream.push({ type: "context.tokens.updated", properties: { sessionId, used: 230, size: 1000, sessionTotals: totals } })
+		stream.push({ type: "session.usage.updated", properties: { sessionId, usage: totals } })
+		await Bun.sleep(30)
+		expect(appStore.get(sessionNativeFamily(sessionId)).usage?.used).toBe(230)
+		expect(appStore.get(sessionNativeFamily(sessionId)).cumulativeUsage?.totalTokens).toBe(350)
+		// Replacing a coalesced occupancy must move it to its latest position,
+		// not retain the position of the event it replaces.
+		stream.push({ type: "session.status", properties: { sessionId, status: { type: "busy" } } })
+		stream.push({ type: "context.usage.updated", properties: { sessionId, occupancy: { totalTokens: 100, contextWindowTokens: 1000 } } })
+		stream.push({ type: "context.tokens.updated", properties: { sessionId, used: 250, size: 1000, sessionTotals: totals } })
+		stream.push({ type: "context.usage.updated", properties: { sessionId, occupancy: { totalTokens: 300, contextWindowTokens: 1000 } } })
+		await Bun.sleep(30)
+		expect(appStore.get(sessionNativeFamily(sessionId)).usage?.used).toBe(300)
 	})
 
 	test("an early folder read does not leave pagination loading before connection", async () => {

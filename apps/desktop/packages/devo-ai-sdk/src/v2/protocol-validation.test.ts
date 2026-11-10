@@ -325,3 +325,25 @@ describe("desktop protocol runtime validation", () => {
 		expect(dropped).toEqual([])
 	})
 })
+
+test("atomic keptQueued validates nested host origin without dropping it", () => {
+	const payload = {
+		outcome: "keptQueued",
+		entry: {
+			queueItemId: "host-queue", position: 1, preview: "Host notice", enqueuedAt: "2026-11-09T00:00:00Z",
+			input: [{ type: "text", text: "Host notice" }], recoveryRequired: true,
+			origin: { eventId: "host-event", source: "agent", sender: "child", delivery: "followUp" },
+		},
+	}
+	expect(assertValidProtocolPayload({ direction: "incomingResult", method: "session/queue/steer", payload })).toEqual(payload)
+	for (const origin of [
+		{ ...payload.entry.origin, source: "human" },
+		{ ...payload.entry.origin, eventId: 123 },
+		{ source: "agent", sender: "child", delivery: "followUp" },
+	]) {
+		expect(() => assertValidProtocolPayload({
+			direction: "incomingResult", method: "session/queue/steer",
+			payload: { ...payload, entry: { ...payload.entry, origin } },
+		})).toThrow(ProtocolValidationError)
+	}
+})

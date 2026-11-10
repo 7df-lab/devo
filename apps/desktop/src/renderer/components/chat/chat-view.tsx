@@ -1,3 +1,5 @@
+import { latestEditableUserTurnIndex as findLatestEditableUserTurnIndex } from "../../atoms/derived/session-chat"
+import { useSessionHistoryShortcuts } from "../../hooks/use-session-history-shortcuts"
 import { useTurnRecovery } from "../../hooks/use-turn-recovery"
 import { TurnRecoveryPanel } from "./turn-recovery-panel"
 import {
@@ -117,7 +119,7 @@ import { ComposerSubmitControls } from "./composer-submit-controls"
 import { ChatPermissionFlow } from "./chat-permission"
 import { ChatQuestionFlow } from "./chat-question"
 import { isAssistantItemError } from "./assistant-item-error"
-import { ChatTurnComponent, isSyntheticMessage } from "./chat-turn"
+import { ChatTurnComponent } from "./chat-turn"
 import { ForkBoundaryDivider } from "./fork-boundary-divider"
 import { forkBoundaryAfterTurnIndex } from "./fork-boundary"
 import { ChatLoadingSkeleton } from "./chat-turn-skeleton"
@@ -1000,37 +1002,7 @@ export function ChatView({
 		[onDeny],
 	)
 
-	// Keyboard shortcuts for undo/redo
-	useEffect(() => {
-		const handleKeyDown = (e: KeyboardEvent) => {
-			// Don't intercept Cmd/Ctrl+Z in any text input — let the browser
-			// handle native undo/redo. Session undo/redo is still available via
-			// /undo, /redo slash commands and the command palette.
-			const target = e.target as HTMLElement
-			if (target.tagName === "INPUT" || target.tagName === "TEXTAREA") return
-
-			// Cmd+Z / Ctrl+Z — Undo
-			if ((e.metaKey || e.ctrlKey) && e.key === "z" && !e.shiftKey) {
-				if (canUndo && onUndo) {
-					e.preventDefault()
-					onUndo()
-				}
-				return
-			}
-
-			// Cmd+Shift+Z / Ctrl+Shift+Z — Redo
-			if ((e.metaKey || e.ctrlKey) && e.key === "z" && e.shiftKey) {
-				if (canRedo && onRedo) {
-					e.preventDefault()
-					onRedo()
-				}
-				return
-			}
-		}
-
-		document.addEventListener("keydown", handleKeyDown)
-		return () => document.removeEventListener("keydown", handleKeyDown)
-	}, [canUndo, canRedo, onUndo, onRedo])
+	useSessionHistoryShortcuts({ isActive, canUndo, canRedo, onUndo, onRedo })
 
 	// Width constraint class: remove max-w when review panel is open
 	const contentWidthClass = reviewPanelOpen
@@ -1048,12 +1020,10 @@ export function ChatView({
 		)
 		return filtered.length === providerErrors.length ? providerErrors : filtered
 	}, [providerErrors, turns])
-	const latestEditableUserTurnIndex = useMemo(() => {
-		for (let index = turns.length - 1; index >= 0; index--) {
-			if (!isSyntheticMessage(turns[index].userMessage)) return index
-		}
-		return -1
-	}, [turns])
+	const latestEditableUserTurnIndex = useMemo(
+		() => findLatestEditableUserTurnIndex(turns),
+		[turns],
+	)
 
 	const forkBoundaryAfterIndex = useMemo(
 		() =>
@@ -1346,6 +1316,7 @@ export function ChatInputSection({
 		draggingId: draggingQueueItemId,
 		setDraggingId: setDraggingQueueItemId,
 		steerQueueItem,
+		retryQueueItem,
 		removeQueueItem,
 		editQueueItem,
 		reorderQueueItem,
@@ -2359,6 +2330,7 @@ export function ChatInputSection({
 										onPauseGoal={handlePauseGoal}
 										onResumeGoal={handleResumeGoal}
 										onClearGoal={handleClearGoal}
+										onRetryQueueItem={retryQueueItem}
 										onSteerQueueItem={steerQueueItem}
 										onEditQueueItem={handleEditQueueItem}
 										onRemoveQueueItem={removeQueueItem}
@@ -2414,6 +2386,7 @@ export function ChatInputSection({
 										</PromptInputTools>
 										<div className="ml-auto flex min-w-0 items-center gap-0.5">
 											<PromptToolbar
+												directory={agent.directory}
 												agents={devoAgents ?? []}
 												selectedAgent={selectedAgent}
 												defaultAgent={config?.defaultAgent}

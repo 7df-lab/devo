@@ -43,6 +43,18 @@ struct ScheduleOutboxFile {
 }
 
 impl ScheduleStore {
+    pub(super) fn pending_job_times_unlocked(
+        &self,
+    ) -> Result<std::collections::HashMap<String, DateTime<Utc>>> {
+        let mut jobs = std::collections::HashMap::new();
+        for occurrence in self.read_outbox_unlocked()?.occurrences {
+            jobs.entry(occurrence.job.job_id.as_str().to_string())
+                .and_modify(|at: &mut DateTime<Utc>| *at = (*at).min(occurrence.scheduled_at))
+                .or_insert(occurrence.scheduled_at);
+        }
+        Ok(jobs)
+    }
+
     pub(crate) fn claim_due_with_outbox(&self, now: DateTime<Utc>) -> Result<Vec<ScheduleJob>> {
         self.claim_due_inner(now, DueClaimMode::WithOutbox)
     }
@@ -338,6 +350,40 @@ mod tests {
             .expect("read reconciled outbox");
         assert_eq!(occurrences.len(), 1);
         assert_eq!(occurrences[0], occurrence);
+    }
+
+    #[test]
+    fn restart_keeps_interval_phase_and_bounds_pending_delivery() {
+        let (dir, store, scheduled_at) = store_with_due_job();
+        let late = scheduled_at + Duration::minutes(17);
+        let due = store
+            .claim_due_with_outbox(late)
+            .expect("coalesce missed slots");
+        assert_eq!(
+            due[0].next_run_at,
+            Some(scheduled_at + Duration::minutes(20))
+        );
+        drop(store);
+        let reopened = ScheduleStore::new(dir.path());
+        assert!(
+            reopened
+                .claim_due_with_outbox(late + Duration::hours(24))
+                .expect("blocked delivery")
+                .is_empty()
+        );
+        let pending = reopened.pending_occurrences(late).expect("pending");
+        assert_eq!(pending.len(), 1);
+        reopened
+            .acknowledge_occurrence(&pending[0].occurrence_id)
+            .expect("acknowledge");
+        let due = reopened
+            .claim_due_with_outbox(late + Duration::hours(24))
+            .expect("coalesce after acknowledgement");
+        assert_eq!(due.len(), 1);
+        assert_eq!(
+            due[0].next_run_at,
+            Some(scheduled_at + Duration::hours(24) + Duration::minutes(20))
+        );
     }
 
     #[test]

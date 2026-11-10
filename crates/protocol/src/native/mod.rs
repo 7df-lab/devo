@@ -16,6 +16,7 @@ pub use ids::{
     EventId, GoalId, ItemId, JobId, OpaqueId, QueueItemId, RestorePlanId, RunId, SessionId,
     SubscriptionId, TurnId,
 };
+pub mod host_message;
 pub mod item;
 pub mod methods;
 pub mod model;

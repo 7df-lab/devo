@@ -326,7 +326,9 @@ fn acp_update_from_native_item_completed(
 ) -> Option<AcpSessionUpdate> {
     use crate::native::item::{Item, UserInput};
     match native {
-        Item::UserMessage { content, .. } => {
+        Item::UserMessage {
+            content, origin, ..
+        } => {
             let text = content
                 .iter()
                 .filter_map(|part| match part {
@@ -335,6 +337,20 @@ fn acp_update_from_native_item_completed(
                 })
                 .collect::<Vec<_>>()
                 .join("\n");
+            let (text, meta) = match origin {
+                Some(origin) => {
+                    let mut meta = meta.unwrap_or_default();
+                    meta.insert(
+                        super::DEVO_HOST_MESSAGE_ORIGIN_META.to_string(),
+                        serde_json::json!(origin),
+                    );
+                    (
+                        crate::native::host_message::render(origin, &text),
+                        Some(meta),
+                    )
+                }
+                None => (text, meta),
+            };
             Some(AcpSessionUpdate::UserMessageChunk {
                 content: AcpContentBlock::text(text),
                 message_id: Some(envelope.id.as_str().to_string()),

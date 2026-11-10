@@ -63,6 +63,17 @@ const entry = {
 }
 class QueueTransport implements DevoNativeTransport {
 	requests: Array<{ method: string; params: unknown }> = []
+	failSteer = false
+	keptQueued = false
+	keptEntry: typeof entry & { recoveryRequired?: boolean } = { ...entry, recoveryRequired: true }
+	retried = false
+	held = false
+	steerGate?: Promise<void>
+	failList = false
+	listGate?: Promise<void>
+	onList?: () => void
+	mutationGate?: Promise<void>
+	onMutation?: () => void
 	listener?: (event: DevoNativeTransportEvent) => void
 	async request(method: string, params?: unknown): Promise<unknown> {
 		this.requests.push({ method, params })
@@ -71,7 +82,23 @@ class QueueTransport implements DevoNativeTransport {
 			case "session/new": return { session: nativeSession }
 			case "subscription/create": return { subscriptionId: "sub-1", cursors: [] }
 			case "subscription/ack": return { serverTimeMs: 1 }
-			case "session/queue/list": return { entries: [entry] }
+			case "session/queue/list": {
+				if (this.failList) throw new Error("Queue refresh unavailable")
+				const entries = [{ ...entry, ...(this.held ? { recoveryRequired: true } : {}), queueItemId: this.retried ? "queue-fresh" : entry.queueItemId }]
+				this.onList?.()
+				await this.listGate
+				return { entries }
+			}
+			case "session/queue/update":
+			case "session/queue/push":
+				this.onMutation?.()
+				await this.mutationGate
+				return method === "session/queue/push" ? { outcome: "queued", entry } : { entry }
+			case "session/queue/steer":
+				await this.steerGate
+				if (this.failSteer) throw new Error("Unsupported or response lost")
+				return this.keptQueued ? { outcome: "keptQueued", entry: this.keptEntry } : { outcome: "accepted", queueItemId: entry.queueItemId, turnId: "turn-1" }
+			case "session/queue/retry": this.retried = true; return {}
 			case "turn/steer": return { outcome: "injected", itemId: "steered-1" }
 			default: throw new Error(`Unexpected method: ${method}`)
 		}
@@ -83,54 +110,211 @@ class QueueTransport implements DevoNativeTransport {
 	}
 	connected() { return true }
 }
-async function setup() {
+async function setup(active = true) {
 	const transport = new QueueTransport()
 	const client = createDevoClient({ directory: "/repo", transport })
 	await client.session.create()
-	transport.listener?.({ type: "notification", method: "turn/started", params: { turn: nativeTurnInProgress } })
+	if (active) transport.listener?.({ type: "notification", method: "turn/started", params: { turn: nativeTurnInProgress } })
 	return { client, transport }
 }
 
 describe("Native queued steering", () => {
-	test("queue list and steer preserve every Native input field", async () => {
-		const { client, transport } = await setup()
-		try {
-			expect((await client.session.queue.list({ sessionId: nativeSession.id })).data.entries).toEqual([entry])
-			await client.session.steer({ sessionId: nativeSession.id, queueItemId: entry.queueItemId })
-			expect(transport.requests.filter(({ method }) => method === "turn/steer")).toEqual([{
-				method: "turn/steer",
-				params: {
-					sessionId: nativeSession.id,
-					expectedTurnId: nativeTurnInProgress.id,
-					input: queuedInput,
-					idempotencyKey: expect.any(String),
-				},
-			}])
-		} finally { client.dispose() }
-	})
-
-	test("steering uses the latest queue notification instead of an earlier preview", async () => {
+	test("steers atomically by identity without resubmitting Native attachments", async () => {
 		const { client, transport } = await setup()
 		try {
 			await client.session.queue.list({ sessionId: nativeSession.id })
-			const updated = { ...entry, input: [{ type: "skill", name: "updated-skill" }] }
-			transport.listener?.({ type: "notification", method: "queue/updated", params: {
-				sessionId: nativeSession.id, change: "updated", queueItemId: entry.queueItemId, queue: [updated],
-			} })
-			await client.session.steer({ sessionId: nativeSession.id, queueItemId: entry.queueItemId })
-			expect(transport.requests.find(({ method }) => method === "turn/steer")?.params).toEqual({
-				sessionId: nativeSession.id, expectedTurnId: nativeTurnInProgress.id,
-				input: updated.input, idempotencyKey: expect.any(String),
-			})
+			const params = { sessionId: nativeSession.id, queueItemId: entry.queueItemId, expectedTurnId: "turn-1" }
+			expect((await client.session.queue.steer(params)).data).toEqual({ outcome: "accepted", queueItemId: "queue-1", turnId: "turn-1" })
+			await client.session.queue.steer(params)
+			expect(transport.requests.filter(({ method }) => method.includes("steer") || method.includes("remove"))).toEqual([
+				{ method: "session/queue/steer", params }, { method: "session/queue/steer", params },
+			])
 		} finally { client.dispose() }
 	})
 
-	test("a missing queue entry fails before sending or deleting anything", async () => {
+	test("empty caches and a fresh client do not prevent receipt retries", async () => {
+		for (let attempt = 0; attempt < 2; attempt++) {
+			const { client, transport } = await setup()
+			try {
+				await client.session.steer({ sessionId: nativeSession.id, queueItemId: "queue-1" })
+				expect(transport.requests.find(({ method }) => method === "session/queue/steer")).toEqual({ method: "session/queue/steer", params: { sessionId: nativeSession.id, queueItemId: "queue-1", expectedTurnId: "turn-1" } })
+			} finally { client.dispose() }
+		}
+	})
+
+	test("receipt recovery works without an active turn cache", async () => {
+		const { client, transport } = await setup(false)
+		try {
+			await client.session.steer({ sessionId: nativeSession.id, queueItemId: "queue-1" })
+			expect(transport.requests.find(({ method }) => method === "session/queue/steer")).toEqual({ method: "session/queue/steer", params: { sessionId: nativeSession.id, queueItemId: "queue-1", expectedTurnId: "" } })
+		} finally { client.dispose() }
+	})
+
+	test("a delayed accepted response cannot erase a newer held notification", async () => {
+		const { client, transport } = await setup()
+		const { stream } = await client.event.subscribe()
+		try {
+			let release!: () => void
+			transport.steerGate = new Promise((resolve) => { release = resolve })
+			const pending = client.session.queue.steer({ sessionId: nativeSession.id, queueItemId: "queue-1", expectedTurnId: "turn-1" })
+			transport.held = true
+			const held = { ...entry, recoveryRequired: true }
+			transport.listener?.({ type: "notification", method: "queue/updated", params: {
+				sessionId: nativeSession.id, change: "updated", queueItemId: entry.queueItemId, queue: [held],
+			} })
+			release()
+			await pending
+			client.dispose()
+			const queues = []
+			for await (const event of stream) {
+				if (event.payload.type === "session.queue.updated") queues.push(event.payload.properties.entries)
+			}
+			expect(queues).toEqual([[held], [held]])
+		} finally { client.dispose() }
+	})
+
+	test("an old acceptance receipt preserves held input when refresh fails", async () => {
+		const { client, transport } = await setup(false)
+		const { stream } = await client.event.subscribe()
+		try {
+			transport.held = true
+			const held = { ...entry, recoveryRequired: true }
+			await client.session.queue.list({ sessionId: nativeSession.id })
+			transport.failList = true
+			expect((await client.session.steer({ sessionId: nativeSession.id, queueItemId: "queue-1" })).data.outcome).toBe("accepted")
+			client.dispose()
+			const queues = []
+			for await (const event of stream) {
+				if (event.payload.type === "session.queue.updated") queues.push(event.payload.properties.entries)
+			}
+			expect(queues).toEqual([[held]])
+			expect(transport.requests.filter(({ method }) => method === "session/queue/list").length).toBe(2)
+		} finally { client.dispose() }
+	})
+
+	test("a stale keptQueued response cannot downgrade a newer held notification", async () => {
+		const { client, transport } = await setup()
+		const { stream } = await client.event.subscribe()
+		try {
+			let release!: () => void
+			transport.keptQueued = true
+			transport.keptEntry = entry
+			transport.steerGate = new Promise((resolve) => { release = resolve })
+			const pending = client.session.queue.steer({ sessionId: nativeSession.id, queueItemId: "queue-1", expectedTurnId: "stale" })
+			transport.held = true
+			const held = { ...entry, recoveryRequired: true }
+			transport.listener?.({ type: "notification", method: "queue/updated", params: {
+				sessionId: nativeSession.id, change: "updated", queueItemId: entry.queueItemId, queue: [held],
+			} })
+			release()
+			await pending
+			client.dispose()
+			const queues = []
+			for await (const event of stream) {
+				if (event.payload.type === "session.queue.updated") queues.push(event.payload.properties.entries)
+			}
+			expect(queues).toEqual([[held], [held]])
+		} finally { client.dispose() }
+	})
+
+	test("a delayed list response remains available to its caller without hiding a newer held notification", async () => {
+		const { client, transport } = await setup()
+		const { stream } = await client.event.subscribe()
+		try {
+			let release!: () => void
+			transport.listGate = new Promise((resolve) => { release = resolve })
+			const started = new Promise<void>((resolve) => { transport.onList = resolve })
+			const pending = client.session.queue.list({ sessionId: nativeSession.id })
+			await started
+			const held = { ...entry, recoveryRequired: true }
+			transport.listener?.({ type: "notification", method: "queue/updated", params: {
+				sessionId: nativeSession.id, change: "updated", queueItemId: entry.queueItemId, queue: [held],
+			} })
+			release()
+			expect((await pending).data.entries).toEqual([entry])
+			client.dispose()
+			const queues = []
+			for await (const event of stream) {
+				if (event.payload.type === "session.queue.updated") queues.push(event.payload.properties.entries)
+			}
+			expect(queues).toEqual([[held]])
+		} finally { client.dispose() }
+	})
+
+	test("an older list cannot overwrite a newer completed list", async () => {
+		const { client, transport } = await setup()
+		const { stream } = await client.event.subscribe()
+		try {
+			let release!: () => void
+			transport.listGate = new Promise((resolve) => { release = resolve })
+			const started = new Promise<void>((resolve) => { transport.onList = resolve })
+			const older = client.session.queue.list({ sessionId: nativeSession.id })
+			await started
+			transport.listGate = undefined
+			transport.held = true
+			await client.session.queue.list({ sessionId: nativeSession.id })
+			release()
+			expect((await older).data.entries).toEqual([entry])
+			client.dispose()
+			const queues = []
+			for await (const event of stream) {
+				if (event.payload.type === "session.queue.updated") queues.push(event.payload.properties.entries)
+			}
+			expect(queues).toEqual([[{ ...entry, recoveryRequired: true }]])
+		} finally { client.dispose() }
+	})
+
+	for (const operation of ["update", "push"] as const) {
+		for (const change of ["promoted", "drained", "removed", "updated"] as const) {
+			test(`a delayed queue ${operation} response preserves newer ${change} state`, async () => {
+				const { client, transport } = await setup()
+				const { stream } = await client.event.subscribe()
+				try {
+					let release!: () => void
+					transport.mutationGate = new Promise((resolve) => { release = resolve })
+					const started = new Promise<void>((resolve) => { transport.onMutation = resolve })
+					const pending = operation === "update"
+						? client.session.queue.update({ sessionId: nativeSession.id, queueItemId: "queue-1", parts: [{ type: "text", text: "edited" }] })
+						: client.session.queue.push({ sessionId: nativeSession.id, parts: [{ type: "text", text: "queued" }] })
+					await started
+					const authoritative = change === "updated" ? [{ ...entry, recoveryRequired: true }] : []
+					transport.listener?.({ type: "notification", method: "queue/updated", params: {
+						sessionId: nativeSession.id, change, queueItemId: entry.queueItemId, queue: authoritative,
+					} })
+					release()
+					expect((await pending).data).toEqual(operation === "update" ? { entry } : { outcome: "queued", queueItemId: entry.queueItemId })
+					client.dispose()
+					const queues = []
+					for await (const event of stream) {
+						if (event.payload.type === "session.queue.updated") queues.push(event.payload.properties.entries)
+					}
+					expect(queues).toEqual([authoritative])
+				} finally { client.dispose() }
+			})
+		}
+	}
+
+	test("unsupported or lost responses never fall back to raw steer or removal", async () => {
 		const { client, transport } = await setup()
 		try {
-			await expect(client.session.steer({ sessionId: nativeSession.id, queueItemId: "missing" }))
-				.rejects.toThrow("Queued message is no longer available to steer")
+			transport.failSteer = true
+			const params = { sessionId: nativeSession.id, queueItemId: "queue-1", expectedTurnId: "turn-1" }
+			await expect(client.session.queue.steer(params)).rejects.toThrow()
+			transport.failSteer = false
+			await client.session.queue.steer(params)
 			expect(transport.requests.filter(({ method }) => method === "turn/steer" || method === "session/queue/remove")).toEqual([])
+		} finally { client.dispose() }
+	})
+
+	test("keptQueued preserves recovery state and explicit retry uses a fresh identity", async () => {
+		const { client, transport } = await setup()
+		try {
+			transport.keptQueued = true
+			const result = await client.session.queue.steer({ sessionId: nativeSession.id, queueItemId: "queue-1", expectedTurnId: "stale-turn" })
+			expect(result.data).toEqual({ outcome: "keptQueued", entry: { ...entry, recoveryRequired: true } })
+			await client.session.queue.retry({ sessionId: nativeSession.id, queueItemId: "queue-1" })
+			expect((await client.session.queue.list({ sessionId: nativeSession.id })).data.entries[0].queueItemId).toBe("queue-fresh")
+			expect(transport.requests.find(({ method }) => method === "session/queue/retry")).toEqual({ method: "session/queue/retry", params: { sessionId: nativeSession.id, queueItemId: "queue-1" } })
 		} finally { client.dispose() }
 	})
 
@@ -144,4 +328,16 @@ describe("Native queued steering", () => {
 			})
 		} finally { client.dispose() }
 	})
+})
+
+
+test("queue recovery preserves host provenance and complete Native input together", async () => {
+ const { client, transport } = await setup()
+ try {
+  const origin = { eventId: "host-event", source: "agent" as const, sender: "child", delivery: "followUp" as const }
+  transport.keptQueued = true
+  transport.keptEntry = { ...entry, recoveryRequired: true, ...{ origin } }
+  const result = await client.session.queue.steer({ sessionId: nativeSession.id, queueItemId: entry.queueItemId, expectedTurnId: "stale" })
+  expect(result.data).toEqual({ outcome: "keptQueued", entry: { ...entry, recoveryRequired: true, origin } })
+ } finally { client.dispose() }
 })

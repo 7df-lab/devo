@@ -50,6 +50,8 @@ pub const DEVO_ITEM_ID_META: &str = "devo/itemId";
 pub const DEVO_ACTIVITY_AT_META: &str = "devo/activityAt";
 pub const DEVO_HISTORY_INDEX_META: &str = "devo/historyIndex";
 pub const DEVO_PARENT_MESSAGE_ID_META: &str = "devo/parentMessageId";
+/// Structured host provenance on otherwise compatible ACP message chunks.
+pub const DEVO_HOST_MESSAGE_ORIGIN_META: &str = "devo/hostMessageOrigin";
 pub const DEVO_ITEM_KIND_META: &str = "devo/itemKind";
 pub const DEVO_TURN_USAGE_META: &str = "devo/turnUsage";
 /// Top-level `_meta` object key that carries devo extension capabilities as
@@ -929,6 +931,7 @@ mod tests {
             turn_id,
             usage: crate::native::usage::TurnUsage {
                 query: crate::native::usage::UsageTotals {
+                    unreported_fields: None,
                     total_tokens: 7,
                     input_tokens: 3,
                     output_tokens: 4,
@@ -942,6 +945,7 @@ mod tests {
                     estimated_cost: None,
                 },
                 overhead: crate::native::usage::UsageTotals {
+                    unreported_fields: None,
                     total_tokens: 0,
                     input_tokens: 0,
                     output_tokens: 0,
@@ -957,6 +961,7 @@ mod tests {
             },
             last_query_input_tokens: 3,
             session_totals: Some(crate::native::usage::UsageTotals {
+                unreported_fields: None,
                 total_tokens: 42,
                 input_tokens: 30,
                 output_tokens: 12,

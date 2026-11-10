@@ -3,7 +3,8 @@ import { Window } from "happy-dom"
 import { createStore, Provider } from "jotai"
 import { act } from "react"
 import { createRoot, type Root } from "react-dom/client"
-import { sessionQueueFamily } from "../atoms/queue"
+import { sessionActiveTurnFamily, sessionQueueFamily } from "../atoms/queue"
+import { ComposerStatusStack } from "../components/chat/composer-status-stack"
 import type { QueueWireEntry } from "../lib/queue-helpers"
 
 const dom = new Window({ url: "http://localhost" })
@@ -17,17 +18,20 @@ Object.assign(globalThis, {
 const list = mock(async (_params: unknown) => ({ data: { entries: [] } }))
 const update = mock(async (_params: unknown) => ({}))
 const remove = mock(async (_params: unknown) => ({}))
-const steer = mock(async (_params: unknown) => ({}))
+const accepted = { data: { outcome: "accepted" } }
+const steer = mock(async (_params: unknown) => accepted)
+const retry = mock(async (_params: unknown) => ({}))
 mock.module("../services/connection-manager", () => ({
-	getProjectClient: () => ({ session: { queue: { list, update, remove }, steer } }),
+	getProjectClient: () => ({ session: { queue: { list, update, remove, steer, retry } } }),
 }))
 const { useComposerQueue } = await import("./use-composer-queue")
 let queue: ReturnType<typeof useComposerQueue>
 let root: Root
+let container: HTMLElement
 let store: ReturnType<typeof createStore>
 function Harness({ sessionId }: { sessionId: string }) {
 	queue = useComposerQueue(sessionId, "/repo")
-	return null
+	return <ComposerStatusStack queueItems={queue.queueItems} onRetryQueueItem={queue.retryQueueItem} onRemoveQueueItem={queue.removeQueueItem} onEditQueueItem={queue.editQueueItem} onSteerQueueItem={queue.steerQueueItem} />
 }
 const entries: QueueWireEntry[] = ["first", "second", "third"].map((text, index) => ({
 	queueItemId: `queue-${index + 1}`,
@@ -37,9 +41,11 @@ const entries: QueueWireEntry[] = ["first", "second", "third"].map((text, index)
 }))
 async function mount(input = entries) {
 	store = createStore()
+	store.set(sessionActiveTurnFamily("session-1"), "turn-1")
 	store.set(sessionQueueFamily("session-1"), input)
 	store.set(sessionQueueFamily("session-2"), input)
-	root = createRoot(dom.document.createElement("div") as unknown as HTMLElement)
+	container = dom.document.createElement("div") as unknown as HTMLElement
+	root = createRoot(container)
 	await navigate("session-1")
 }
 async function navigate(sessionId: string) {
@@ -48,10 +54,10 @@ async function navigate(sessionId: string) {
 	})
 }
 beforeEach(() => {
-	for (const fn of [list, update, remove, steer]) fn.mockClear()
+	for (const fn of [list, update, remove, steer, retry]) fn.mockClear()
 	update.mockImplementation(async () => ({}))
 	remove.mockImplementation(async () => ({}))
-	steer.mockImplementation(async () => ({}))
+	steer.mockImplementation(async () => accepted)
 })
 afterEach(async () => { await act(async () => { root?.unmount() }) })
 afterAll(() => {
@@ -80,8 +86,8 @@ describe("composer queue actions", () => {
 		await mount([{ ...entries[0], input: [{ type: "image" }, { type: "skill" }] }])
 		await act(async () => { await queue.steerQueueItem(queue.queueItems[0]) })
 		expect([steer.mock.calls, remove.mock.calls]).toEqual([
-			[[{ sessionId: "session-1", queueItemId: "queue-1" }]],
-			[[{ sessionId: "session-1", queueItemId: "queue-1" }]],
+			[[{ sessionId: "session-1", queueItemId: "queue-1", expectedTurnId: "turn-1" }]],
+			[],
 		])
 	})
 
@@ -108,65 +114,85 @@ describe("composer queue actions", () => {
 		expect([queue.queueItems[0].canEdit, result, remove.mock.calls]).toEqual([false, null, []])
 	})
 
-	test("does not inject twice on repeated clicks or removal retry", async () => {
+	test("locks repeated clicks and retries the same identity after an uncertain response", async () => {
 		await mount()
-		let finishSteer!: () => void
-		steer.mockImplementationOnce(() => new Promise((resolve) => {
-			finishSteer = () => resolve({})
-		}))
-		remove.mockImplementationOnce(async () => { throw new Error("Remove unavailable") })
+		let fail!: () => void
+		steer.mockImplementationOnce(() => new Promise((_, reject) => { fail = () => reject(new Error("Response lost")) }))
 		const item = queue.queueItems[0]
 		await act(async () => {
-			const first = queue.steerQueueItem(item)
+			const pending = queue.steerQueueItem(item)
 			await queue.steerQueueItem(item)
-			finishSteer()
-			await first
+			fail()
+			await pending
 		})
-		expect([queue.queueItems[0].error, queue.queueItems[0].steered, queue.queueItems[0].canEdit]).toEqual([
-			"Remove unavailable", true, false,
-		])
+		expect(steer.mock.calls.length).toBe(1)
+		expect(queue.queueItems[0].error).toBe("Response lost")
 		await act(async () => { await queue.steerQueueItem(queue.queueItems[0]) })
-		expect([steer.mock.calls.length, remove.mock.calls.length, queue.queueItems[0].error]).toEqual([1, 2, undefined])
+		expect(steer.mock.calls[1]).toEqual(steer.mock.calls[0])
+		expect(remove.mock.calls).toEqual([])
 	})
 
-	test("retains the original queued message when steering fails", async () => {
+	test("scopes late failures to the original session across navigation", async () => {
 		await mount()
-		steer.mockImplementationOnce(async () => { throw new Error("Turn finished") })
-		await act(async () => { await queue.steerQueueItem(queue.queueItems[0]) })
-		expect([queue.queueItems[0].error, queue.queueItems[0].status, remove.mock.calls]).toEqual([
-			"Turn finished", "queued", [],
-		])
-	})
-
-	test("retains removal-only retry state when navigating away and back", async () => {
-		await mount()
-		remove.mockImplementationOnce(async () => { throw new Error("Remove unavailable") })
-		await act(async () => { await queue.steerQueueItem(queue.queueItems[0]) })
-		await navigate("session-2")
-		expect([queue.queueItems[0].steered, queue.queueItems[0].error]).toEqual([false, undefined])
-		await navigate("session-1")
-		expect([queue.queueItems[0].steered, queue.queueItems[0].error]).toEqual([true, "Remove unavailable"])
-		await act(async () => { await queue.steerQueueItem(queue.queueItems[0]) })
-		expect([steer.mock.calls.length, remove.mock.calls.length]).toEqual([1, 2])
-	})
-
-	test("finishes pending actions in their original session after navigation", async () => {
-		await mount()
-		let finishSteer!: () => void
-		steer.mockImplementationOnce(() => new Promise((resolve) => {
-			finishSteer = () => resolve({})
-		}))
-		remove.mockImplementationOnce(async () => { throw new Error("Remove unavailable") })
+		let fail!: () => void
+		steer.mockImplementationOnce(() => new Promise((_, reject) => { fail = () => reject(new Error("Offline")) }))
 		let pending!: Promise<void>
 		await act(async () => { pending = queue.steerQueueItem(queue.queueItems[0]) })
 		await navigate("session-2")
 		expect(queue.queueItems[0].status).toBe("queued")
-		await act(async () => { finishSteer(); await pending })
-		expect([queue.queueItems[0].steered, queue.queueItems[0].error]).toEqual([false, undefined])
+		await act(async () => { fail(); await pending })
+		expect(queue.queueItems[0].error).toBeUndefined()
 		await navigate("session-1")
-		expect([queue.queueItems[0].steered, queue.queueItems[0].error]).toEqual([true, "Remove unavailable"])
+		expect(queue.queueItems[0].error).toBe("Offline")
+	})
+
+	test("keeps stale-turn messages queued without a deletion", async () => {
+		await mount()
+		steer.mockImplementationOnce(async () => ({ data: { outcome: "keptQueued" } }))
 		await act(async () => { await queue.steerQueueItem(queue.queueItems[0]) })
-		expect([steer.mock.calls.length, remove.mock.calls.length]).toEqual([1, 2])
+		expect(queue.queueItems[0].error).toContain("still queued")
+		expect(remove.mock.calls).toEqual([])
+	})
+
+	test("held messages require explicit recovery and cannot steer, edit, or reorder", async () => {
+		await mount([{ ...entries[0], recoveryRequired: true }, entries[1], entries[2]])
+		const item = queue.queueItems[0]
+		await act(async () => {
+			await queue.steerQueueItem(item)
+			expect(await queue.editQueueItem(item)).toBeNull()
+			await queue.reorderQueueItem(item.id, "queue-2")
+			await queue.reorderQueueItem("queue-2", item.id)
+			await queue.reorderQueueItem("queue-2", "queue-3")
+		})
+		expect([steer.mock.calls, remove.mock.calls, update.mock.calls, retry.mock.calls]).toEqual([[], [], [], []])
+		await act(async () => { await queue.retryQueueItem(item) })
+		expect(retry.mock.calls).toEqual([[{ sessionId: "session-1", queueItemId: "queue-1" }]])
+		await act(async () => { await queue.removeQueueItem(item) })
+		expect(remove.mock.calls.length).toBe(1)
+	})
+
+	test("rendered Retry is explicit and locked while recovery is pending", async () => {
+		await mount([{ ...entries[0], recoveryRequired: true }])
+		expect(container.textContent).toContain("Prior effects may have occurred")
+		expect(retry.mock.calls).toEqual([])
+		let finish!: () => void
+		retry.mockImplementationOnce(() => new Promise((resolve) => { finish = () => resolve({}) }))
+		const button = [...container.querySelectorAll("button")].find((item) => item.textContent === "Retry")
+		if (!button) throw new Error("Recovery Retry button is missing")
+		await act(async () => { button.click(); button.click() })
+		expect(retry.mock.calls.length).toBe(1)
+		expect(button.disabled).toBe(true)
+		await act(async () => { finish() })
+		expect(button.disabled).toBe(false)
+	})
+
+	test("remount retries the same queue identity without removal", async () => {
+		await mount()
+		await act(async () => { await queue.steerQueueItem(queue.queueItems[0]); root.unmount() })
+		await mount()
+		await act(async () => { await queue.steerQueueItem(queue.queueItems[0]) })
+		expect(steer.mock.calls[1]).toEqual(steer.mock.calls[0])
+		expect(remove.mock.calls).toEqual([])
 	})
 
 	test("reports removal failure without rejecting a fire-and-forget click or restoring a draft", async () => {
@@ -187,4 +213,17 @@ describe("composer queue actions", () => {
 			"Reorder unavailable", "queued", 2,
 		])
 	})
+})
+
+
+test("host queue entries retain origin and cannot be edited or steered as human input", async () => {
+ const origin = { eventId: "host-event", source: "agent" as const, sender: "child", delivery: "followUp" as const }
+ await mount([{ ...entries[0]!, origin }])
+ expect(queue.queueItems[0]!.origin).toEqual(origin)
+ await act(async () => {
+  await queue.steerQueueItem(queue.queueItems[0]!)
+  expect(await queue.editQueueItem(queue.queueItems[0]!)).toBeNull()
+ })
+ expect(steer).not.toHaveBeenCalled()
+ expect(remove).not.toHaveBeenCalled()
 })

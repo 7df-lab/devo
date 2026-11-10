@@ -59,6 +59,7 @@ fn native_user_message_item_with_identity(
         content.push(UserInput::Text { text });
     }
     NativeItem::UserMessage {
+        origin: None,
         client_user_message_id,
         content,
         entry,
@@ -479,6 +480,7 @@ mod client_message_id_tests {
                 "schedule:job:occurrence-1".to_string(),
             ),
             NativeItem::UserMessage {
+                origin: None,
                 client_user_message_id: Some("schedule:job:occurrence-1".to_string()),
                 content: vec![UserInput::Text {
                     text: "hello".to_string(),
@@ -489,6 +491,7 @@ mod client_message_id_tests {
         assert_eq!(
             native_user_message_item("hello", &[], UserMessageEntry::TurnStart),
             NativeItem::UserMessage {
+                origin: None,
                 client_user_message_id: None,
                 content: vec![UserInput::Text {
                     text: "hello".to_string(),

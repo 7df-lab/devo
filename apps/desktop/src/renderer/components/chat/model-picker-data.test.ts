@@ -104,11 +104,11 @@ describe("desktop model directory", () => {
 				ready: model.ready,
 			})),
 		).toEqual([
-			{ value: "deepseek/flash", ready: true },
+			{ value: "deepseek/flash", ready: false },
 			{ value: "openai-codex/gpt-codex", ready: false },
 		])
 	})
-	test("merges remote models and recognizes credential-only providers", () => {
+	test("keeps remote and credential-only models as setup choices, never available routes", () => {
 		const directory: ModelDirectoryData = {
 			models: [
 				{
@@ -139,7 +139,7 @@ describe("desktop model directory", () => {
 				providerName: "DeepSeek",
 				modelID: "flash",
 				displayName: "Flash",
-				ready: true,
+				ready: false,
 			},
 			{
 				value: "openai-codex/gpt-codex",
@@ -148,7 +148,7 @@ describe("desktop model directory", () => {
 				providerName: "OpenAI Codex",
 				modelID: "gpt-codex",
 				displayName: "Coding model",
-				ready: true,
+				ready: false,
 			},
 			{
 				value: "openai-codex/remote-new",
@@ -160,7 +160,7 @@ describe("desktop model directory", () => {
 				providerName: "OpenAI Codex",
 				modelID: "remote-new",
 				displayName: "Remote New",
-				ready: true,
+				ready: false,
 			},
 		])
 	})

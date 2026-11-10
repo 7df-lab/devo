@@ -28,6 +28,7 @@ fn build_tree_keeps_sibling_branches() {
         "item_a",
         1,
         Item::UserMessage {
+            origin: None,
             client_user_message_id: None,
             content: vec![UserInput::Text {
                 text: "first".into(),
@@ -40,6 +41,7 @@ fn build_tree_keeps_sibling_branches() {
         "item_c",
         3,
         Item::UserMessage {
+            origin: None,
             client_user_message_id: None,
             content: vec![UserInput::Text {
                 text: "path A".into(),
@@ -51,6 +53,7 @@ fn build_tree_keeps_sibling_branches() {
         "item_d",
         4,
         Item::UserMessage {
+            origin: None,
             client_user_message_id: None,
             content: vec![UserInput::Text {
                 text: "path B".into(),

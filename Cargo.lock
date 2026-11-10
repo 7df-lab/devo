@@ -1399,6 +1399,7 @@ version = "0.2.16"
 dependencies = [
  "anyhow",
  "async-trait",
+ "chrono",
  "clap",
  "colored",
  "devo-arg0",
@@ -1414,11 +1415,13 @@ dependencies = [
  "devo-util-paths",
  "devo-windows-sandbox",
  "futures",
+ "libc",
  "pretty_assertions",
  "serde",
  "serde_json",
  "tempfile",
  "tokio",
+ "tokio-tungstenite",
  "toml",
  "tracing",
  "tracing-subscriber",
@@ -1456,6 +1459,7 @@ dependencies = [
  "tempfile",
  "thiserror 2.0.18",
  "toml",
+ "url",
 ]
 
 [[package]]

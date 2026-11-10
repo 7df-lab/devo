@@ -5,6 +5,8 @@
  * is projected inside this adapter (see native-to-pi/events.ts).
  */
 
+import { nativeCumulativeUsage, newerCumulativeUsage, unknownCumulativeUsage } from "./native-to-pi/usage.js";
+import type { CumulativeUsage } from "../lib/coding-agent/src/core/usage-display.js";
 import { ExplicitLoginModels } from "./explicit-login-models.js";
 import { ModelCatalogRefresh } from "./model-catalog-refresh.js";
 import { randomUUID } from "node:crypto";
@@ -64,6 +66,7 @@ import {
   applyGoalFromWire,
   countMessageStats,
   credentialSetParamsFromAuth,
+  hostMessagePrefix,
   mapMcpToExtensions,
   mapSkillSourceInfo,
   mapSkillsToResourceSkills,
@@ -252,6 +255,8 @@ export class NativeAgentConnection implements AgentConnection {
   private followUpMode: "all" | "one-at-a-time" = "all";
   private autoCompactionEnabled = true;
   private contextUsage: ReturnType<typeof occupancyToContextUsage> = emptyContextUsage();
+  private cumulativeUsage: CumulativeUsage | undefined;
+  private contextUsageRevision = 0;
   private contextUsageWindowSource: "bootstrap" | "model-switch" | "server" = "bootstrap";
   private permissionProfile: "default" | "autoReview" | "fullAccess" = "default";
   /** Explicit per-session auto-refine fields from the live session snapshot. */
@@ -409,6 +414,9 @@ export class NativeAgentConnection implements AgentConnection {
         "",
     );
     const appliesToActiveSession = !notificationSessionId || notificationSessionId === this.sessionId;
+    const reportedTotals = method === "turn/usage/updated" ? nativeCumulativeUsage(p.sessionTotals) : undefined;
+    const staleUsage = reportedTotals !== undefined &&
+      newerCumulativeUsage(this.cumulativeUsage, reportedTotals) === this.cumulativeUsage;
     // A delayed notification must not project an old session into the active UI; explicit watchers still receive it.
     if (notificationSessionId && !appliesToActiveSession) {
       this.fanoutWatchedSession(method, params);
@@ -609,7 +617,13 @@ export class NativeAgentConnection implements AgentConnection {
       if (this.subscriptionReplayDepth > 0 && ev.type === "agent_start") {
         continue;
       }
+      if (ev.type === "session_usage_update") {
+        this.cumulativeUsage = newerCumulativeUsage(this.cumulativeUsage, ev.cumulativeUsage as CumulativeUsage);
+        ev.cumulativeUsage = this.cumulativeUsage;
+      }
       if (ev.type === "context_usage_update") {
+        if (staleUsage) continue;
+        this.contextUsageRevision += 1;
         this.applyNativeContextUsage(
           ev.contextUsage as NonNullable<ReturnType<typeof occupancyToContextUsage>>,
           "notification",
@@ -678,6 +692,8 @@ export class NativeAgentConnection implements AgentConnection {
   }
 
   private applySessionSnapshot(session: Record<string, unknown>): void {
+    const usage = session.usage as { total?: unknown; legacy?: unknown } | undefined;
+    this.cumulativeUsage = newerCumulativeUsage(this.cumulativeUsage, nativeCumulativeUsage(usage?.total, usage?.legacy));
     if (session.id) {
       this.sessionId = String(session.id);
       this.activeSessionId = this.sessionId;
@@ -885,6 +901,7 @@ export class NativeAgentConnection implements AgentConnection {
       scopedModels: [],
       activeToolNames: ["ipython"],
       contextUsage: this.contextUsage as never,
+      cumulativeUsage: this.cumulativeUsage,
     };
   }
 
@@ -1029,8 +1046,9 @@ export class NativeAgentConnection implements AgentConnection {
   private async refreshContextUsage(sessionId: string | null = this.sessionId): Promise<void> {
     if (!sessionId) return;
     try {
+      const revision = this.contextUsageRevision;
       const result = (await this.rpc.request("context/usage/read", { sessionId })) as { occupancy?: unknown };
-      if (this.sessionId !== sessionId) return;
+      if (this.sessionId !== sessionId || revision !== this.contextUsageRevision) return;
       const next = occupancyToContextUsage(result?.occupancy);
       if (next) {
         this.applyNativeContextUsage(next, "snapshot");
@@ -1045,12 +1063,11 @@ export class NativeAgentConnection implements AgentConnection {
 
 
   private async refreshSessionSnapshot(): Promise<void> {
-    if (!this.sessionId) return;
+    const sessionId = this.sessionId;
+    if (!sessionId) return;
     try {
-      const result = (await this.rpc.request("session/read", {
-        sessionId: this.sessionId,
-      })) as { session?: Record<string, unknown> };
-      if (result?.session) this.applySessionSnapshot(result.session);
+      const result = (await this.rpc.request("session/read", { sessionId })) as { session?: Record<string, unknown> };
+      if (this.sessionId === sessionId && result?.session) this.applySessionSnapshot(result.session);
     } catch {
       // best-effort
     }
@@ -1462,45 +1479,23 @@ export class NativeAgentConnection implements AgentConnection {
   }
 
   async getSessionStats() {
-    await this.refreshContextUsage();
+    await Promise.all([this.refreshContextUsage(), this.refreshSessionSnapshot()]);
     const messages = (await this.getMessages()) as Array<{ role?: string; content?: unknown }>;
     const counts = countMessageStats(messages);
-    const usage = this.contextUsage as { tokens?: number } | undefined;
-    const tokensUsed = Number(usage?.tokens ?? 0);
+    const usage = this.cumulativeUsage ?? unknownCumulativeUsage();
     return {
       sessionFile: this.sessionRolloutPath(),
       sessionId: this.sessionId ?? "",
       ...counts,
-      tokens: {
-        input: tokensUsed,
-        output: 0,
-        cacheRead: 0,
-        cacheWrite: 0,
-        total: tokensUsed,
-      },
-      cost: 0,
+      tokens: usage.tokens,
+      cost: usage.cost,
+      cumulativeUsage: usage,
       contextUsage: this.contextUsage,
     };
   }
 
   async getContextTree() {
-    await this.refreshContextUsage();
-    const zeroUsage = {
-      input: 0,
-      output: 0,
-      cacheRead: 0,
-      cacheWrite: 0,
-      totalTokens: 0,
-      cost: { input: 0, output: 0, cacheRead: 0, cacheWrite: 0, total: 0 },
-    };
-    const tokensUsed = Number(
-      (this.contextUsage as { tokens?: number } | undefined)?.tokens ?? 0,
-    );
-    const ownUsage = {
-      ...zeroUsage,
-      input: tokensUsed,
-      totalTokens: tokensUsed,
-    };
+    await Promise.all([this.refreshContextUsage(), this.refreshSessionSnapshot()]);
     const children = (await this.getRlmChildSnapshots()).map((child) => {
       const c = child as {
         id?: string;
@@ -1522,8 +1517,8 @@ export class NativeAgentConnection implements AgentConnection {
         id: String(c.id ?? "child"),
         label: String(c.label ?? c.id ?? "child"),
         status: status as ContextTreeNode["status"],
-        ownUsage: { ...zeroUsage },
-        totalUsage: { ...zeroUsage },
+        ownUsage: null,
+        totalUsage: null,
         children: [],
       };
     });
@@ -1534,8 +1529,11 @@ export class NativeAgentConnection implements AgentConnection {
       model: this.model
         ? { provider: this.model.provider, id: this.model.id }
         : undefined,
-      ownUsage,
-      totalUsage: { ...ownUsage },
+      // Native totals include descendants. Do not label them as own spend or
+      // fabricate per-child meters from transcript size.
+      ownUsage: null,
+      totalUsage: null,
+      cumulativeUsage: this.cumulativeUsage ?? unknownCumulativeUsage(),
       contextUsage: this.contextUsage,
       children,
     };
@@ -1647,25 +1645,10 @@ export class NativeAgentConnection implements AgentConnection {
       if (this.sessionId !== sessionId || this.disposed) return;
       const entries = Array.isArray(result?.entries) ? result.entries : [];
       this.queueEntries = parseQueueWireEntries(entries);
-      const followUp: string[] = [];
-      for (const entry of entries) {
-        if (!entry || typeof entry !== "object") continue;
-        const record = entry as Record<string, unknown>;
-        const preview = String(record.preview ?? "").trim();
-        if (preview) {
-          followUp.push(preview);
-          continue;
-        }
-        const input = Array.isArray(record.input) ? record.input : [];
-        const parts: string[] = [];
-        for (const part of input) {
-          if (!part || typeof part !== "object") continue;
-          const text = (part as { text?: unknown }).text;
-          if (text != null) parts.push(String(text));
-        }
-        const joined = parts.join("\n").trim();
-        if (joined) followUp.push(joined);
-      }
+      const followUp = entries
+        .filter((entry) => entry && typeof entry === "object")
+        .map((entry) => queuePreviewText(entry as QueueWireEntry))
+        .filter(Boolean);
       // Steering is turn-scoped and not listed on the durable queue.
       this.queue = { steering: [...this.queue.steering], followUp };
       this.syncActionsFromQueue();
@@ -1719,6 +1702,7 @@ export class NativeAgentConnection implements AgentConnection {
     }
     const entry = this.queueEntries[index];
     if (!entry || queuePreviewText(entry) !== expectedText) return "rejected" as const;
+    if (entry.origin && mutation.type !== "delete") return "rejected" as const;
     const sessionId = this.requireSessionId();
     try {
       if (mutation.type === "delete") {
@@ -1969,7 +1953,7 @@ export class NativeAgentConnection implements AgentConnection {
       const turnId = String(env.turnId ?? env.turn_id ?? "");
       if (!turnId || seenTurns.has(turnId)) continue;
       seenTurns.add(turnId);
-      out.push({ entryId: turnId, text: extractText(item.content) });
+      out.push({ entryId: turnId, text: hostMessagePrefix(item.origin) + extractText(item.content) });
     }
     return out;
   }
@@ -3023,7 +3007,7 @@ export class NativeAgentConnection implements AgentConnection {
     await this.abort();
   }
   async reload(): Promise<void> {
-    await this.getMessages();
+    await Promise.all([this.getMessages(), this.refreshSessionSnapshot(), this.refreshContextUsage()]);
   }
 
   async newSession(_options?: AgentConnectionNewSessionOptions) {
@@ -3032,7 +3016,7 @@ export class NativeAgentConnection implements AgentConnection {
     const result = (await this.rpc.request("session/new", {
       cwd: this.cwd,
       idempotencyKey: randomUUID(),
-    })) as { session?: { id?: string; title?: string; model?: unknown; settings?: unknown } };
+    })) as { session?: Record<string, unknown> };
 
     const session = result?.session;
     const id = String(session?.id ?? "");
@@ -3054,6 +3038,9 @@ export class NativeAgentConnection implements AgentConnection {
     // Fresh session has no occupancy yet — clear so the footer does not keep
     // the previous session's token % after /new.
     this.contextUsage = emptyContextUsage();
+    this.contextUsageRevision += 1;
+    const usage = session?.usage as { total?: unknown; legacy?: unknown } | undefined;
+    this.cumulativeUsage = nativeCumulativeUsage(usage?.total, usage?.legacy);
     this.contextUsageWindowSource = "bootstrap";
     this.ensureDefaultContextUsage();
 
@@ -3096,6 +3083,9 @@ export class NativeAgentConnection implements AgentConnection {
     this.streamState = createStreamState();
     this.isStreaming = false;
     this.expectedTurnId = null;
+    const usage = session.usage as { total?: unknown; legacy?: unknown } | undefined;
+    this.cumulativeUsage = nativeCumulativeUsage(usage?.total, usage?.legacy);
+    this.contextUsageRevision += 1;
     const resumedUsage = occupancyToContextUsage(resumed.lastContextOccupancy);
     this.contextUsage = (resumedUsage ?? emptyContextUsage()) as never;
     this.contextUsageWindowSource = resumedUsage && resumedUsage.contextWindow > 1 ? "server" : "bootstrap";

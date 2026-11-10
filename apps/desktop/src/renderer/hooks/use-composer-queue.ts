@@ -21,18 +21,18 @@ function wireEntryToComposerItem(
 	entry: QueueWireEntry,
 	action: QueueAction | null,
 	error?: string,
-	steered?: boolean,
 ): ComposerQueueItem {
 	return {
 		id: entry.queueItemId,
+		origin: entry.origin,
 		text: queueEntryText(entry),
 		status: action ?? "queued",
 		queuedInputId: entry.queueItemId,
 		fileCount: countQueueFileParts(entry) || undefined,
 		createdAtMs: entry.enqueuedAt ? Date.parse(entry.enqueuedAt) : undefined,
 		error,
-		canEdit: !steered && !entry.input?.some((part) => part.type !== "text"),
-		steered,
+		canEdit: !entry.recoveryRequired && !entry.input?.some((part) => part.type !== "text"),
+		recoveryRequired: entry.recoveryRequired,
 	}
 }
 
@@ -43,7 +43,6 @@ export function useComposerQueue(sessionId: string, directory: string | null) {
 	const [actionErrors, setActionErrors] = useState<Map<string, string>>(new Map())
 	const [draggingId, setDraggingId] = useState<string | null>(null)
 	const pendingIds = useRef(new Set<string>())
-	const steeredIds = useRef(new Set<string>())
 	const queueScope = JSON.stringify([directory, sessionId])
 
 	const refreshQueue = useCallback(async () => {
@@ -71,7 +70,6 @@ export function useComposerQueue(sessionId: string, directory: string | null) {
 				entry,
 				pendingActions.get(queueScope + entry.queueItemId) ?? null,
 				actionErrors.get(queueScope + entry.queueItemId),
-				steeredIds.current.has(queueScope + entry.queueItemId),
 			),
 		)
 	}, [actionErrors, entries, pendingActions, queueScope])
@@ -102,22 +100,20 @@ export function useComposerQueue(sessionId: string, directory: string | null) {
 
 	const steerQueueItem = useCallback(
 		async (item: ComposerQueueItem) => {
-			if (pendingIds.current.has(queueScope + item.id)) return
-			if (!directory || !clientSupportsQueue(directory)) return
+			if (item.recoveryRequired || pendingIds.current.has(queueScope + item.id)) return
+			if (item.origin || !directory || !clientSupportsQueue(directory)) return
 			const client = getProjectClient(directory)
-			if (!client?.session?.steer || !client?.session?.queue?.remove) return
+			if (!client?.session?.queue?.steer) {
+				setItemError(item.id, "Atomic queue steering is unavailable. Update the server to steer safely.")
+				return
+			}
 			setPending(item.id, "steering")
 			setItemError(item.id, null)
 			try {
-				if (!steeredIds.current.has(queueScope + item.id)) {
-					await client.session.steer({ sessionId, queueItemId: item.id })
-					// A retry after removal fails must not inject the same message twice.
-					steeredIds.current.add(queueScope + item.id)
+				const result = await client.session.queue.steer({ sessionId, queueItemId: item.id, expectedTurnId: activeTurnId ?? "" })
+				if (result.data.outcome === "keptQueued") {
+					setItemError(item.id, "The active turn cannot accept this message. Your message is still queued.")
 				}
-				await client.session.queue.remove({
-					sessionId: sessionId,
-					queueItemId: item.id,
-				})
 			} catch (err) {
 				const message = err instanceof Error ? err.message : "Steer failed"
 				setItemError(item.id, message)
@@ -126,8 +122,26 @@ export function useComposerQueue(sessionId: string, directory: string | null) {
 				setPending(item.id, null)
 			}
 		},
-		[directory, sessionId, queueScope, setItemError, setPending],
+		[directory, sessionId, activeTurnId, queueScope, setItemError, setPending],
 	)
+
+	const retryQueueItem = useCallback(async (item: ComposerQueueItem) => {
+		if (!item.recoveryRequired || pendingIds.current.has(queueScope + item.id) || !directory) return
+		const client = getProjectClient(directory)
+		if (!client?.session?.queue?.retry) {
+			setItemError(item.id, "Queue recovery is unavailable. Update the server to retry safely.")
+			return
+		}
+		setPending(item.id, "submitting")
+		setItemError(item.id, null)
+		try {
+			await client.session.queue.retry({ sessionId, queueItemId: item.id })
+		} catch (err) {
+			setItemError(item.id, err instanceof Error ? err.message : "Retry failed")
+		} finally {
+			setPending(item.id, null)
+		}
+	}, [directory, sessionId, queueScope, setItemError, setPending])
 
 	const removeQueueItem = useCallback(
 		async (item: ComposerQueueItem) => {
@@ -157,8 +171,8 @@ export function useComposerQueue(sessionId: string, directory: string | null) {
 
 	const editQueueItem = useCallback(
 		async (item: ComposerQueueItem) => {
-			if (pendingIds.current.has(queueScope + item.id) || steeredIds.current.has(queueScope + item.id)) return null
-			if (item.canEdit === false || (item.fileCount ?? 0) > 0) return null
+			if (pendingIds.current.has(queueScope + item.id) || item.recoveryRequired) return null
+			if (item.origin || item.canEdit === false || (item.fileCount ?? 0) > 0) return null
 			const removed = await removeQueueItem(item)
 			return removed ? item.text : null
 		},
@@ -167,12 +181,12 @@ export function useComposerQueue(sessionId: string, directory: string | null) {
 
 	const reorderQueueItem = useCallback(
 		async (queueItemId: string, targetQueueItemId: string) => {
-			if (!directory || queueItemId === targetQueueItemId) return
+			if (!directory || queueItemId === targetQueueItemId || entries.some((entry) => entry.recoveryRequired)) return
 			const client = getProjectClient(directory)
 			if (!client?.session?.queue?.update) return
 			const item = entries.find((entry) => entry.queueItemId === queueItemId)
 			const toIndex = entries.findIndex((entry) => entry.queueItemId === targetQueueItemId)
-			if (!item || toIndex < 0 || pendingIds.current.has(queueScope + item.queueItemId)) return
+			if (!item || item.recoveryRequired || toIndex < 0 || entries[toIndex].recoveryRequired || pendingIds.current.has(queueScope + item.queueItemId)) return
 			setPending(item.queueItemId, "submitting")
 			setItemError(item.queueItemId, null)
 			try {
@@ -199,6 +213,7 @@ export function useComposerQueue(sessionId: string, directory: string | null) {
 		draggingId,
 		setDraggingId,
 		steerQueueItem,
+		retryQueueItem,
 		removeQueueItem,
 		editQueueItem,
 		reorderQueueItem,

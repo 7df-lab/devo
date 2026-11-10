@@ -311,6 +311,7 @@ mod tests {
             turn_id,
             usage: crate::native::usage::TurnUsage {
                 query: crate::native::usage::UsageTotals {
+                    unreported_fields: None,
                     total_tokens: 162,
                     input_tokens: 100,
                     output_tokens: 40,
@@ -324,6 +325,7 @@ mod tests {
                     estimated_cost: None,
                 },
                 overhead: crate::native::usage::UsageTotals {
+                    unreported_fields: None,
                     total_tokens: 0,
                     input_tokens: 0,
                     output_tokens: 0,
@@ -339,6 +341,7 @@ mod tests {
             },
             last_query_input_tokens: 96,
             session_totals: Some(crate::native::usage::UsageTotals {
+                unreported_fields: None,
                 total_tokens: 700,
                 input_tokens: 500,
                 output_tokens: 200,

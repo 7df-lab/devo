@@ -76,6 +76,7 @@ pub(crate) struct SessionResumeSnapshot {
 #[derive(Clone, Debug, PartialEq, Eq)]
 pub(crate) struct QueuedTurnInputData {
     pub(crate) queued_input_id: devo_core::QueueItemId,
+    pub(crate) host_origin: Option<devo_protocol::native::host_message::HostMessageOrigin>,
     pub(crate) client_user_message_id: Option<String>,
     pub(crate) display_input: String,
     pub(crate) input_text: String,

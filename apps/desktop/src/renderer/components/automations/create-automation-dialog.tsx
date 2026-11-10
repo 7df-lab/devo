@@ -453,7 +453,7 @@ export function CreateAutomationDialog({
 								</>
 							)}
 							<ModelSelector
-								providers={providers}
+								directory={directory}
 								effectiveModel={selectedModel}
 								hasOverride={selectedModel !== null}
 								onSelectModel={setSelectedModel}

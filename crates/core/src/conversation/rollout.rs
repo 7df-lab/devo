@@ -105,11 +105,11 @@ pub enum RolloutLine {
         #[serde(default, skip_serializing_if = "Option::is_none")]
         extras: Option<Box<SessionPersistenceExtras>>,
     },
-    /// Canonical turn metadata.
+    /// Canonical turn metadata, boxed to keep the envelope small (serde-transparent).
     Turn {
         v: u32,
         timestamp: DateTime<Utc>,
-        turn: Turn,
+        turn: Box<Turn>,
         /// Replay-only fields the canonical turn does not model.
         #[serde(default, skip_serializing_if = "Option::is_none")]
         extras: Option<Box<TurnPersistenceExtras>>,
@@ -396,6 +396,7 @@ mod tests {
                 updated_at: fixed_ts(),
                 state: ItemState::Completed,
                 item: Item::UserMessage {
+                    origin: None,
                     client_user_message_id: None,
                     content: vec![UserInput::Text {
                         text: "hello".into(),
