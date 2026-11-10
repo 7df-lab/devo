@@ -1,4 +1,4 @@
-import type { ModelRef, ProvidersData, ProviderCatalogData } from "../../hooks/use-devo-data"
+import type { ModelRef, ProviderCatalogData, ProvidersData } from "../../hooks/use-devo-data"
 import type { ModelDirectoryData } from "../../hooks/use-model-directory"
 
 export interface PickerModel {
@@ -18,10 +18,6 @@ export function buildPickerModels(
 	directory: ModelDirectoryData | null = null,
 ): PickerModel[] {
 	const models = new Map<string, PickerModel>()
-	const configured = new Set([
-		...(catalog?.connectedIds ?? []),
-		...(directory?.credentials.map((credential) => credential.provider) ?? []),
-	])
 	for (const provider of available?.providers ?? []) {
 		for (const [modelID, model] of Object.entries(provider.models)) {
 			const canonical = provider.id === "session" ? modelID : `${provider.id}/${modelID}`
@@ -58,7 +54,7 @@ export function buildPickerModels(
 			providerName: provider?.name ?? (providerID === "session" ? "Configured model" : providerID),
 			modelID: model.modelId ?? model.slug.slice(model.slug.indexOf("/") + 1),
 			displayName: model.displayName,
-			ready: providerID === "session" || configured.has(providerID),
+			ready: false,
 		})
 	}
 	for (const provider of catalog?.providers ?? []) {
@@ -74,7 +70,7 @@ export function buildPickerModels(
 				providerName: provider.name,
 				modelID,
 				displayName: model.name || modelID,
-				ready: configured.has(provider.id),
+				ready: false,
 			})
 		}
 	}
