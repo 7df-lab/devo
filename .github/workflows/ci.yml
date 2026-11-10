@@ -131,6 +131,7 @@ jobs:
       - run: bun install --frozen-lockfile
       - run: bun run test
       - run: bunx tsc --noEmit
+      - run: bun run build
 
   tui:
     needs: changes
