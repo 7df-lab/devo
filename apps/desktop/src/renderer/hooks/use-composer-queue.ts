@@ -24,6 +24,7 @@ function wireEntryToComposerItem(
 ): ComposerQueueItem {
 	return {
 		id: entry.queueItemId,
+		origin: entry.origin,
 		text: queueEntryText(entry),
 		status: action ?? "queued",
 		queuedInputId: entry.queueItemId,
@@ -90,7 +91,7 @@ export function useComposerQueue(sessionId: string, directory: string | null) {
 
 	const steerQueueItem = useCallback(
 		async (item: ComposerQueueItem) => {
-			if (!directory || !clientSupportsQueue(directory)) return
+			if (item.origin || !directory || !clientSupportsQueue(directory)) return
 			const client = getProjectClient(directory)
 			if (!client?.session?.steer || !client?.session?.queue?.remove) return
 			setPending(item.id, "steering")
@@ -141,7 +142,7 @@ export function useComposerQueue(sessionId: string, directory: string | null) {
 
 	const editQueueItem = useCallback(
 		async (item: ComposerQueueItem) => {
-			if ((item.fileCount ?? 0) > 0) return null
+			if (item.origin || (item.fileCount ?? 0) > 0) return null
 			await removeQueueItem(item)
 			return item.text
 		},

@@ -59,7 +59,8 @@ impl ServerRuntime {
         let session_tool_registry = self.tool_registry_for_actor_state(state);
         let runtime_context = Arc::clone(&state.runtime_context);
         let turn_goal = match &input_mode {
-            super::super::TurnInputMode::VisibleUserMessage => {
+            super::super::TurnInputMode::VisibleUserMessage
+            | super::super::TurnInputMode::HostMessage(_) => {
                 let stores = self.goal_stores.lock().await;
                 stores
                     .get(&session_id)
@@ -87,7 +88,13 @@ impl ServerRuntime {
             state.core.clear_active_goal();
         }
         if input_mode.emits_user_message() {
-            push_resolved_user_input(&mut state.core, input, input_messages, input_images);
+            if let Some(origin) = input_mode.host_origin() {
+                state
+                    .core
+                    .push_message(Message::user(devo_core::render_host_message(origin, input)));
+            } else {
+                push_resolved_user_input(&mut state.core, input, input_messages, input_images);
+            }
         }
         let event_callback_tx = event_tx.clone();
         let callback: devo_core::EventCallback = std::sync::Arc::new(move |event: QueryEvent| {

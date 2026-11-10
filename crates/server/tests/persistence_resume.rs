@@ -865,6 +865,7 @@ async fn failed_turn_resume_restores_terminal_history_without_prompt_contaminati
         }
     };
     let user_message = |text: &str| Item::UserMessage {
+        origin: None,
         client_user_message_id: None,
         content: vec![UserInput::Text {
             text: text.to_string(),

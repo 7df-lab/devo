@@ -87,7 +87,11 @@ impl ServerRuntime {
         };
 
         let (new_leaf, editor_text) = match &target.item {
-            Item::UserMessage { content, .. } => {
+            Item::UserMessage {
+                content,
+                origin: None,
+                ..
+            } => {
                 let parent = parents.get(&target.id).cloned().flatten();
                 let text = content
                     .iter()

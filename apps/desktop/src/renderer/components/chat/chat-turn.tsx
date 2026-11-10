@@ -19,6 +19,7 @@ import type { ChatMessageEntry, ChatTurn as ChatTurnType } from "../../hooks/use
 import type { ProviderErrorEntry, ProviderRetryStatus } from "../../atoms/sessions"
 import type { Agent } from "../../lib/types"
 import { itemDisplayText } from "../../atoms/derived/session-chat"
+import { HostMessageBlock } from "./host-message-block"
 import { UserMessageBlock } from "./user-message-block"
 import { ProviderErrorRow } from "./provider-error-row"
 import { TurnActivity } from "./turn-activity"
@@ -145,13 +146,15 @@ export const ChatTurnComponent = memo(
 
 		return (
 			<div className="group/turn flex flex-col gap-3 py-3" data-turn-id={turn.turnId ?? turn.id}>
-				{isUserMessageItem(turn.userMessage.info) && !isSynthetic && (
+				{isUserMessageItem(turn.userMessage.info) && !isSynthetic && (turn.userMessage.info.item.origin != null ? (
+					<HostMessageBlock text={userText} origin={turn.userMessage.info.item.origin} />
+				) : (
 					<UserMessageBlock
 						text={userText}
 						canEdit={Boolean(onEditUserMessage)}
 						onEdit={onEditUserMessage}
 					/>
-				)}
+				))}
 				{isSynthetic && (
 					<div className="text-center text-[11px] text-muted-foreground">
 						{itemDisplayText(turn.userMessage.info)}

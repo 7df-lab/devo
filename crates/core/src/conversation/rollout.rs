@@ -396,6 +396,7 @@ mod tests {
                 updated_at: fixed_ts(),
                 state: ItemState::Completed,
                 item: Item::UserMessage {
+                    origin: None,
                     client_user_message_id: None,
                     content: vec![UserInput::Text {
                         text: "hello".into(),

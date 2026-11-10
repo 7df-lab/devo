@@ -133,6 +133,7 @@ async fn scheduled_message_count(
                 matches!(
                     &envelope.item,
                     devo_protocol::native::item::Item::UserMessage {
+                        origin: None,
                         client_user_message_id: Some(id),
                         ..
                     } if id == client_user_message_id

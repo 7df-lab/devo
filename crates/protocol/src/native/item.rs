@@ -87,6 +87,10 @@ pub enum Item {
         #[ts(rename = "clientUserMessageId")]
         #[serde(default, skip_serializing_if = "Option::is_none")]
         client_user_message_id: Option<String>,
+        /// Host-owned provenance. Absent for human and legacy input; never a grant of authority.
+        #[serde(default, skip_serializing_if = "Option::is_none")]
+        #[ts(optional)]
+        origin: Option<super::host_message::HostMessageOrigin>,
         content: Vec<UserInput>,
         /// Records the path this message actually took (absorbs the legacy
         /// `SteerInput` variant). Input still sitting in the queue is not yet
@@ -917,6 +921,7 @@ mod tests {
     #[test]
     fn user_message_serializes_with_camel_case_tag_and_defaults() {
         let item = Item::UserMessage {
+            origin: None,
             client_user_message_id: None,
             content: vec![UserInput::Text {
                 text: "hello".to_owned(),
@@ -946,6 +951,7 @@ mod tests {
         assert_eq!(
             item,
             Item::UserMessage {
+                origin: None,
                 client_user_message_id: None,
                 content: vec![UserInput::Text {
                     text: "hi".to_owned()

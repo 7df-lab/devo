@@ -47,6 +47,17 @@ export type GoalId = string;
 
 export type UserMessageEntry = "turnStart" | "queue" | "steer";
 
+export type HostMessageOrigin = { eventId: string, source: HostMessageSource,
+/**
+ * Host-resolved sender session or background task identity, never a claim
+ * extracted from the message body.
+ */
+sender: string, delivery: HostMessageDelivery, };
+
+export type HostMessageSource = "agent" | "backgroundTask" | "schedule";
+
+export type HostMessageDelivery = "followUp" | "steer";
+
 export type PlanEntry = { step: string, status: PlanStepStatus, };
 
 export type PlanStepStatus = "pending" | "inProgress" | "completed";
@@ -100,7 +111,11 @@ export type Item = { "type": "userMessage",
  * Domain-level dedup key: the same logical message materializes only
  * once across steer/queue races and RPC retries.
  */
-clientUserMessageId?: string | null, content: Array<UserInput>,
+clientUserMessageId?: string | null,
+/**
+ * Host-owned provenance. Absent for human and legacy input; never a grant of authority.
+ */
+origin?: HostMessageOrigin, content: Array<UserInput>,
 /**
  * Records the path this message actually took (absorbs the legacy
  * `SteerInput` variant). Input still sitting in the queue is not yet

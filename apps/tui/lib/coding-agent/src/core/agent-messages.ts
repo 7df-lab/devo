@@ -425,11 +425,25 @@ export function isAgentSessionMessage(message: AgentMessage): message is AgentSe
 	);
 }
 
+export interface HostFollowUpMessage extends CustomMessage {
+	details: { origin: { delivery: "followUp" } };
+}
+
+/** Structured host provenance marks new runs; display labels and mid-turn steers do not. */
+export function isHostFollowUpMessage(message: AgentMessage): message is HostFollowUpMessage {
+	if (message.role !== "custom") return false;
+	const details = message.details;
+	if (typeof details !== "object" || details === null || !("origin" in details)) return false;
+	const origin = details.origin;
+	return typeof origin === "object" && origin !== null && "delivery" in origin && origin.delivery === "followUp";
+}
+
 // A message that starts a new agent run (prompt-turn boundary).
 export function startsAgentRun(message: AgentMessage): boolean {
 	return (
 		message.role === "user" ||
 		isAgentSessionMessage(message) ||
+		isHostFollowUpMessage(message) ||
 		(message.role === "custom" &&
 			(message.customType === HEARTBEAT_PROMPT_CUSTOM_TYPE ||
 				message.customType === ASYNC_BASH_COMPLETION_CUSTOM_TYPE))

@@ -47,11 +47,11 @@ if child is not None:
   `send("all", message)` broadcasts only to the family roster and returns
   `{receipts: [...]}` in roster order; successful entries are ordinary receipts
   and failed entries contain the target id and a short `error`. One failed delivery
-  does not reject successful deliveries. Messages always use steering delivery so
-  a busy target sees them during its active run. Returns a receipt with a
-  `deliveryStatus` field: `"delivered"` means the message reached an idle target's
-  context; `"queued"` means a steering message was accepted and will deliver when
-  the target's current work allows (`send` does not block waiting for that).
+  does not reject successful deliveries. Messages use follow-up delivery: a busy target
+  receives them after its current turn finishes, without interrupting active work.
+  Returns a receipt with a `deliveryStatus` field: `"delivered"` means an idle
+  target accepted the turn; `"queued"` means follow-up delivery was accepted.
+  Neither receipt means the model has processed or answered the message.
   Delivered receipts carry `deliveredAt`, queued receipts carry `queuedAt`.
 
 ## Safety
@@ -62,5 +62,7 @@ if child is not None:
 - Reach is limited to parent, siblings, and direct children; relay through an
   intermediate child instead of messaging grandchildren or cousins directly.
 - Sender identity is daemon-derived and cannot be spoofed from Python.
-- The daemon enforces message size, rate, and pending-queue limits before
-  accepting delivery.
+- Host-delivered messages retain agent provenance and do not count as human
+  authorization, even though the model transport uses the user role.
+- Avoid unbounded repeated messages; this path does not implement a general
+  per-sender rate limiter or exactly-once retries.

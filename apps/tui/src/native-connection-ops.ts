@@ -7,6 +7,7 @@ import { nativeGoalToAgentGoal, emptyGoalState } from "./native-to-pi/messages.j
 import { DEFAULT_PREVIEW_LIMIT, MAX_PREVIEW_LIMIT } from "./native-traffic-log.js";
 
 export type QueueWireEntry = {
+  origin?: Record<string, unknown>;
   queueItemId: string;
   position: number;
   preview: string;
@@ -20,6 +21,7 @@ export function parseQueueWireEntries(value: unknown): QueueWireEntry[] {
     .map((entry) => (entry && typeof entry === "object" ? (entry as Record<string, unknown>) : null))
     .filter((entry): entry is Record<string, unknown> => entry != null)
     .map((entry) => ({
+      ...(entry.origin && typeof entry.origin === "object" ? { origin: entry.origin as Record<string, unknown> } : {}),
       queueItemId: String(entry.queueItemId ?? entry.queue_item_id ?? ""),
       position: Number(entry.position ?? 0),
       preview: String(entry.preview ?? ""),
@@ -43,12 +45,21 @@ export function parseQueueWireEntries(value: unknown): QueueWireEntry[] {
     .sort((left, right) => left.position - right.position);
 }
 
+/** Prefix host content on selection/queue surfaces without changing its identity. */
+export function hostMessagePrefix(origin: unknown): string {
+  if (origin == null || typeof origin !== "object") return "";
+  const metadata = origin as Record<string, unknown>;
+  const labels: Record<string, string> = { agent: "Agent message", backgroundTask: "Background notification", schedule: "Scheduled notification" };
+  return `[${labels[String(metadata.source)] ?? "Host notification"} · ${String(metadata.sender ?? "Host")}] `;
+}
+
 export function queuePreviewText(entry: QueueWireEntry): string {
-  if (entry.preview) return entry.preview;
+  const label = hostMessagePrefix(entry.origin);
+  if (entry.preview) return label + entry.preview;
   const texts = (entry.input ?? [])
     .filter((p) => p.type === "text" && p.text)
     .map((p) => String(p.text));
-  return texts.join("\n");
+  return label + texts.join("\n");
 }
 
 export type GoalSlashAction =
