@@ -41,7 +41,12 @@ let sibling: ReturnType<typeof useWorkspaceChanges>
 let directory = ""
 let fixtureId = 0
 let selectedScope: WorkspaceChangeScope = "uncommitted"
-let hookOptions: { baseBranch?: string; ignoreWhitespace?: boolean } = {}
+let hookOptions: {
+	baseBranch?: string
+	ignoreWhitespace?: boolean
+	prefetch?: boolean
+	enabled?: boolean
+} = {}
 function view(paths = ["a.ts"], text?: string): WorkspaceChangeView {
 	return {
 		scope: "uncommitted",
@@ -408,3 +413,138 @@ for (const partition of ["scope", "whitespace", "base branch"] as const) {
 		expect(requests).toHaveLength(2)
 	})
 }
+
+for (const reopen of ["after prefetch", "during prefetch"] as const) {
+	test(`inactive prefetch stays Summary-only; reopening ${reopen} reloads expanded details`, async () => {
+		await mount()
+		await expand()
+		const previousKey = changes.key
+		await act(async () =>
+			appStore.set(workspaceChangesStateFamily(previousKey), (state) => ({
+				...state,
+				stale: true,
+			})),
+		)
+		selectedScope = "staged"
+		hookOptions = { prefetch: true }
+		await act(async () => {
+			for (const scope of ["staged", "unstaged", "branch"] as const) {
+				appStore.set(setWorkspaceChangesViewAtom, {
+					key: workspaceChangesKey({ cwd: directory, scope }),
+					view: { ...view(), scope },
+				})
+			}
+			root?.render(
+				<Provider store={appStore}>
+					<Probe />
+				</Provider>,
+			)
+		})
+		expect(requests.map(({ params }) => params.diffDetail)).toEqual(["full", "summary"])
+		if (reopen === "after prefetch") {
+			await respond(1, view())
+			expect(requests).toHaveLength(2)
+			expect(appStore.get(workspaceChangesStateFamily(previousKey)).view).toEqual(view())
+		}
+		selectedScope = "uncommitted"
+		await act(async () =>
+			root?.render(
+				<Provider store={appStore}>
+					<Probe />
+				</Provider>,
+			),
+		)
+		if (reopen === "during prefetch") {
+			expect(requests).toHaveLength(2)
+			await respond(1, view())
+		}
+		expect(requests.map(({ params }) => [params.diffDetail, params.paths])).toEqual([
+			["full", ["a.ts"]],
+			["summary", undefined],
+			["full", ["a.ts"]],
+		])
+		await respond(2, view(["a.ts"], "reopened"))
+		expect(changes.view).toEqual(view(["a.ts"], "reopened"))
+	})
+}
+
+for (const leaving of ["unmount", "switch scope", "disable"] as const) {
+	test(`Refresh does not start background detail reloads after ${leaving}`, async () => {
+		await mount()
+		await expand()
+		await act(async () => {
+			void changes.refetch()
+		})
+		if (leaving === "disable") hookOptions = { enabled: false }
+		if (leaving === "switch scope") {
+			selectedScope = "staged"
+			await act(async () =>
+				appStore.set(setWorkspaceChangesViewAtom, {
+					key: workspaceChangesKey({ cwd: directory, scope: selectedScope }),
+					view: { ...view(), scope: selectedScope },
+				}),
+			)
+		}
+		await act(async () =>
+			root?.render(
+				leaving === "unmount" ? null : (
+					<Provider store={appStore}>
+						<Probe />
+					</Provider>
+				),
+			),
+		)
+		await respond(1, view())
+		expect(requests).toHaveLength(2)
+		hookOptions = {}
+		selectedScope = "uncommitted"
+		await act(async () =>
+			root?.render(
+				<Provider store={appStore}>
+					<Probe />
+				</Provider>,
+			),
+		)
+		expect(requests[2]?.params.paths).toEqual(["a.ts"])
+		await respond(2, view(["a.ts"], "returned"))
+		expect(changes.view).toEqual(view(["a.ts"], "returned"))
+	})
+}
+
+test("unmounting the Refresh initiator retains reloads for a shared-cache consumer", async () => {
+	await mount(true)
+	await expand()
+	await act(async () => {
+		void changes.refetch()
+	})
+	await act(async () =>
+		root?.render(
+			<Provider store={appStore}>
+				{null}
+				<Probe second />
+			</Provider>,
+		),
+	)
+	await respond(1, view())
+	expect(requests[2]?.params.paths).toEqual(["a.ts"])
+	await respond(2, view(["a.ts"], "shared"))
+	expect(sibling.view).toEqual(view(["a.ts"], "shared"))
+})
+
+test("closing the active review stops subsequent reload batches", async () => {
+	await mount()
+	const paths = Array.from({ length: 6 }, (_, i) => `${i}.ts`)
+	await act(async () =>
+		appStore.set(setWorkspaceChangesViewAtom, { key: changes.key, view: view(paths) }),
+	)
+	await act(async () => {
+		void changes.ensureFullPatches()
+		void changes.refetch()
+	})
+	await respond(1, view(paths))
+	expect(requests).toHaveLength(6)
+	await act(async () => root?.render(null))
+	for (let i = 2; i < 6; i++) await respond(i, view([paths[i - 2]], "fresh"))
+	await respond(0, view(paths, "obsolete"))
+	expect(requests).toHaveLength(6)
+})

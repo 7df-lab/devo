@@ -5,7 +5,9 @@
  */
 type WorkspaceChangeRequests = {
 	generation: number
+	activeConsumers: Set<symbol>
 	summaryPending: boolean
+	reloadAfterSummary: boolean
 	detailsPending: Set<string>
 	detailErrors: Map<string, string>
 	sidesFetched: Set<string>
@@ -19,7 +21,9 @@ export function workspaceChangeRequests(cache: object): WorkspaceChangeRequests 
 	if (!requests) {
 		requests = {
 			generation: 0,
+			activeConsumers: new Set(),
 			summaryPending: false,
+			reloadAfterSummary: false,
 			detailsPending: new Set(),
 			detailErrors: new Map(),
 			sidesFetched: new Set(),

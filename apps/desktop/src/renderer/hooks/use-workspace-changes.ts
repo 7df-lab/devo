@@ -242,6 +242,7 @@ export function useWorkspaceChanges(
 			const fetchKey = cacheKeyFor(args)
 			const cache = workspaceChangesStateFamily(fetchKey)
 			const requests = workspaceChangeRequests(cache)
+			if (requests.activeConsumers.size === 0) return
 			const current = appStore.get(cache).view
 			if (!current) return
 			const normalizedPath = filePath?.replace(/\\/g, "/")
@@ -309,14 +310,35 @@ export function useWorkspaceChanges(
 		[isMockMode, setError, setView],
 	)
 
-	const fetchServer = useCallback(
+	// ReviewPanel loads on expand, not on view changes. Resume only paths the
+	// user previously requested; unavailable sides remain attempted until refresh.
+	const reloadRequestedDetails = useCallback(
 		async (args: FetchArgs) => {
+			const requests = workspaceChangeRequests(workspaceChangesStateFamily(cacheKeyFor(args)))
+			const generation = requests.generation
+			const paths = [...requests.requestedPaths]
+			const concurrency = 4
+			for (let i = 0; i < paths.length; i += concurrency) {
+				if (generation !== requests.generation || requests.activeConsumers.size === 0) return
+				await Promise.all(paths.slice(i, i + concurrency).map((path) => fetchDetails(args, path)))
+			}
+		},
+		[fetchDetails],
+	)
+
+	const fetchServer = useCallback(
+		async (args: FetchArgs, purpose: "active" | "prefetch") => {
 			if (isMockMode) return
 			const client = getProjectClient(args.directory)
 			const fetchKey = cacheKeyFor(args)
 			const cache = workspaceChangesStateFamily(fetchKey)
 			const requests = workspaceChangeRequests(cache)
-			if (requests.summaryPending) return
+			if (requests.summaryPending) {
+				// Reopening a scope may join its background Summary. Promote that
+				// request so its completion resumes the active expanded rows.
+				if (purpose === "active") requests.reloadAfterSummary = true
+				return
+			}
 			if (!client) {
 				setError({
 					key: fetchKey,
@@ -327,8 +349,8 @@ export function useWorkspaceChanges(
 				return
 			}
 			requests.summaryPending = true
+			requests.reloadAfterSummary = purpose === "active"
 			requests.generation += 1
-			const generation = requests.generation
 			requests.detailsPending.clear()
 			markLoading({ key: fetchKey, loading: true, error: null })
 			try {
@@ -363,16 +385,10 @@ export function useWorkspaceChanges(
 			} finally {
 				requests.summaryPending = false
 			}
-			// ReviewPanel loads on expand, not on view changes. Refresh only paths
-			// already requested, including expand clicks made during the Summary.
-			const paths = [...requests.requestedPaths]
-			const concurrency = 4
-			for (let i = 0; i < paths.length; i += concurrency) {
-				if (generation !== requests.generation) return
-				await Promise.all(paths.slice(i, i + concurrency).map((path) => fetchDetails(args, path)))
-			}
+			// Background scope previews never fetch Full, even for warmed paths.
+			if (requests.reloadAfterSummary) await reloadRequestedDetails(args)
 		},
-		[fetchDetails, isMockMode, markLoading, setError, setView],
+		[isMockMode, markLoading, reloadRequestedDetails, setError, setView],
 	)
 
 	const activeArgs = useMemo<FetchArgs>(
@@ -388,7 +404,7 @@ export function useWorkspaceChanges(
 	)
 
 	const fetchChanges = useCallback(async () => {
-		await fetchServer(activeArgs)
+		await fetchServer(activeArgs, "active")
 	}, [activeArgs, fetchServer])
 
 	/** Expand lazily; whole-tree Full is followed by per-path sides in Expand all. */
@@ -403,10 +419,18 @@ export function useWorkspaceChanges(
 	// First open is Summary-only. Previously requested paths reload after refresh.
 	useEffect(() => {
 		if (!enabled) return
+		const requests = workspaceChangeRequests(workspaceChangesStateFamily(key))
+		const owner = Symbol()
+		requests.activeConsumers.add(owner)
 		let cancelled = false
 		void (async () => {
 			if (needsSummary(key)) {
-				await fetchServer(activeArgs)
+				await fetchServer(activeArgs, "active")
+				if (cancelled) return
+			} else {
+				// A completed background Summary is fresh but deliberately has no
+				// sides. Reopening must resume expanded rows without another Summary.
+				await reloadRequestedDetails(activeArgs)
 				if (cancelled) return
 			}
 			if (prefetch && !isMockMode && directory) {
@@ -422,12 +446,13 @@ export function useWorkspaceChanges(
 					}
 					const warmKey = cacheKeyFor(warmArgs)
 					if (!needsSummary(warmKey)) continue
-					void fetchServer(warmArgs)
+					void fetchServer(warmArgs, "prefetch")
 				}
 			}
 		})()
 		return () => {
 			cancelled = true
+			requests.activeConsumers.delete(owner)
 		}
 	}, [
 		activeArgs,
@@ -439,6 +464,7 @@ export function useWorkspaceChanges(
 		key,
 		options.baseBranch,
 		prefetch,
+		reloadRequestedDetails,
 		scope,
 		sessionId,
 	])
