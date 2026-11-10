@@ -33,14 +33,12 @@ async fn responses_failed_completion_persists_real_http_usage_before_returning_e
         let body = "event: response.failed\ndata: {\"response\":{\"status\":\"failed\",\"usage\":{\"input_tokens\":100,\"output_tokens\":25,\"total_tokens\":125},\"error\":{\"code\":\"server_error\",\"message\":\"failed after work\"}}}\n\n";
         socket.write_all(format!("HTTP/1.1 200 OK\r\nContent-Type: text/event-stream\r\nContent-Length: {}\r\nConnection: close\r\n\r\n{}", body.len(), body).as_bytes()).await.unwrap();
     });
-    let runtime = crate::test_support::TestRuntime::new(Arc::new(
+    let deps = crate::test_support::TestRuntime::new(Arc::new(
         devo_provider::openai::OpenAIResponsesProvider::new(format!("http://{address}")),
     ))
-    .runtime(fixture._temp.path());
+    .deps(fixture._temp.path());
     let provider = fixture.ledger.instrumented_provider(
-        runtime
-            .deps
-            .process_context
+        deps.process_context
             .provider_for_route(devo_provider::ProviderRoute::Default),
         fixture.session.id,
         Some(TurnId::new()),
@@ -57,7 +55,6 @@ async fn responses_failed_completion_persists_real_http_usage_before_returning_e
         fixture.replay().session_usage(fixture.session.id).unwrap(),
         live
     );
-    runtime.shutdown().await;
 }
 
 struct ObservedPendingCompletion {
@@ -92,14 +89,12 @@ impl ModelProviderSDK for ObservedPendingCompletion {
 async fn cancelled_completion_keeps_the_observed_sample_and_cancellation_outcome() {
     let fixture = Fixture::new();
     let observed = Arc::new(tokio::sync::Notify::new());
-    let runtime = crate::test_support::TestRuntime::new(Arc::new(ObservedPendingCompletion {
+    let deps = crate::test_support::TestRuntime::new(Arc::new(ObservedPendingCompletion {
         observed: observed.clone(),
     }))
-    .runtime(fixture._temp.path());
+    .deps(fixture._temp.path());
     let provider = fixture.ledger.instrumented_provider(
-        runtime
-            .deps
-            .process_context
+        deps.process_context
             .provider_for_route(devo_provider::ProviderRoute::Default),
         fixture.session.id,
         None,
@@ -120,5 +115,4 @@ async fn cancelled_completion_keeps_the_observed_sample_and_cancellation_outcome
         fixture.replay().session_usage(fixture.session.id).unwrap(),
         live
     );
-    runtime.shutdown().await;
 }
