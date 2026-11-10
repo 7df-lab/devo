@@ -44,3 +44,7 @@ under the gate before removing queued input. Both the post-turn chain and the
 interrupt fallback leave the queue untouched if the edit replacement has already
 started. Its own completion will drain that queue. Tests cover both orderings:
 new queued work wins before edit, and edit wins before the old scheduler runs.
+
+Resumed approval continuations also release admission before scheduling queued
+input or goal continuation. A fresh-runtime approval recovery regression checks
+that input queued during the resumed query drains after that query finishes.
