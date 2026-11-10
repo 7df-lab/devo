@@ -591,3 +591,95 @@ async fn explicit_sandbox_after_preset_change_is_not_a_noop() -> Result<()> {
     assert_eq!(after, before);
     Ok(())
 }
+
+#[tokio::test]
+async fn initial_sandbox_keeps_list_and_update_versions_aligned() -> Result<()> {
+    for reload_writer in [false, true] {
+        let data_root = TempDir::new()?;
+        let cwd = data_root.path().join("repo");
+        std::fs::create_dir_all(&cwd)?;
+        let runtime = build_runtime(data_root.path())?;
+        let connection = initialize_connection(&runtime, TestProtocol::Native).await?;
+        let session_id = start_session(&runtime, connection, &cwd).await?;
+        let runtime = if reload_writer {
+            drop(runtime);
+            let restarted = build_runtime(data_root.path())?;
+            restarted.load_persisted_sessions().await?;
+            restarted
+        } else {
+            runtime
+        };
+        let connection = initialize_connection(&runtime, TestProtocol::Native).await?;
+        session_settings(&runtime, connection, session_id, "session/resume").await?;
+        let updated = runtime
+            .handle_incoming(
+                connection,
+                serde_json::json!({
+                    "id": 20,
+                    "method": "session/metadata/update",
+                    "params": {
+                        "sessionId": session_id,
+                        "expectedVersion": 1,
+                        "settings": { "permissionProfile": "default" }
+                    }
+                }),
+            )
+            .await
+            .context("first settings update")?;
+        assert!(updated.get("error").is_none(), "{updated}");
+        let listed = runtime
+            .handle_incoming(
+                connection,
+                serde_json::json!({ "id": 21, "method": "session/list", "params": {} }),
+            )
+            .await
+            .context("session list")?;
+        let listed_session = listed["result"]["data"]
+            .as_array()
+            .context("listed sessions")?
+            .iter()
+            .find(|session| session["id"] == serde_json::json!(session_id))
+            .context("new session in list")?;
+        let canonical = devo_core::read_canonical_history(
+            &data_root
+                .path()
+                .join("sessions")
+                .join(format!("{session_id}.jsonl")),
+        )?
+        .session
+        .context("canonical session")?;
+        let version = listed_session["version"]
+            .as_u64()
+            .context("listed version")?;
+        assert_eq!(
+            (
+                updated["result"]["session"]["version"].as_u64(),
+                version,
+                canonical.version
+            ),
+            (Some(2), 2, 2),
+            "initial state must not consume mutation epochs; writer reloaded: {reload_writer}",
+        );
+        let follow_up = runtime
+            .handle_incoming(
+                connection,
+                serde_json::json!({
+                    "id": 22,
+                    "method": "session/metadata/update",
+                    "params": {
+                        "sessionId": session_id,
+                        "expectedVersion": version,
+                        "settings": { "sandboxProfile": "strict" }
+                    }
+                }),
+            )
+            .await
+            .context("update using listed version")?;
+        assert!(follow_up.get("error").is_none(), "{follow_up}");
+        assert_eq!(
+            follow_up["result"]["session"]["version"],
+            serde_json::json!(3)
+        );
+    }
+    Ok(())
+}
