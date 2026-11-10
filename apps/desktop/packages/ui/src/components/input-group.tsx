@@ -5,7 +5,7 @@ import { Input } from "@devo/ui/components/input"
 import { Textarea } from "@devo/ui/components/textarea"
 import { cn } from "@devo/ui/lib/utils"
 import { cva, type VariantProps } from "class-variance-authority"
-import type * as React from "react"
+import * as React from "react"
 
 function InputGroup({ className, ...props }: React.ComponentProps<"div">) {
 	return (
@@ -122,10 +122,41 @@ function InputGroupInput({ className, ...props }: React.ComponentProps<"input">)
 	)
 }
 
-function InputGroupTextarea({ className, ...props }: React.ComponentProps<"textarea">) {
+function InputGroupTextarea({
+	className,
+	onKeyDown,
+	onCompositionStart,
+	onCompositionEnd,
+	onBlur,
+	...props
+}: React.ComponentProps<"textarea">) {
+	const isComposing = React.useRef(false)
 	return (
 		<Textarea
 			data-slot="input-group-control"
+			onCompositionStart={(event) => {
+				isComposing.current = true
+				onCompositionStart?.(event)
+			}}
+			onCompositionEnd={(event) => {
+				isComposing.current = false
+				onCompositionEnd?.(event)
+			}}
+			onBlur={(event) => {
+				isComposing.current = false
+				onBlur?.(event)
+			}}
+			onKeyDown={(event) => {
+				// IME keys belong to the editor, not composer shortcuts or suggestions.
+				// Some IMEs report the final key as 229 after compositionend.
+				if (
+					isComposing.current ||
+					event.nativeEvent.isComposing ||
+					event.nativeEvent.keyCode === 229
+				)
+					return
+				onKeyDown?.(event)
+			}}
 			className={cn(
 				"rounded-none border-0 bg-transparent py-2 shadow-none ring-0 focus-visible:ring-0 aria-invalid:ring-0 dark:bg-transparent flex-1 resize-none",
 				className,
