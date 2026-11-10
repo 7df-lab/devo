@@ -1,3 +1,4 @@
+import type { SessionRosterPage } from "@devo-ai/sdk/v2/client"
 import { projectNativeSession } from "@devo-ai/sdk/v2/session-projection"
 import { useAtomValue } from "jotai"
 import { useLayoutEffect, useRef, useState } from "react"
@@ -56,7 +57,8 @@ export function usePaletteSessionSearch(open: boolean, query: string) {
 				if (!client) throw new Error("Runtime unavailable")
 				// Unlike session.list, roster does not share abandoned in-flight queries
 				// or populate SDK caches/usage events before we can check the lifetime.
-				const page = await client.session.roster({ cwds: [], search, limit: 50 })
+				// The SDK client facade is untyped; retain the Native page contract here.
+				const page: SessionRosterPage = await client.session.roster({ cwds: [], search, limit: 50 })
 				if (!isCurrent()) return
 				const sessions = page.data
 					.slice(0, 50)
