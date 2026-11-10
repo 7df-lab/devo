@@ -426,17 +426,26 @@ fn apply_settings_to_canonical_session(
             // The persisted value uses the legacy `PermissionPreset` wire
             // shape (kebab-case); map it onto the canonical profile enum.
             if let Ok(preset) = serde_json::from_value::<devo_protocol::PermissionPreset>(value) {
-                session.settings.permission_profile = match preset {
-                    devo_protocol::PermissionPreset::Default => {
-                        devo_protocol::native::model::PermissionProfile::Default
-                    }
-                    devo_protocol::PermissionPreset::AutoReview => {
-                        devo_protocol::native::model::PermissionProfile::AutoReview
-                    }
-                    devo_protocol::PermissionPreset::FullAccess => {
-                        devo_protocol::native::model::PermissionProfile::FullAccess
-                    }
+                let (profile, safety_preset) = match preset {
+                    devo_protocol::PermissionPreset::Default => (
+                        devo_protocol::native::model::PermissionProfile::Default,
+                        devo_safety::PermissionPreset::Default,
+                    ),
+                    devo_protocol::PermissionPreset::AutoReview => (
+                        devo_protocol::native::model::PermissionProfile::AutoReview,
+                        devo_safety::PermissionPreset::AutoReview,
+                    ),
+                    devo_protocol::PermissionPreset::FullAccess => (
+                        devo_protocol::native::model::PermissionProfile::FullAccess,
+                        devo_safety::PermissionPreset::FullAccess,
+                    ),
                 };
+                session.settings.permission_profile = profile;
+                // Match live application and restore: a preset replaces the
+                // previous sandbox, while a later explicit field wins again.
+                session.settings.sandbox_profile = Some(
+                    devo_safety::sandbox_profile_for_permission_preset(safety_preset).to_string(),
+                );
             }
         }
         SessionSettingsField::SandboxProfile => {
@@ -950,6 +959,77 @@ mod tests {
         // Three settings epochs (1, 2, 3) raise the SessionMeta version (1)
         // to 4.
         assert_eq!(session.version, 4);
+    }
+
+    #[test]
+    fn permission_preset_fold_replaces_sandbox_until_explicit_override() {
+        use devo_protocol::native::model::PermissionProfile;
+
+        for (raw, expected_profile, implied_sandbox) in [
+            ("default", Some(PermissionProfile::Default), "workspace"),
+            (
+                "auto-review",
+                Some(PermissionProfile::AutoReview),
+                "workspace",
+            ),
+            ("full-access", Some(PermissionProfile::FullAccess), "off"),
+            ("invalid-preset", None, "strict"),
+        ] {
+            for explicit_after in [false, true] {
+                let dir = tempfile::TempDir::new().expect("temp dir");
+                let session_id = SessionId::new();
+                let now = fixture_now();
+                let record = session_record_for(session_id, /*parent*/ None, dir.path(), now);
+                let mut lines = vec![
+                    session_meta_line(&record, now),
+                    settings_line(
+                        now,
+                        session_id,
+                        SessionSettingsField::SandboxProfile,
+                        serde_json::json!("strict"),
+                        /*epoch*/ 1,
+                    ),
+                    settings_line(
+                        now,
+                        session_id,
+                        SessionSettingsField::PermissionPreset,
+                        serde_json::json!(raw),
+                        /*epoch*/ 2,
+                    ),
+                ];
+                if explicit_after {
+                    lines.push(settings_line(
+                        now,
+                        session_id,
+                        SessionSettingsField::SandboxProfile,
+                        serde_json::json!("read-only"),
+                        /*epoch*/ 3,
+                    ));
+                }
+                write_lines(&record.rollout_path, &lines);
+                let actual = read_canonical_history(&record.rollout_path)
+                    .expect("read history")
+                    .session
+                    .expect("session");
+                let mut expected = native_session_from_record(&record).expect("convert session");
+                if let Some(profile) = expected_profile {
+                    expected.settings.permission_profile = profile;
+                }
+                expected.settings.sandbox_profile = Some(
+                    if explicit_after {
+                        "read-only"
+                    } else {
+                        implied_sandbox
+                    }
+                    .to_string(),
+                );
+                expected.version = if explicit_after { 4 } else { 3 };
+                assert_eq!(
+                    *actual, expected,
+                    "preset {raw}, explicit after: {explicit_after}"
+                );
+            }
+        }
     }
 
     /// Toggle keywords and level labels both survive the fold, and the raw

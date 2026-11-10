@@ -7,12 +7,12 @@
 
 export type ComposerPermissionProfile = "default" | "autoReview" | "fullAccess"
 
-/** The picker is temporarily hidden while OS sandboxing is disabled repo-wide;
- *  flip to true to restore it. */
+/** The picker is currently hidden. Explicit server-side permission and sandbox
+ *  configuration remains effective; flip to true to restore the picker. */
 export const PERMISSION_PICKER_ENABLED = false
 
-/** Matches server `new_session_state`: new sessions default to FullAccess
- *  (temporary product default while the sandbox is disabled). */
+/** Visual fallback for an unconfigured new session. The server owns effective
+ *  defaults; this value must not overwrite explicit project configuration. */
 export const DEFAULT_COMPOSER_PERMISSION_PROFILE: ComposerPermissionProfile = "fullAccess"
 
 export const COMPOSER_PERMISSION_PROFILES: readonly {

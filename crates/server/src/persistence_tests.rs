@@ -2576,3 +2576,6 @@ fn session_settings_line_roundtrips_through_store_and_projectors() {
     assert_eq!(line.field, devo_core::SessionSettingsField::SandboxProfile);
     assert_eq!(line.value, serde_json::Value::String("workspace".into()));
 }
+
+#[path = "persistence_seeded_settings_tests.rs"]
+mod seeded_settings_tests;

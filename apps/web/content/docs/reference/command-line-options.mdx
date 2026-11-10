@@ -71,6 +71,11 @@ The session id is printed when an interactive session exits. Inside the TUI,
 
 ## `devo prompt`
 
+New sessions default to Full Access with the shell sandbox off. Project/global
+sandbox overrides still apply. A configured `default` or `auto-review` approval
+preset is rejected before provider/tool execution because this command has no
+interactive approval controller; use interactive `devo` instead.
+
 Runs one non-interactive prompt:
 
 ```bash

@@ -385,6 +385,8 @@ impl RolloutStore {
     /// Persist inherited settings before the first metadata header in one locked
     /// create batch. A crash leaving only a prefix cannot expose a root with
     /// relaxed defaults: either its settings precede its header or no header exists.
+    /// These initial snapshot fields share epoch 0, keeping the header and actor
+    /// at version 1. Only later mutations allocate the increasing epoch sequence.
     pub(crate) fn append_seeded_session_meta_create_at(
         &self,
         rollout_path: &Path,
@@ -399,15 +401,13 @@ impl RolloutStore {
             JournalWriteMode::CreateIfMissing,
             |state| {
                 let mut lines = Vec::with_capacity(settings.len() + 1);
-                let session_state = state.session_state_mut(session_id);
                 for (field, value) in settings {
-                    let epoch = session_state.allocate_settings_epoch();
                     lines.push(devo_core::settings_line(
                         Utc::now(),
                         session_id,
                         *field,
                         value.clone(),
-                        epoch,
+                        /*epoch*/ 0,
                     ));
                 }
                 let merged =

@@ -450,44 +450,17 @@ impl SessionRuntimeContext {
         cwd: PathBuf,
         additional_directories: Vec<PathBuf>,
     ) -> SessionState {
-        let (permission_preset, sandbox_from_project, sandbox_from_global) = {
+        let mut session_config = {
             let config_store = self
                 .config_store
                 .lock()
                 .expect("app config store mutex should not be poisoned");
-            let project = config_store
-                .effective_config()
-                .projects
-                .get(&devo_core::project_config_key(&cwd));
-            let preset = match project.and_then(|project| project.permission_preset) {
-                Some(devo_protocol::PermissionPreset::Default) => {
-                    devo_safety::PermissionPreset::Default
-                }
-                Some(devo_protocol::PermissionPreset::FullAccess) => {
-                    devo_safety::PermissionPreset::FullAccess
-                }
-                Some(devo_protocol::PermissionPreset::AutoReview) => {
-                    devo_safety::PermissionPreset::AutoReview
-                }
-                // Sandbox temporarily disabled: new sessions default to
-                // FullAccess so nothing interrupts the user. Flip back to
-                // AutoReview to re-enable the asking default.
-                None => devo_safety::PermissionPreset::FullAccess,
-            };
-            let sandbox_from_project = project.and_then(|project| project.sandbox_profile.clone());
-            let sandbox_from_global = config_store
-                .effective_config()
-                .permission
-                .sandbox_profile
-                .clone();
-            (preset, sandbox_from_project, sandbox_from_global)
+            SessionConfig::for_new_session(
+                config_store.effective_config(),
+                &cwd,
+                &additional_directories,
+            )
         };
-        let permission_profile =
-            devo_safety::RuntimePermissionProfile::from_preset(permission_preset, cwd.clone())
-                .with_additional_roots(additional_directories);
-        let sandbox_profile = sandbox_from_project
-            .or(sandbox_from_global)
-            .unwrap_or_else(|| permission_profile.implied_sandbox_profile().to_string());
         let available_skills_instructions = {
             let mut skill_catalog = self
                 .skill_catalog
@@ -509,14 +482,8 @@ impl SessionRuntimeContext {
                 }
             }
         };
-        let session_config = SessionConfig {
-            permission_mode: permission_profile.permission_mode(),
-            permission_profile,
-            agents_md: self.agents_md.clone(),
-            available_skills_instructions,
-            sandbox_profile: Some(sandbox_profile),
-            ..SessionConfig::default()
-        };
+        session_config.agents_md = self.agents_md.clone();
+        session_config.available_skills_instructions = available_skills_instructions;
         let mut state = SessionState::new(session_config, cwd);
         state.id = session_id.to_string();
         state

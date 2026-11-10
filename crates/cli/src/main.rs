@@ -35,6 +35,7 @@ mod doctor_command;
 mod mcp_command;
 mod prompt_command;
 mod prompt_host;
+mod prompt_session;
 mod upgrade_command;
 
 use agent_command::run_agent;

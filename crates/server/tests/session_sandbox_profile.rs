@@ -358,3 +358,328 @@ async fn session_sandbox_profile_update_applies_normalizes_and_rejects() -> Resu
 
     Ok(())
 }
+
+async fn session_settings(
+    runtime: &Arc<ServerRuntime>,
+    connection_id: u64,
+    session_id: SessionId,
+    method: &str,
+) -> Result<devo_protocol::native::session::SessionSettings> {
+    let response = runtime
+        .handle_incoming(
+            connection_id,
+            serde_json::json!({
+                "id": 10,
+                "method": method,
+                "params": { "sessionId": session_id }
+            }),
+        )
+        .await
+        .context("session settings response")?;
+    assert!(response.get("error").is_none(), "{response}");
+    Ok(serde_json::from_value(
+        response["result"]["session"]["settings"].clone(),
+    )?)
+}
+
+#[tokio::test]
+async fn configured_sandbox_survives_cold_resume_without_settings_update() -> Result<()> {
+    for scope in ["project", "global"] {
+        let data_root = TempDir::new()?;
+        let cwd = data_root.path().join("repo");
+        std::fs::create_dir_all(&cwd)?;
+        if scope == "project" {
+            write_project_config(
+                data_root.path(),
+                &devo_core::project_config_key(&cwd),
+                "strict",
+            )?;
+        } else {
+            std::fs::write(
+                data_root.path().join("config.toml"),
+                "[permission]\nsandbox_profile = \"strict\"\n",
+            )?;
+        }
+        let runtime = build_runtime(data_root.path())?;
+        let connection = initialize_connection(&runtime, TestProtocol::Native).await?;
+        let session_id = start_session(&runtime, connection, &cwd).await?;
+        let before = session_settings(&runtime, connection, session_id, "session/read").await?;
+        assert_eq!(
+            (before.permission_profile, before.sandbox_profile.clone()),
+            (
+                devo_protocol::native::model::PermissionProfile::FullAccess,
+                Some("strict".to_string())
+            ),
+        );
+
+        // A new product default or a later config edit must not loosen an
+        // existing session's selected sandbox when its actor is hydrated.
+        std::fs::write(data_root.path().join("config.toml"), "")?;
+        let restarted = build_runtime(data_root.path())?;
+        restarted.load_persisted_sessions().await?;
+        let connection = initialize_connection(&restarted, TestProtocol::Native).await?;
+        let after = session_settings(&restarted, connection, session_id, "session/resume").await?;
+        assert_eq!(after, before, "{scope} sandbox must survive cold resume");
+    }
+    Ok(())
+}
+
+#[tokio::test]
+async fn explicit_restricted_settings_survive_full_access_default() -> Result<()> {
+    let data_root = TempDir::new()?;
+    let cwd = data_root.path().join("repo");
+    std::fs::create_dir_all(&cwd)?;
+    let runtime = build_runtime(data_root.path())?;
+    let connection = initialize_connection(&runtime, TestProtocol::Native).await?;
+    let session_id = start_session(&runtime, connection, &cwd).await?;
+    let response = runtime
+        .handle_incoming(
+            connection,
+            serde_json::json!({
+                "id": 11,
+                "method": "session/metadata/update",
+                "params": {
+                    "sessionId": session_id,
+                    "expectedVersion": 0,
+                    "settings": { "permissionProfile": "default", "sandboxProfile": "read-only" }
+                }
+            }),
+        )
+        .await
+        .context("settings update")?;
+    assert!(response.get("error").is_none(), "{response}");
+    let before = session_settings(&runtime, connection, session_id, "session/read").await?;
+    assert_eq!(
+        (before.permission_profile, before.sandbox_profile.clone()),
+        (
+            devo_protocol::native::model::PermissionProfile::Default,
+            Some("read-only".to_string())
+        ),
+    );
+    let restarted = build_runtime(data_root.path())?;
+    restarted.load_persisted_sessions().await?;
+    let connection = initialize_connection(&restarted, TestProtocol::Native).await?;
+    let after = session_settings(&restarted, connection, session_id, "session/resume").await?;
+    assert_eq!(after, before);
+    Ok(())
+}
+
+#[tokio::test]
+async fn preset_change_and_explicit_sandbox_precedence_survive_cold_resume() -> Result<()> {
+    for (preset, requested_sandbox, sandbox) in [
+        ("default", None, "workspace"),
+        ("autoReview", None, "workspace"),
+        ("fullAccess", None, "strict"),
+        ("default", Some("strict"), "strict"),
+        ("autoReview", Some("strict"), "strict"),
+    ] {
+        let data_root = TempDir::new()?;
+        let cwd = data_root.path().join("repo");
+        std::fs::create_dir_all(&cwd)?;
+        write_project_config(
+            data_root.path(),
+            &devo_core::project_config_key(&cwd),
+            "strict",
+        )?;
+        let runtime = build_runtime(data_root.path())?;
+        let connection = initialize_connection(&runtime, TestProtocol::Native).await?;
+        let session_id = start_session(&runtime, connection, &cwd).await?;
+        let response = runtime
+            .handle_incoming(
+                connection,
+                serde_json::json!({
+                    "id": 11,
+                    "method": "session/metadata/update",
+                    "params": {
+                        "sessionId": session_id,
+                        "expectedVersion": 0,
+                        "settings": {
+                            "permissionProfile": preset,
+                            "sandboxProfile": requested_sandbox
+                        }
+                    }
+                }),
+            )
+            .await
+            .context("preset update")?;
+        assert!(response.get("error").is_none(), "{response}");
+        assert_eq!(
+            response["result"]["session"]["settings"]["sandboxProfile"],
+            serde_json::json!(sandbox),
+            "settings response must describe the applied sandbox",
+        );
+        let before = session_settings(&runtime, connection, session_id, "session/read").await?;
+        assert_eq!(before.sandbox_profile.as_deref(), Some(sandbox));
+        let canonical = devo_core::read_canonical_history(
+            &data_root
+                .path()
+                .join("sessions")
+                .join(format!("{session_id}.jsonl")),
+        )?
+        .session
+        .context("canonical session")?;
+        assert_eq!(canonical.settings, before);
+        let restarted = build_runtime(data_root.path())?;
+        restarted.load_persisted_sessions().await?;
+        let connection = initialize_connection(&restarted, TestProtocol::Native).await?;
+        let after = session_settings(&restarted, connection, session_id, "session/resume").await?;
+        assert_eq!(
+            after, before,
+            "preset {preset} must replace the initial sandbox"
+        );
+    }
+    Ok(())
+}
+
+#[tokio::test]
+async fn explicit_sandbox_after_preset_change_is_not_a_noop() -> Result<()> {
+    let data_root = TempDir::new()?;
+    let cwd = data_root.path().join("repo");
+    std::fs::create_dir_all(&cwd)?;
+    write_project_config(
+        data_root.path(),
+        &devo_core::project_config_key(&cwd),
+        "strict",
+    )?;
+    let runtime = build_runtime(data_root.path())?;
+    let connection = initialize_connection(&runtime, TestProtocol::Native).await?;
+    let session_id = start_session(&runtime, connection, &cwd).await?;
+    let response = runtime
+        .handle_incoming(
+            connection,
+            serde_json::json!({
+                "id": 11,
+                "method": "session/metadata/update",
+                "params": {
+                    "sessionId": session_id,
+                    "expectedVersion": 0,
+                    "settings": { "permissionProfile": "default" }
+                }
+            }),
+        )
+        .await
+        .context("preset update")?;
+    assert!(response.get("error").is_none(), "{response}");
+    let response = update_sandbox_profile(&runtime, connection, session_id, "strict").await?;
+    assert!(response.get("error").is_none(), "{response}");
+    assert_eq!(
+        response["result"]["session"]["settings"]["sandboxProfile"],
+        serde_json::json!("strict"),
+    );
+    let before = session_settings(&runtime, connection, session_id, "session/read").await?;
+    let canonical = devo_core::read_canonical_history(
+        &data_root
+            .path()
+            .join("sessions")
+            .join(format!("{session_id}.jsonl")),
+    )?
+    .session
+    .context("canonical session")?;
+    assert_eq!(canonical.settings, before);
+    assert_eq!(
+        (before.permission_profile, before.sandbox_profile.clone()),
+        (
+            devo_protocol::native::model::PermissionProfile::Default,
+            Some("strict".to_string())
+        ),
+        "the explicit sandbox must be applied even when it matches the initial header",
+    );
+    let restarted = build_runtime(data_root.path())?;
+    restarted.load_persisted_sessions().await?;
+    let connection = initialize_connection(&restarted, TestProtocol::Native).await?;
+    let after = session_settings(&restarted, connection, session_id, "session/resume").await?;
+    assert_eq!(after, before);
+    Ok(())
+}
+
+#[tokio::test]
+async fn initial_sandbox_keeps_list_and_update_versions_aligned() -> Result<()> {
+    for reload_writer in [false, true] {
+        let data_root = TempDir::new()?;
+        let cwd = data_root.path().join("repo");
+        std::fs::create_dir_all(&cwd)?;
+        let runtime = build_runtime(data_root.path())?;
+        let connection = initialize_connection(&runtime, TestProtocol::Native).await?;
+        let session_id = start_session(&runtime, connection, &cwd).await?;
+        let runtime = if reload_writer {
+            drop(runtime);
+            let restarted = build_runtime(data_root.path())?;
+            restarted.load_persisted_sessions().await?;
+            restarted
+        } else {
+            runtime
+        };
+        let connection = initialize_connection(&runtime, TestProtocol::Native).await?;
+        session_settings(&runtime, connection, session_id, "session/resume").await?;
+        let updated = runtime
+            .handle_incoming(
+                connection,
+                serde_json::json!({
+                    "id": 20,
+                    "method": "session/metadata/update",
+                    "params": {
+                        "sessionId": session_id,
+                        "expectedVersion": 1,
+                        "settings": { "permissionProfile": "default" }
+                    }
+                }),
+            )
+            .await
+            .context("first settings update")?;
+        assert!(updated.get("error").is_none(), "{updated}");
+        let listed = runtime
+            .handle_incoming(
+                connection,
+                serde_json::json!({ "id": 21, "method": "session/list", "params": {} }),
+            )
+            .await
+            .context("session list")?;
+        let listed_session = listed["result"]["data"]
+            .as_array()
+            .context("listed sessions")?
+            .iter()
+            .find(|session| session["id"] == serde_json::json!(session_id))
+            .context("new session in list")?;
+        let canonical = devo_core::read_canonical_history(
+            &data_root
+                .path()
+                .join("sessions")
+                .join(format!("{session_id}.jsonl")),
+        )?
+        .session
+        .context("canonical session")?;
+        let version = listed_session["version"]
+            .as_u64()
+            .context("listed version")?;
+        assert_eq!(
+            (
+                updated["result"]["session"]["version"].as_u64(),
+                version,
+                canonical.version
+            ),
+            (Some(2), 2, 2),
+            "initial state must not consume mutation epochs; writer reloaded: {reload_writer}",
+        );
+        let follow_up = runtime
+            .handle_incoming(
+                connection,
+                serde_json::json!({
+                    "id": 22,
+                    "method": "session/metadata/update",
+                    "params": {
+                        "sessionId": session_id,
+                        "expectedVersion": version,
+                        "settings": { "sandboxProfile": "strict" }
+                    }
+                }),
+            )
+            .await
+            .context("update using listed version")?;
+        assert!(follow_up.get("error").is_none(), "{follow_up}");
+        assert_eq!(
+            follow_up["result"]["session"]["version"],
+            serde_json::json!(3)
+        );
+    }
+    Ok(())
+}

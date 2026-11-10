@@ -6,27 +6,47 @@ description: Review and control tool execution.
 Permissions control what tools Devo can run without asking and what must be
 approved first.
 
-Open the permission preset picker with:
+New sessions default to **Full Access** with the shell sandbox **off** when no
+explicit configuration applies. This skips approval prompts and allows tools to
+use the current user's filesystem and network access. It does not grant root or
+administrator privileges. Use this default only with trusted workspaces and tasks.
 
-```text
-/permissions
-```
+The Desktop permission picker and TUI `/permissions` command are currently hidden.
+Explicit project permissions and sandbox profiles remain supported through config
+and the Native `session/metadata/update` API. Desktop new chats inherit the server's
+resolved settings rather than overwriting project configuration with a hidden picker value.
 
-Use `Up` and `Down` to choose a preset, `Enter` to confirm, and `Esc` to go
-back.
+## Presets and sandbox profiles
 
-## Presets
+| Preset | Without Approval | Approval Behavior | Implied Shell Sandbox |
+| --- | --- | --- | --- |
+| Default | Read/edit workspace files and eligible workspace shell commands. | Sensitive requests ask the user. | `workspace` |
+| Auto-review | Same base policy as Default. | Eligible requests go to the reviewer; uncertain or failed reviews ask the user. | `workspace` |
+| Full Access | Tool requests are allowed under the full-access policy. | No approval prompts. | `off` |
 
-| Preset | What Devo Can Do Without Asking | What Still Asks |
-| --- | --- | --- |
-| Read Only | Read files in the current workspace. | Edits, shell commands, and internet access. |
-| Default | Read and edit files in the current workspace, and run shell commands. | Internet access and edits outside the workspace. |
-| Auto-review | Same workspace-write policy as Default. | Approval requests, including sandbox escalation requests, go to the auto-reviewer first; uncertain or failed reviews still ask you. |
-| Full Access | Edit files outside the workspace and access the internet without asking. | Nothing under the normal tool policy. |
+Approval policy and OS sandboxing are separate controls. For new sessions,
+`projects.<path>.permission_preset` overrides the Full Access default. The sandbox
+is selected from the project `sandbox_profile`, then `[permission].sandbox_profile`,
+then the preset's implied profile. Thus Full Access can coexist with an explicitly
+configured sandbox. The `workspace` profile restricts filesystem writes but does
+not itself block network access; network approval is a separate policy layer.
 
-`Default` is the normal coding preset. `Read Only` is useful for audits and
-questions. `Full Access` is convenient but should only be used when you trust
-the task, workspace, and tool calls.
+`read-only` is a sandbox profile, not a permission preset. A legacy `read-only`
+preset maps to `default`, which permits shell commands.
+
+Saved session settings are restored rather than replaced with new-session
+defaults. Changing a session's permission preset re-derives its sandbox; an
+explicit `sandboxProfile` in the same settings patch takes precedence.
+
+## Non-interactive prompts
+
+`devo prompt` shares the same new-session defaults and honors project/global
+sandbox overrides. It has no interactive approval controller. If a project
+explicitly selects `default` or `auto-review`, the command exits before provider
+initialization or tool execution with an error instead of silently bypassing that
+policy. Use interactive `devo` for those projects. Existing unconfigured headless
+workflows continue with Full Access and no OS shell sandbox. Invalid configuration
+also fails instead of falling back to permissive defaults.
 
 ## Approval Prompts
 

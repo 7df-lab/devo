@@ -1,6 +1,6 @@
+use anyhow::Context;
 use anyhow::Result;
 use clap::ValueEnum;
-use devo_core::AgentsMdConfig;
 use devo_core::AppConfig;
 use devo_core::AppConfigLoader;
 use devo_core::EventCallback;
@@ -42,7 +42,6 @@ pub(crate) async fn run_prompt(
             .with_env_filter(tracing_subscriber::EnvFilter::new(level))
             .try_init();
     }
-    use devo_core::SessionConfig;
     use devo_core::SessionState;
     use devo_core::tools::ToolRuntime;
 
@@ -50,7 +49,8 @@ pub(crate) async fn run_prompt(
     let home_dir = find_devo_home()?;
     let app_config = FileSystemAppConfigLoader::new(home_dir.clone())
         .load(Some(cwd.as_path()))
-        .unwrap_or_else(|_| AppConfig::default());
+        .context("failed to load prompt configuration")?;
+    let session_config = crate::prompt_session::session_config(&app_config, &cwd)?;
     let resolved_provider =
         devo_server::load_server_provider(&app_config, model_override, &home_dir).await?;
     let model_catalog = PresetModelCatalog::load_from_provider_config_with_home(
@@ -67,26 +67,7 @@ pub(crate) async fn run_prompt(
     )?;
     let selected_model = turn_config.model.slug.clone();
 
-    let mut session_state = SessionState::new(
-        {
-            let mut session_config = SessionConfig {
-                agents_md: AgentsMdConfig {
-                    project_root_markers: app_config.project_root_markers.clone(),
-                    ..AgentsMdConfig::default()
-                },
-                ..SessionConfig::default()
-            };
-            if let Some(sandbox_profile) = app_config
-                .projects
-                .get(&devo_core::project_config_key(&cwd))
-                .and_then(|project| project.sandbox_profile.clone())
-            {
-                session_config.sandbox_profile = Some(sandbox_profile);
-            }
-            session_config
-        },
-        cwd.clone(),
-    );
+    let mut session_state = SessionState::new(session_config, cwd.clone());
     session_state.push_message(devo_core::Message::user(input.to_string()));
 
     if output_format == PromptOutputFormat::Jsonl {

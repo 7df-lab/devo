@@ -14,8 +14,7 @@ pub enum PermissionPreset {
     /// through an automatic reviewer before the user is interrupted.
     AutoReview,
     /// Allow all tool requests without approval.
-    /// Temporarily the product default while OS sandboxing is disabled; move
-    /// `#[default]` back to `Default` to re-enable the asking default.
+    /// Product default for new sessions without an explicit permission preset.
     #[default]
     FullAccess,
 }
