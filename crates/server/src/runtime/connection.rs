@@ -399,6 +399,7 @@ impl ServerRuntime {
             }
             "mcp/list" => Some(Box::pin(self.handle_mcp_list(id?, params)).await),
             "mcp/tools" => Some(Box::pin(self.handle_mcp_tools(id?, params)).await),
+            "mcp/reconnect" => Some(Box::pin(self.handle_mcp_reconnect(id?, params)).await),
             "mcp/set_enabled" => Some(Box::pin(self.handle_mcp_set_enabled(id?, params)).await),
             "context/usage/read" => {
                 Some(Box::pin(self.handle_context_usage_read(id?, params)).await)

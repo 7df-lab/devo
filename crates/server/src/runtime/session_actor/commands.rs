@@ -233,6 +233,12 @@ pub(crate) enum SessionCommand {
         tool_registry: Option<Arc<devo_core::tools::ToolRegistry>>,
         reply: oneshot::Sender<()>,
     },
+    ReplaceMcpServerTools {
+        server_id: devo_core::McpServerId,
+        tools: Vec<devo_core::McpToolInfo>,
+        manager: Arc<dyn devo_core::McpManager>,
+        reply: oneshot::Sender<()>,
+    },
     GetRuntimeContext {
         reply: oneshot::Sender<Arc<crate::session_context::SessionRuntimeContext>>,
     },

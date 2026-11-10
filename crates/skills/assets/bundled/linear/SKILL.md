@@ -14,6 +14,13 @@ Connect via `/login` → **Services** tab → **Linear** (OAuth in the browser).
 automatically. If a call raises `NotEnabled`, the user isn't logged in — walk
 them through `/login`; don't ask them to set environment variables.
 
+This authored Python integration uses the login host's `auth.json`, separately
+from native configured servers accessed through `rlm.mcp`. The current Rust
+host cannot refresh this store. A refresh error is not a missing-login error:
+report it accurately and reconnect through the host that owns the login.
+`list_tools()` verifies the connection each time; stored credentials alone do
+not prove it is connected. Never retry a failed write automatically.
+
 ## Usage
 
 The tool set is defined by the server, not by this skill, so **discover before

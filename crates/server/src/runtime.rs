@@ -130,6 +130,7 @@ mod kernel_host_session;
 mod kernel_idle_bash;
 mod lifecycle;
 mod mcp;
+mod mcp_reconnect;
 mod model_api;
 mod outbound;
 mod permission_decision;
@@ -277,6 +278,9 @@ pub struct ServerRuntime {
     /// Durable cron/heartbeat jobs (`$DEVO_HOME/schedules.json`).
     schedule_store: crate::schedule_store::ScheduleStore,
     schedule_wake_cancel: CancellationToken,
+    /// Short MCP registry publication and disable critical sections; never transport I/O.
+    mcp_publication_gate: Mutex<()>,
+    mcp_reconnecting: std::sync::Mutex<HashSet<String>>,
 }
 
 #[derive(Debug, Clone, PartialEq, Eq)]
@@ -494,6 +498,8 @@ impl ServerRuntime {
             sandbox_network_proxy,
             schedule_store: crate::schedule_store::ScheduleStore::new(server_home),
             schedule_wake_cancel: CancellationToken::new(),
+            mcp_publication_gate: Mutex::new(()),
+            mcp_reconnecting: std::sync::Mutex::new(HashSet::new()),
         });
         runtime.start_usage_updates();
         runtime.start_schedule_wake_loop();

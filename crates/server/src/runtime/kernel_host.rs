@@ -245,7 +245,21 @@ pub async fn dispatch_host_request_with_bridge(bridge: &HostBridge, data: Value)
         "mcp.list_tools" => {
             crate::runtime::kernel_host_bridge::handle_mcp_list_tools(bridge, &params).await
         }
-        "mcp.config" | "mcp.refresh" => ok_result(json!({ "servers": [] })),
+        "mcp.list_servers" => {
+            crate::runtime::kernel_host_bridge::handle_mcp_list_servers(bridge).await
+        }
+        // These are the authored Python integration's auth.json contracts, not
+        // the Rust manager's discovery refresh. Never acknowledge a no-op or
+        // return runtime transport config (which can contain credentials).
+        "mcp.refresh" => error_reply(
+            "This Rust host cannot refresh authored integration credentials in auth.json. \
+             Reconnect the integration using the host that owns its login. \
+             Configured native MCP servers use rlm.mcp.list_tools instead.",
+        ),
+        "mcp.config" => error_reply(
+            "This Rust host does not expose authored integration config. \
+             Use rlm.mcp.list_servers for native server status; credentials remain host-owned.",
+        ),
         "model.info" => ok_result(bridge.model_info_payload()),
         "plan.update" => {
             crate::runtime::kernel_host_bridge::handle_plan_update(bridge, &params).await

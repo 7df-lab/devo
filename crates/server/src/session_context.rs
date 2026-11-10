@@ -304,7 +304,13 @@ impl SessionRuntimeContext {
             &inherited_context.provider_catalog_snapshot,
         ) || config.provider_http
             != inherited_context.provider_http_snapshot;
-        let mcp_runtime_equivalent = config.mcp_runtime == inherited_config.mcp_runtime;
+        let workspace_owns_mcp_servers = !config_store
+            .lock()
+            .expect("app config store mutex should not be poisoned")
+            .workspace_mcp_server_ids()?
+            .is_empty();
+        let mcp_runtime_equivalent =
+            !workspace_owns_mcp_servers && config.mcp_runtime == inherited_config.mcp_runtime;
         let oauth_credentials_equivalent = config.mcp_oauth_credentials_store.unwrap_or_default()
             == inherited_config
                 .mcp_oauth_credentials_store

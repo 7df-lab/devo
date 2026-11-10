@@ -74563,6 +74563,60 @@
         }
       }
     },
+    "McpReconnectParams": {
+      "$schema": "http://json-schema.org/draft-07/schema#",
+      "title": "McpReconnectParams",
+      "description": "Reconnects an existing native transport. Credentials are never accepted here.",
+      "type": "object",
+      "required": [
+        "name"
+      ],
+      "properties": {
+        "name": {
+          "type": "string"
+        }
+      },
+      "additionalProperties": false
+    },
+    "McpReconnectResult": {
+      "$schema": "http://json-schema.org/draft-07/schema#",
+      "title": "McpReconnectResult",
+      "type": "object",
+      "required": [
+        "servers"
+      ],
+      "properties": {
+        "servers": {
+          "type": "array",
+          "items": {
+            "$ref": "#/definitions/McpServerInfo"
+          }
+        }
+      },
+      "definitions": {
+        "McpServerInfo": {
+          "type": "object",
+          "required": [
+            "name",
+            "status",
+            "toolCount"
+          ],
+          "properties": {
+            "name": {
+              "type": "string"
+            },
+            "status": {
+              "type": "string"
+            },
+            "toolCount": {
+              "type": "integer",
+              "format": "uint32",
+              "minimum": 0.0
+            }
+          }
+        }
+      }
+    },
     "McpServerInfo": {
       "$schema": "http://json-schema.org/draft-07/schema#",
       "title": "McpServerInfo",
@@ -238874,6 +238928,10 @@
     "mcp/list": {
       "outgoingRequest": "McpListParams",
       "incomingResult": "McpListResult"
+    },
+    "mcp/reconnect": {
+      "outgoingRequest": "McpReconnectParams",
+      "incomingResult": "McpReconnectResult"
     },
     "mcp/set_enabled": {
       "outgoingRequest": "McpSetEnabledParams",

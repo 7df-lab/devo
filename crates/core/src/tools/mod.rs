@@ -21,6 +21,7 @@ pub mod invocation {
 pub mod json_schema {
     pub use devo_tools::json_schema::*;
 }
+mod mcp_replacement;
 pub mod registry;
 pub mod registry_plan;
 pub mod router;

@@ -5,8 +5,6 @@ use std::sync::Arc;
 use devo_core::McpServerId;
 use devo_core::McpServerStatus;
 use devo_core::McpStartupState;
-use devo_core::tools::ToolPlanConfig;
-use devo_core::tools::handlers;
 use devo_protocol::SuccessResponse;
 use devo_protocol::native::rpc_admin::McpListParams;
 use devo_protocol::native::rpc_admin::McpListResult;
@@ -184,88 +182,95 @@ impl ServerRuntime {
             );
         }
 
-        {
-            let mut store = self
-                .deps
-                .config_store
-                .lock()
-                .expect("app config store mutex should not be poisoned");
-            if let Err(error) = store.set_mcp_server_enabled(name, params.enabled) {
-                return self.error_response(
-                    request_id,
-                    ProtocolErrorCode::InternalError,
-                    format!("failed to update mcp config: {error}"),
-                );
+        let mut contexts = Vec::new();
+        for handle in self.list_session_handles().await {
+            if let Some(context) = handle.runtime_context().await {
+                contexts.push(context);
             }
         }
-        self.deps.invalidate_workspace_contexts();
-
         let server_id = McpServerId(name.to_string());
-        let process_context = &self.deps.process_context;
-        if let Err(error) = process_context
-            .mcp_manager
-            .set_enabled(&server_id, params.enabled)
-            .await
+        let mut managers = vec![Arc::clone(&self.deps.process_context.mcp_manager)];
         {
-            return self.error_response(
-                request_id,
-                ProtocolErrorCode::InternalError,
-                format!("failed to apply mcp enablement: {error}"),
-            );
-        }
-
-        let tool_plan = {
-            let store = self
-                .deps
-                .config_store
-                .lock()
-                .expect("app config store mutex should not be poisoned");
-            ToolPlanConfig::from_app_config(store.effective_config())
-        };
-        let previous = process_context.tool_registry();
-        let new_registry = Arc::new(
-            handlers::rebuild_registry_from_plan_with_mcp(
-                &tool_plan,
-                Arc::clone(&process_context.mcp_manager),
-                Some(previous.as_ref()),
-            )
-            .await,
-        );
-        process_context.replace_tool_registry(Arc::clone(&new_registry));
-
-        for handle in self.list_session_handles().await {
-            let Some(session_context) = handle.runtime_context().await else {
-                continue;
-            };
-            let session_registry =
-                if Arc::ptr_eq(&session_context.mcp_manager, &process_context.mcp_manager) {
-                    Arc::clone(&new_registry)
-                } else {
-                    if let Err(error) = session_context
-                        .mcp_manager
-                        .set_enabled(&server_id, params.enabled)
-                        .await
-                    {
-                        tracing::warn!(
-                            server = %server_id,
-                            error = %error,
-                            "failed to apply mcp enablement on session manager"
-                        );
-                        continue;
-                    }
-                    let previous = session_context.tool_registry();
-                    let rebuilt = Arc::new(
-                        handlers::rebuild_registry_from_plan_with_mcp(
-                            &tool_plan,
-                            Arc::clone(&session_context.mcp_manager),
-                            Some(previous.as_ref()),
-                        )
-                        .await,
+            let _publication = self.mcp_publication_gate.lock().await;
+            let current_record = {
+                let mut store = self
+                    .deps
+                    .config_store
+                    .lock()
+                    .expect("app config store mutex");
+                if let Err(error) = store.set_mcp_server_enabled(name, params.enabled) {
+                    return self.error_response(
+                        request_id,
+                        ProtocolErrorCode::InternalError,
+                        format!("failed to update mcp config: {error}"),
                     );
-                    session_context.replace_tool_registry(Arc::clone(&rebuilt));
-                    rebuilt
+                }
+                store
+                    .effective_config()
+                    .mcp_runtime
+                    .servers
+                    .iter()
+                    .find(|record| record.id == server_id)
+                    .cloned()
+            };
+            contexts.extend(self.deps.take_workspace_contexts());
+            // Re-read effective workspace configuration after the global write.
+            // This follows inherited records through repeated toggles while
+            // preserving explicit workspace transport/enablement overrides.
+            for context in &contexts {
+                let inherits_record = {
+                    let mut store = context.config_store.lock().expect("app config store mutex");
+                    store.reload().is_ok()
+                        && store
+                            .workspace_mcp_server_ids()
+                            .is_ok_and(|ids| !ids.contains(&server_id))
+                        && store
+                            .effective_config()
+                            .mcp_runtime
+                            .servers
+                            .iter()
+                            .find(|record| record.id == server_id)
+                            == current_record.as_ref()
                 };
-            let _ = handle.set_tool_registry(Some(session_registry)).await;
+                if inherits_record
+                    && !managers
+                        .iter()
+                        .any(|manager| Arc::ptr_eq(manager, &context.mcp_manager))
+                {
+                    managers.push(Arc::clone(&context.mcp_manager));
+                }
+            }
+            // Configure every affected manager before any startup I/O. A later
+            // disable therefore invalidates ALL older enable operations, including
+            // managers whose discovery has not started yet.
+            for manager in &managers {
+                if manager
+                    .configure_enabled(&server_id, params.enabled)
+                    .await
+                    .is_err()
+                {
+                    return self.error_response(
+                        request_id,
+                        ProtocolErrorCode::InternalError,
+                        "failed to apply MCP enablement; check the server configuration"
+                            .to_string(),
+                    );
+                }
+                let tools = manager.cached_tools(&server_id).await.unwrap_or_default();
+                self.publish_mcp_server_tools(manager, &server_id, tools, &contexts)
+                    .await;
+            }
+        }
+        if params.enabled {
+            for manager in &managers {
+                // Refresh never changes desired enablement. Disable can run while
+                // this I/O waits, and a disabled manager rejects late discovery.
+                let _ = manager.refresh(&server_id).await;
+                let _publication = self.mcp_publication_gate.lock().await;
+                let tools = manager.cached_tools(&server_id).await.unwrap_or_default();
+                self.publish_mcp_server_tools(manager, &server_id, tools, &contexts)
+                    .await;
+            }
         }
 
         match self.mcp_server_infos().await {
@@ -282,7 +287,7 @@ impl ServerRuntime {
         }
     }
 
-    async fn mcp_server_infos(&self) -> Result<Vec<McpServerInfo>, String> {
+    pub(super) async fn mcp_server_infos(&self) -> Result<Vec<McpServerInfo>, String> {
         let statuses = self
             .deps
             .process_context

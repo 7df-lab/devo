@@ -591,6 +591,21 @@ pub(super) async fn run_session_actor(
                 state.tool_registry = tool_registry;
                 let _ = reply.send(());
             }
+            SessionCommand::ReplaceMcpServerTools {
+                server_id,
+                tools,
+                manager,
+                reply,
+            } => {
+                if Arc::ptr_eq(&state.runtime_context.mcp_manager, &manager)
+                    && let Some(registry) = &state.tool_registry
+                {
+                    state.tool_registry = Some(Arc::new(
+                        registry.replace_mcp_server_tools(&server_id, tools, manager),
+                    ));
+                }
+                let _ = reply.send(());
+            }
             SessionCommand::GetRuntimeContext { reply } => {
                 let _ = reply.send(Arc::clone(&state.runtime_context));
             }

@@ -800,6 +800,10 @@ export type McpToolEntry = { name: string, description: string, };
 
 export type McpToolsResult = { tools: Array<McpToolEntry>, };
 
+export type McpReconnectParams = { name: string, };
+
+export type McpReconnectResult = { servers: Array<McpServerInfo>, };
+
 export type McpSetEnabledParams = { name: string, enabled: boolean, };
 
 export type McpSetEnabledResult = { servers: Array<McpServerInfo>, };

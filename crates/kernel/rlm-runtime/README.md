@@ -271,7 +271,8 @@ to host commands.
 There are two layers:
 
 - `rlm.mcp` is a thin facade for the session's Rust MCP manager. Use
-  `await mcp.list_tools(server)` for `{name, description, inputSchema}` entries
+  `await mcp.list_servers()` for redacted observed connection states without
+  starting servers, and `await mcp.list_tools(server)` for `{name, description, inputSchema}` entries
   and `await mcp.call_tool(server, tool, arguments)` for the complete MCP
   `CallToolResult`, including `content`, `structuredContent`, and `isError`.
   Tool-level `isError` results are returned unchanged. Host call rejections
@@ -287,7 +288,12 @@ There are two layers:
   discovered on first use and bound through `__getattr__`; `call_tool(name,
   args)` is the explicit escape hatch. These authored integrations, including
   Linear and Notion, still use the Python SDK and retain their parsed-result
-  contract; they are separate from the generic host facade.
+  contract; they are separate from the generic host facade. An explicit
+  `list_tools()` rechecks the connection and clears stale schemas on failure.
+  Their legacy `auth.json` refresh contract is not implemented by the Rust host:
+  it reports an explicit error, never a successful no-op. Expired grants must be
+  reconnected through their owning login host. See
+  [MCP connection lifecycle](../../../docs/mcp-connection-lifecycle.md).
 
 The MCP exports are lazy. `import rlm` does not import the `mcp` SDK; only an
 integration package that subclasses `McpIntegration` needs it.

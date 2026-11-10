@@ -1472,6 +1472,10 @@ class NativeClient {
 			}
 			return { data: result.tools ?? [] }
 		},
+		/** Restart the configured transport and rediscover tools; does not perform login. */
+		reconnect: async (params: { name: string }) => ({
+			data: await this.requestCanonical("mcp/reconnect", { name: params.name }),
+		}),
 		setEnabled: async (params: { name: string; enabled: boolean }) => ({
 			data: await this.requestCanonical("mcp/set_enabled", params),
 		}),

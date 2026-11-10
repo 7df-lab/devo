@@ -808,6 +808,27 @@ impl SessionHandle {
         reply_rx.await.is_ok()
     }
 
+    pub(crate) async fn replace_mcp_server_tools(
+        &self,
+        server_id: devo_core::McpServerId,
+        tools: Vec<devo_core::McpToolInfo>,
+        manager: Arc<dyn devo_core::McpManager>,
+    ) -> bool {
+        let (reply_tx, reply_rx) = oneshot::channel();
+        if !self
+            .send(SessionCommand::ReplaceMcpServerTools {
+                server_id,
+                tools,
+                manager,
+                reply: reply_tx,
+            })
+            .await
+        {
+            return false;
+        }
+        reply_rx.await.is_ok()
+    }
+
     pub(crate) async fn runtime_context(
         &self,
     ) -> Option<Arc<crate::session_context::SessionRuntimeContext>> {

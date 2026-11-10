@@ -499,6 +499,19 @@ pub struct McpSetEnabledResult {
     pub servers: Vec<McpServerInfo>,
 }
 
+/// Reconnects an existing native transport. Credentials are never accepted here.
+#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize, JsonSchema, TS)]
+#[serde(rename_all = "camelCase", deny_unknown_fields)]
+pub struct McpReconnectParams {
+    pub name: String,
+}
+
+#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize, JsonSchema, TS)]
+#[serde(rename_all = "camelCase")]
+pub struct McpReconnectResult {
+    pub servers: Vec<McpServerInfo>,
+}
+
 // ── context/usage/read ──
 
 #[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize, JsonSchema, TS)]

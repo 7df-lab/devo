@@ -142,6 +142,11 @@ pub struct ServerRuntimeDependencies {
     /// Invalidate via [`Self::invalidate_workspace_contexts`] when user MCP,
     /// skills, provider, or model config mutates.
     workspace_contexts: StdMutex<LruCache<PathBuf, Arc<SessionRuntimeContext>>>,
+    // Read and increment only while holding workspace_contexts, so invalidation
+    // and asynchronous load publication have one ordering point.
+    workspace_context_generation: std::sync::atomic::AtomicU64,
+    #[cfg(test)]
+    workspace_load_pause: StdMutex<Option<(Arc<tokio::sync::Notify>, Arc<tokio::sync::Notify>)>>,
 }
 
 /// Builds an empty MCP manager for tests and bootstrap paths without servers.
@@ -164,6 +169,9 @@ impl ServerRuntimeDependencies {
             workspace_contexts: StdMutex::new(workspace_context_cache(
                 WORKSPACE_CONTEXT_CACHE_CAPACITY,
             )),
+            workspace_context_generation: std::sync::atomic::AtomicU64::new(0),
+            #[cfg(test)]
+            workspace_load_pause: StdMutex::new(None),
         }
     }
 
@@ -172,41 +180,86 @@ impl ServerRuntimeDependencies {
         workspace_root: &Path,
     ) -> anyhow::Result<Arc<SessionRuntimeContext>> {
         let cache_key = canonicalize_workspace_root(workspace_root);
-        {
+        // Repeated config writes must not keep a caller retrying indefinitely.
+        for _ in 0..3 {
+            let generation = {
+                let mut cache = self
+                    .workspace_contexts
+                    .lock()
+                    .expect("workspace context cache mutex should not be poisoned");
+                if let Some(cached) = cache.get(&cache_key) {
+                    return Ok(Arc::clone(cached));
+                }
+                self.workspace_context_generation
+                    .load(std::sync::atomic::Ordering::Relaxed)
+            };
+
+            let user_config_dir = self
+                .config_store
+                .lock()
+                .expect("app config store mutex should not be poisoned")
+                .user_config_dir()
+                .to_path_buf();
+            // Loading can discover MCP tools. Do not hold the cache lock across I/O.
+            // Keep the large discovery future off the session/RPC call stack.
+            let loaded = Box::pin(SessionRuntimeContext::load_for_workspace(
+                user_config_dir,
+                Some(workspace_root),
+                &self.process_context,
+            ))
+            .await;
+
+            #[cfg(test)]
+            {
+                let pause = self
+                    .workspace_load_pause
+                    .lock()
+                    .expect("workspace load pause")
+                    .take();
+                if let Some((entered, release)) = pause {
+                    entered.notify_one();
+                    release.notified().await;
+                }
+            }
+
             let mut cache = self
                 .workspace_contexts
                 .lock()
                 .expect("workspace context cache mutex should not be poisoned");
+            if self
+                .workspace_context_generation
+                .load(std::sync::atomic::Ordering::Relaxed)
+                != generation
+            {
+                // Discard both stale successes and stale configuration errors.
+                continue;
+            }
+            // Another task may have filled the same key while we loaded.
             if let Some(cached) = cache.get(&cache_key) {
                 return Ok(Arc::clone(cached));
             }
+            let loaded = loaded?;
+            cache.put(cache_key.clone(), Arc::clone(&loaded));
+            return Ok(loaded);
         }
+        anyhow::bail!("Workspace configuration changed repeatedly while loading; retry the request")
+    }
 
-        let user_config_dir = self
-            .config_store
-            .lock()
-            .expect("app config store mutex should not be poisoned")
-            .user_config_dir()
-            .to_path_buf();
-        // Miss path: load workspace-merged config. MCP/registry are reused from
-        // `process_context` when operationally equivalent (see load_for_workspace).
-        let loaded = SessionRuntimeContext::load_for_workspace(
-            user_config_dir,
-            Some(workspace_root),
-            &self.process_context,
-        )
-        .await?;
-
+    /// Atomically retire cached contexts and invalidate in-flight loads, while
+    /// retaining the published contexts for a targeted runtime update.
+    pub(crate) fn take_workspace_contexts(&self) -> Vec<Arc<SessionRuntimeContext>> {
         let mut cache = self
             .workspace_contexts
             .lock()
-            .expect("workspace context cache mutex should not be poisoned");
-        // Another task may have filled the same key while we loaded.
-        if let Some(cached) = cache.get(&cache_key) {
-            return Ok(Arc::clone(cached));
-        }
-        cache.put(cache_key, Arc::clone(&loaded));
-        Ok(loaded)
+            .expect("workspace context cache mutex");
+        let contexts = cache
+            .iter()
+            .map(|(_, context)| Arc::clone(context))
+            .collect();
+        self.workspace_context_generation
+            .fetch_add(1, std::sync::atomic::Ordering::Relaxed);
+        cache.clear();
+        contexts
     }
 
     /// Clears the workspace context LRU so the next lookup reloads from disk.
@@ -215,10 +268,13 @@ impl ServerRuntimeDependencies {
     /// provider upsert, model/preferences/write). Already-running sessions keep their
     /// own `Arc<SessionRuntimeContext>`; only subsequent lookups are affected.
     pub(crate) fn invalidate_workspace_contexts(&self) {
-        self.workspace_contexts
+        let mut cache = self
+            .workspace_contexts
             .lock()
-            .expect("workspace context cache mutex should not be poisoned")
-            .clear();
+            .expect("workspace context cache mutex should not be poisoned");
+        self.workspace_context_generation
+            .fetch_add(1, std::sync::atomic::Ordering::Relaxed);
+        cache.clear();
     }
 
     /// Resolves the full turn configuration used by the core query loop.
@@ -805,6 +861,63 @@ invocation_method = "openai_chat_completions"
         ));
 
         let _ = std::fs::remove_dir_all(workspace);
+    }
+
+    #[tokio::test]
+    async fn context_for_workspace_retries_load_invalidated_by_mcp_disable() {
+        let deps = Arc::new(test_deps(
+            "[mcp_servers.target]\ncommand = \"__missing_workspace_generation_test__\"\nenabled = true\n",
+        ));
+        let workspace = tempfile::tempdir().unwrap();
+        std::fs::create_dir_all(workspace.path().join(".devo")).unwrap();
+        // A workspace-owned sibling forces an independent manager for the inherited target.
+        std::fs::write(
+            workspace.path().join(".devo/config.toml"),
+            "[mcp_servers.sibling]\ncommand = \"__unused__\"\nenabled = false\n",
+        )
+        .unwrap();
+        let entered = Arc::new(tokio::sync::Notify::new());
+        let release = Arc::new(tokio::sync::Notify::new());
+        *deps.workspace_load_pause.lock().unwrap() =
+            Some((Arc::clone(&entered), Arc::clone(&release)));
+        let pending = {
+            let deps = Arc::clone(&deps);
+            let path = workspace.path().to_path_buf();
+            tokio::spawn(async move { deps.context_for_workspace(&path).await })
+        };
+        tokio::time::timeout(std::time::Duration::from_secs(10), entered.notified())
+            .await
+            .expect("workspace load reached publication boundary");
+        deps.config_store
+            .lock()
+            .unwrap()
+            .set_mcp_server_enabled("target", /*enabled*/ false)
+            .unwrap();
+        deps.invalidate_workspace_contexts();
+        release.notify_one();
+        let context = tokio::time::timeout(std::time::Duration::from_secs(10), pending)
+            .await
+            .unwrap()
+            .unwrap()
+            .unwrap();
+        let mut states = context
+            .mcp_manager
+            .statuses()
+            .await
+            .unwrap()
+            .into_iter()
+            .map(|status| (status.server_id.0, status.startup_state))
+            .collect::<Vec<_>>();
+        states.sort_by(|left, right| left.0.cmp(&right.0));
+        assert_eq!(
+            states,
+            vec![
+                ("sibling".to_string(), devo_core::McpStartupState::Disabled),
+                ("target".to_string(), devo_core::McpStartupState::Disabled),
+            ]
+        );
+        let cached = deps.context_for_workspace(workspace.path()).await.unwrap();
+        assert!(Arc::ptr_eq(&context, &cached));
     }
 
     #[tokio::test]
