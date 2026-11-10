@@ -1,6 +1,6 @@
 import type { WorkspaceChangeScope, WorkspaceChangeView } from "@devo-ai/sdk/v2/client"
 import { useAtomValue, useSetAtom } from "jotai"
-import { useCallback, useEffect, useMemo, useRef } from "react"
+import { useCallback, useEffect, useMemo } from "react"
 import { isMockModeAtom } from "../atoms/mock-mode"
 import { appStore } from "../atoms/store"
 import {
@@ -15,16 +15,12 @@ import {
 import { numberFromProtocol, isCompletePatch } from "../lib/workspace-diff"
 import { getProjectClient } from "../services/connection-manager"
 import { getWorkspaceChanges } from "../services/devo"
+import { workspaceChangeRequests } from "./workspace-change-requests"
 
 const FULL_DIFF_LIMIT_BYTES = 2_000_000
 
 /** Sibling scopes warmed after the active Summary paints. */
-const PREFETCH_SCOPES: WorkspaceChangeScope[] = [
-	"uncommitted",
-	"unstaged",
-	"staged",
-	"branch",
-]
+const PREFETCH_SCOPES: WorkspaceChangeScope[] = ["uncommitted", "unstaged", "staged", "branch"]
 
 export type ScopeStatsPreview = {
 	additions: number
@@ -135,16 +131,14 @@ function fileExpandReady(
 	view: WorkspaceChangeView,
 	filePath: string,
 	sidesFetched: Set<string>,
-	cacheKey: string,
 ): boolean {
 	const normalized = filePath.replace(/\\/g, "/")
 	const file = findFile(view, filePath)
 	if (!file) return false
 	if (file.binary) return true
 	if (fileHasSides(view, filePath)) return true
-	const sideKey = `${cacheKey}\u001f${normalized}`
 	// Path-scoped sides already attempted (oversize/unavailable) — stop refetching.
-	if (sidesFetched.has(sideKey)) return true
+	if (sidesFetched.has(normalized)) return true
 	return false
 }
 
@@ -186,43 +180,6 @@ export function mergePathFullIntoView(
 	if (already) return { ...base, files }
 	const unified = baseDiff.trimEnd() ? `${baseDiff.trimEnd()}\n${incoming}\n` : `${incoming}\n`
 	return { ...base, files, unifiedDiff: unified }
-}
-
-/** Summary refreshes must not wipe expand-on-demand patches/sides. */
-export function mergeSummaryPreservingExpandState(
-	previous: WorkspaceChangeView | null | undefined,
-	summary: WorkspaceChangeView,
-): WorkspaceChangeView {
-	if (!previous) return summary
-	const prevByPath = new Map(
-		previous.files.map((file) => [String(file.path).replace(/\\/g, "/"), file] as const),
-	)
-	const files = summary.files.map((file) => {
-		const path = String(file.path).replace(/\\/g, "/")
-		const prev = prevByPath.get(path)
-		if (!prev) return file
-		return {
-			...file,
-			oldText: prev.oldText ?? file.oldText,
-			newText: prev.newText ?? file.newText,
-		}
-	})
-	let unified = previous.unifiedDiff ?? undefined
-	if (unified) {
-		const keptPaths = new Set(files.map((file) => String(file.path).replace(/\\/g, "/")))
-		for (const prev of previous.files) {
-			const path = String(prev.path).replace(/\\/g, "/")
-			if (!keptPaths.has(path)) {
-				unified = stripFilePatch(unified, path)
-			}
-		}
-		if (!unified.trim()) unified = undefined
-	}
-	return {
-		...summary,
-		files,
-		unifiedDiff: unified ?? summary.unifiedDiff,
-	}
 }
 
 export function useWorkspaceChanges(
@@ -272,12 +229,6 @@ export function useWorkspaceChanges(
 	const isMockMode = useAtomValue(isMockModeAtom)
 	const enabled = options.enabled ?? true
 	const prefetch = options.prefetch ?? true
-	const inFlightRef = useRef(new Set<string>())
-	const sidesFetchedRef = useRef(new Set<string>())
-
-	useEffect(() => {
-		sidesFetchedRef.current.clear()
-	}, [key])
 
 	useEffect(() => {
 		if (sessionId && directory) {
@@ -285,13 +236,87 @@ export function useWorkspaceChanges(
 		}
 	}, [directory, registerDirectory, sessionId])
 
+	const fetchDetails = useCallback(
+		async (args: FetchArgs, filePath?: string) => {
+			if (isMockMode) return
+			const fetchKey = cacheKeyFor(args)
+			const cache = workspaceChangesStateFamily(fetchKey)
+			const requests = workspaceChangeRequests(cache)
+			const current = appStore.get(cache).view
+			if (!current) return
+			const normalizedPath = filePath?.replace(/\\/g, "/")
+			// Remember intent even during Refresh; the new Summary will reload it.
+			if (normalizedPath) {
+				requests.requestedPaths.add(normalizedPath)
+			} else {
+				for (const file of current.files) {
+					requests.requestedPaths.add(String(file.path).replace(/\\/g, "/"))
+				}
+			}
+			if (requests.summaryPending) return
+			if (normalizedPath) {
+				if (!findFile(current, normalizedPath)) return
+				if (fileExpandReady(current, normalizedPath, requests.sidesFetched)) return
+			} else if (viewHasCompletePatches(current)) return
+
+			const client = getProjectClient(args.directory)
+			if (!client) {
+				setError({ key: fetchKey, error: "No workspace connection for this project" })
+				return
+			}
+			const flightKey = normalizedPath ?? ""
+			if (requests.detailsPending.has(flightKey)) return
+			requests.detailsPending.add(flightKey)
+			const generation = requests.generation
+			try {
+				const result = await getWorkspaceChanges(client, {
+					sessionId: args.sessionId,
+					scopes: [args.scope],
+					cwd: args.directory || undefined,
+					baseBranch: args.baseBranch ?? undefined,
+					turnId: args.turnId ?? undefined,
+					diffDetail: "full",
+					maxDiffBytes: FULL_DIFF_LIMIT_BYTES,
+					ignoreWhitespace: args.ignoreWhitespace || undefined,
+					paths: normalizedPath ? [normalizedPath] : undefined,
+					includeFileSides: Boolean(normalizedPath),
+				})
+				if (generation !== requests.generation) return
+				const patchView = result.views.find((item) => item.scope === args.scope)
+				if (!patchView) {
+					requests.detailErrors.set(flightKey, "Workspace change view missing from response")
+					setError({ key: fetchKey, error: "Workspace change view missing from response" })
+					return
+				}
+				if (normalizedPath) requests.sidesFetched.add(normalizedPath)
+				const latest = appStore.get(cache).view
+				if (!latest) return
+				requests.detailErrors.delete(flightKey)
+				setView({ key: fetchKey, view: mergePathFullIntoView(latest, patchView) })
+				// A successful sibling must not hide another row's failed load/Retry.
+				const remainingError = requests.detailErrors.values().next().value
+				if (remainingError) setError({ key: fetchKey, error: remainingError })
+			} catch (error) {
+				if (generation !== requests.generation) return
+				const message = error instanceof Error ? error.message : "Failed to load file diff"
+				requests.detailErrors.set(flightKey, message)
+				setError({ key: fetchKey, error: message })
+			} finally {
+				// An obsolete request must not release its replacement's flight slot.
+				if (generation === requests.generation) requests.detailsPending.delete(flightKey)
+			}
+		},
+		[isMockMode, setError, setView],
+	)
+
 	const fetchServer = useCallback(
-		async (args: FetchArgs, detail: "summary" | "full") => {
+		async (args: FetchArgs) => {
 			if (isMockMode) return
 			const client = getProjectClient(args.directory)
 			const fetchKey = cacheKeyFor(args)
-			const flightKey = `${fetchKey}\u001f${detail}`
-			if (inFlightRef.current.has(flightKey)) return
+			const cache = workspaceChangesStateFamily(fetchKey)
+			const requests = workspaceChangeRequests(cache)
+			if (requests.summaryPending) return
 			if (!client) {
 				setError({
 					key: fetchKey,
@@ -301,12 +326,11 @@ export function useWorkspaceChanges(
 				})
 				return
 			}
-			inFlightRef.current.add(flightKey)
-			const existing = appStore.get(workspaceChangesStateFamily(fetchKey))
-			const silentUpgrade = detail === "full" && Boolean(existing.view) && !existing.stale
-			if (!silentUpgrade) {
-				markLoading({ key: fetchKey, loading: true, error: null })
-			}
+			requests.summaryPending = true
+			requests.generation += 1
+			const generation = requests.generation
+			requests.detailsPending.clear()
+			markLoading({ key: fetchKey, loading: true, error: null })
 			try {
 				const result = await getWorkspaceChanges(client, {
 					sessionId: args.sessionId,
@@ -314,37 +338,41 @@ export function useWorkspaceChanges(
 					cwd: args.directory || undefined,
 					baseBranch: args.baseBranch ?? undefined,
 					turnId: args.turnId ?? undefined,
-					diffDetail: detail,
-					maxDiffBytes: detail === "full" ? FULL_DIFF_LIMIT_BYTES : undefined,
+					diffDetail: "summary",
 					ignoreWhitespace: args.ignoreWhitespace || undefined,
 				})
-				const view = result.views.find((item) => item.scope === args.scope) as
-					| WorkspaceChangeView
-					| undefined
+				const view = result.views.find((item) => item.scope === args.scope)
 				if (!view) {
 					setError({ key: fetchKey, error: "Workspace change view missing from response" })
 					return
 				}
-				const current = appStore.get(workspaceChangesStateFamily(fetchKey))
-				if (detail === "summary" && current.view?.unifiedDiff && !current.stale) {
-					if (!silentUpgrade) markLoading({ key: fetchKey, loading: false })
-					return
+				// Summary is authoritative. Equal stats do not imply equal content.
+				// Keep the visible old view while loading, never carry its sides forward.
+				requests.sidesFetched.clear()
+				requests.detailErrors.clear()
+				for (const path of requests.requestedPaths) {
+					if (!findFile(view, path)) requests.requestedPaths.delete(path)
 				}
-				const next =
-					detail === "summary"
-						? mergeSummaryPreservingExpandState(current.view, view)
-						: view
-				setView({ key: fetchKey, view: next })
+				setView({ key: fetchKey, view })
 			} catch (error) {
 				setError({
 					key: fetchKey,
 					error: error instanceof Error ? error.message : "Failed to load workspace changes",
 				})
+				return
 			} finally {
-				inFlightRef.current.delete(flightKey)
+				requests.summaryPending = false
+			}
+			// ReviewPanel loads on expand, not on view changes. Refresh only paths
+			// already requested, including expand clicks made during the Summary.
+			const paths = [...requests.requestedPaths]
+			const concurrency = 4
+			for (let i = 0; i < paths.length; i += concurrency) {
+				if (generation !== requests.generation) return
+				await Promise.all(paths.slice(i, i + concurrency).map((path) => fetchDetails(args, path)))
 			}
 		},
-		[isMockMode, markLoading, setError, setView],
+		[fetchDetails, isMockMode, markLoading, setError, setView],
 	)
 
 	const activeArgs = useMemo<FetchArgs>(
@@ -360,98 +388,25 @@ export function useWorkspaceChanges(
 	)
 
 	const fetchChanges = useCallback(async () => {
-		await fetchServer(activeArgs, "summary")
+		await fetchServer(activeArgs)
 	}, [activeArgs, fetchServer])
 
-	/**
-	 * Expand a file: path-scoped Full + file sides via the server (remote-safe).
-	 * Without `filePath`, fetches whole-tree Full patches; callers then re-enter
-	 * per pending path so sides load path-scoped.
-	 */
+	/** Expand lazily; whole-tree Full is followed by per-path sides in Expand all. */
 	const ensureFullPatches = useCallback(
 		async (filePath?: string) => {
-			if (!enabled || isMockMode) return
-			const current = appStore.get(workspaceChangesStateFamily(key)).view
-			if (!current) return
-			const sidesFetched = sidesFetchedRef.current
-			if (filePath) {
-				if (fileExpandReady(current, filePath, sidesFetched, key)) return
-			} else if (viewHasCompletePatches(current)) {
-				// Whole-tree patches only; sides load via per-path ensureFullPatches.
-				return
-			}
-
-			const client = getProjectClient(directory)
-			if (!client) {
-				setError({ key, error: "No workspace connection for this project" })
-				return
-			}
-			const normalizedPath = filePath?.replace(/\\/g, "/")
-			const flightKey = normalizedPath
-				? `${key}\u001ffile\u001f${normalizedPath}`
-				: `${key}\u001ffull`
-			if (inFlightRef.current.has(flightKey)) return
-			inFlightRef.current.add(flightKey)
-			try {
-				const result = await getWorkspaceChanges(client, {
-					sessionId,
-					scopes: [scope],
-					cwd: directory || undefined,
-					baseBranch: options.baseBranch ?? undefined,
-					turnId: turnId ?? undefined,
-					diffDetail: "full",
-					maxDiffBytes: FULL_DIFF_LIMIT_BYTES,
-					ignoreWhitespace: ignoreWhitespace || undefined,
-					paths: normalizedPath ? [normalizedPath] : undefined,
-					includeFileSides: Boolean(normalizedPath),
-				})
-				const patchView = result.views.find((item) => item.scope === scope) as
-					| WorkspaceChangeView
-					| undefined
-				if (!patchView) {
-					setError({ key, error: "Workspace change view missing from response" })
-					return
-				}
-				if (normalizedPath) {
-					sidesFetched.add(`${key}\u001f${normalizedPath}`)
-				}
-				const latest = appStore.get(workspaceChangesStateFamily(key)).view
-				if (!latest) return
-				setView({
-					key,
-					view: mergePathFullIntoView(latest, patchView),
-				})
-			} catch (error) {
-				setError({
-					key,
-					error: error instanceof Error ? error.message : "Failed to load file diff",
-				})
-			} finally {
-				inFlightRef.current.delete(flightKey)
-			}
+			if (!enabled) return
+			await fetchDetails(activeArgs, filePath)
 		},
-		[
-			directory,
-			enabled,
-			ignoreWhitespace,
-			isMockMode,
-			key,
-			options.baseBranch,
-			scope,
-			sessionId,
-			setError,
-			setView,
-			turnId,
-		],
+		[activeArgs, enabled, fetchDetails],
 	)
 
-	// Open path: Summary only. Never auto-Full.
+	// First open is Summary-only. Previously requested paths reload after refresh.
 	useEffect(() => {
 		if (!enabled) return
 		let cancelled = false
 		void (async () => {
 			if (needsSummary(key)) {
-				await fetchServer(activeArgs, "summary")
+				await fetchServer(activeArgs)
 				if (cancelled) return
 			}
 			if (prefetch && !isMockMode && directory) {
@@ -467,7 +422,7 @@ export function useWorkspaceChanges(
 					}
 					const warmKey = cacheKeyFor(warmArgs)
 					if (!needsSummary(warmKey)) continue
-					void fetchServer(warmArgs, "summary")
+					void fetchServer(warmArgs)
 				}
 			}
 		})()
@@ -491,7 +446,9 @@ export function useWorkspaceChanges(
 	const displayView = state.view ?? (state.loading ? fallbackState.view : null)
 	const isInitialLoading = !displayView && state.loading
 	const isRefreshing = Boolean(displayView) && state.loading
-	const patchesPending = Boolean(displayView && displayView.files.length > 0 && !displayView.unifiedDiff)
+	const patchesPending = Boolean(
+		displayView && displayView.files.length > 0 && !displayView.unifiedDiff,
+	)
 
 	return {
 		...state,
