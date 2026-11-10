@@ -37,6 +37,7 @@ interface ConnectionDetailDialogProps {
 	open: boolean
 	onOpenChange: (open: boolean) => void
 	onChanged: () => void
+	onEdit?: () => void
 }
 
 export function ConnectionDetailDialog({
@@ -45,6 +46,7 @@ export function ConnectionDetailDialog({
 	open,
 	onOpenChange,
 	onChanged,
+	onEdit,
 }: ConnectionDetailDialogProps) {
 	const [search, setSearch] = useState("")
 	const [discovering, setDiscovering] = useState(false)
@@ -266,6 +268,7 @@ export function ConnectionDetailDialog({
 					</div>
 
 					<DialogFooter>
+						{onEdit && <Button variant="outline" onClick={onEdit}>Edit connection</Button>}
 						<Button variant="outline" onClick={() => onOpenChange(false)}>
 							Done
 						</Button>
