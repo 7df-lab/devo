@@ -42,7 +42,7 @@ interface ChatTurnProps {
 	retryStatus?: ProviderRetryStatus
 	providerErrors?: ProviderErrorEntry[]
 	onForkFromTurn?: (turnId: string) => void
-	onEditUserMessage?: (messageId: string, text: string) => void
+	onEditUserMessage?: (text: string) => Promise<void>
 }
 
 function NativeItemRow({ entry, streaming }: { entry: ChatMessageEntry; streaming?: boolean }) {
@@ -149,13 +149,7 @@ export const ChatTurnComponent = memo(
 					<UserMessageBlock
 						text={userText}
 						canEdit={Boolean(onEditUserMessage)}
-						onEdit={
-							onEditUserMessage
-								? async (next) => {
-										await onEditUserMessage(turn.userMessage.info.id, next)
-									}
-								: undefined
-						}
+						onEdit={onEditUserMessage}
 					/>
 				)}
 				{isSynthetic && (

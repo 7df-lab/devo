@@ -8,7 +8,6 @@
  * (or pick another id) before save.
  */
 
-import type { CatalogModelInfo, CatalogProviderInfo, CatalogWireApi } from "@devo-ai/sdk/v2/client"
 import { Button } from "@devo/ui/components/button"
 import {
 	Dialog,
@@ -29,13 +28,11 @@ import {
 	SelectValue,
 } from "@devo/ui/components/select"
 import { Spinner } from "@devo/ui/components/spinner"
+import type { CatalogModelInfo, CatalogProviderInfo, CatalogWireApi } from "@devo-ai/sdk/v2/client"
 import { PlusIcon, Trash2Icon } from "lucide-react"
-import { useCallback, useEffect, useMemo, useRef, useState } from "react"
+import { useCallback, useEffect, useId, useMemo, useRef, useState } from "react"
 import { getBaseClient } from "../../services/connection-manager"
-import {
-	isBuiltinTemplateProviderId,
-	suggestNonTemplateProviderId,
-} from "./custom-provider-id"
+import { isBuiltinTemplateProviderId, suggestNonTemplateProviderId } from "./custom-provider-id"
 
 const WIRE_API_OPTIONS: Array<{ value: CatalogWireApi; label: string }> = [
 	{ value: "openai_chat_completions", label: "OpenAI Chat Completions" },
@@ -89,10 +86,19 @@ export function CustomProviderDialog({
 	})
 	const [headers, setHeaders] = useState<HeaderEntry[]>(() => {
 		if (!existing?.headers) return []
-		return Object.entries(existing.headers).map(([key, value]) => ({ key, value }))
+		return Object.entries(existing.headers).map(([key, value]) => ({
+			key,
+			value,
+		}))
 	})
 	const [saving, setSaving] = useState(false)
-	const [error, setError] = useState<string | null>(null)
+	const [error, setError] = useState<{
+		message: string
+		field?: "provider-id" | "base-url"
+	} | null>(null)
+	const errorId = useId()
+	const providerIdInput = useRef<HTMLInputElement>(null)
+	const baseUrlInput = useRef<HTMLInputElement>(null)
 	const [builtinConflictOpen, setBuiltinConflictOpen] = useState(false)
 	const saveScope = useRef<{ saving: boolean } | null>(null)
 
@@ -182,7 +188,9 @@ export function CustomProviderDialog({
 			onSaved()
 		} catch (err) {
 			if (saveScope.current === scope) {
-				setError(err instanceof Error ? err.message : "Failed to save provider")
+				setError({
+					message: err instanceof Error ? err.message : "Failed to save provider",
+				})
 			}
 		} finally {
 			if (saveScope.current === scope) {
@@ -190,26 +198,18 @@ export function CustomProviderDialog({
 				setSaving(false)
 			}
 		}
-	}, [
-		providerId,
-		displayName,
-		baseUrl,
-		wireApi,
-		apiKey,
-		models,
-		headers,
-		onOpenChange,
-		onSaved,
-	])
+	}, [providerId, displayName, baseUrl, wireApi, apiKey, models, headers, onOpenChange, onSaved])
 
 	const handleSave = useCallback(async () => {
 		const id = providerId.trim()
 		if (!id) {
-			setError("Provider ID is required")
+			setError({ message: "Provider ID is required", field: "provider-id" })
+			providerIdInput.current?.focus()
 			return
 		}
 		if (!baseUrl.trim()) {
-			setError("Base URL is required")
+			setError({ message: "Base URL is required", field: "base-url" })
+			baseUrlInput.current?.focus()
 			return
 		}
 
@@ -252,14 +252,17 @@ export function CustomProviderDialog({
 							</Label>
 							<Input
 								id="provider-id"
+								ref={providerIdInput}
+								aria-invalid={error?.field === "provider-id"}
+								aria-describedby={error?.field === "provider-id" ? errorId : undefined}
 								placeholder="my-provider"
 								value={providerId}
 								onChange={(e) => setProviderId(e.target.value)}
 								disabled={isEdit || saving}
 							/>
 							<p className="text-[12px] text-muted-foreground">
-								Lowercase letters, numbers, hyphens, or underscores. Avoid built-in ids
-								unless you intend to overlay that template.
+								Lowercase letters, numbers, hyphens, or underscores. Avoid built-in ids unless you
+								intend to overlay that template.
 							</p>
 						</div>
 
@@ -284,6 +287,9 @@ export function CustomProviderDialog({
 							</Label>
 							<Input
 								id="base-url"
+								ref={baseUrlInput}
+								aria-invalid={error?.field === "base-url"}
+								aria-describedby={error?.field === "base-url" ? errorId : undefined}
 								placeholder="https://api.example.com/v1"
 								value={baseUrl}
 								onChange={(e) => setBaseUrl(e.target.value)}
@@ -294,7 +300,13 @@ export function CustomProviderDialog({
 						{/* Wire API */}
 						<div className="flex flex-col gap-1.5">
 							<Label className="text-[13px]">Wire API</Label>
-							<Select value={wireApi} items={Object.fromEntries(WIRE_API_OPTIONS.map((option) => [option.value, option.label]))} onValueChange={(v) => setWireApi(v as CatalogWireApi)}>
+							<Select
+								value={wireApi}
+								items={Object.fromEntries(
+									WIRE_API_OPTIONS.map((option) => [option.value, option.label]),
+								)}
+								onValueChange={(v) => setWireApi(v as CatalogWireApi)}
+							>
 								<SelectTrigger aria-label="Wire API">
 									<SelectValue />
 								</SelectTrigger>
@@ -388,7 +400,12 @@ export function CustomProviderDialog({
 										className="flex-1"
 										disabled={saving}
 									/>
-									<Button variant="ghost" size="sm" onClick={() => removeHeader(i)} disabled={saving}>
+									<Button
+										variant="ghost"
+										size="sm"
+										onClick={() => removeHeader(i)}
+										disabled={saving}
+									>
 										<Trash2Icon className="size-3.5 stroke-[1.5]" />
 									</Button>
 								</div>
@@ -404,9 +421,16 @@ export function CustomProviderDialog({
 								Add header
 							</Button>
 						</div>
-
-						{error && <p className="text-[13px] text-destructive">{error}</p>}
 					</div>
+					{error && (
+						<p
+							id={errorId}
+							role="alert"
+							className="max-h-24 shrink-0 overflow-y-auto break-words text-[13px] text-destructive"
+						>
+							{error.message}
+						</p>
+					)}
 
 					<DialogFooter className="shrink-0 border-t border-border/60 pt-3">
 						<Button variant="outline" onClick={() => onOpenChange(false)} disabled={saving}>
@@ -430,9 +454,8 @@ export function CustomProviderDialog({
 					<DialogHeader className="gap-1.5">
 						<DialogTitle>Built-in provider ID</DialogTitle>
 						<DialogDescription>
-							<code className="text-foreground">{providerId.trim()}</code> is a built-in
-							provider. Overlaying merges with that template (same Connection id). Or pick
-							another id such as{" "}
+							<code className="text-foreground">{providerId.trim()}</code> is a built-in provider.
+							Overlaying merges with that template (same Connection id). Or pick another id such as{" "}
 							<code className="text-foreground">{suggestedAlternateId}</code>.
 						</DialogDescription>
 					</DialogHeader>

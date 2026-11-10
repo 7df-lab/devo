@@ -256,11 +256,6 @@ export function useAgentActions() {
 		if (!client) throw new Error("Not connected to Devo server")
 		log.debug("revert", { sessionId, messageId })
 		try {
-			const entry = appStore.get(sessionFamily(sessionId))
-			if (entry?.status?.type === "busy") {
-				log.debug("revert: aborting busy session first", { sessionId })
-				await client.session.abort({ sessionId: sessionId })
-			}
 			await client.session.revert({ sessionId: sessionId })
 		} catch (err) {
 			log.error("revert failed", { sessionId, messageId }, err)

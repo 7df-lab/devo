@@ -12,7 +12,7 @@ let failure = false
 mock.module("../../atoms/preferences", () => ({ lastProjectDirectoryAtom: atom("C:\\work\\project") }))
 mock.module("../../atoms/connection", () => ({ serverConnectedAtom: atom(true) }))
 mock.module("@tanstack/react-query", () => ({ useQuery: () => ({ data: null, error: null }) }))
-mock.module("../../hooks/use-devo-data", () => ({ resolveEffectiveModel: () => null,
+mock.module("../../hooks/use-devo-data", () => ({ useProviders: () => ({ data: null }), resolveEffectiveModel: () => null,
 	getModelCurrentVariant: () => undefined, getModelVariants: () => [], modelAllowsDefaultVariant: () => true }))
 mock.module("../../services/connection-manager", () => ({ getBaseClient: () => null, getProjectClient: () => null }))
 mock.module("../../lib/model-config-options", () => ({

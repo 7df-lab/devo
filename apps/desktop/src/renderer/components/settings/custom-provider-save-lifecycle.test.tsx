@@ -135,6 +135,34 @@ for (const retained of [false, true]) {
 		expect((document.getElementById("provider-id") as HTMLInputElement).value).toBe("new-input")
 		expect(onSaved).not.toHaveBeenCalled()
 	})
+
+	test(`an obsolete failure preserves new validation feedback in the ${retained ? "retained" : "remounted"} form`, async () => {
+		let fail!: (error: Error) => void
+		upsert.mockImplementationOnce(
+			() =>
+				new Promise((_, reject) => {
+					fail = reject
+				}),
+		)
+		await controlled({ retained })
+		await click("Add Provider")
+		await click("Close")
+		await click("Reopen")
+		await fill("provider-id", "new-input")
+		await fill("base-url", "")
+		await click("Add Provider")
+		const input = document.getElementById("base-url")
+		const alert = document.querySelector('[role="alert"]')
+		await act(async () => fail(new Error("obsolete failure")))
+		expect(document.querySelector('[role="alert"]')).toBe(alert)
+		expect(alert?.textContent).toBe("Base URL is required")
+		expect(input?.closest(".overflow-y-auto")?.contains(alert)).toBe(false)
+		expect(document.activeElement).toBe(input)
+		expect(input?.getAttribute("aria-invalid")).toBe("true")
+		expect(input?.getAttribute("aria-describedby")).toBe(alert?.id)
+		expect(upsert).toHaveBeenCalledTimes(1)
+		expect(onSaved).not.toHaveBeenCalled()
+	})
 }
 
 test("an old response cannot finish a newer pending save", async () => {
@@ -231,4 +259,28 @@ test("a late built-in overlay save cannot dismiss a newer custom form", async ()
 	expect(document.querySelector('[role="dialog"]')).not.toBeNull()
 	expect((document.getElementById("provider-id") as HTMLInputElement).value).toBe("new-input")
 	expect(onSaved).toHaveBeenCalledTimes(1)
+})
+
+test("an active overlay failure shows structured feedback and can be retried", async () => {
+	upsert.mockImplementationOnce(async () => {
+		throw new Error("Overlay save rejected")
+	})
+	await controlled({ templateIds: new Set(["custom-test"]) })
+	await click("Add Provider")
+	await click("Overlay built-in")
+	const alert = document.querySelector('[role="alert"]')
+	expect(alert?.textContent).toBe("Overlay save rejected")
+	expect(document.getElementById("base-url")?.closest(".overflow-y-auto")?.contains(alert)).toBe(
+		false,
+	)
+	expect(alert?.nextElementSibling?.getAttribute("data-slot")).toBe("dialog-footer")
+	expect(document.getElementById("provider-id")?.getAttribute("aria-invalid")).toBe("false")
+	expect(document.getElementById("base-url")?.getAttribute("aria-describedby")).toBeNull()
+	expect(onSaved).not.toHaveBeenCalled()
+	await click("Add Provider")
+	expect(document.querySelector('[role="alert"]')).toBeNull()
+	await click("Overlay built-in")
+	expect(upsert).toHaveBeenCalledTimes(2)
+	expect(onSaved).toHaveBeenCalledTimes(1)
+	expect(document.querySelector('[role="dialog"]')).toBeNull()
 })

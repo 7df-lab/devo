@@ -325,7 +325,7 @@ export async function subscribeToGlobalEvents(
 	return result.stream as AsyncIterable<GlobalEvent>
 }
 
-/** Request a session revert to its current server-selected undo point. */
+/** Legacy undo request. The Native client explicitly rejects this unsupported operation. */
 export async function revertSession(
 	client: DevoClient,
 	sessionId: string,
@@ -334,10 +334,7 @@ export async function revertSession(
 	return result.data as Session
 }
 
-/**
- * Unrevert a session (redo).
- * Restores previously reverted messages and filesystem state.
- */
+/** Legacy redo request. It must not report a cached session as a completed restore. */
 export async function unrevertSession(client: DevoClient, sessionId: string): Promise<Session> {
 	const result = await client.session.unrevert({ sessionId: sessionId,
 	})
