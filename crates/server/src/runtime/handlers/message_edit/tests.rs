@@ -207,9 +207,16 @@ async fn terminal_busy_edit_rejects_newer_turn_instead_of_canceling_it() -> Resu
         .runtime
         .register_runtime_active_turn(fixture.session, newer.clone())
         .await;
+    let newer_cancel = tokio_util::sync::CancellationToken::new();
+    fixture
+        .runtime
+        .active_turns
+        .insert_cancel_token(fixture.session, newer_cancel.clone())
+        .await;
     drop(gate);
     let response = timeout(Duration::from_secs(2), edit).await??;
     assert_eq!(response["error"]["code"], json!("ActiveTurnEditRejected"));
+    assert!(!newer_cancel.is_cancelled());
     assert_eq!(
         fixture
             .runtime
@@ -266,4 +273,96 @@ async fn terminal_busy_edit_times_out_without_rewriting_or_clearing_execution() 
         Some(fixture.item)
     );
     Ok(())
+}
+
+#[derive(Clone, Copy)]
+enum DelayedDrain {
+    Chain,
+    Fallback,
+}
+
+async fn assert_delayed_drain_preserves_replacement(drain: DelayedDrain) -> Result<()> {
+    let fixture = Fixture::new().await?;
+    let handle = fixture
+        .runtime
+        .session(fixture.session)
+        .await
+        .context("handle")?;
+    fixture
+        .runtime
+        .clear_active_turn_runtime_handles(fixture.session)
+        .await;
+    let mut replacement = fixture.turn.clone();
+    replacement.native.id = TurnId::new();
+    replacement.native.status = devo_protocol::native::turn::TurnStatus::InProgress;
+    replacement.native.completed_at = None;
+    let snapshot = handle
+        .turn_reservation_snapshot()
+        .await
+        .context("reservation")?;
+    let config = snapshot.runtime_context.resolve_turn_config(None, None);
+    handle.begin_runtime_turn(replacement.clone(), config).await;
+    fixture
+        .runtime
+        .register_runtime_active_turn(fixture.session, replacement.clone())
+        .await;
+    let cancel = tokio_util::sync::CancellationToken::new();
+    fixture
+        .runtime
+        .active_turns
+        .insert_cancel_token(fixture.session, cancel.clone())
+        .await;
+    let queued = devo_protocol::PendingInputItem::new(
+        devo_protocol::PendingInputKind::UserText {
+            text: "queued after original".into(),
+        },
+        /*metadata*/ None,
+        chrono::Utc::now(),
+    );
+    handle.enqueue_pending_turn_input(queued.clone()).await;
+    // Model the old turn's delayed scheduler, after the replacement won admission.
+    let drained = match drain {
+        DelayedDrain::Chain => {
+            fixture
+                .runtime
+                .chain_queued_followup_turn(fixture.session)
+                .await
+        }
+        DelayedDrain::Fallback => {
+            fixture
+                .runtime
+                .spawn_next_turn_from_queue(fixture.session)
+                .await
+        }
+    };
+    assert!(!drained);
+    assert!(!cancel.is_cancelled());
+    assert_eq!(
+        fixture
+            .runtime
+            .active_turns
+            .active_turn(fixture.session)
+            .await,
+        Some(replacement.native.clone())
+    );
+    let after = handle.turn_reservation_snapshot().await.context("after")?;
+    assert_eq!(
+        after.active_turn.map(|turn| turn.native),
+        Some(replacement.native)
+    );
+    assert_eq!(
+        serde_json::to_value(&*after.pending_turn_queue.lock().expect("pending queue"))?,
+        json!([queued])
+    );
+    Ok(())
+}
+
+#[tokio::test]
+async fn delayed_post_turn_chain_does_not_overwrite_edit_replacement() -> Result<()> {
+    assert_delayed_drain_preserves_replacement(DelayedDrain::Chain).await
+}
+
+#[tokio::test]
+async fn delayed_interrupt_queue_kick_does_not_overwrite_edit_replacement() -> Result<()> {
+    assert_delayed_drain_preserves_replacement(DelayedDrain::Fallback).await
 }

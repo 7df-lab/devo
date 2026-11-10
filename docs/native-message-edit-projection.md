@@ -38,3 +38,9 @@ Deterministic unit regressions retain an execution after terminal status to test
 waiting, gate availability, newer-turn rejection, and timeout. The Native RPC
 integration test additionally repeats sixteen live busy edits without retries,
 checks mid-turn reads, and verifies history after a fresh-runtime resume.
+
+A delayed scheduler from the canceled turn must also recheck runtime admission
+under the gate before removing queued input. Both the post-turn chain and the
+interrupt fallback leave the queue untouched if the edit replacement has already
+started. Its own completion will drain that queue. Tests cover both orderings:
+new queued work wins before edit, and edit wins before the old scheduler runs.

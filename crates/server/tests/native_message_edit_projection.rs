@@ -390,6 +390,9 @@ async fn repeated_busy_edits_accept_first_attempt_and_preserve_cold_history() ->
         let (_, unfinished) = timeout(Duration::from_secs(10), calls.recv())
             .await?
             .context("active provider stream")?;
+        // This stress case only needs the final terminal event. Keep consuming
+        // earlier notifications so client backpressure cannot drive the result.
+        while notifications.try_recv().is_ok() {}
         // Reads must remain available while the old query is still pending.
         timeout(
             Duration::from_secs(2),
