@@ -19,6 +19,7 @@ export function ModelPickerList({
 	refreshing = false,
 	offline = false,
 	onRefresh,
+	unavailableReason = null,
 }: {
 	models: PickerModel[]
 	activeValue: string | null
@@ -30,6 +31,7 @@ export function ModelPickerList({
 	refreshing?: boolean
 	offline?: boolean
 	onRefresh?: () => void
+	unavailableReason?: string | null
 }) {
 	const search = useSearchableListPopoverSearch()
 	const [scope, setScope] = useState<"ready" | "all">("ready")
@@ -44,8 +46,9 @@ export function ModelPickerList({
 			onKeyDown={(event) => {
 				if (event.key !== "ArrowDown" && event.key !== "ArrowUp" && event.key !== "Enter") return
 				const rows = [
-					...(listRef.current?.querySelectorAll<HTMLButtonElement>("button[data-model-option]") ??
-						[]),
+					...(listRef.current?.querySelectorAll<HTMLButtonElement>(
+						"button[data-model-option]:not(:disabled)",
+					) ?? []),
 				]
 				if (!rows.length) return
 				const index = rows.indexOf(document.activeElement as HTMLButtonElement)
@@ -91,10 +94,11 @@ export function ModelPickerList({
 							key={model.value}
 							type="button"
 							data-model-option
-							aria-label={`${model.displayName}, ${model.providerName}${model.ready ? "" : ", connect provider"}`}
+							disabled={!!unavailableReason}
+							aria-label={`${model.displayName}, ${model.providerName}${unavailableReason ? ", unavailable" : model.ready ? "" : ", connect provider"}`}
 							aria-current={model.value === activeValue ? "true" : undefined}
 							onClick={() => onSelect(model)}
-							className="flex w-full items-center gap-2 rounded-md px-3 py-2 text-left text-[13px] hover:bg-muted focus-visible:bg-muted focus-visible:outline-none"
+							className="flex w-full items-center gap-2 rounded-md px-3 py-2 text-left text-[13px] hover:bg-muted focus-visible:bg-muted focus-visible:outline-none disabled:cursor-not-allowed disabled:opacity-50"
 						>
 							<span
 								className="flex size-3.5 shrink-0 items-center justify-center"
@@ -112,17 +116,21 @@ export function ModelPickerList({
 								</span>
 							</span>
 							{!model.ready && (
-								<span className="shrink-0 text-xs text-muted-foreground">Connect</span>
+								<span className="shrink-0 text-xs text-muted-foreground">
+									{unavailableReason ? "Unavailable" : "Connect"}
+								</span>
 							)}
 						</button>
 					))}
 					{!filtered.length && (
 						<SearchableListPopoverEmpty>
-							{loading
-								? "Loading models…"
-								: search
-									? "No matching models"
-									: "Connect a provider to get started"}
+							{unavailableReason
+								? unavailableReason
+								: loading
+									? "Loading models…"
+									: search
+										? "No matching models"
+										: "Connect a provider to get started"}
 							{scope === "ready" && allMatches.length > 0 && (
 								<button
 									type="button"
@@ -147,7 +155,7 @@ export function ModelPickerList({
 			</div>
 			{error && (
 				<div role="status" className="border-t px-3 py-2 text-xs text-destructive">
-					Could not update models. Your saved catalog is available.{" "}
+					Could not update models. Your saved catalog is available to browse.{" "}
 					<button type="button" onClick={onRetry} className="underline">
 						Retry
 					</button>

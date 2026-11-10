@@ -12,8 +12,8 @@ import type {
 } from "@devo-ai/sdk/v2/client"
 import { useQuery, useQueryClient } from "@tanstack/react-query"
 import { useAtomValue } from "jotai"
-import { useCallback } from "react"
-import { serverConnectedAtom } from "../atoms/connection"
+import { useCallback, useEffect, useMemo } from "react"
+import { activeServerIdAtom, serverConnectedAtom, serverUrlAtom } from "../atoms/connection"
 import { isMockModeAtom } from "../atoms/mock-mode"
 import { MOCK_AGENTS, MOCK_CONFIG, MOCK_PROVIDERS } from "../lib/mock-data"
 import type { GitBranchInfo, GitBranchState } from "../../preload/api"
@@ -314,50 +314,57 @@ export const queryKeys = {
 export function useProviders(directory: string | null): {
 	data: ProvidersData | null
 	loading: boolean
+	connected: boolean
 	error: string | null
 	reload: () => void
 } {
 	const connected = useAtomValue(serverConnectedAtom)
+	const serverId = useAtomValue(activeServerIdAtom)
+	const serverUrl = useAtomValue(serverUrlAtom)
 	const isMockMode = useAtomValue(isMockModeAtom)
 	const queryClient = useQueryClient()
-
-	const { data, isLoading, error } = useQuery({
-		queryKey: queryKeys.providers(directory ?? ""),
-		queryFn: async (): Promise<ProvidersData> => {
-			const client = getProjectClient(directory!)
-			if (!client) throw new Error("No client for directory")
+	const queryKey = useMemo(
+		() => [...queryKeys.providers(directory ?? ""), serverId, serverUrl],
+		[directory, serverId, serverUrl],
+	)
+	const { data, isFetching, error, refetch } = useQuery({
+		queryKey,
+		queryFn: async ({ signal }): Promise<ProvidersData> => {
+			const client = directory ? getProjectClient(directory) : getBaseClient()
+			if (!client) throw new Error("Not connected to server")
 			const result = await client.config.providers()
-			const raw = result.data as {
-				providers: SdkProvider[]
-				default: Record<string, string>
-			}
-			return {
-				providers: raw.providers ?? [],
-				defaults: raw.default ?? {},
-			}
+			signal.throwIfAborted()
+			return { providers: result.data.providers, defaults: result.data.default }
 		},
-		enabled: !!directory && connected && !isMockMode,
+		enabled: directory !== null && connected && !isMockMode,
+		// Reopening/reconnecting must recheck routes instead of trusting a
+		// five-minute metadata cache. Concurrent observers share this query.
+		staleTime: 0,
+		networkMode: "always",
 	})
-
+	useEffect(() => {
+		if (!connected) void queryClient.cancelQueries({ queryKey, exact: true })
+	}, [connected, queryClient, queryKey])
 	const reload = useCallback(() => {
-		if (directory) {
-			queryClient.invalidateQueries({ queryKey: queryKeys.providers(directory) })
-		}
-	}, [directory, queryClient])
-
-	// Return mock data if in mock mode
-	if (isMockMode && directory) {
+		if (directory === null || !connected || isMockMode) return
+		// Refetch alone deduplicates a pending first read when data is absent.
+		// Explicit cancellation also fences reads from a previous open cycle.
+		void queryClient.cancelQueries({ queryKey, exact: true })
+		void refetch()
+	}, [directory, connected, isMockMode, queryClient, queryKey, refetch])
+	if (isMockMode && directory !== null) {
 		return {
 			data: MOCK_PROVIDERS as unknown as ProvidersData,
 			loading: false,
+			connected: true,
 			error: null,
 			reload,
 		}
 	}
-
 	return {
-		data: data ?? null,
-		loading: isLoading,
+		data: directory !== null && connected ? data ?? null : null,
+		loading: directory !== null && connected && (isFetching || (!data && !error)),
+		connected,
 		error: error ? (error instanceof Error ? error.message : "Failed to load providers") : null,
 		reload,
 	}
