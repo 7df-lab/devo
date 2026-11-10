@@ -426,7 +426,7 @@ function SessionMetricsLabel({ sessionId, project }: { sessionId: string; projec
 	return (
 		<span className="text-xs text-muted-foreground">
 			{project} &middot; {metrics.workTime}
-			{metrics.costRaw > 0 && ` · ${metrics.cost}`}
+			{(metrics.costRaw ?? 0) > 0 && ` · ${metrics.cost}`}
 		</span>
 	)
 }

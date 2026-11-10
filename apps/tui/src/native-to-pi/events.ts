@@ -3,6 +3,7 @@
  * Projection stays inside the adapter — InteractiveMode never sees Native method names.
  */
 
+import { nativeCumulativeUsage } from "./usage.js";
 import {
   nativeGoalToAgentGoal,
   nativeItemToAgentMessages,
@@ -258,7 +259,7 @@ function contextUsageEvent(params: Record<string, unknown>): Record<string, unkn
         : undefined;
     const tokens = Number(query?.totalTokens ?? params.lastQueryInputTokens ?? 0);
     const contextWindow = Number(params.contextWindow ?? params.context_window ?? 0);
-    if (!tokens && !contextWindow) return null;
+    if (!Number.isFinite(tokens) || tokens <= 0) return null;
     const percent =
       contextWindow > 0 ? Math.min(100, Math.round((tokens / contextWindow) * 1000) / 10) : 0;
     return {
@@ -871,14 +872,24 @@ export function nativeNotificationToPiEvents(
     ];
   }
 
-  // ── Usage ──
-  if (
-    method === "context/usageUpdated" ||
-    method === "turn/usage/updated" ||
-    method === "session/usage/updated"
-  ) {
+  // Context is session-local latest-request occupancy. Spend is cumulative.
+  if (method === "context/usageUpdated") {
     const event = contextUsageEvent(p);
     return event ? [event] : [];
+  }
+  if (method === "turn/usage/updated" || method === "session/usage/updated") {
+    const events: Record<string, unknown>[] = [];
+    if (method === "turn/usage/updated") {
+      const context = contextUsageEvent(p);
+      if (context) events.push(context);
+    }
+    const usage = p.usage as { total?: unknown; legacy?: unknown } | undefined;
+    const cumulativeUsage = nativeCumulativeUsage(
+      method === "turn/usage/updated" ? p.sessionTotals : usage?.total,
+      usage?.legacy,
+    );
+    if (cumulativeUsage) events.push({ type: "session_usage_update", cumulativeUsage });
+    return events;
   }
 
   // ── Auth ──

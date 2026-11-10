@@ -54,6 +54,7 @@ use devo_provider::ModelProviderSDK;
 use devo_provider::MultiProviderRouter;
 use devo_provider::ProviderRoute;
 use devo_provider::ProviderRouter;
+use devo_provider::UsageObserver;
 use futures::Stream;
 
 use crate::SkillRecord;
@@ -108,6 +109,17 @@ impl ModelProviderSDK for RoutedModelProvider {
     async fn completion(&self, request: ModelRequest) -> anyhow::Result<ModelResponse> {
         self.router
             .complete(self.route.clone(), request)
+            .await
+            .map_err(anyhow::Error::new)
+    }
+
+    async fn completion_with_usage_observer(
+        &self,
+        request: ModelRequest,
+        usage_observer: UsageObserver,
+    ) -> anyhow::Result<ModelResponse> {
+        self.router
+            .complete_with_usage_observer(self.route.clone(), request, usage_observer)
             .await
             .map_err(anyhow::Error::new)
     }

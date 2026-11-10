@@ -226,7 +226,7 @@ jobs:
           python-version: "3.13"
       - name: Install kernel snapshot dependency
         run: python -m pip install dill==0.4.1
-      - run: cargo test --workspace --jobs 1
+      - run: cargo test --workspace --jobs 1 --no-fail-fast
 
   fmt:
     needs: changes

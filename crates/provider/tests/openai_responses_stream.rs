@@ -41,13 +41,19 @@ async fn responses_stream_completion_closes_tagged_reasoning_before_message_done
                     content: vec![ResponseContent::Text("final".to_string())],
                     stop_reason: Some(StopReason::EndTurn),
                     usage: Usage {
+                        unreported_fields: None,
+                        reported: true,
                         input_tokens: 1,
                         output_tokens: 1,
                         cache_creation_input_tokens: None,
                         cache_read_input_tokens: None,
                         reasoning_output_tokens: None,
                         total_tokens: None,
-                    },
+                    }
+                    .with_field_coverage(
+                        /*input_tokens*/ Some(0),
+                        /*output_tokens*/ Some(0)
+                    ),
                     metadata: ResponseMetadata {
                         extras: vec![ResponseExtra::ReasoningText {
                             text: "plan".to_string()
@@ -269,13 +275,19 @@ async fn responses_stream_separates_reasoning_summary_parts_with_paragraph_break
                     content: vec![ResponseContent::Text("done".to_string())],
                     stop_reason: Some(StopReason::EndTurn),
                     usage: Usage {
+                        unreported_fields: None,
+                        reported: true,
                         input_tokens: 1,
                         output_tokens: 1,
                         cache_creation_input_tokens: None,
                         cache_read_input_tokens: None,
                         reasoning_output_tokens: None,
                         total_tokens: None,
-                    },
+                    }
+                    .with_field_coverage(
+                        /*input_tokens*/ Some(0),
+                        /*output_tokens*/ Some(0)
+                    ),
                     metadata: ResponseMetadata {
                         extras: vec![ResponseExtra::ReasoningText {
                             text: "first part\n\nsecond part".to_string()
@@ -327,13 +339,19 @@ async fn responses_stream_does_not_emit_part_boundary_across_reasoning_items() {
                     content: vec![ResponseContent::Text("done".to_string())],
                     stop_reason: Some(StopReason::EndTurn),
                     usage: Usage {
+                        unreported_fields: None,
+                        reported: true,
                         input_tokens: 1,
                         output_tokens: 1,
                         cache_creation_input_tokens: None,
                         cache_read_input_tokens: None,
                         reasoning_output_tokens: None,
                         total_tokens: None,
-                    },
+                    }
+                    .with_field_coverage(
+                        /*input_tokens*/ Some(0),
+                        /*output_tokens*/ Some(0)
+                    ),
                     metadata: ResponseMetadata {
                         extras: vec![ResponseExtra::ReasoningText {
                             text: "part onepart two".to_string()
@@ -384,13 +402,19 @@ async fn responses_stream_does_not_emit_part_boundary_after_function_call_withou
                     content: vec![ResponseContent::Text("done".to_string())],
                     stop_reason: Some(StopReason::EndTurn),
                     usage: Usage {
+                        unreported_fields: None,
+                        reported: true,
                         input_tokens: 1,
                         output_tokens: 1,
                         cache_creation_input_tokens: None,
                         cache_read_input_tokens: None,
                         reasoning_output_tokens: None,
                         total_tokens: None,
-                    },
+                    }
+                    .with_field_coverage(
+                        /*input_tokens*/ Some(0),
+                        /*output_tokens*/ Some(0)
+                    ),
                     metadata: ResponseMetadata {
                         extras: vec![ResponseExtra::ReasoningText {
                             text: "part onepart two".to_string()
@@ -421,13 +445,19 @@ async fn completion_folds_streamed_text_when_completed_event_replays_no_output()
         )],
         stop_reason: Some(StopReason::EndTurn),
         usage: Usage {
+            unreported_fields: None,
+            reported: true,
             input_tokens: 7,
             output_tokens: 3,
             cache_creation_input_tokens: None,
             cache_read_input_tokens: None,
             reasoning_output_tokens: None,
             total_tokens: None,
-        },
+        }
+        .with_field_coverage(
+            /*input_tokens*/ Some(0),
+            /*output_tokens*/ Some(0),
+        ),
         metadata: ResponseMetadata::default(),
     };
     assert_eq!(response, expected);

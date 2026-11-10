@@ -33,6 +33,15 @@ pub enum ResponseContent {
 /// again when deriving totals.
 #[derive(Debug, Clone, Default, PartialEq, Eq, Serialize, Deserialize)]
 pub struct Usage {
+    /// Missing counters. `None` means a legacy sample with unknown coverage.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub unreported_fields: Option<Vec<crate::native::usage::UsageField>>,
+    /// Whether a provider explicitly supplied token counters, including zero.
+    /// Defaults and absent/null/empty provider usage are unreported. Legacy
+    /// samples with nonzero or optional counters remain recognized by
+    /// `is_reported` even when this field was not stored.
+    #[serde(default)]
+    pub reported: bool,
     /// Number of tokens in the prompt.
     pub input_tokens: usize,
     /// Number of tokens in the generated completion.
@@ -52,6 +61,50 @@ pub struct Usage {
 }
 
 impl Usage {
+    /// Distinguishes an actual reported zero from a missing usage sample.
+    /// Nonzero and optional legacy counters retain their previous meaning.
+    pub fn is_reported(&self) -> bool {
+        self.reported
+            || self.input_tokens > 0
+            || self.output_tokens > 0
+            || self.cache_creation_input_tokens.is_some()
+            || self.cache_read_input_tokens.is_some()
+            || self.reasoning_output_tokens.is_some()
+            || self.total_tokens.is_some()
+    }
+
+    /// Record counter presence after a provider has normalized its fields.
+    /// Primary values are used only for their presence; normalized input may
+    /// already include cache counts (Anthropic), so it is not replaced here.
+    pub fn with_field_coverage(
+        mut self,
+        input_tokens: Option<usize>,
+        output_tokens: Option<usize>,
+    ) -> Self {
+        use crate::native::usage::UsageField;
+        if self.is_reported() {
+            self.unreported_fields = Some(
+                UsageField::ALL
+                    .into_iter()
+                    .filter(|field| match field {
+                        UsageField::InputTokens => input_tokens.is_none(),
+                        UsageField::OutputTokens => output_tokens.is_none(),
+                        UsageField::ReasoningTokens => self.reasoning_output_tokens.is_none(),
+                        UsageField::CacheReadInputTokens => self.cache_read_input_tokens.is_none(),
+                        UsageField::CacheCreationInputTokens => {
+                            self.cache_creation_input_tokens.is_none()
+                        }
+                        UsageField::TotalTokens => {
+                            self.total_tokens.is_none()
+                                && (input_tokens.is_none() || output_tokens.is_none())
+                        }
+                    })
+                    .collect(),
+            );
+        }
+        self
+    }
+
     pub fn derived_total_tokens(&self) -> usize {
         self.input_tokens.saturating_add(self.output_tokens)
     }
@@ -170,8 +223,46 @@ mod tests {
     }
 
     #[test]
+    fn usage_presence_preserves_explicit_zero_and_legacy_samples() {
+        let unknown = Usage::default();
+        let reported_zero = Usage {
+            reported: true,
+            ..Usage::default()
+        };
+        assert!(!unknown.is_reported());
+        assert!(reported_zero.is_reported());
+        assert_eq!(
+            unknown.display_total_tokens(),
+            reported_zero.display_total_tokens()
+        );
+        assert_eq!(
+            serde_json::from_value::<Usage>(serde_json::to_value(&reported_zero).unwrap()).unwrap(),
+            reported_zero
+        );
+        for value in [
+            json!({"input_tokens": 1, "output_tokens": 0}),
+            json!({"input_tokens": 0, "output_tokens": 0, "total_tokens": 0}),
+        ] {
+            assert!(
+                serde_json::from_value::<Usage>(value)
+                    .unwrap()
+                    .is_reported()
+            );
+        }
+        assert!(
+            !serde_json::from_value::<Usage>(json!({
+                "input_tokens": 0, "output_tokens": 0
+            }))
+            .unwrap()
+            .is_reported()
+        );
+    }
+
+    #[test]
     fn usage_totals_follow_conservative_accounting() {
         let usage = Usage {
+            unreported_fields: None,
+            reported: true,
             input_tokens: 100,
             output_tokens: 50,
             cache_creation_input_tokens: None,
@@ -194,6 +285,8 @@ mod tests {
     #[test]
     fn usage_serde_skips_none_optional_usage_fields() {
         let usage = Usage {
+            unreported_fields: None,
+            reported: true,
             input_tokens: 100,
             output_tokens: 50,
             cache_creation_input_tokens: None,
@@ -219,6 +312,8 @@ mod tests {
         assert_eq!(
             usage,
             Usage {
+                unreported_fields: None,
+                reported: false,
                 input_tokens: 100,
                 output_tokens: 50,
                 cache_creation_input_tokens: None,
@@ -251,6 +346,8 @@ mod tests {
             content: vec![ResponseContent::Text("hello".into())],
             stop_reason: Some(StopReason::EndTurn),
             usage: Usage {
+                unreported_fields: None,
+                reported: true,
                 input_tokens: 10,
                 output_tokens: 5,
                 cache_creation_input_tokens: None,

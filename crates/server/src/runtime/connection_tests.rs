@@ -2341,13 +2341,9 @@ async fn legacy_implicit_filters_prune_to_live_session_subscriptions() -> Result
 }
 
 #[tokio::test]
-async fn live_context_occupancy_skips_zero_anchor() -> Result<()> {
-    // Regression (live r25b protocol trace): every provider leg starts with a
-    // message_start whose usage is all zeros. That placeholder was scaled to
-    // the `.max(1)` floor and broadcast as a 1-token occupancy, so the client
-    // context bar collapsed to 0% at the start of every leg — repeatedly
-    // during multi-leg spawn/await turns. A zero anchor is not a measurement;
-    // the last known occupancy must stand.
+async fn live_context_occupancy_distinguishes_unknown_from_reported_zero() -> Result<()> {
+    // Placeholder usage never reaches the occupancy publisher. A genuinely
+    // reported zero does, and remains distinguishable from unknown usage.
     let data_root = TempDir::new()?;
     let runtime = build_runtime(data_root.path());
     let session_id = write_subscribed_rollout(&runtime).await;
@@ -2375,15 +2371,29 @@ async fn live_context_occupancy_skips_zero_anchor() -> Result<()> {
         conversation: 400,
     };
 
-    // Leg-start placeholder: an all-zero usage anchor must not broadcast.
+    // Missing leg-start usage must not broadcast a zero context sample.
     runtime
-        .publish_live_context_occupancy(session_id, None, raw(), 0)
+        .publish_query_usage(
+            session_id,
+            devo_core::TurnId::new(),
+            devo_protocol::native::usage::TurnUsage::from_provider_usage(
+                &devo_protocol::Usage::default(),
+            ),
+            None,
+            OutboundDeliveryPolicy::BestEffort,
+        )
         .await;
     recv_none(&mut rx, 150).await;
 
     // A real anchor broadcasts exactly the provider-anchored total.
     runtime
-        .publish_live_context_occupancy(session_id, None, raw(), 500)
+        .publish_live_context_occupancy(
+            session_id,
+            None,
+            raw(),
+            500,
+            OutboundDeliveryPolicy::Reliable,
+        )
         .await;
     let frame = recv_frame(&mut rx).await?;
     assert_eq!(
@@ -2396,6 +2406,17 @@ async fn live_context_occupancy_skips_zero_anchor() -> Result<()> {
         .unwrap_or_default();
     assert_eq!(occupancy["totalTokens"].as_u64(), Some(500));
 
+    runtime
+        .publish_live_context_occupancy(
+            session_id,
+            None,
+            raw(),
+            0,
+            OutboundDeliveryPolicy::Reliable,
+        )
+        .await;
+    let frame = recv_frame(&mut rx).await?;
+    assert_eq!(frame["params"]["occupancy"]["totalTokens"], 0);
     Ok(())
 }
 
@@ -7065,3 +7086,73 @@ async fn schedule_dispatch_skips_fire_when_identical_prompt_already_queued() -> 
 
 #[path = "agent_compaction_admission_tests.rs"]
 mod agent_compaction_admission_tests;
+
+#[tokio::test]
+async fn final_query_usage_waits_for_full_outbound_queue() -> Result<()> {
+    let temp = TempDir::new()?;
+    let runtime = build_runtime(temp.path());
+    let session_id = SessionId::new();
+    let turn_id = NativeTurnId::new();
+    // Use the actual transport queue without the JSON-forwarding test helper.
+    let (tx, mut rx) = tokio::sync::mpsc::channel(1);
+    let connection_id = runtime
+        .register_connection(ClientTransportKind::Stdio, tx.clone())
+        .await;
+    {
+        let mut connections = runtime.connections.lock().await;
+        let connection = connections.get_mut(&connection_id).unwrap();
+        connection.protocol = Some(ConnectionProtocol::Native);
+        connection.event_selectors =
+            vec![devo_protocol::native::event::StreamSelector::Session { session_id }];
+    }
+    tx.send(OutboundFrame::json_rpc_response(
+        connection_id,
+        serde_json::json!({"busy":true}),
+    ))
+    .await
+    .unwrap();
+    let usage =
+        devo_protocol::native::usage::TurnUsage::from_provider_usage(&devo_protocol::Usage {
+            reported: true,
+            input_tokens: 100,
+            output_tokens: 20,
+            ..Default::default()
+        });
+    runtime
+        .publish_query_usage(
+            session_id,
+            turn_id,
+            usage.clone(),
+            Some(1000),
+            OutboundDeliveryPolicy::BestEffort,
+        )
+        .await;
+    let publisher = {
+        let runtime = Arc::clone(&runtime);
+        tokio::spawn(async move {
+            runtime
+                .publish_query_usage(
+                    session_id,
+                    turn_id,
+                    usage,
+                    Some(1000),
+                    OutboundDeliveryPolicy::Reliable,
+                )
+                .await;
+        })
+    };
+    tokio::task::yield_now().await;
+    assert!(!publisher.is_finished());
+    assert_eq!(
+        outbound_frame_to_value(&rx.recv().await.unwrap()),
+        serde_json::json!({"busy":true})
+    );
+    let delivered = outbound_frame_to_value(&rx.recv().await.unwrap());
+    assert_eq!(delivered["method"], "turn/usage/updated");
+    assert_eq!(delivered["params"]["usage"]["query"]["totalTokens"], 120);
+    publisher.await?;
+    Ok(())
+}
+
+#[path = "usage_publication_tests.rs"]
+mod usage_publication_tests;

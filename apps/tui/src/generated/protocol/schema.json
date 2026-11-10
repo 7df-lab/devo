@@ -6726,6 +6726,16 @@
               "type": "integer",
               "format": "uint64",
               "minimum": 0.0
+            },
+            "unreportedFields": {
+              "description": "`None` is legacy/unknown coverage; an empty list means all fields known.",
+              "type": [
+                "array",
+                "null"
+              ],
+              "items": {
+                "$ref": "#/definitions/UsageField"
+              }
             }
           }
         },
@@ -7800,6 +7810,18 @@
             }
           }
         },
+        "UsageField": {
+          "description": "A provider counter that was not reported. Counts remain available as known subtotals, but consumers must not present these fields as complete totals.",
+          "type": "string",
+          "enum": [
+            "inputTokens",
+            "outputTokens",
+            "reasoningTokens",
+            "cacheReadInputTokens",
+            "cacheCreationInputTokens",
+            "totalTokens"
+          ]
+        },
         "UsagePurpose": {
           "oneOf": [
             {
@@ -7918,10 +7940,20 @@
               "minimum": 0.0
             },
             "totalTokens": {
-              "description": "Aggregate tokens. For ledger-derived totals this equals `input_tokens + output_tokens`; for legacy lumps it is the only known number (the input/output split was never recorded).",
+              "description": "Aggregate tokens, preferring each call's provider-reported total and otherwise using `input_tokens + output_tokens`. For legacy lumps it is the only known number (the input/output split was never recorded).",
               "type": "integer",
               "format": "uint64",
               "minimum": 0.0
+            },
+            "unreportedFields": {
+              "description": "`None` is legacy/unknown coverage; an empty list means all fields known.",
+              "type": [
+                "array",
+                "null"
+              ],
+              "items": {
+                "$ref": "#/definitions/UsageField"
+              }
             }
           }
         },
@@ -11578,6 +11610,16 @@
               "type": "integer",
               "format": "uint64",
               "minimum": 0.0
+            },
+            "unreportedFields": {
+              "description": "`None` is legacy/unknown coverage; an empty list means all fields known.",
+              "type": [
+                "array",
+                "null"
+              ],
+              "items": {
+                "$ref": "#/definitions/UsageField"
+              }
             }
           }
         },
@@ -12652,6 +12694,18 @@
             }
           }
         },
+        "UsageField": {
+          "description": "A provider counter that was not reported. Counts remain available as known subtotals, but consumers must not present these fields as complete totals.",
+          "type": "string",
+          "enum": [
+            "inputTokens",
+            "outputTokens",
+            "reasoningTokens",
+            "cacheReadInputTokens",
+            "cacheCreationInputTokens",
+            "totalTokens"
+          ]
+        },
         "UsagePurpose": {
           "oneOf": [
             {
@@ -12770,10 +12824,20 @@
               "minimum": 0.0
             },
             "totalTokens": {
-              "description": "Aggregate tokens. For ledger-derived totals this equals `input_tokens + output_tokens`; for legacy lumps it is the only known number (the input/output split was never recorded).",
+              "description": "Aggregate tokens, preferring each call's provider-reported total and otherwise using `input_tokens + output_tokens`. For legacy lumps it is the only known number (the input/output split was never recorded).",
               "type": "integer",
               "format": "uint64",
               "minimum": 0.0
+            },
+            "unreportedFields": {
+              "description": "`None` is legacy/unknown coverage; an empty list means all fields known.",
+              "type": [
+                "array",
+                "null"
+              ],
+              "items": {
+                "$ref": "#/definitions/UsageField"
+              }
             }
           }
         },
@@ -16193,6 +16257,16 @@
               "type": "integer",
               "format": "uint64",
               "minimum": 0.0
+            },
+            "unreportedFields": {
+              "description": "`None` is legacy/unknown coverage; an empty list means all fields known.",
+              "type": [
+                "array",
+                "null"
+              ],
+              "items": {
+                "$ref": "#/definitions/UsageField"
+              }
             }
           }
         },
@@ -17267,6 +17341,18 @@
             }
           }
         },
+        "UsageField": {
+          "description": "A provider counter that was not reported. Counts remain available as known subtotals, but consumers must not present these fields as complete totals.",
+          "type": "string",
+          "enum": [
+            "inputTokens",
+            "outputTokens",
+            "reasoningTokens",
+            "cacheReadInputTokens",
+            "cacheCreationInputTokens",
+            "totalTokens"
+          ]
+        },
         "UsagePurpose": {
           "oneOf": [
             {
@@ -17385,10 +17471,20 @@
               "minimum": 0.0
             },
             "totalTokens": {
-              "description": "Aggregate tokens. For ledger-derived totals this equals `input_tokens + output_tokens`; for legacy lumps it is the only known number (the input/output split was never recorded).",
+              "description": "Aggregate tokens, preferring each call's provider-reported total and otherwise using `input_tokens + output_tokens`. For legacy lumps it is the only known number (the input/output split was never recorded).",
               "type": "integer",
               "format": "uint64",
               "minimum": 0.0
+            },
+            "unreportedFields": {
+              "description": "`None` is legacy/unknown coverage; an empty list means all fields known.",
+              "type": [
+                "array",
+                "null"
+              ],
+              "items": {
+                "$ref": "#/definitions/UsageField"
+              }
             }
           }
         },
@@ -19923,6 +20019,16 @@
               "type": "integer",
               "format": "uint64",
               "minimum": 0.0
+            },
+            "unreportedFields": {
+              "description": "`None` is legacy/unknown coverage; an empty list means all fields known.",
+              "type": [
+                "array",
+                "null"
+              ],
+              "items": {
+                "$ref": "#/definitions/UsageField"
+              }
             }
           }
         },
@@ -20997,6 +21103,18 @@
             }
           }
         },
+        "UsageField": {
+          "description": "A provider counter that was not reported. Counts remain available as known subtotals, but consumers must not present these fields as complete totals.",
+          "type": "string",
+          "enum": [
+            "inputTokens",
+            "outputTokens",
+            "reasoningTokens",
+            "cacheReadInputTokens",
+            "cacheCreationInputTokens",
+            "totalTokens"
+          ]
+        },
         "UsagePurpose": {
           "oneOf": [
             {
@@ -21115,10 +21233,20 @@
               "minimum": 0.0
             },
             "totalTokens": {
-              "description": "Aggregate tokens. For ledger-derived totals this equals `input_tokens + output_tokens`; for legacy lumps it is the only known number (the input/output split was never recorded).",
+              "description": "Aggregate tokens, preferring each call's provider-reported total and otherwise using `input_tokens + output_tokens`. For legacy lumps it is the only known number (the input/output split was never recorded).",
               "type": "integer",
               "format": "uint64",
               "minimum": 0.0
+            },
+            "unreportedFields": {
+              "description": "`None` is legacy/unknown coverage; an empty list means all fields known.",
+              "type": [
+                "array",
+                "null"
+              ],
+              "items": {
+                "$ref": "#/definitions/UsageField"
+              }
             }
           }
         },
@@ -23085,6 +23213,16 @@
               "type": "integer",
               "format": "uint64",
               "minimum": 0.0
+            },
+            "unreportedFields": {
+              "description": "`None` is legacy/unknown coverage; an empty list means all fields known.",
+              "type": [
+                "array",
+                "null"
+              ],
+              "items": {
+                "$ref": "#/definitions/UsageField"
+              }
             }
           }
         },
@@ -24159,6 +24297,18 @@
             }
           }
         },
+        "UsageField": {
+          "description": "A provider counter that was not reported. Counts remain available as known subtotals, but consumers must not present these fields as complete totals.",
+          "type": "string",
+          "enum": [
+            "inputTokens",
+            "outputTokens",
+            "reasoningTokens",
+            "cacheReadInputTokens",
+            "cacheCreationInputTokens",
+            "totalTokens"
+          ]
+        },
         "UsagePurpose": {
           "oneOf": [
             {
@@ -24277,10 +24427,20 @@
               "minimum": 0.0
             },
             "totalTokens": {
-              "description": "Aggregate tokens. For ledger-derived totals this equals `input_tokens + output_tokens`; for legacy lumps it is the only known number (the input/output split was never recorded).",
+              "description": "Aggregate tokens, preferring each call's provider-reported total and otherwise using `input_tokens + output_tokens`. For legacy lumps it is the only known number (the input/output split was never recorded).",
               "type": "integer",
               "format": "uint64",
               "minimum": 0.0
+            },
+            "unreportedFields": {
+              "description": "`None` is legacy/unknown coverage; an empty list means all fields known.",
+              "type": [
+                "array",
+                "null"
+              ],
+              "items": {
+                "$ref": "#/definitions/UsageField"
+              }
             }
           }
         },
@@ -26510,6 +26670,16 @@
               "type": "integer",
               "format": "uint64",
               "minimum": 0.0
+            },
+            "unreportedFields": {
+              "description": "`None` is legacy/unknown coverage; an empty list means all fields known.",
+              "type": [
+                "array",
+                "null"
+              ],
+              "items": {
+                "$ref": "#/definitions/UsageField"
+              }
             }
           }
         },
@@ -27584,6 +27754,18 @@
             }
           }
         },
+        "UsageField": {
+          "description": "A provider counter that was not reported. Counts remain available as known subtotals, but consumers must not present these fields as complete totals.",
+          "type": "string",
+          "enum": [
+            "inputTokens",
+            "outputTokens",
+            "reasoningTokens",
+            "cacheReadInputTokens",
+            "cacheCreationInputTokens",
+            "totalTokens"
+          ]
+        },
         "UsagePurpose": {
           "oneOf": [
             {
@@ -27702,10 +27884,20 @@
               "minimum": 0.0
             },
             "totalTokens": {
-              "description": "Aggregate tokens. For ledger-derived totals this equals `input_tokens + output_tokens`; for legacy lumps it is the only known number (the input/output split was never recorded).",
+              "description": "Aggregate tokens, preferring each call's provider-reported total and otherwise using `input_tokens + output_tokens`. For legacy lumps it is the only known number (the input/output split was never recorded).",
               "type": "integer",
               "format": "uint64",
               "minimum": 0.0
+            },
+            "unreportedFields": {
+              "description": "`None` is legacy/unknown coverage; an empty list means all fields known.",
+              "type": [
+                "array",
+                "null"
+              ],
+              "items": {
+                "$ref": "#/definitions/UsageField"
+              }
             }
           }
         },
@@ -29658,6 +29850,16 @@
               "type": "integer",
               "format": "uint64",
               "minimum": 0.0
+            },
+            "unreportedFields": {
+              "description": "`None` is legacy/unknown coverage; an empty list means all fields known.",
+              "type": [
+                "array",
+                "null"
+              ],
+              "items": {
+                "$ref": "#/definitions/UsageField"
+              }
             }
           }
         },
@@ -30732,6 +30934,18 @@
             }
           }
         },
+        "UsageField": {
+          "description": "A provider counter that was not reported. Counts remain available as known subtotals, but consumers must not present these fields as complete totals.",
+          "type": "string",
+          "enum": [
+            "inputTokens",
+            "outputTokens",
+            "reasoningTokens",
+            "cacheReadInputTokens",
+            "cacheCreationInputTokens",
+            "totalTokens"
+          ]
+        },
         "UsagePurpose": {
           "oneOf": [
             {
@@ -30850,10 +31064,20 @@
               "minimum": 0.0
             },
             "totalTokens": {
-              "description": "Aggregate tokens. For ledger-derived totals this equals `input_tokens + output_tokens`; for legacy lumps it is the only known number (the input/output split was never recorded).",
+              "description": "Aggregate tokens, preferring each call's provider-reported total and otherwise using `input_tokens + output_tokens`. For legacy lumps it is the only known number (the input/output split was never recorded).",
               "type": "integer",
               "format": "uint64",
               "minimum": 0.0
+            },
+            "unreportedFields": {
+              "description": "`None` is legacy/unknown coverage; an empty list means all fields known.",
+              "type": [
+                "array",
+                "null"
+              ],
+              "items": {
+                "$ref": "#/definitions/UsageField"
+              }
             }
           }
         },
@@ -32810,6 +33034,16 @@
               "type": "integer",
               "format": "uint64",
               "minimum": 0.0
+            },
+            "unreportedFields": {
+              "description": "`None` is legacy/unknown coverage; an empty list means all fields known.",
+              "type": [
+                "array",
+                "null"
+              ],
+              "items": {
+                "$ref": "#/definitions/UsageField"
+              }
             }
           }
         },
@@ -33884,6 +34118,18 @@
             }
           }
         },
+        "UsageField": {
+          "description": "A provider counter that was not reported. Counts remain available as known subtotals, but consumers must not present these fields as complete totals.",
+          "type": "string",
+          "enum": [
+            "inputTokens",
+            "outputTokens",
+            "reasoningTokens",
+            "cacheReadInputTokens",
+            "cacheCreationInputTokens",
+            "totalTokens"
+          ]
+        },
         "UsagePurpose": {
           "oneOf": [
             {
@@ -34002,10 +34248,20 @@
               "minimum": 0.0
             },
             "totalTokens": {
-              "description": "Aggregate tokens. For ledger-derived totals this equals `input_tokens + output_tokens`; for legacy lumps it is the only known number (the input/output split was never recorded).",
+              "description": "Aggregate tokens, preferring each call's provider-reported total and otherwise using `input_tokens + output_tokens`. For legacy lumps it is the only known number (the input/output split was never recorded).",
               "type": "integer",
               "format": "uint64",
               "minimum": 0.0
+            },
+            "unreportedFields": {
+              "description": "`None` is legacy/unknown coverage; an empty list means all fields known.",
+              "type": [
+                "array",
+                "null"
+              ],
+              "items": {
+                "$ref": "#/definitions/UsageField"
+              }
             }
           }
         },
@@ -36056,6 +36312,16 @@
               "type": "integer",
               "format": "uint64",
               "minimum": 0.0
+            },
+            "unreportedFields": {
+              "description": "`None` is legacy/unknown coverage; an empty list means all fields known.",
+              "type": [
+                "array",
+                "null"
+              ],
+              "items": {
+                "$ref": "#/definitions/UsageField"
+              }
             }
           }
         },
@@ -37130,6 +37396,18 @@
             }
           }
         },
+        "UsageField": {
+          "description": "A provider counter that was not reported. Counts remain available as known subtotals, but consumers must not present these fields as complete totals.",
+          "type": "string",
+          "enum": [
+            "inputTokens",
+            "outputTokens",
+            "reasoningTokens",
+            "cacheReadInputTokens",
+            "cacheCreationInputTokens",
+            "totalTokens"
+          ]
+        },
         "UsagePurpose": {
           "oneOf": [
             {
@@ -37248,10 +37526,20 @@
               "minimum": 0.0
             },
             "totalTokens": {
-              "description": "Aggregate tokens. For ledger-derived totals this equals `input_tokens + output_tokens`; for legacy lumps it is the only known number (the input/output split was never recorded).",
+              "description": "Aggregate tokens, preferring each call's provider-reported total and otherwise using `input_tokens + output_tokens`. For legacy lumps it is the only known number (the input/output split was never recorded).",
               "type": "integer",
               "format": "uint64",
               "minimum": 0.0
+            },
+            "unreportedFields": {
+              "description": "`None` is legacy/unknown coverage; an empty list means all fields known.",
+              "type": [
+                "array",
+                "null"
+              ],
+              "items": {
+                "$ref": "#/definitions/UsageField"
+              }
             }
           }
         },
@@ -39208,6 +39496,16 @@
               "type": "integer",
               "format": "uint64",
               "minimum": 0.0
+            },
+            "unreportedFields": {
+              "description": "`None` is legacy/unknown coverage; an empty list means all fields known.",
+              "type": [
+                "array",
+                "null"
+              ],
+              "items": {
+                "$ref": "#/definitions/UsageField"
+              }
             }
           }
         },
@@ -40282,6 +40580,18 @@
             }
           }
         },
+        "UsageField": {
+          "description": "A provider counter that was not reported. Counts remain available as known subtotals, but consumers must not present these fields as complete totals.",
+          "type": "string",
+          "enum": [
+            "inputTokens",
+            "outputTokens",
+            "reasoningTokens",
+            "cacheReadInputTokens",
+            "cacheCreationInputTokens",
+            "totalTokens"
+          ]
+        },
         "UsagePurpose": {
           "oneOf": [
             {
@@ -40400,10 +40710,20 @@
               "minimum": 0.0
             },
             "totalTokens": {
-              "description": "Aggregate tokens. For ledger-derived totals this equals `input_tokens + output_tokens`; for legacy lumps it is the only known number (the input/output split was never recorded).",
+              "description": "Aggregate tokens, preferring each call's provider-reported total and otherwise using `input_tokens + output_tokens`. For legacy lumps it is the only known number (the input/output split was never recorded).",
               "type": "integer",
               "format": "uint64",
               "minimum": 0.0
+            },
+            "unreportedFields": {
+              "description": "`None` is legacy/unknown coverage; an empty list means all fields known.",
+              "type": [
+                "array",
+                "null"
+              ],
+              "items": {
+                "$ref": "#/definitions/UsageField"
+              }
             }
           }
         },
@@ -42567,6 +42887,16 @@
               "type": "integer",
               "format": "uint64",
               "minimum": 0.0
+            },
+            "unreportedFields": {
+              "description": "`None` is legacy/unknown coverage; an empty list means all fields known.",
+              "type": [
+                "array",
+                "null"
+              ],
+              "items": {
+                "$ref": "#/definitions/UsageField"
+              }
             }
           }
         },
@@ -43641,6 +43971,18 @@
             }
           }
         },
+        "UsageField": {
+          "description": "A provider counter that was not reported. Counts remain available as known subtotals, but consumers must not present these fields as complete totals.",
+          "type": "string",
+          "enum": [
+            "inputTokens",
+            "outputTokens",
+            "reasoningTokens",
+            "cacheReadInputTokens",
+            "cacheCreationInputTokens",
+            "totalTokens"
+          ]
+        },
         "UsagePurpose": {
           "oneOf": [
             {
@@ -43759,10 +44101,20 @@
               "minimum": 0.0
             },
             "totalTokens": {
-              "description": "Aggregate tokens. For ledger-derived totals this equals `input_tokens + output_tokens`; for legacy lumps it is the only known number (the input/output split was never recorded).",
+              "description": "Aggregate tokens, preferring each call's provider-reported total and otherwise using `input_tokens + output_tokens`. For legacy lumps it is the only known number (the input/output split was never recorded).",
               "type": "integer",
               "format": "uint64",
               "minimum": 0.0
+            },
+            "unreportedFields": {
+              "description": "`None` is legacy/unknown coverage; an empty list means all fields known.",
+              "type": [
+                "array",
+                "null"
+              ],
+              "items": {
+                "$ref": "#/definitions/UsageField"
+              }
             }
           }
         },
@@ -47057,6 +47409,16 @@
               "type": "integer",
               "format": "uint64",
               "minimum": 0.0
+            },
+            "unreportedFields": {
+              "description": "`None` is legacy/unknown coverage; an empty list means all fields known.",
+              "type": [
+                "array",
+                "null"
+              ],
+              "items": {
+                "$ref": "#/definitions/UsageField"
+              }
             }
           }
         },
@@ -48131,6 +48493,18 @@
             }
           }
         },
+        "UsageField": {
+          "description": "A provider counter that was not reported. Counts remain available as known subtotals, but consumers must not present these fields as complete totals.",
+          "type": "string",
+          "enum": [
+            "inputTokens",
+            "outputTokens",
+            "reasoningTokens",
+            "cacheReadInputTokens",
+            "cacheCreationInputTokens",
+            "totalTokens"
+          ]
+        },
         "UsagePurpose": {
           "oneOf": [
             {
@@ -48249,10 +48623,20 @@
               "minimum": 0.0
             },
             "totalTokens": {
-              "description": "Aggregate tokens. For ledger-derived totals this equals `input_tokens + output_tokens`; for legacy lumps it is the only known number (the input/output split was never recorded).",
+              "description": "Aggregate tokens, preferring each call's provider-reported total and otherwise using `input_tokens + output_tokens`. For legacy lumps it is the only known number (the input/output split was never recorded).",
               "type": "integer",
               "format": "uint64",
               "minimum": 0.0
+            },
+            "unreportedFields": {
+              "description": "`None` is legacy/unknown coverage; an empty list means all fields known.",
+              "type": [
+                "array",
+                "null"
+              ],
+              "items": {
+                "$ref": "#/definitions/UsageField"
+              }
             }
           }
         },
@@ -50193,6 +50577,16 @@
               "type": "integer",
               "format": "uint64",
               "minimum": 0.0
+            },
+            "unreportedFields": {
+              "description": "`None` is legacy/unknown coverage; an empty list means all fields known.",
+              "type": [
+                "array",
+                "null"
+              ],
+              "items": {
+                "$ref": "#/definitions/UsageField"
+              }
             }
           }
         },
@@ -51267,6 +51661,18 @@
             }
           }
         },
+        "UsageField": {
+          "description": "A provider counter that was not reported. Counts remain available as known subtotals, but consumers must not present these fields as complete totals.",
+          "type": "string",
+          "enum": [
+            "inputTokens",
+            "outputTokens",
+            "reasoningTokens",
+            "cacheReadInputTokens",
+            "cacheCreationInputTokens",
+            "totalTokens"
+          ]
+        },
         "UsagePurpose": {
           "oneOf": [
             {
@@ -51385,10 +51791,20 @@
               "minimum": 0.0
             },
             "totalTokens": {
-              "description": "Aggregate tokens. For ledger-derived totals this equals `input_tokens + output_tokens`; for legacy lumps it is the only known number (the input/output split was never recorded).",
+              "description": "Aggregate tokens, preferring each call's provider-reported total and otherwise using `input_tokens + output_tokens`. For legacy lumps it is the only known number (the input/output split was never recorded).",
               "type": "integer",
               "format": "uint64",
               "minimum": 0.0
+            },
+            "unreportedFields": {
+              "description": "`None` is legacy/unknown coverage; an empty list means all fields known.",
+              "type": [
+                "array",
+                "null"
+              ],
+              "items": {
+                "$ref": "#/definitions/UsageField"
+              }
             }
           }
         },
@@ -53337,6 +53753,16 @@
               "type": "integer",
               "format": "uint64",
               "minimum": 0.0
+            },
+            "unreportedFields": {
+              "description": "`None` is legacy/unknown coverage; an empty list means all fields known.",
+              "type": [
+                "array",
+                "null"
+              ],
+              "items": {
+                "$ref": "#/definitions/UsageField"
+              }
             }
           }
         },
@@ -54411,6 +54837,18 @@
             }
           }
         },
+        "UsageField": {
+          "description": "A provider counter that was not reported. Counts remain available as known subtotals, but consumers must not present these fields as complete totals.",
+          "type": "string",
+          "enum": [
+            "inputTokens",
+            "outputTokens",
+            "reasoningTokens",
+            "cacheReadInputTokens",
+            "cacheCreationInputTokens",
+            "totalTokens"
+          ]
+        },
         "UsagePurpose": {
           "oneOf": [
             {
@@ -54529,10 +54967,20 @@
               "minimum": 0.0
             },
             "totalTokens": {
-              "description": "Aggregate tokens. For ledger-derived totals this equals `input_tokens + output_tokens`; for legacy lumps it is the only known number (the input/output split was never recorded).",
+              "description": "Aggregate tokens, preferring each call's provider-reported total and otherwise using `input_tokens + output_tokens`. For legacy lumps it is the only known number (the input/output split was never recorded).",
               "type": "integer",
               "format": "uint64",
               "minimum": 0.0
+            },
+            "unreportedFields": {
+              "description": "`None` is legacy/unknown coverage; an empty list means all fields known.",
+              "type": [
+                "array",
+                "null"
+              ],
+              "items": {
+                "$ref": "#/definitions/UsageField"
+              }
             }
           }
         },
@@ -56473,6 +56921,16 @@
               "type": "integer",
               "format": "uint64",
               "minimum": 0.0
+            },
+            "unreportedFields": {
+              "description": "`None` is legacy/unknown coverage; an empty list means all fields known.",
+              "type": [
+                "array",
+                "null"
+              ],
+              "items": {
+                "$ref": "#/definitions/UsageField"
+              }
             }
           }
         },
@@ -57547,6 +58005,18 @@
             }
           }
         },
+        "UsageField": {
+          "description": "A provider counter that was not reported. Counts remain available as known subtotals, but consumers must not present these fields as complete totals.",
+          "type": "string",
+          "enum": [
+            "inputTokens",
+            "outputTokens",
+            "reasoningTokens",
+            "cacheReadInputTokens",
+            "cacheCreationInputTokens",
+            "totalTokens"
+          ]
+        },
         "UsagePurpose": {
           "oneOf": [
             {
@@ -57665,10 +58135,20 @@
               "minimum": 0.0
             },
             "totalTokens": {
-              "description": "Aggregate tokens. For ledger-derived totals this equals `input_tokens + output_tokens`; for legacy lumps it is the only known number (the input/output split was never recorded).",
+              "description": "Aggregate tokens, preferring each call's provider-reported total and otherwise using `input_tokens + output_tokens`. For legacy lumps it is the only known number (the input/output split was never recorded).",
               "type": "integer",
               "format": "uint64",
               "minimum": 0.0
+            },
+            "unreportedFields": {
+              "description": "`None` is legacy/unknown coverage; an empty list means all fields known.",
+              "type": [
+                "array",
+                "null"
+              ],
+              "items": {
+                "$ref": "#/definitions/UsageField"
+              }
             }
           }
         },
@@ -59609,6 +60089,16 @@
               "type": "integer",
               "format": "uint64",
               "minimum": 0.0
+            },
+            "unreportedFields": {
+              "description": "`None` is legacy/unknown coverage; an empty list means all fields known.",
+              "type": [
+                "array",
+                "null"
+              ],
+              "items": {
+                "$ref": "#/definitions/UsageField"
+              }
             }
           }
         },
@@ -60683,6 +61173,18 @@
             }
           }
         },
+        "UsageField": {
+          "description": "A provider counter that was not reported. Counts remain available as known subtotals, but consumers must not present these fields as complete totals.",
+          "type": "string",
+          "enum": [
+            "inputTokens",
+            "outputTokens",
+            "reasoningTokens",
+            "cacheReadInputTokens",
+            "cacheCreationInputTokens",
+            "totalTokens"
+          ]
+        },
         "UsagePurpose": {
           "oneOf": [
             {
@@ -60801,10 +61303,20 @@
               "minimum": 0.0
             },
             "totalTokens": {
-              "description": "Aggregate tokens. For ledger-derived totals this equals `input_tokens + output_tokens`; for legacy lumps it is the only known number (the input/output split was never recorded).",
+              "description": "Aggregate tokens, preferring each call's provider-reported total and otherwise using `input_tokens + output_tokens`. For legacy lumps it is the only known number (the input/output split was never recorded).",
               "type": "integer",
               "format": "uint64",
               "minimum": 0.0
+            },
+            "unreportedFields": {
+              "description": "`None` is legacy/unknown coverage; an empty list means all fields known.",
+              "type": [
+                "array",
+                "null"
+              ],
+              "items": {
+                "$ref": "#/definitions/UsageField"
+              }
             }
           }
         },
@@ -62753,6 +63265,16 @@
               "type": "integer",
               "format": "uint64",
               "minimum": 0.0
+            },
+            "unreportedFields": {
+              "description": "`None` is legacy/unknown coverage; an empty list means all fields known.",
+              "type": [
+                "array",
+                "null"
+              ],
+              "items": {
+                "$ref": "#/definitions/UsageField"
+              }
             }
           }
         },
@@ -63827,6 +64349,18 @@
             }
           }
         },
+        "UsageField": {
+          "description": "A provider counter that was not reported. Counts remain available as known subtotals, but consumers must not present these fields as complete totals.",
+          "type": "string",
+          "enum": [
+            "inputTokens",
+            "outputTokens",
+            "reasoningTokens",
+            "cacheReadInputTokens",
+            "cacheCreationInputTokens",
+            "totalTokens"
+          ]
+        },
         "UsagePurpose": {
           "oneOf": [
             {
@@ -63945,10 +64479,20 @@
               "minimum": 0.0
             },
             "totalTokens": {
-              "description": "Aggregate tokens. For ledger-derived totals this equals `input_tokens + output_tokens`; for legacy lumps it is the only known number (the input/output split was never recorded).",
+              "description": "Aggregate tokens, preferring each call's provider-reported total and otherwise using `input_tokens + output_tokens`. For legacy lumps it is the only known number (the input/output split was never recorded).",
               "type": "integer",
               "format": "uint64",
               "minimum": 0.0
+            },
+            "unreportedFields": {
+              "description": "`None` is legacy/unknown coverage; an empty list means all fields known.",
+              "type": [
+                "array",
+                "null"
+              ],
+              "items": {
+                "$ref": "#/definitions/UsageField"
+              }
             }
           }
         },
@@ -65889,6 +66433,16 @@
               "type": "integer",
               "format": "uint64",
               "minimum": 0.0
+            },
+            "unreportedFields": {
+              "description": "`None` is legacy/unknown coverage; an empty list means all fields known.",
+              "type": [
+                "array",
+                "null"
+              ],
+              "items": {
+                "$ref": "#/definitions/UsageField"
+              }
             }
           }
         },
@@ -66963,6 +67517,18 @@
             }
           }
         },
+        "UsageField": {
+          "description": "A provider counter that was not reported. Counts remain available as known subtotals, but consumers must not present these fields as complete totals.",
+          "type": "string",
+          "enum": [
+            "inputTokens",
+            "outputTokens",
+            "reasoningTokens",
+            "cacheReadInputTokens",
+            "cacheCreationInputTokens",
+            "totalTokens"
+          ]
+        },
         "UsagePurpose": {
           "oneOf": [
             {
@@ -67081,10 +67647,20 @@
               "minimum": 0.0
             },
             "totalTokens": {
-              "description": "Aggregate tokens. For ledger-derived totals this equals `input_tokens + output_tokens`; for legacy lumps it is the only known number (the input/output split was never recorded).",
+              "description": "Aggregate tokens, preferring each call's provider-reported total and otherwise using `input_tokens + output_tokens`. For legacy lumps it is the only known number (the input/output split was never recorded).",
               "type": "integer",
               "format": "uint64",
               "minimum": 0.0
+            },
+            "unreportedFields": {
+              "description": "`None` is legacy/unknown coverage; an empty list means all fields known.",
+              "type": [
+                "array",
+                "null"
+              ],
+              "items": {
+                "$ref": "#/definitions/UsageField"
+              }
             }
           }
         },
@@ -69040,6 +69616,16 @@
               "type": "integer",
               "format": "uint64",
               "minimum": 0.0
+            },
+            "unreportedFields": {
+              "description": "`None` is legacy/unknown coverage; an empty list means all fields known.",
+              "type": [
+                "array",
+                "null"
+              ],
+              "items": {
+                "$ref": "#/definitions/UsageField"
+              }
             }
           }
         },
@@ -70114,6 +70700,18 @@
             }
           }
         },
+        "UsageField": {
+          "description": "A provider counter that was not reported. Counts remain available as known subtotals, but consumers must not present these fields as complete totals.",
+          "type": "string",
+          "enum": [
+            "inputTokens",
+            "outputTokens",
+            "reasoningTokens",
+            "cacheReadInputTokens",
+            "cacheCreationInputTokens",
+            "totalTokens"
+          ]
+        },
         "UsagePurpose": {
           "oneOf": [
             {
@@ -70232,10 +70830,20 @@
               "minimum": 0.0
             },
             "totalTokens": {
-              "description": "Aggregate tokens. For ledger-derived totals this equals `input_tokens + output_tokens`; for legacy lumps it is the only known number (the input/output split was never recorded).",
+              "description": "Aggregate tokens, preferring each call's provider-reported total and otherwise using `input_tokens + output_tokens`. For legacy lumps it is the only known number (the input/output split was never recorded).",
               "type": "integer",
               "format": "uint64",
               "minimum": 0.0
+            },
+            "unreportedFields": {
+              "description": "`None` is legacy/unknown coverage; an empty list means all fields known.",
+              "type": [
+                "array",
+                "null"
+              ],
+              "items": {
+                "$ref": "#/definitions/UsageField"
+              }
             }
           }
         },
@@ -72184,6 +72792,16 @@
               "type": "integer",
               "format": "uint64",
               "minimum": 0.0
+            },
+            "unreportedFields": {
+              "description": "`None` is legacy/unknown coverage; an empty list means all fields known.",
+              "type": [
+                "array",
+                "null"
+              ],
+              "items": {
+                "$ref": "#/definitions/UsageField"
+              }
             }
           }
         },
@@ -73258,6 +73876,18 @@
             }
           }
         },
+        "UsageField": {
+          "description": "A provider counter that was not reported. Counts remain available as known subtotals, but consumers must not present these fields as complete totals.",
+          "type": "string",
+          "enum": [
+            "inputTokens",
+            "outputTokens",
+            "reasoningTokens",
+            "cacheReadInputTokens",
+            "cacheCreationInputTokens",
+            "totalTokens"
+          ]
+        },
         "UsagePurpose": {
           "oneOf": [
             {
@@ -73376,10 +74006,20 @@
               "minimum": 0.0
             },
             "totalTokens": {
-              "description": "Aggregate tokens. For ledger-derived totals this equals `input_tokens + output_tokens`; for legacy lumps it is the only known number (the input/output split was never recorded).",
+              "description": "Aggregate tokens, preferring each call's provider-reported total and otherwise using `input_tokens + output_tokens`. For legacy lumps it is the only known number (the input/output split was never recorded).",
               "type": "integer",
               "format": "uint64",
               "minimum": 0.0
+            },
+            "unreportedFields": {
+              "description": "`None` is legacy/unknown coverage; an empty list means all fields known.",
+              "type": [
+                "array",
+                "null"
+              ],
+              "items": {
+                "$ref": "#/definitions/UsageField"
+              }
             }
           }
         },
@@ -75706,6 +76346,16 @@
               "type": "integer",
               "format": "uint64",
               "minimum": 0.0
+            },
+            "unreportedFields": {
+              "description": "`None` is legacy/unknown coverage; an empty list means all fields known.",
+              "type": [
+                "array",
+                "null"
+              ],
+              "items": {
+                "$ref": "#/definitions/UsageField"
+              }
             }
           }
         },
@@ -76780,6 +77430,18 @@
             }
           }
         },
+        "UsageField": {
+          "description": "A provider counter that was not reported. Counts remain available as known subtotals, but consumers must not present these fields as complete totals.",
+          "type": "string",
+          "enum": [
+            "inputTokens",
+            "outputTokens",
+            "reasoningTokens",
+            "cacheReadInputTokens",
+            "cacheCreationInputTokens",
+            "totalTokens"
+          ]
+        },
         "UsagePurpose": {
           "oneOf": [
             {
@@ -76898,10 +77560,20 @@
               "minimum": 0.0
             },
             "totalTokens": {
-              "description": "Aggregate tokens. For ledger-derived totals this equals `input_tokens + output_tokens`; for legacy lumps it is the only known number (the input/output split was never recorded).",
+              "description": "Aggregate tokens, preferring each call's provider-reported total and otherwise using `input_tokens + output_tokens`. For legacy lumps it is the only known number (the input/output split was never recorded).",
               "type": "integer",
               "format": "uint64",
               "minimum": 0.0
+            },
+            "unreportedFields": {
+              "description": "`None` is legacy/unknown coverage; an empty list means all fields known.",
+              "type": [
+                "array",
+                "null"
+              ],
+              "items": {
+                "$ref": "#/definitions/UsageField"
+              }
             }
           }
         },
@@ -79723,6 +80395,16 @@
               "type": "integer",
               "format": "uint64",
               "minimum": 0.0
+            },
+            "unreportedFields": {
+              "description": "`None` is legacy/unknown coverage; an empty list means all fields known.",
+              "type": [
+                "array",
+                "null"
+              ],
+              "items": {
+                "$ref": "#/definitions/UsageField"
+              }
             }
           }
         },
@@ -80797,6 +81479,18 @@
             }
           }
         },
+        "UsageField": {
+          "description": "A provider counter that was not reported. Counts remain available as known subtotals, but consumers must not present these fields as complete totals.",
+          "type": "string",
+          "enum": [
+            "inputTokens",
+            "outputTokens",
+            "reasoningTokens",
+            "cacheReadInputTokens",
+            "cacheCreationInputTokens",
+            "totalTokens"
+          ]
+        },
         "UsagePurpose": {
           "oneOf": [
             {
@@ -80915,10 +81609,20 @@
               "minimum": 0.0
             },
             "totalTokens": {
-              "description": "Aggregate tokens. For ledger-derived totals this equals `input_tokens + output_tokens`; for legacy lumps it is the only known number (the input/output split was never recorded).",
+              "description": "Aggregate tokens, preferring each call's provider-reported total and otherwise using `input_tokens + output_tokens`. For legacy lumps it is the only known number (the input/output split was never recorded).",
               "type": "integer",
               "format": "uint64",
               "minimum": 0.0
+            },
+            "unreportedFields": {
+              "description": "`None` is legacy/unknown coverage; an empty list means all fields known.",
+              "type": [
+                "array",
+                "null"
+              ],
+              "items": {
+                "$ref": "#/definitions/UsageField"
+              }
             }
           }
         },
@@ -82916,6 +83620,16 @@
               "type": "integer",
               "format": "uint64",
               "minimum": 0.0
+            },
+            "unreportedFields": {
+              "description": "`None` is legacy/unknown coverage; an empty list means all fields known.",
+              "type": [
+                "array",
+                "null"
+              ],
+              "items": {
+                "$ref": "#/definitions/UsageField"
+              }
             }
           }
         },
@@ -83990,6 +84704,18 @@
             }
           }
         },
+        "UsageField": {
+          "description": "A provider counter that was not reported. Counts remain available as known subtotals, but consumers must not present these fields as complete totals.",
+          "type": "string",
+          "enum": [
+            "inputTokens",
+            "outputTokens",
+            "reasoningTokens",
+            "cacheReadInputTokens",
+            "cacheCreationInputTokens",
+            "totalTokens"
+          ]
+        },
         "UsagePurpose": {
           "oneOf": [
             {
@@ -84108,10 +84834,20 @@
               "minimum": 0.0
             },
             "totalTokens": {
-              "description": "Aggregate tokens. For ledger-derived totals this equals `input_tokens + output_tokens`; for legacy lumps it is the only known number (the input/output split was never recorded).",
+              "description": "Aggregate tokens, preferring each call's provider-reported total and otherwise using `input_tokens + output_tokens`. For legacy lumps it is the only known number (the input/output split was never recorded).",
               "type": "integer",
               "format": "uint64",
               "minimum": 0.0
+            },
+            "unreportedFields": {
+              "description": "`None` is legacy/unknown coverage; an empty list means all fields known.",
+              "type": [
+                "array",
+                "null"
+              ],
+              "items": {
+                "$ref": "#/definitions/UsageField"
+              }
             }
           }
         },
@@ -86090,6 +86826,16 @@
               "type": "integer",
               "format": "uint64",
               "minimum": 0.0
+            },
+            "unreportedFields": {
+              "description": "`None` is legacy/unknown coverage; an empty list means all fields known.",
+              "type": [
+                "array",
+                "null"
+              ],
+              "items": {
+                "$ref": "#/definitions/UsageField"
+              }
             }
           }
         },
@@ -86535,6 +87281,18 @@
         "TurnId": {
           "type": "string"
         },
+        "UsageField": {
+          "description": "A provider counter that was not reported. Counts remain available as known subtotals, but consumers must not present these fields as complete totals.",
+          "type": "string",
+          "enum": [
+            "inputTokens",
+            "outputTokens",
+            "reasoningTokens",
+            "cacheReadInputTokens",
+            "cacheCreationInputTokens",
+            "totalTokens"
+          ]
+        },
         "UsagePurpose": {
           "oneOf": [
             {
@@ -86653,10 +87411,20 @@
               "minimum": 0.0
             },
             "totalTokens": {
-              "description": "Aggregate tokens. For ledger-derived totals this equals `input_tokens + output_tokens`; for legacy lumps it is the only known number (the input/output split was never recorded).",
+              "description": "Aggregate tokens, preferring each call's provider-reported total and otherwise using `input_tokens + output_tokens`. For legacy lumps it is the only known number (the input/output split was never recorded).",
               "type": "integer",
               "format": "uint64",
               "minimum": 0.0
+            },
+            "unreportedFields": {
+              "description": "`None` is legacy/unknown coverage; an empty list means all fields known.",
+              "type": [
+                "array",
+                "null"
+              ],
+              "items": {
+                "$ref": "#/definitions/UsageField"
+              }
             }
           }
         }
@@ -86963,6 +87731,18 @@
             }
           }
         },
+        "UsageField": {
+          "description": "A provider counter that was not reported. Counts remain available as known subtotals, but consumers must not present these fields as complete totals.",
+          "type": "string",
+          "enum": [
+            "inputTokens",
+            "outputTokens",
+            "reasoningTokens",
+            "cacheReadInputTokens",
+            "cacheCreationInputTokens",
+            "totalTokens"
+          ]
+        },
         "UsageTotals": {
           "description": "Aggregated token/call totals. `call_count` includes failed and cancelled attempts; `metered_call_count` counts attempts with reported usage.",
           "type": "object",
@@ -87035,10 +87815,20 @@
               "minimum": 0.0
             },
             "totalTokens": {
-              "description": "Aggregate tokens. For ledger-derived totals this equals `input_tokens + output_tokens`; for legacy lumps it is the only known number (the input/output split was never recorded).",
+              "description": "Aggregate tokens, preferring each call's provider-reported total and otherwise using `input_tokens + output_tokens`. For legacy lumps it is the only known number (the input/output split was never recorded).",
               "type": "integer",
               "format": "uint64",
               "minimum": 0.0
+            },
+            "unreportedFields": {
+              "description": "`None` is legacy/unknown coverage; an empty list means all fields known.",
+              "type": [
+                "array",
+                "null"
+              ],
+              "items": {
+                "$ref": "#/definitions/UsageField"
+              }
             }
           }
         }
@@ -88664,6 +89454,16 @@
               "type": "integer",
               "format": "uint64",
               "minimum": 0.0
+            },
+            "unreportedFields": {
+              "description": "`None` is legacy/unknown coverage; an empty list means all fields known.",
+              "type": [
+                "array",
+                "null"
+              ],
+              "items": {
+                "$ref": "#/definitions/UsageField"
+              }
             }
           }
         },
@@ -89738,6 +90538,18 @@
             }
           }
         },
+        "UsageField": {
+          "description": "A provider counter that was not reported. Counts remain available as known subtotals, but consumers must not present these fields as complete totals.",
+          "type": "string",
+          "enum": [
+            "inputTokens",
+            "outputTokens",
+            "reasoningTokens",
+            "cacheReadInputTokens",
+            "cacheCreationInputTokens",
+            "totalTokens"
+          ]
+        },
         "UsagePurpose": {
           "oneOf": [
             {
@@ -89856,10 +90668,20 @@
               "minimum": 0.0
             },
             "totalTokens": {
-              "description": "Aggregate tokens. For ledger-derived totals this equals `input_tokens + output_tokens`; for legacy lumps it is the only known number (the input/output split was never recorded).",
+              "description": "Aggregate tokens, preferring each call's provider-reported total and otherwise using `input_tokens + output_tokens`. For legacy lumps it is the only known number (the input/output split was never recorded).",
               "type": "integer",
               "format": "uint64",
               "minimum": 0.0
+            },
+            "unreportedFields": {
+              "description": "`None` is legacy/unknown coverage; an empty list means all fields known.",
+              "type": [
+                "array",
+                "null"
+              ],
+              "items": {
+                "$ref": "#/definitions/UsageField"
+              }
             }
           }
         },
@@ -91814,6 +92636,16 @@
               "type": "integer",
               "format": "uint64",
               "minimum": 0.0
+            },
+            "unreportedFields": {
+              "description": "`None` is legacy/unknown coverage; an empty list means all fields known.",
+              "type": [
+                "array",
+                "null"
+              ],
+              "items": {
+                "$ref": "#/definitions/UsageField"
+              }
             }
           }
         },
@@ -92888,6 +93720,18 @@
             }
           }
         },
+        "UsageField": {
+          "description": "A provider counter that was not reported. Counts remain available as known subtotals, but consumers must not present these fields as complete totals.",
+          "type": "string",
+          "enum": [
+            "inputTokens",
+            "outputTokens",
+            "reasoningTokens",
+            "cacheReadInputTokens",
+            "cacheCreationInputTokens",
+            "totalTokens"
+          ]
+        },
         "UsagePurpose": {
           "oneOf": [
             {
@@ -93006,10 +93850,20 @@
               "minimum": 0.0
             },
             "totalTokens": {
-              "description": "Aggregate tokens. For ledger-derived totals this equals `input_tokens + output_tokens`; for legacy lumps it is the only known number (the input/output split was never recorded).",
+              "description": "Aggregate tokens, preferring each call's provider-reported total and otherwise using `input_tokens + output_tokens`. For legacy lumps it is the only known number (the input/output split was never recorded).",
               "type": "integer",
               "format": "uint64",
               "minimum": 0.0
+            },
+            "unreportedFields": {
+              "description": "`None` is legacy/unknown coverage; an empty list means all fields known.",
+              "type": [
+                "array",
+                "null"
+              ],
+              "items": {
+                "$ref": "#/definitions/UsageField"
+              }
             }
           }
         },
@@ -97836,6 +98690,16 @@
               "type": "integer",
               "format": "uint64",
               "minimum": 0.0
+            },
+            "unreportedFields": {
+              "description": "`None` is legacy/unknown coverage; an empty list means all fields known.",
+              "type": [
+                "array",
+                "null"
+              ],
+              "items": {
+                "$ref": "#/definitions/UsageField"
+              }
             }
           }
         },
@@ -98910,6 +99774,18 @@
             }
           }
         },
+        "UsageField": {
+          "description": "A provider counter that was not reported. Counts remain available as known subtotals, but consumers must not present these fields as complete totals.",
+          "type": "string",
+          "enum": [
+            "inputTokens",
+            "outputTokens",
+            "reasoningTokens",
+            "cacheReadInputTokens",
+            "cacheCreationInputTokens",
+            "totalTokens"
+          ]
+        },
         "UsagePurpose": {
           "oneOf": [
             {
@@ -99028,10 +99904,20 @@
               "minimum": 0.0
             },
             "totalTokens": {
-              "description": "Aggregate tokens. For ledger-derived totals this equals `input_tokens + output_tokens`; for legacy lumps it is the only known number (the input/output split was never recorded).",
+              "description": "Aggregate tokens, preferring each call's provider-reported total and otherwise using `input_tokens + output_tokens`. For legacy lumps it is the only known number (the input/output split was never recorded).",
               "type": "integer",
               "format": "uint64",
               "minimum": 0.0
+            },
+            "unreportedFields": {
+              "description": "`None` is legacy/unknown coverage; an empty list means all fields known.",
+              "type": [
+                "array",
+                "null"
+              ],
+              "items": {
+                "$ref": "#/definitions/UsageField"
+              }
             }
           }
         },
@@ -101037,6 +101923,16 @@
               "type": "integer",
               "format": "uint64",
               "minimum": 0.0
+            },
+            "unreportedFields": {
+              "description": "`None` is legacy/unknown coverage; an empty list means all fields known.",
+              "type": [
+                "array",
+                "null"
+              ],
+              "items": {
+                "$ref": "#/definitions/UsageField"
+              }
             }
           }
         },
@@ -102111,6 +103007,18 @@
             }
           }
         },
+        "UsageField": {
+          "description": "A provider counter that was not reported. Counts remain available as known subtotals, but consumers must not present these fields as complete totals.",
+          "type": "string",
+          "enum": [
+            "inputTokens",
+            "outputTokens",
+            "reasoningTokens",
+            "cacheReadInputTokens",
+            "cacheCreationInputTokens",
+            "totalTokens"
+          ]
+        },
         "UsagePurpose": {
           "oneOf": [
             {
@@ -102229,10 +103137,20 @@
               "minimum": 0.0
             },
             "totalTokens": {
-              "description": "Aggregate tokens. For ledger-derived totals this equals `input_tokens + output_tokens`; for legacy lumps it is the only known number (the input/output split was never recorded).",
+              "description": "Aggregate tokens, preferring each call's provider-reported total and otherwise using `input_tokens + output_tokens`. For legacy lumps it is the only known number (the input/output split was never recorded).",
               "type": "integer",
               "format": "uint64",
               "minimum": 0.0
+            },
+            "unreportedFields": {
+              "description": "`None` is legacy/unknown coverage; an empty list means all fields known.",
+              "type": [
+                "array",
+                "null"
+              ],
+              "items": {
+                "$ref": "#/definitions/UsageField"
+              }
             }
           }
         },
@@ -104189,6 +105107,16 @@
               "type": "integer",
               "format": "uint64",
               "minimum": 0.0
+            },
+            "unreportedFields": {
+              "description": "`None` is legacy/unknown coverage; an empty list means all fields known.",
+              "type": [
+                "array",
+                "null"
+              ],
+              "items": {
+                "$ref": "#/definitions/UsageField"
+              }
             }
           }
         },
@@ -105263,6 +106191,18 @@
             }
           }
         },
+        "UsageField": {
+          "description": "A provider counter that was not reported. Counts remain available as known subtotals, but consumers must not present these fields as complete totals.",
+          "type": "string",
+          "enum": [
+            "inputTokens",
+            "outputTokens",
+            "reasoningTokens",
+            "cacheReadInputTokens",
+            "cacheCreationInputTokens",
+            "totalTokens"
+          ]
+        },
         "UsagePurpose": {
           "oneOf": [
             {
@@ -105381,10 +106321,20 @@
               "minimum": 0.0
             },
             "totalTokens": {
-              "description": "Aggregate tokens. For ledger-derived totals this equals `input_tokens + output_tokens`; for legacy lumps it is the only known number (the input/output split was never recorded).",
+              "description": "Aggregate tokens, preferring each call's provider-reported total and otherwise using `input_tokens + output_tokens`. For legacy lumps it is the only known number (the input/output split was never recorded).",
               "type": "integer",
               "format": "uint64",
               "minimum": 0.0
+            },
+            "unreportedFields": {
+              "description": "`None` is legacy/unknown coverage; an empty list means all fields known.",
+              "type": [
+                "array",
+                "null"
+              ],
+              "items": {
+                "$ref": "#/definitions/UsageField"
+              }
             }
           }
         },
@@ -107344,6 +108294,16 @@
               "type": "integer",
               "format": "uint64",
               "minimum": 0.0
+            },
+            "unreportedFields": {
+              "description": "`None` is legacy/unknown coverage; an empty list means all fields known.",
+              "type": [
+                "array",
+                "null"
+              ],
+              "items": {
+                "$ref": "#/definitions/UsageField"
+              }
             }
           }
         },
@@ -108418,6 +109378,18 @@
             }
           }
         },
+        "UsageField": {
+          "description": "A provider counter that was not reported. Counts remain available as known subtotals, but consumers must not present these fields as complete totals.",
+          "type": "string",
+          "enum": [
+            "inputTokens",
+            "outputTokens",
+            "reasoningTokens",
+            "cacheReadInputTokens",
+            "cacheCreationInputTokens",
+            "totalTokens"
+          ]
+        },
         "UsagePurpose": {
           "oneOf": [
             {
@@ -108536,10 +109508,20 @@
               "minimum": 0.0
             },
             "totalTokens": {
-              "description": "Aggregate tokens. For ledger-derived totals this equals `input_tokens + output_tokens`; for legacy lumps it is the only known number (the input/output split was never recorded).",
+              "description": "Aggregate tokens, preferring each call's provider-reported total and otherwise using `input_tokens + output_tokens`. For legacy lumps it is the only known number (the input/output split was never recorded).",
               "type": "integer",
               "format": "uint64",
               "minimum": 0.0
+            },
+            "unreportedFields": {
+              "description": "`None` is legacy/unknown coverage; an empty list means all fields known.",
+              "type": [
+                "array",
+                "null"
+              ],
+              "items": {
+                "$ref": "#/definitions/UsageField"
+              }
             }
           }
         },
@@ -110480,6 +111462,16 @@
               "type": "integer",
               "format": "uint64",
               "minimum": 0.0
+            },
+            "unreportedFields": {
+              "description": "`None` is legacy/unknown coverage; an empty list means all fields known.",
+              "type": [
+                "array",
+                "null"
+              ],
+              "items": {
+                "$ref": "#/definitions/UsageField"
+              }
             }
           }
         },
@@ -111554,6 +112546,18 @@
             }
           }
         },
+        "UsageField": {
+          "description": "A provider counter that was not reported. Counts remain available as known subtotals, but consumers must not present these fields as complete totals.",
+          "type": "string",
+          "enum": [
+            "inputTokens",
+            "outputTokens",
+            "reasoningTokens",
+            "cacheReadInputTokens",
+            "cacheCreationInputTokens",
+            "totalTokens"
+          ]
+        },
         "UsagePurpose": {
           "oneOf": [
             {
@@ -111672,10 +112676,20 @@
               "minimum": 0.0
             },
             "totalTokens": {
-              "description": "Aggregate tokens. For ledger-derived totals this equals `input_tokens + output_tokens`; for legacy lumps it is the only known number (the input/output split was never recorded).",
+              "description": "Aggregate tokens, preferring each call's provider-reported total and otherwise using `input_tokens + output_tokens`. For legacy lumps it is the only known number (the input/output split was never recorded).",
               "type": "integer",
               "format": "uint64",
               "minimum": 0.0
+            },
+            "unreportedFields": {
+              "description": "`None` is legacy/unknown coverage; an empty list means all fields known.",
+              "type": [
+                "array",
+                "null"
+              ],
+              "items": {
+                "$ref": "#/definitions/UsageField"
+              }
             }
           }
         },
@@ -114104,6 +115118,16 @@
               "type": "integer",
               "format": "uint64",
               "minimum": 0.0
+            },
+            "unreportedFields": {
+              "description": "`None` is legacy/unknown coverage; an empty list means all fields known.",
+              "type": [
+                "array",
+                "null"
+              ],
+              "items": {
+                "$ref": "#/definitions/UsageField"
+              }
             }
           }
         },
@@ -115178,6 +116202,18 @@
             }
           }
         },
+        "UsageField": {
+          "description": "A provider counter that was not reported. Counts remain available as known subtotals, but consumers must not present these fields as complete totals.",
+          "type": "string",
+          "enum": [
+            "inputTokens",
+            "outputTokens",
+            "reasoningTokens",
+            "cacheReadInputTokens",
+            "cacheCreationInputTokens",
+            "totalTokens"
+          ]
+        },
         "UsagePurpose": {
           "oneOf": [
             {
@@ -115296,10 +116332,20 @@
               "minimum": 0.0
             },
             "totalTokens": {
-              "description": "Aggregate tokens. For ledger-derived totals this equals `input_tokens + output_tokens`; for legacy lumps it is the only known number (the input/output split was never recorded).",
+              "description": "Aggregate tokens, preferring each call's provider-reported total and otherwise using `input_tokens + output_tokens`. For legacy lumps it is the only known number (the input/output split was never recorded).",
               "type": "integer",
               "format": "uint64",
               "minimum": 0.0
+            },
+            "unreportedFields": {
+              "description": "`None` is legacy/unknown coverage; an empty list means all fields known.",
+              "type": [
+                "array",
+                "null"
+              ],
+              "items": {
+                "$ref": "#/definitions/UsageField"
+              }
             }
           }
         },
@@ -117252,6 +118298,16 @@
               "type": "integer",
               "format": "uint64",
               "minimum": 0.0
+            },
+            "unreportedFields": {
+              "description": "`None` is legacy/unknown coverage; an empty list means all fields known.",
+              "type": [
+                "array",
+                "null"
+              ],
+              "items": {
+                "$ref": "#/definitions/UsageField"
+              }
             }
           }
         },
@@ -118326,6 +119382,18 @@
             }
           }
         },
+        "UsageField": {
+          "description": "A provider counter that was not reported. Counts remain available as known subtotals, but consumers must not present these fields as complete totals.",
+          "type": "string",
+          "enum": [
+            "inputTokens",
+            "outputTokens",
+            "reasoningTokens",
+            "cacheReadInputTokens",
+            "cacheCreationInputTokens",
+            "totalTokens"
+          ]
+        },
         "UsagePurpose": {
           "oneOf": [
             {
@@ -118444,10 +119512,20 @@
               "minimum": 0.0
             },
             "totalTokens": {
-              "description": "Aggregate tokens. For ledger-derived totals this equals `input_tokens + output_tokens`; for legacy lumps it is the only known number (the input/output split was never recorded).",
+              "description": "Aggregate tokens, preferring each call's provider-reported total and otherwise using `input_tokens + output_tokens`. For legacy lumps it is the only known number (the input/output split was never recorded).",
               "type": "integer",
               "format": "uint64",
               "minimum": 0.0
+            },
+            "unreportedFields": {
+              "description": "`None` is legacy/unknown coverage; an empty list means all fields known.",
+              "type": [
+                "array",
+                "null"
+              ],
+              "items": {
+                "$ref": "#/definitions/UsageField"
+              }
             }
           }
         },
@@ -120410,6 +121488,16 @@
               "type": "integer",
               "format": "uint64",
               "minimum": 0.0
+            },
+            "unreportedFields": {
+              "description": "`None` is legacy/unknown coverage; an empty list means all fields known.",
+              "type": [
+                "array",
+                "null"
+              ],
+              "items": {
+                "$ref": "#/definitions/UsageField"
+              }
             }
           }
         },
@@ -121484,6 +122572,18 @@
             }
           }
         },
+        "UsageField": {
+          "description": "A provider counter that was not reported. Counts remain available as known subtotals, but consumers must not present these fields as complete totals.",
+          "type": "string",
+          "enum": [
+            "inputTokens",
+            "outputTokens",
+            "reasoningTokens",
+            "cacheReadInputTokens",
+            "cacheCreationInputTokens",
+            "totalTokens"
+          ]
+        },
         "UsagePurpose": {
           "oneOf": [
             {
@@ -121602,10 +122702,20 @@
               "minimum": 0.0
             },
             "totalTokens": {
-              "description": "Aggregate tokens. For ledger-derived totals this equals `input_tokens + output_tokens`; for legacy lumps it is the only known number (the input/output split was never recorded).",
+              "description": "Aggregate tokens, preferring each call's provider-reported total and otherwise using `input_tokens + output_tokens`. For legacy lumps it is the only known number (the input/output split was never recorded).",
               "type": "integer",
               "format": "uint64",
               "minimum": 0.0
+            },
+            "unreportedFields": {
+              "description": "`None` is legacy/unknown coverage; an empty list means all fields known.",
+              "type": [
+                "array",
+                "null"
+              ],
+              "items": {
+                "$ref": "#/definitions/UsageField"
+              }
             }
           }
         },
@@ -122145,6 +123255,16 @@
               "type": "integer",
               "format": "uint64",
               "minimum": 0.0
+            },
+            "unreportedFields": {
+              "description": "`None` is legacy/unknown coverage; an empty list means all fields known.",
+              "type": [
+                "array",
+                "null"
+              ],
+              "items": {
+                "$ref": "#/definitions/UsageField"
+              }
             }
           }
         },
@@ -122590,6 +123710,18 @@
         "TurnId": {
           "type": "string"
         },
+        "UsageField": {
+          "description": "A provider counter that was not reported. Counts remain available as known subtotals, but consumers must not present these fields as complete totals.",
+          "type": "string",
+          "enum": [
+            "inputTokens",
+            "outputTokens",
+            "reasoningTokens",
+            "cacheReadInputTokens",
+            "cacheCreationInputTokens",
+            "totalTokens"
+          ]
+        },
         "UsagePurpose": {
           "oneOf": [
             {
@@ -122708,10 +123840,20 @@
               "minimum": 0.0
             },
             "totalTokens": {
-              "description": "Aggregate tokens. For ledger-derived totals this equals `input_tokens + output_tokens`; for legacy lumps it is the only known number (the input/output split was never recorded).",
+              "description": "Aggregate tokens, preferring each call's provider-reported total and otherwise using `input_tokens + output_tokens`. For legacy lumps it is the only known number (the input/output split was never recorded).",
               "type": "integer",
               "format": "uint64",
               "minimum": 0.0
+            },
+            "unreportedFields": {
+              "description": "`None` is legacy/unknown coverage; an empty list means all fields known.",
+              "type": [
+                "array",
+                "null"
+              ],
+              "items": {
+                "$ref": "#/definitions/UsageField"
+              }
             }
           }
         }
@@ -124333,6 +125475,16 @@
               "type": "integer",
               "format": "uint64",
               "minimum": 0.0
+            },
+            "unreportedFields": {
+              "description": "`None` is legacy/unknown coverage; an empty list means all fields known.",
+              "type": [
+                "array",
+                "null"
+              ],
+              "items": {
+                "$ref": "#/definitions/UsageField"
+              }
             }
           }
         },
@@ -125407,6 +126559,18 @@
             }
           }
         },
+        "UsageField": {
+          "description": "A provider counter that was not reported. Counts remain available as known subtotals, but consumers must not present these fields as complete totals.",
+          "type": "string",
+          "enum": [
+            "inputTokens",
+            "outputTokens",
+            "reasoningTokens",
+            "cacheReadInputTokens",
+            "cacheCreationInputTokens",
+            "totalTokens"
+          ]
+        },
         "UsagePurpose": {
           "oneOf": [
             {
@@ -125525,10 +126689,20 @@
               "minimum": 0.0
             },
             "totalTokens": {
-              "description": "Aggregate tokens. For ledger-derived totals this equals `input_tokens + output_tokens`; for legacy lumps it is the only known number (the input/output split was never recorded).",
+              "description": "Aggregate tokens, preferring each call's provider-reported total and otherwise using `input_tokens + output_tokens`. For legacy lumps it is the only known number (the input/output split was never recorded).",
               "type": "integer",
               "format": "uint64",
               "minimum": 0.0
+            },
+            "unreportedFields": {
+              "description": "`None` is legacy/unknown coverage; an empty list means all fields known.",
+              "type": [
+                "array",
+                "null"
+              ],
+              "items": {
+                "$ref": "#/definitions/UsageField"
+              }
             }
           }
         },
@@ -127477,6 +128651,16 @@
               "type": "integer",
               "format": "uint64",
               "minimum": 0.0
+            },
+            "unreportedFields": {
+              "description": "`None` is legacy/unknown coverage; an empty list means all fields known.",
+              "type": [
+                "array",
+                "null"
+              ],
+              "items": {
+                "$ref": "#/definitions/UsageField"
+              }
             }
           }
         },
@@ -128551,6 +129735,18 @@
             }
           }
         },
+        "UsageField": {
+          "description": "A provider counter that was not reported. Counts remain available as known subtotals, but consumers must not present these fields as complete totals.",
+          "type": "string",
+          "enum": [
+            "inputTokens",
+            "outputTokens",
+            "reasoningTokens",
+            "cacheReadInputTokens",
+            "cacheCreationInputTokens",
+            "totalTokens"
+          ]
+        },
         "UsagePurpose": {
           "oneOf": [
             {
@@ -128669,10 +129865,20 @@
               "minimum": 0.0
             },
             "totalTokens": {
-              "description": "Aggregate tokens. For ledger-derived totals this equals `input_tokens + output_tokens`; for legacy lumps it is the only known number (the input/output split was never recorded).",
+              "description": "Aggregate tokens, preferring each call's provider-reported total and otherwise using `input_tokens + output_tokens`. For legacy lumps it is the only known number (the input/output split was never recorded).",
               "type": "integer",
               "format": "uint64",
               "minimum": 0.0
+            },
+            "unreportedFields": {
+              "description": "`None` is legacy/unknown coverage; an empty list means all fields known.",
+              "type": [
+                "array",
+                "null"
+              ],
+              "items": {
+                "$ref": "#/definitions/UsageField"
+              }
             }
           }
         },
@@ -130639,6 +131845,16 @@
               "type": "integer",
               "format": "uint64",
               "minimum": 0.0
+            },
+            "unreportedFields": {
+              "description": "`None` is legacy/unknown coverage; an empty list means all fields known.",
+              "type": [
+                "array",
+                "null"
+              ],
+              "items": {
+                "$ref": "#/definitions/UsageField"
+              }
             }
           }
         },
@@ -131713,6 +132929,18 @@
             }
           }
         },
+        "UsageField": {
+          "description": "A provider counter that was not reported. Counts remain available as known subtotals, but consumers must not present these fields as complete totals.",
+          "type": "string",
+          "enum": [
+            "inputTokens",
+            "outputTokens",
+            "reasoningTokens",
+            "cacheReadInputTokens",
+            "cacheCreationInputTokens",
+            "totalTokens"
+          ]
+        },
         "UsagePurpose": {
           "oneOf": [
             {
@@ -131831,10 +133059,20 @@
               "minimum": 0.0
             },
             "totalTokens": {
-              "description": "Aggregate tokens. For ledger-derived totals this equals `input_tokens + output_tokens`; for legacy lumps it is the only known number (the input/output split was never recorded).",
+              "description": "Aggregate tokens, preferring each call's provider-reported total and otherwise using `input_tokens + output_tokens`. For legacy lumps it is the only known number (the input/output split was never recorded).",
               "type": "integer",
               "format": "uint64",
               "minimum": 0.0
+            },
+            "unreportedFields": {
+              "description": "`None` is legacy/unknown coverage; an empty list means all fields known.",
+              "type": [
+                "array",
+                "null"
+              ],
+              "items": {
+                "$ref": "#/definitions/UsageField"
+              }
             }
           }
         },
@@ -132375,6 +133613,16 @@
               "type": "integer",
               "format": "uint64",
               "minimum": 0.0
+            },
+            "unreportedFields": {
+              "description": "`None` is legacy/unknown coverage; an empty list means all fields known.",
+              "type": [
+                "array",
+                "null"
+              ],
+              "items": {
+                "$ref": "#/definitions/UsageField"
+              }
             }
           }
         },
@@ -132820,6 +134068,18 @@
         "TurnId": {
           "type": "string"
         },
+        "UsageField": {
+          "description": "A provider counter that was not reported. Counts remain available as known subtotals, but consumers must not present these fields as complete totals.",
+          "type": "string",
+          "enum": [
+            "inputTokens",
+            "outputTokens",
+            "reasoningTokens",
+            "cacheReadInputTokens",
+            "cacheCreationInputTokens",
+            "totalTokens"
+          ]
+        },
         "UsagePurpose": {
           "oneOf": [
             {
@@ -132938,10 +134198,20 @@
               "minimum": 0.0
             },
             "totalTokens": {
-              "description": "Aggregate tokens. For ledger-derived totals this equals `input_tokens + output_tokens`; for legacy lumps it is the only known number (the input/output split was never recorded).",
+              "description": "Aggregate tokens, preferring each call's provider-reported total and otherwise using `input_tokens + output_tokens`. For legacy lumps it is the only known number (the input/output split was never recorded).",
               "type": "integer",
               "format": "uint64",
               "minimum": 0.0
+            },
+            "unreportedFields": {
+              "description": "`None` is legacy/unknown coverage; an empty list means all fields known.",
+              "type": [
+                "array",
+                "null"
+              ],
+              "items": {
+                "$ref": "#/definitions/UsageField"
+              }
             }
           }
         }
@@ -134563,6 +135833,16 @@
               "type": "integer",
               "format": "uint64",
               "minimum": 0.0
+            },
+            "unreportedFields": {
+              "description": "`None` is legacy/unknown coverage; an empty list means all fields known.",
+              "type": [
+                "array",
+                "null"
+              ],
+              "items": {
+                "$ref": "#/definitions/UsageField"
+              }
             }
           }
         },
@@ -135637,6 +136917,18 @@
             }
           }
         },
+        "UsageField": {
+          "description": "A provider counter that was not reported. Counts remain available as known subtotals, but consumers must not present these fields as complete totals.",
+          "type": "string",
+          "enum": [
+            "inputTokens",
+            "outputTokens",
+            "reasoningTokens",
+            "cacheReadInputTokens",
+            "cacheCreationInputTokens",
+            "totalTokens"
+          ]
+        },
         "UsagePurpose": {
           "oneOf": [
             {
@@ -135755,10 +137047,20 @@
               "minimum": 0.0
             },
             "totalTokens": {
-              "description": "Aggregate tokens. For ledger-derived totals this equals `input_tokens + output_tokens`; for legacy lumps it is the only known number (the input/output split was never recorded).",
+              "description": "Aggregate tokens, preferring each call's provider-reported total and otherwise using `input_tokens + output_tokens`. For legacy lumps it is the only known number (the input/output split was never recorded).",
               "type": "integer",
               "format": "uint64",
               "minimum": 0.0
+            },
+            "unreportedFields": {
+              "description": "`None` is legacy/unknown coverage; an empty list means all fields known.",
+              "type": [
+                "array",
+                "null"
+              ],
+              "items": {
+                "$ref": "#/definitions/UsageField"
+              }
             }
           }
         },
@@ -137736,6 +139038,16 @@
               "type": "integer",
               "format": "uint64",
               "minimum": 0.0
+            },
+            "unreportedFields": {
+              "description": "`None` is legacy/unknown coverage; an empty list means all fields known.",
+              "type": [
+                "array",
+                "null"
+              ],
+              "items": {
+                "$ref": "#/definitions/UsageField"
+              }
             }
           }
         },
@@ -138810,6 +140122,18 @@
             }
           }
         },
+        "UsageField": {
+          "description": "A provider counter that was not reported. Counts remain available as known subtotals, but consumers must not present these fields as complete totals.",
+          "type": "string",
+          "enum": [
+            "inputTokens",
+            "outputTokens",
+            "reasoningTokens",
+            "cacheReadInputTokens",
+            "cacheCreationInputTokens",
+            "totalTokens"
+          ]
+        },
         "UsagePurpose": {
           "oneOf": [
             {
@@ -138928,10 +140252,20 @@
               "minimum": 0.0
             },
             "totalTokens": {
-              "description": "Aggregate tokens. For ledger-derived totals this equals `input_tokens + output_tokens`; for legacy lumps it is the only known number (the input/output split was never recorded).",
+              "description": "Aggregate tokens, preferring each call's provider-reported total and otherwise using `input_tokens + output_tokens`. For legacy lumps it is the only known number (the input/output split was never recorded).",
               "type": "integer",
               "format": "uint64",
               "minimum": 0.0
+            },
+            "unreportedFields": {
+              "description": "`None` is legacy/unknown coverage; an empty list means all fields known.",
+              "type": [
+                "array",
+                "null"
+              ],
+              "items": {
+                "$ref": "#/definitions/UsageField"
+              }
             }
           }
         },
@@ -139580,6 +140914,16 @@
               "type": "integer",
               "format": "uint64",
               "minimum": 0.0
+            },
+            "unreportedFields": {
+              "description": "`None` is legacy/unknown coverage; an empty list means all fields known.",
+              "type": [
+                "array",
+                "null"
+              ],
+              "items": {
+                "$ref": "#/definitions/UsageField"
+              }
             }
           }
         },
@@ -140025,6 +141369,18 @@
         "TurnId": {
           "type": "string"
         },
+        "UsageField": {
+          "description": "A provider counter that was not reported. Counts remain available as known subtotals, but consumers must not present these fields as complete totals.",
+          "type": "string",
+          "enum": [
+            "inputTokens",
+            "outputTokens",
+            "reasoningTokens",
+            "cacheReadInputTokens",
+            "cacheCreationInputTokens",
+            "totalTokens"
+          ]
+        },
         "UsagePurpose": {
           "oneOf": [
             {
@@ -140143,10 +141499,20 @@
               "minimum": 0.0
             },
             "totalTokens": {
-              "description": "Aggregate tokens. For ledger-derived totals this equals `input_tokens + output_tokens`; for legacy lumps it is the only known number (the input/output split was never recorded).",
+              "description": "Aggregate tokens, preferring each call's provider-reported total and otherwise using `input_tokens + output_tokens`. For legacy lumps it is the only known number (the input/output split was never recorded).",
               "type": "integer",
               "format": "uint64",
               "minimum": 0.0
+            },
+            "unreportedFields": {
+              "description": "`None` is legacy/unknown coverage; an empty list means all fields known.",
+              "type": [
+                "array",
+                "null"
+              ],
+              "items": {
+                "$ref": "#/definitions/UsageField"
+              }
             }
           }
         }
@@ -141773,6 +143139,16 @@
               "type": "integer",
               "format": "uint64",
               "minimum": 0.0
+            },
+            "unreportedFields": {
+              "description": "`None` is legacy/unknown coverage; an empty list means all fields known.",
+              "type": [
+                "array",
+                "null"
+              ],
+              "items": {
+                "$ref": "#/definitions/UsageField"
+              }
             }
           }
         },
@@ -142847,6 +144223,18 @@
             }
           }
         },
+        "UsageField": {
+          "description": "A provider counter that was not reported. Counts remain available as known subtotals, but consumers must not present these fields as complete totals.",
+          "type": "string",
+          "enum": [
+            "inputTokens",
+            "outputTokens",
+            "reasoningTokens",
+            "cacheReadInputTokens",
+            "cacheCreationInputTokens",
+            "totalTokens"
+          ]
+        },
         "UsagePurpose": {
           "oneOf": [
             {
@@ -142965,10 +144353,20 @@
               "minimum": 0.0
             },
             "totalTokens": {
-              "description": "Aggregate tokens. For ledger-derived totals this equals `input_tokens + output_tokens`; for legacy lumps it is the only known number (the input/output split was never recorded).",
+              "description": "Aggregate tokens, preferring each call's provider-reported total and otherwise using `input_tokens + output_tokens`. For legacy lumps it is the only known number (the input/output split was never recorded).",
               "type": "integer",
               "format": "uint64",
               "minimum": 0.0
+            },
+            "unreportedFields": {
+              "description": "`None` is legacy/unknown coverage; an empty list means all fields known.",
+              "type": [
+                "array",
+                "null"
+              ],
+              "items": {
+                "$ref": "#/definitions/UsageField"
+              }
             }
           }
         },
@@ -144917,6 +146315,16 @@
               "type": "integer",
               "format": "uint64",
               "minimum": 0.0
+            },
+            "unreportedFields": {
+              "description": "`None` is legacy/unknown coverage; an empty list means all fields known.",
+              "type": [
+                "array",
+                "null"
+              ],
+              "items": {
+                "$ref": "#/definitions/UsageField"
+              }
             }
           }
         },
@@ -145991,6 +147399,18 @@
             }
           }
         },
+        "UsageField": {
+          "description": "A provider counter that was not reported. Counts remain available as known subtotals, but consumers must not present these fields as complete totals.",
+          "type": "string",
+          "enum": [
+            "inputTokens",
+            "outputTokens",
+            "reasoningTokens",
+            "cacheReadInputTokens",
+            "cacheCreationInputTokens",
+            "totalTokens"
+          ]
+        },
         "UsagePurpose": {
           "oneOf": [
             {
@@ -146109,10 +147529,20 @@
               "minimum": 0.0
             },
             "totalTokens": {
-              "description": "Aggregate tokens. For ledger-derived totals this equals `input_tokens + output_tokens`; for legacy lumps it is the only known number (the input/output split was never recorded).",
+              "description": "Aggregate tokens, preferring each call's provider-reported total and otherwise using `input_tokens + output_tokens`. For legacy lumps it is the only known number (the input/output split was never recorded).",
               "type": "integer",
               "format": "uint64",
               "minimum": 0.0
+            },
+            "unreportedFields": {
+              "description": "`None` is legacy/unknown coverage; an empty list means all fields known.",
+              "type": [
+                "array",
+                "null"
+              ],
+              "items": {
+                "$ref": "#/definitions/UsageField"
+              }
             }
           }
         },
@@ -148326,6 +149756,16 @@
               "type": "integer",
               "format": "uint64",
               "minimum": 0.0
+            },
+            "unreportedFields": {
+              "description": "`None` is legacy/unknown coverage; an empty list means all fields known.",
+              "type": [
+                "array",
+                "null"
+              ],
+              "items": {
+                "$ref": "#/definitions/UsageField"
+              }
             }
           }
         },
@@ -149400,6 +150840,18 @@
             }
           }
         },
+        "UsageField": {
+          "description": "A provider counter that was not reported. Counts remain available as known subtotals, but consumers must not present these fields as complete totals.",
+          "type": "string",
+          "enum": [
+            "inputTokens",
+            "outputTokens",
+            "reasoningTokens",
+            "cacheReadInputTokens",
+            "cacheCreationInputTokens",
+            "totalTokens"
+          ]
+        },
         "UsagePurpose": {
           "oneOf": [
             {
@@ -149518,10 +150970,20 @@
               "minimum": 0.0
             },
             "totalTokens": {
-              "description": "Aggregate tokens. For ledger-derived totals this equals `input_tokens + output_tokens`; for legacy lumps it is the only known number (the input/output split was never recorded).",
+              "description": "Aggregate tokens, preferring each call's provider-reported total and otherwise using `input_tokens + output_tokens`. For legacy lumps it is the only known number (the input/output split was never recorded).",
               "type": "integer",
               "format": "uint64",
               "minimum": 0.0
+            },
+            "unreportedFields": {
+              "description": "`None` is legacy/unknown coverage; an empty list means all fields known.",
+              "type": [
+                "array",
+                "null"
+              ],
+              "items": {
+                "$ref": "#/definitions/UsageField"
+              }
             }
           }
         },
@@ -151781,6 +153243,16 @@
               "type": "integer",
               "format": "uint64",
               "minimum": 0.0
+            },
+            "unreportedFields": {
+              "description": "`None` is legacy/unknown coverage; an empty list means all fields known.",
+              "type": [
+                "array",
+                "null"
+              ],
+              "items": {
+                "$ref": "#/definitions/UsageField"
+              }
             }
           }
         },
@@ -152855,6 +154327,18 @@
             }
           }
         },
+        "UsageField": {
+          "description": "A provider counter that was not reported. Counts remain available as known subtotals, but consumers must not present these fields as complete totals.",
+          "type": "string",
+          "enum": [
+            "inputTokens",
+            "outputTokens",
+            "reasoningTokens",
+            "cacheReadInputTokens",
+            "cacheCreationInputTokens",
+            "totalTokens"
+          ]
+        },
         "UsagePurpose": {
           "oneOf": [
             {
@@ -152973,10 +154457,20 @@
               "minimum": 0.0
             },
             "totalTokens": {
-              "description": "Aggregate tokens. For ledger-derived totals this equals `input_tokens + output_tokens`; for legacy lumps it is the only known number (the input/output split was never recorded).",
+              "description": "Aggregate tokens, preferring each call's provider-reported total and otherwise using `input_tokens + output_tokens`. For legacy lumps it is the only known number (the input/output split was never recorded).",
               "type": "integer",
               "format": "uint64",
               "minimum": 0.0
+            },
+            "unreportedFields": {
+              "description": "`None` is legacy/unknown coverage; an empty list means all fields known.",
+              "type": [
+                "array",
+                "null"
+              ],
+              "items": {
+                "$ref": "#/definitions/UsageField"
+              }
             }
           }
         },
@@ -155908,6 +157402,16 @@
               "type": "integer",
               "format": "uint64",
               "minimum": 0.0
+            },
+            "unreportedFields": {
+              "description": "`None` is legacy/unknown coverage; an empty list means all fields known.",
+              "type": [
+                "array",
+                "null"
+              ],
+              "items": {
+                "$ref": "#/definitions/UsageField"
+              }
             }
           }
         },
@@ -156353,6 +157857,18 @@
         "TurnId": {
           "type": "string"
         },
+        "UsageField": {
+          "description": "A provider counter that was not reported. Counts remain available as known subtotals, but consumers must not present these fields as complete totals.",
+          "type": "string",
+          "enum": [
+            "inputTokens",
+            "outputTokens",
+            "reasoningTokens",
+            "cacheReadInputTokens",
+            "cacheCreationInputTokens",
+            "totalTokens"
+          ]
+        },
         "UsagePurpose": {
           "oneOf": [
             {
@@ -156471,10 +157987,20 @@
               "minimum": 0.0
             },
             "totalTokens": {
-              "description": "Aggregate tokens. For ledger-derived totals this equals `input_tokens + output_tokens`; for legacy lumps it is the only known number (the input/output split was never recorded).",
+              "description": "Aggregate tokens, preferring each call's provider-reported total and otherwise using `input_tokens + output_tokens`. For legacy lumps it is the only known number (the input/output split was never recorded).",
               "type": "integer",
               "format": "uint64",
               "minimum": 0.0
+            },
+            "unreportedFields": {
+              "description": "`None` is legacy/unknown coverage; an empty list means all fields known.",
+              "type": [
+                "array",
+                "null"
+              ],
+              "items": {
+                "$ref": "#/definitions/UsageField"
+              }
             }
           }
         }
@@ -158092,6 +159618,16 @@
               "type": "integer",
               "format": "uint64",
               "minimum": 0.0
+            },
+            "unreportedFields": {
+              "description": "`None` is legacy/unknown coverage; an empty list means all fields known.",
+              "type": [
+                "array",
+                "null"
+              ],
+              "items": {
+                "$ref": "#/definitions/UsageField"
+              }
             }
           }
         },
@@ -159166,6 +160702,18 @@
             }
           }
         },
+        "UsageField": {
+          "description": "A provider counter that was not reported. Counts remain available as known subtotals, but consumers must not present these fields as complete totals.",
+          "type": "string",
+          "enum": [
+            "inputTokens",
+            "outputTokens",
+            "reasoningTokens",
+            "cacheReadInputTokens",
+            "cacheCreationInputTokens",
+            "totalTokens"
+          ]
+        },
         "UsagePurpose": {
           "oneOf": [
             {
@@ -159284,10 +160832,20 @@
               "minimum": 0.0
             },
             "totalTokens": {
-              "description": "Aggregate tokens. For ledger-derived totals this equals `input_tokens + output_tokens`; for legacy lumps it is the only known number (the input/output split was never recorded).",
+              "description": "Aggregate tokens, preferring each call's provider-reported total and otherwise using `input_tokens + output_tokens`. For legacy lumps it is the only known number (the input/output split was never recorded).",
               "type": "integer",
               "format": "uint64",
               "minimum": 0.0
+            },
+            "unreportedFields": {
+              "description": "`None` is legacy/unknown coverage; an empty list means all fields known.",
+              "type": [
+                "array",
+                "null"
+              ],
+              "items": {
+                "$ref": "#/definitions/UsageField"
+              }
             }
           }
         },
@@ -159823,6 +161381,16 @@
               "type": "integer",
               "format": "uint64",
               "minimum": 0.0
+            },
+            "unreportedFields": {
+              "description": "`None` is legacy/unknown coverage; an empty list means all fields known.",
+              "type": [
+                "array",
+                "null"
+              ],
+              "items": {
+                "$ref": "#/definitions/UsageField"
+              }
             }
           }
         },
@@ -160268,6 +161836,18 @@
         "TurnId": {
           "type": "string"
         },
+        "UsageField": {
+          "description": "A provider counter that was not reported. Counts remain available as known subtotals, but consumers must not present these fields as complete totals.",
+          "type": "string",
+          "enum": [
+            "inputTokens",
+            "outputTokens",
+            "reasoningTokens",
+            "cacheReadInputTokens",
+            "cacheCreationInputTokens",
+            "totalTokens"
+          ]
+        },
         "UsagePurpose": {
           "oneOf": [
             {
@@ -160386,10 +161966,20 @@
               "minimum": 0.0
             },
             "totalTokens": {
-              "description": "Aggregate tokens. For ledger-derived totals this equals `input_tokens + output_tokens`; for legacy lumps it is the only known number (the input/output split was never recorded).",
+              "description": "Aggregate tokens, preferring each call's provider-reported total and otherwise using `input_tokens + output_tokens`. For legacy lumps it is the only known number (the input/output split was never recorded).",
               "type": "integer",
               "format": "uint64",
               "minimum": 0.0
+            },
+            "unreportedFields": {
+              "description": "`None` is legacy/unknown coverage; an empty list means all fields known.",
+              "type": [
+                "array",
+                "null"
+              ],
+              "items": {
+                "$ref": "#/definitions/UsageField"
+              }
             }
           }
         }
@@ -161280,6 +162870,18 @@
             }
           }
         },
+        "UsageField": {
+          "description": "A provider counter that was not reported. Counts remain available as known subtotals, but consumers must not present these fields as complete totals.",
+          "type": "string",
+          "enum": [
+            "inputTokens",
+            "outputTokens",
+            "reasoningTokens",
+            "cacheReadInputTokens",
+            "cacheCreationInputTokens",
+            "totalTokens"
+          ]
+        },
         "UsageTotals": {
           "description": "Aggregated token/call totals. `call_count` includes failed and cancelled attempts; `metered_call_count` counts attempts with reported usage.",
           "type": "object",
@@ -161352,10 +162954,20 @@
               "minimum": 0.0
             },
             "totalTokens": {
-              "description": "Aggregate tokens. For ledger-derived totals this equals `input_tokens + output_tokens`; for legacy lumps it is the only known number (the input/output split was never recorded).",
+              "description": "Aggregate tokens, preferring each call's provider-reported total and otherwise using `input_tokens + output_tokens`. For legacy lumps it is the only known number (the input/output split was never recorded).",
               "type": "integer",
               "format": "uint64",
               "minimum": 0.0
+            },
+            "unreportedFields": {
+              "description": "`None` is legacy/unknown coverage; an empty list means all fields known.",
+              "type": [
+                "array",
+                "null"
+              ],
+              "items": {
+                "$ref": "#/definitions/UsageField"
+              }
             }
           }
         },
@@ -162190,6 +163802,16 @@
               "type": "integer",
               "format": "uint64",
               "minimum": 0.0
+            },
+            "unreportedFields": {
+              "description": "`None` is legacy/unknown coverage; an empty list means all fields known.",
+              "type": [
+                "array",
+                "null"
+              ],
+              "items": {
+                "$ref": "#/definitions/UsageField"
+              }
             }
           }
         },
@@ -162635,6 +164257,18 @@
         "TurnId": {
           "type": "string"
         },
+        "UsageField": {
+          "description": "A provider counter that was not reported. Counts remain available as known subtotals, but consumers must not present these fields as complete totals.",
+          "type": "string",
+          "enum": [
+            "inputTokens",
+            "outputTokens",
+            "reasoningTokens",
+            "cacheReadInputTokens",
+            "cacheCreationInputTokens",
+            "totalTokens"
+          ]
+        },
         "UsagePurpose": {
           "oneOf": [
             {
@@ -162753,10 +164387,20 @@
               "minimum": 0.0
             },
             "totalTokens": {
-              "description": "Aggregate tokens. For ledger-derived totals this equals `input_tokens + output_tokens`; for legacy lumps it is the only known number (the input/output split was never recorded).",
+              "description": "Aggregate tokens, preferring each call's provider-reported total and otherwise using `input_tokens + output_tokens`. For legacy lumps it is the only known number (the input/output split was never recorded).",
               "type": "integer",
               "format": "uint64",
               "minimum": 0.0
+            },
+            "unreportedFields": {
+              "description": "`None` is legacy/unknown coverage; an empty list means all fields known.",
+              "type": [
+                "array",
+                "null"
+              ],
+              "items": {
+                "$ref": "#/definitions/UsageField"
+              }
             }
           }
         }
@@ -163135,6 +164779,16 @@
               "type": "integer",
               "format": "uint64",
               "minimum": 0.0
+            },
+            "unreportedFields": {
+              "description": "`None` is legacy/unknown coverage; an empty list means all fields known.",
+              "type": [
+                "array",
+                "null"
+              ],
+              "items": {
+                "$ref": "#/definitions/UsageField"
+              }
             }
           }
         },
@@ -163608,6 +165262,18 @@
             }
           }
         },
+        "UsageField": {
+          "description": "A provider counter that was not reported. Counts remain available as known subtotals, but consumers must not present these fields as complete totals.",
+          "type": "string",
+          "enum": [
+            "inputTokens",
+            "outputTokens",
+            "reasoningTokens",
+            "cacheReadInputTokens",
+            "cacheCreationInputTokens",
+            "totalTokens"
+          ]
+        },
         "UsagePurpose": {
           "oneOf": [
             {
@@ -163726,10 +165392,20 @@
               "minimum": 0.0
             },
             "totalTokens": {
-              "description": "Aggregate tokens. For ledger-derived totals this equals `input_tokens + output_tokens`; for legacy lumps it is the only known number (the input/output split was never recorded).",
+              "description": "Aggregate tokens, preferring each call's provider-reported total and otherwise using `input_tokens + output_tokens`. For legacy lumps it is the only known number (the input/output split was never recorded).",
               "type": "integer",
               "format": "uint64",
               "minimum": 0.0
+            },
+            "unreportedFields": {
+              "description": "`None` is legacy/unknown coverage; an empty list means all fields known.",
+              "type": [
+                "array",
+                "null"
+              ],
+              "items": {
+                "$ref": "#/definitions/UsageField"
+              }
             }
           }
         }
@@ -165453,6 +167129,16 @@
               "type": "integer",
               "format": "uint64",
               "minimum": 0.0
+            },
+            "unreportedFields": {
+              "description": "`None` is legacy/unknown coverage; an empty list means all fields known.",
+              "type": [
+                "array",
+                "null"
+              ],
+              "items": {
+                "$ref": "#/definitions/UsageField"
+              }
             }
           }
         },
@@ -166527,6 +168213,18 @@
             }
           }
         },
+        "UsageField": {
+          "description": "A provider counter that was not reported. Counts remain available as known subtotals, but consumers must not present these fields as complete totals.",
+          "type": "string",
+          "enum": [
+            "inputTokens",
+            "outputTokens",
+            "reasoningTokens",
+            "cacheReadInputTokens",
+            "cacheCreationInputTokens",
+            "totalTokens"
+          ]
+        },
         "UsagePurpose": {
           "oneOf": [
             {
@@ -166645,10 +168343,20 @@
               "minimum": 0.0
             },
             "totalTokens": {
-              "description": "Aggregate tokens. For ledger-derived totals this equals `input_tokens + output_tokens`; for legacy lumps it is the only known number (the input/output split was never recorded).",
+              "description": "Aggregate tokens, preferring each call's provider-reported total and otherwise using `input_tokens + output_tokens`. For legacy lumps it is the only known number (the input/output split was never recorded).",
               "type": "integer",
               "format": "uint64",
               "minimum": 0.0
+            },
+            "unreportedFields": {
+              "description": "`None` is legacy/unknown coverage; an empty list means all fields known.",
+              "type": [
+                "array",
+                "null"
+              ],
+              "items": {
+                "$ref": "#/definitions/UsageField"
+              }
             }
           }
         },
@@ -167812,6 +169520,16 @@
               "type": "integer",
               "format": "uint64",
               "minimum": 0.0
+            },
+            "unreportedFields": {
+              "description": "`None` is legacy/unknown coverage; an empty list means all fields known.",
+              "type": [
+                "array",
+                "null"
+              ],
+              "items": {
+                "$ref": "#/definitions/UsageField"
+              }
             }
           }
         },
@@ -168257,6 +169975,18 @@
         "TurnId": {
           "type": "string"
         },
+        "UsageField": {
+          "description": "A provider counter that was not reported. Counts remain available as known subtotals, but consumers must not present these fields as complete totals.",
+          "type": "string",
+          "enum": [
+            "inputTokens",
+            "outputTokens",
+            "reasoningTokens",
+            "cacheReadInputTokens",
+            "cacheCreationInputTokens",
+            "totalTokens"
+          ]
+        },
         "UsagePurpose": {
           "oneOf": [
             {
@@ -168375,10 +170105,20 @@
               "minimum": 0.0
             },
             "totalTokens": {
-              "description": "Aggregate tokens. For ledger-derived totals this equals `input_tokens + output_tokens`; for legacy lumps it is the only known number (the input/output split was never recorded).",
+              "description": "Aggregate tokens, preferring each call's provider-reported total and otherwise using `input_tokens + output_tokens`. For legacy lumps it is the only known number (the input/output split was never recorded).",
               "type": "integer",
               "format": "uint64",
               "minimum": 0.0
+            },
+            "unreportedFields": {
+              "description": "`None` is legacy/unknown coverage; an empty list means all fields known.",
+              "type": [
+                "array",
+                "null"
+              ],
+              "items": {
+                "$ref": "#/definitions/UsageField"
+              }
             }
           }
         }
@@ -170026,6 +171766,16 @@
               "type": "integer",
               "format": "uint64",
               "minimum": 0.0
+            },
+            "unreportedFields": {
+              "description": "`None` is legacy/unknown coverage; an empty list means all fields known.",
+              "type": [
+                "array",
+                "null"
+              ],
+              "items": {
+                "$ref": "#/definitions/UsageField"
+              }
             }
           }
         },
@@ -171100,6 +172850,18 @@
             }
           }
         },
+        "UsageField": {
+          "description": "A provider counter that was not reported. Counts remain available as known subtotals, but consumers must not present these fields as complete totals.",
+          "type": "string",
+          "enum": [
+            "inputTokens",
+            "outputTokens",
+            "reasoningTokens",
+            "cacheReadInputTokens",
+            "cacheCreationInputTokens",
+            "totalTokens"
+          ]
+        },
         "UsagePurpose": {
           "oneOf": [
             {
@@ -171218,10 +172980,20 @@
               "minimum": 0.0
             },
             "totalTokens": {
-              "description": "Aggregate tokens. For ledger-derived totals this equals `input_tokens + output_tokens`; for legacy lumps it is the only known number (the input/output split was never recorded).",
+              "description": "Aggregate tokens, preferring each call's provider-reported total and otherwise using `input_tokens + output_tokens`. For legacy lumps it is the only known number (the input/output split was never recorded).",
               "type": "integer",
               "format": "uint64",
               "minimum": 0.0
+            },
+            "unreportedFields": {
+              "description": "`None` is legacy/unknown coverage; an empty list means all fields known.",
+              "type": [
+                "array",
+                "null"
+              ],
+              "items": {
+                "$ref": "#/definitions/UsageField"
+              }
             }
           }
         },
@@ -174843,6 +176615,16 @@
               "type": "integer",
               "format": "uint64",
               "minimum": 0.0
+            },
+            "unreportedFields": {
+              "description": "`None` is legacy/unknown coverage; an empty list means all fields known.",
+              "type": [
+                "array",
+                "null"
+              ],
+              "items": {
+                "$ref": "#/definitions/UsageField"
+              }
             }
           }
         },
@@ -175917,6 +177699,18 @@
             }
           }
         },
+        "UsageField": {
+          "description": "A provider counter that was not reported. Counts remain available as known subtotals, but consumers must not present these fields as complete totals.",
+          "type": "string",
+          "enum": [
+            "inputTokens",
+            "outputTokens",
+            "reasoningTokens",
+            "cacheReadInputTokens",
+            "cacheCreationInputTokens",
+            "totalTokens"
+          ]
+        },
         "UsagePurpose": {
           "oneOf": [
             {
@@ -176035,10 +177829,20 @@
               "minimum": 0.0
             },
             "totalTokens": {
-              "description": "Aggregate tokens. For ledger-derived totals this equals `input_tokens + output_tokens`; for legacy lumps it is the only known number (the input/output split was never recorded).",
+              "description": "Aggregate tokens, preferring each call's provider-reported total and otherwise using `input_tokens + output_tokens`. For legacy lumps it is the only known number (the input/output split was never recorded).",
               "type": "integer",
               "format": "uint64",
               "minimum": 0.0
+            },
+            "unreportedFields": {
+              "description": "`None` is legacy/unknown coverage; an empty list means all fields known.",
+              "type": [
+                "array",
+                "null"
+              ],
+              "items": {
+                "$ref": "#/definitions/UsageField"
+              }
             }
           }
         },
@@ -179056,6 +180860,16 @@
               "type": "integer",
               "format": "uint64",
               "minimum": 0.0
+            },
+            "unreportedFields": {
+              "description": "`None` is legacy/unknown coverage; an empty list means all fields known.",
+              "type": [
+                "array",
+                "null"
+              ],
+              "items": {
+                "$ref": "#/definitions/UsageField"
+              }
             }
           }
         },
@@ -182218,6 +184032,18 @@
             }
           }
         },
+        "UsageField": {
+          "description": "A provider counter that was not reported. Counts remain available as known subtotals, but consumers must not present these fields as complete totals.",
+          "type": "string",
+          "enum": [
+            "inputTokens",
+            "outputTokens",
+            "reasoningTokens",
+            "cacheReadInputTokens",
+            "cacheCreationInputTokens",
+            "totalTokens"
+          ]
+        },
         "UsagePurpose": {
           "oneOf": [
             {
@@ -182336,10 +184162,20 @@
               "minimum": 0.0
             },
             "totalTokens": {
-              "description": "Aggregate tokens. For ledger-derived totals this equals `input_tokens + output_tokens`; for legacy lumps it is the only known number (the input/output split was never recorded).",
+              "description": "Aggregate tokens, preferring each call's provider-reported total and otherwise using `input_tokens + output_tokens`. For legacy lumps it is the only known number (the input/output split was never recorded).",
               "type": "integer",
               "format": "uint64",
               "minimum": 0.0
+            },
+            "unreportedFields": {
+              "description": "`None` is legacy/unknown coverage; an empty list means all fields known.",
+              "type": [
+                "array",
+                "null"
+              ],
+              "items": {
+                "$ref": "#/definitions/UsageField"
+              }
             }
           }
         },
@@ -184402,6 +186238,16 @@
               "type": "integer",
               "format": "uint64",
               "minimum": 0.0
+            },
+            "unreportedFields": {
+              "description": "`None` is legacy/unknown coverage; an empty list means all fields known.",
+              "type": [
+                "array",
+                "null"
+              ],
+              "items": {
+                "$ref": "#/definitions/UsageField"
+              }
             }
           }
         },
@@ -185476,6 +187322,18 @@
             }
           }
         },
+        "UsageField": {
+          "description": "A provider counter that was not reported. Counts remain available as known subtotals, but consumers must not present these fields as complete totals.",
+          "type": "string",
+          "enum": [
+            "inputTokens",
+            "outputTokens",
+            "reasoningTokens",
+            "cacheReadInputTokens",
+            "cacheCreationInputTokens",
+            "totalTokens"
+          ]
+        },
         "UsagePurpose": {
           "oneOf": [
             {
@@ -185594,10 +187452,20 @@
               "minimum": 0.0
             },
             "totalTokens": {
-              "description": "Aggregate tokens. For ledger-derived totals this equals `input_tokens + output_tokens`; for legacy lumps it is the only known number (the input/output split was never recorded).",
+              "description": "Aggregate tokens, preferring each call's provider-reported total and otherwise using `input_tokens + output_tokens`. For legacy lumps it is the only known number (the input/output split was never recorded).",
               "type": "integer",
               "format": "uint64",
               "minimum": 0.0
+            },
+            "unreportedFields": {
+              "description": "`None` is legacy/unknown coverage; an empty list means all fields known.",
+              "type": [
+                "array",
+                "null"
+              ],
+              "items": {
+                "$ref": "#/definitions/UsageField"
+              }
             }
           }
         },
@@ -187556,6 +189424,16 @@
               "type": "integer",
               "format": "uint64",
               "minimum": 0.0
+            },
+            "unreportedFields": {
+              "description": "`None` is legacy/unknown coverage; an empty list means all fields known.",
+              "type": [
+                "array",
+                "null"
+              ],
+              "items": {
+                "$ref": "#/definitions/UsageField"
+              }
             }
           }
         },
@@ -188630,6 +190508,18 @@
             }
           }
         },
+        "UsageField": {
+          "description": "A provider counter that was not reported. Counts remain available as known subtotals, but consumers must not present these fields as complete totals.",
+          "type": "string",
+          "enum": [
+            "inputTokens",
+            "outputTokens",
+            "reasoningTokens",
+            "cacheReadInputTokens",
+            "cacheCreationInputTokens",
+            "totalTokens"
+          ]
+        },
         "UsagePurpose": {
           "oneOf": [
             {
@@ -188748,10 +190638,20 @@
               "minimum": 0.0
             },
             "totalTokens": {
-              "description": "Aggregate tokens. For ledger-derived totals this equals `input_tokens + output_tokens`; for legacy lumps it is the only known number (the input/output split was never recorded).",
+              "description": "Aggregate tokens, preferring each call's provider-reported total and otherwise using `input_tokens + output_tokens`. For legacy lumps it is the only known number (the input/output split was never recorded).",
               "type": "integer",
               "format": "uint64",
               "minimum": 0.0
+            },
+            "unreportedFields": {
+              "description": "`None` is legacy/unknown coverage; an empty list means all fields known.",
+              "type": [
+                "array",
+                "null"
+              ],
+              "items": {
+                "$ref": "#/definitions/UsageField"
+              }
             }
           }
         },
@@ -192322,6 +194222,16 @@
               "type": "integer",
               "format": "uint64",
               "minimum": 0.0
+            },
+            "unreportedFields": {
+              "description": "`None` is legacy/unknown coverage; an empty list means all fields known.",
+              "type": [
+                "array",
+                "null"
+              ],
+              "items": {
+                "$ref": "#/definitions/UsageField"
+              }
             }
           }
         },
@@ -193396,6 +195306,18 @@
             }
           }
         },
+        "UsageField": {
+          "description": "A provider counter that was not reported. Counts remain available as known subtotals, but consumers must not present these fields as complete totals.",
+          "type": "string",
+          "enum": [
+            "inputTokens",
+            "outputTokens",
+            "reasoningTokens",
+            "cacheReadInputTokens",
+            "cacheCreationInputTokens",
+            "totalTokens"
+          ]
+        },
         "UsagePurpose": {
           "oneOf": [
             {
@@ -193514,10 +195436,20 @@
               "minimum": 0.0
             },
             "totalTokens": {
-              "description": "Aggregate tokens. For ledger-derived totals this equals `input_tokens + output_tokens`; for legacy lumps it is the only known number (the input/output split was never recorded).",
+              "description": "Aggregate tokens, preferring each call's provider-reported total and otherwise using `input_tokens + output_tokens`. For legacy lumps it is the only known number (the input/output split was never recorded).",
               "type": "integer",
               "format": "uint64",
               "minimum": 0.0
+            },
+            "unreportedFields": {
+              "description": "`None` is legacy/unknown coverage; an empty list means all fields known.",
+              "type": [
+                "array",
+                "null"
+              ],
+              "items": {
+                "$ref": "#/definitions/UsageField"
+              }
             }
           }
         },
@@ -197254,6 +199186,16 @@
               "type": "integer",
               "format": "uint64",
               "minimum": 0.0
+            },
+            "unreportedFields": {
+              "description": "`None` is legacy/unknown coverage; an empty list means all fields known.",
+              "type": [
+                "array",
+                "null"
+              ],
+              "items": {
+                "$ref": "#/definitions/UsageField"
+              }
             }
           }
         },
@@ -198328,6 +200270,18 @@
             }
           }
         },
+        "UsageField": {
+          "description": "A provider counter that was not reported. Counts remain available as known subtotals, but consumers must not present these fields as complete totals.",
+          "type": "string",
+          "enum": [
+            "inputTokens",
+            "outputTokens",
+            "reasoningTokens",
+            "cacheReadInputTokens",
+            "cacheCreationInputTokens",
+            "totalTokens"
+          ]
+        },
         "UsagePurpose": {
           "oneOf": [
             {
@@ -198446,10 +200400,20 @@
               "minimum": 0.0
             },
             "totalTokens": {
-              "description": "Aggregate tokens. For ledger-derived totals this equals `input_tokens + output_tokens`; for legacy lumps it is the only known number (the input/output split was never recorded).",
+              "description": "Aggregate tokens, preferring each call's provider-reported total and otherwise using `input_tokens + output_tokens`. For legacy lumps it is the only known number (the input/output split was never recorded).",
               "type": "integer",
               "format": "uint64",
               "minimum": 0.0
+            },
+            "unreportedFields": {
+              "description": "`None` is legacy/unknown coverage; an empty list means all fields known.",
+              "type": [
+                "array",
+                "null"
+              ],
+              "items": {
+                "$ref": "#/definitions/UsageField"
+              }
             }
           }
         },
@@ -200449,6 +202413,16 @@
               "type": "integer",
               "format": "uint64",
               "minimum": 0.0
+            },
+            "unreportedFields": {
+              "description": "`None` is legacy/unknown coverage; an empty list means all fields known.",
+              "type": [
+                "array",
+                "null"
+              ],
+              "items": {
+                "$ref": "#/definitions/UsageField"
+              }
             }
           }
         },
@@ -201523,6 +203497,18 @@
             }
           }
         },
+        "UsageField": {
+          "description": "A provider counter that was not reported. Counts remain available as known subtotals, but consumers must not present these fields as complete totals.",
+          "type": "string",
+          "enum": [
+            "inputTokens",
+            "outputTokens",
+            "reasoningTokens",
+            "cacheReadInputTokens",
+            "cacheCreationInputTokens",
+            "totalTokens"
+          ]
+        },
         "UsagePurpose": {
           "oneOf": [
             {
@@ -201641,10 +203627,20 @@
               "minimum": 0.0
             },
             "totalTokens": {
-              "description": "Aggregate tokens. For ledger-derived totals this equals `input_tokens + output_tokens`; for legacy lumps it is the only known number (the input/output split was never recorded).",
+              "description": "Aggregate tokens, preferring each call's provider-reported total and otherwise using `input_tokens + output_tokens`. For legacy lumps it is the only known number (the input/output split was never recorded).",
               "type": "integer",
               "format": "uint64",
               "minimum": 0.0
+            },
+            "unreportedFields": {
+              "description": "`None` is legacy/unknown coverage; an empty list means all fields known.",
+              "type": [
+                "array",
+                "null"
+              ],
+              "items": {
+                "$ref": "#/definitions/UsageField"
+              }
             }
           }
         },
@@ -203668,6 +205664,16 @@
               "type": "integer",
               "format": "uint64",
               "minimum": 0.0
+            },
+            "unreportedFields": {
+              "description": "`None` is legacy/unknown coverage; an empty list means all fields known.",
+              "type": [
+                "array",
+                "null"
+              ],
+              "items": {
+                "$ref": "#/definitions/UsageField"
+              }
             }
           }
         },
@@ -204742,6 +206748,18 @@
             }
           }
         },
+        "UsageField": {
+          "description": "A provider counter that was not reported. Counts remain available as known subtotals, but consumers must not present these fields as complete totals.",
+          "type": "string",
+          "enum": [
+            "inputTokens",
+            "outputTokens",
+            "reasoningTokens",
+            "cacheReadInputTokens",
+            "cacheCreationInputTokens",
+            "totalTokens"
+          ]
+        },
         "UsagePurpose": {
           "oneOf": [
             {
@@ -204860,10 +206878,20 @@
               "minimum": 0.0
             },
             "totalTokens": {
-              "description": "Aggregate tokens. For ledger-derived totals this equals `input_tokens + output_tokens`; for legacy lumps it is the only known number (the input/output split was never recorded).",
+              "description": "Aggregate tokens, preferring each call's provider-reported total and otherwise using `input_tokens + output_tokens`. For legacy lumps it is the only known number (the input/output split was never recorded).",
               "type": "integer",
               "format": "uint64",
               "minimum": 0.0
+            },
+            "unreportedFields": {
+              "description": "`None` is legacy/unknown coverage; an empty list means all fields known.",
+              "type": [
+                "array",
+                "null"
+              ],
+              "items": {
+                "$ref": "#/definitions/UsageField"
+              }
             }
           }
         },
@@ -205517,6 +207545,18 @@
             }
           }
         },
+        "UsageField": {
+          "description": "A provider counter that was not reported. Counts remain available as known subtotals, but consumers must not present these fields as complete totals.",
+          "type": "string",
+          "enum": [
+            "inputTokens",
+            "outputTokens",
+            "reasoningTokens",
+            "cacheReadInputTokens",
+            "cacheCreationInputTokens",
+            "totalTokens"
+          ]
+        },
         "UsageTotals": {
           "description": "Aggregated token/call totals. `call_count` includes failed and cancelled attempts; `metered_call_count` counts attempts with reported usage.",
           "type": "object",
@@ -205589,10 +207629,20 @@
               "minimum": 0.0
             },
             "totalTokens": {
-              "description": "Aggregate tokens. For ledger-derived totals this equals `input_tokens + output_tokens`; for legacy lumps it is the only known number (the input/output split was never recorded).",
+              "description": "Aggregate tokens, preferring each call's provider-reported total and otherwise using `input_tokens + output_tokens`. For legacy lumps it is the only known number (the input/output split was never recorded).",
               "type": "integer",
               "format": "uint64",
               "minimum": 0.0
+            },
+            "unreportedFields": {
+              "description": "`None` is legacy/unknown coverage; an empty list means all fields known.",
+              "type": [
+                "array",
+                "null"
+              ],
+              "items": {
+                "$ref": "#/definitions/UsageField"
+              }
             }
           }
         }
@@ -207323,6 +209373,16 @@
               "type": "integer",
               "format": "uint64",
               "minimum": 0.0
+            },
+            "unreportedFields": {
+              "description": "`None` is legacy/unknown coverage; an empty list means all fields known.",
+              "type": [
+                "array",
+                "null"
+              ],
+              "items": {
+                "$ref": "#/definitions/UsageField"
+              }
             }
           }
         },
@@ -208397,6 +210457,18 @@
             }
           }
         },
+        "UsageField": {
+          "description": "A provider counter that was not reported. Counts remain available as known subtotals, but consumers must not present these fields as complete totals.",
+          "type": "string",
+          "enum": [
+            "inputTokens",
+            "outputTokens",
+            "reasoningTokens",
+            "cacheReadInputTokens",
+            "cacheCreationInputTokens",
+            "totalTokens"
+          ]
+        },
         "UsagePurpose": {
           "oneOf": [
             {
@@ -208515,10 +210587,20 @@
               "minimum": 0.0
             },
             "totalTokens": {
-              "description": "Aggregate tokens. For ledger-derived totals this equals `input_tokens + output_tokens`; for legacy lumps it is the only known number (the input/output split was never recorded).",
+              "description": "Aggregate tokens, preferring each call's provider-reported total and otherwise using `input_tokens + output_tokens`. For legacy lumps it is the only known number (the input/output split was never recorded).",
               "type": "integer",
               "format": "uint64",
               "minimum": 0.0
+            },
+            "unreportedFields": {
+              "description": "`None` is legacy/unknown coverage; an empty list means all fields known.",
+              "type": [
+                "array",
+                "null"
+              ],
+              "items": {
+                "$ref": "#/definitions/UsageField"
+              }
             }
           }
         },
@@ -209188,6 +211270,18 @@
             }
           }
         },
+        "UsageField": {
+          "description": "A provider counter that was not reported. Counts remain available as known subtotals, but consumers must not present these fields as complete totals.",
+          "type": "string",
+          "enum": [
+            "inputTokens",
+            "outputTokens",
+            "reasoningTokens",
+            "cacheReadInputTokens",
+            "cacheCreationInputTokens",
+            "totalTokens"
+          ]
+        },
         "UsageTotals": {
           "description": "Aggregated token/call totals. `call_count` includes failed and cancelled attempts; `metered_call_count` counts attempts with reported usage.",
           "type": "object",
@@ -209260,10 +211354,20 @@
               "minimum": 0.0
             },
             "totalTokens": {
-              "description": "Aggregate tokens. For ledger-derived totals this equals `input_tokens + output_tokens`; for legacy lumps it is the only known number (the input/output split was never recorded).",
+              "description": "Aggregate tokens, preferring each call's provider-reported total and otherwise using `input_tokens + output_tokens`. For legacy lumps it is the only known number (the input/output split was never recorded).",
               "type": "integer",
               "format": "uint64",
               "minimum": 0.0
+            },
+            "unreportedFields": {
+              "description": "`None` is legacy/unknown coverage; an empty list means all fields known.",
+              "type": [
+                "array",
+                "null"
+              ],
+              "items": {
+                "$ref": "#/definitions/UsageField"
+              }
             }
           }
         }
@@ -210887,6 +212991,16 @@
               "type": "integer",
               "format": "uint64",
               "minimum": 0.0
+            },
+            "unreportedFields": {
+              "description": "`None` is legacy/unknown coverage; an empty list means all fields known.",
+              "type": [
+                "array",
+                "null"
+              ],
+              "items": {
+                "$ref": "#/definitions/UsageField"
+              }
             }
           }
         },
@@ -211961,6 +214075,18 @@
             }
           }
         },
+        "UsageField": {
+          "description": "A provider counter that was not reported. Counts remain available as known subtotals, but consumers must not present these fields as complete totals.",
+          "type": "string",
+          "enum": [
+            "inputTokens",
+            "outputTokens",
+            "reasoningTokens",
+            "cacheReadInputTokens",
+            "cacheCreationInputTokens",
+            "totalTokens"
+          ]
+        },
         "UsagePurpose": {
           "oneOf": [
             {
@@ -212079,10 +214205,20 @@
               "minimum": 0.0
             },
             "totalTokens": {
-              "description": "Aggregate tokens. For ledger-derived totals this equals `input_tokens + output_tokens`; for legacy lumps it is the only known number (the input/output split was never recorded).",
+              "description": "Aggregate tokens, preferring each call's provider-reported total and otherwise using `input_tokens + output_tokens`. For legacy lumps it is the only known number (the input/output split was never recorded).",
               "type": "integer",
               "format": "uint64",
               "minimum": 0.0
+            },
+            "unreportedFields": {
+              "description": "`None` is legacy/unknown coverage; an empty list means all fields known.",
+              "type": [
+                "array",
+                "null"
+              ],
+              "items": {
+                "$ref": "#/definitions/UsageField"
+              }
             }
           }
         },
@@ -212902,6 +215038,18 @@
             }
           }
         },
+        "UsageField": {
+          "description": "A provider counter that was not reported. Counts remain available as known subtotals, but consumers must not present these fields as complete totals.",
+          "type": "string",
+          "enum": [
+            "inputTokens",
+            "outputTokens",
+            "reasoningTokens",
+            "cacheReadInputTokens",
+            "cacheCreationInputTokens",
+            "totalTokens"
+          ]
+        },
         "UsageTotals": {
           "description": "Aggregated token/call totals. `call_count` includes failed and cancelled attempts; `metered_call_count` counts attempts with reported usage.",
           "type": "object",
@@ -212974,10 +215122,20 @@
               "minimum": 0.0
             },
             "totalTokens": {
-              "description": "Aggregate tokens. For ledger-derived totals this equals `input_tokens + output_tokens`; for legacy lumps it is the only known number (the input/output split was never recorded).",
+              "description": "Aggregate tokens, preferring each call's provider-reported total and otherwise using `input_tokens + output_tokens`. For legacy lumps it is the only known number (the input/output split was never recorded).",
               "type": "integer",
               "format": "uint64",
               "minimum": 0.0
+            },
+            "unreportedFields": {
+              "description": "`None` is legacy/unknown coverage; an empty list means all fields known.",
+              "type": [
+                "array",
+                "null"
+              ],
+              "items": {
+                "$ref": "#/definitions/UsageField"
+              }
             }
           }
         }
@@ -214595,6 +216753,16 @@
               "type": "integer",
               "format": "uint64",
               "minimum": 0.0
+            },
+            "unreportedFields": {
+              "description": "`None` is legacy/unknown coverage; an empty list means all fields known.",
+              "type": [
+                "array",
+                "null"
+              ],
+              "items": {
+                "$ref": "#/definitions/UsageField"
+              }
             }
           }
         },
@@ -215669,6 +217837,18 @@
             }
           }
         },
+        "UsageField": {
+          "description": "A provider counter that was not reported. Counts remain available as known subtotals, but consumers must not present these fields as complete totals.",
+          "type": "string",
+          "enum": [
+            "inputTokens",
+            "outputTokens",
+            "reasoningTokens",
+            "cacheReadInputTokens",
+            "cacheCreationInputTokens",
+            "totalTokens"
+          ]
+        },
         "UsagePurpose": {
           "oneOf": [
             {
@@ -215787,10 +217967,20 @@
               "minimum": 0.0
             },
             "totalTokens": {
-              "description": "Aggregate tokens. For ledger-derived totals this equals `input_tokens + output_tokens`; for legacy lumps it is the only known number (the input/output split was never recorded).",
+              "description": "Aggregate tokens, preferring each call's provider-reported total and otherwise using `input_tokens + output_tokens`. For legacy lumps it is the only known number (the input/output split was never recorded).",
               "type": "integer",
               "format": "uint64",
               "minimum": 0.0
+            },
+            "unreportedFields": {
+              "description": "`None` is legacy/unknown coverage; an empty list means all fields known.",
+              "type": [
+                "array",
+                "null"
+              ],
+              "items": {
+                "$ref": "#/definitions/UsageField"
+              }
             }
           }
         },
@@ -217743,6 +219933,16 @@
               "type": "integer",
               "format": "uint64",
               "minimum": 0.0
+            },
+            "unreportedFields": {
+              "description": "`None` is legacy/unknown coverage; an empty list means all fields known.",
+              "type": [
+                "array",
+                "null"
+              ],
+              "items": {
+                "$ref": "#/definitions/UsageField"
+              }
             }
           }
         },
@@ -218817,6 +221017,18 @@
             }
           }
         },
+        "UsageField": {
+          "description": "A provider counter that was not reported. Counts remain available as known subtotals, but consumers must not present these fields as complete totals.",
+          "type": "string",
+          "enum": [
+            "inputTokens",
+            "outputTokens",
+            "reasoningTokens",
+            "cacheReadInputTokens",
+            "cacheCreationInputTokens",
+            "totalTokens"
+          ]
+        },
         "UsagePurpose": {
           "oneOf": [
             {
@@ -218935,10 +221147,20 @@
               "minimum": 0.0
             },
             "totalTokens": {
-              "description": "Aggregate tokens. For ledger-derived totals this equals `input_tokens + output_tokens`; for legacy lumps it is the only known number (the input/output split was never recorded).",
+              "description": "Aggregate tokens, preferring each call's provider-reported total and otherwise using `input_tokens + output_tokens`. For legacy lumps it is the only known number (the input/output split was never recorded).",
               "type": "integer",
               "format": "uint64",
               "minimum": 0.0
+            },
+            "unreportedFields": {
+              "description": "`None` is legacy/unknown coverage; an empty list means all fields known.",
+              "type": [
+                "array",
+                "null"
+              ],
+              "items": {
+                "$ref": "#/definitions/UsageField"
+              }
             }
           }
         },
@@ -221395,6 +223617,16 @@
               "type": "integer",
               "format": "uint64",
               "minimum": 0.0
+            },
+            "unreportedFields": {
+              "description": "`None` is legacy/unknown coverage; an empty list means all fields known.",
+              "type": [
+                "array",
+                "null"
+              ],
+              "items": {
+                "$ref": "#/definitions/UsageField"
+              }
             }
           }
         },
@@ -222469,6 +224701,18 @@
             }
           }
         },
+        "UsageField": {
+          "description": "A provider counter that was not reported. Counts remain available as known subtotals, but consumers must not present these fields as complete totals.",
+          "type": "string",
+          "enum": [
+            "inputTokens",
+            "outputTokens",
+            "reasoningTokens",
+            "cacheReadInputTokens",
+            "cacheCreationInputTokens",
+            "totalTokens"
+          ]
+        },
         "UsagePurpose": {
           "oneOf": [
             {
@@ -222587,10 +224831,20 @@
               "minimum": 0.0
             },
             "totalTokens": {
-              "description": "Aggregate tokens. For ledger-derived totals this equals `input_tokens + output_tokens`; for legacy lumps it is the only known number (the input/output split was never recorded).",
+              "description": "Aggregate tokens, preferring each call's provider-reported total and otherwise using `input_tokens + output_tokens`. For legacy lumps it is the only known number (the input/output split was never recorded).",
               "type": "integer",
               "format": "uint64",
               "minimum": 0.0
+            },
+            "unreportedFields": {
+              "description": "`None` is legacy/unknown coverage; an empty list means all fields known.",
+              "type": [
+                "array",
+                "null"
+              ],
+              "items": {
+                "$ref": "#/definitions/UsageField"
+              }
             }
           }
         },
@@ -224571,6 +226825,16 @@
               "type": "integer",
               "format": "uint64",
               "minimum": 0.0
+            },
+            "unreportedFields": {
+              "description": "`None` is legacy/unknown coverage; an empty list means all fields known.",
+              "type": [
+                "array",
+                "null"
+              ],
+              "items": {
+                "$ref": "#/definitions/UsageField"
+              }
             }
           }
         },
@@ -225645,6 +227909,18 @@
             }
           }
         },
+        "UsageField": {
+          "description": "A provider counter that was not reported. Counts remain available as known subtotals, but consumers must not present these fields as complete totals.",
+          "type": "string",
+          "enum": [
+            "inputTokens",
+            "outputTokens",
+            "reasoningTokens",
+            "cacheReadInputTokens",
+            "cacheCreationInputTokens",
+            "totalTokens"
+          ]
+        },
         "UsagePurpose": {
           "oneOf": [
             {
@@ -225763,10 +228039,20 @@
               "minimum": 0.0
             },
             "totalTokens": {
-              "description": "Aggregate tokens. For ledger-derived totals this equals `input_tokens + output_tokens`; for legacy lumps it is the only known number (the input/output split was never recorded).",
+              "description": "Aggregate tokens, preferring each call's provider-reported total and otherwise using `input_tokens + output_tokens`. For legacy lumps it is the only known number (the input/output split was never recorded).",
               "type": "integer",
               "format": "uint64",
               "minimum": 0.0
+            },
+            "unreportedFields": {
+              "description": "`None` is legacy/unknown coverage; an empty list means all fields known.",
+              "type": [
+                "array",
+                "null"
+              ],
+              "items": {
+                "$ref": "#/definitions/UsageField"
+              }
             }
           }
         },
@@ -228399,6 +230685,16 @@
               "type": "integer",
               "format": "uint64",
               "minimum": 0.0
+            },
+            "unreportedFields": {
+              "description": "`None` is legacy/unknown coverage; an empty list means all fields known.",
+              "type": [
+                "array",
+                "null"
+              ],
+              "items": {
+                "$ref": "#/definitions/UsageField"
+              }
             }
           }
         },
@@ -229473,6 +231769,18 @@
             }
           }
         },
+        "UsageField": {
+          "description": "A provider counter that was not reported. Counts remain available as known subtotals, but consumers must not present these fields as complete totals.",
+          "type": "string",
+          "enum": [
+            "inputTokens",
+            "outputTokens",
+            "reasoningTokens",
+            "cacheReadInputTokens",
+            "cacheCreationInputTokens",
+            "totalTokens"
+          ]
+        },
         "UsagePurpose": {
           "oneOf": [
             {
@@ -229591,10 +231899,20 @@
               "minimum": 0.0
             },
             "totalTokens": {
-              "description": "Aggregate tokens. For ledger-derived totals this equals `input_tokens + output_tokens`; for legacy lumps it is the only known number (the input/output split was never recorded).",
+              "description": "Aggregate tokens, preferring each call's provider-reported total and otherwise using `input_tokens + output_tokens`. For legacy lumps it is the only known number (the input/output split was never recorded).",
               "type": "integer",
               "format": "uint64",
               "minimum": 0.0
+            },
+            "unreportedFields": {
+              "description": "`None` is legacy/unknown coverage; an empty list means all fields known.",
+              "type": [
+                "array",
+                "null"
+              ],
+              "items": {
+                "$ref": "#/definitions/UsageField"
+              }
             }
           }
         },
@@ -231561,6 +233879,16 @@
               "type": "integer",
               "format": "uint64",
               "minimum": 0.0
+            },
+            "unreportedFields": {
+              "description": "`None` is legacy/unknown coverage; an empty list means all fields known.",
+              "type": [
+                "array",
+                "null"
+              ],
+              "items": {
+                "$ref": "#/definitions/UsageField"
+              }
             }
           }
         },
@@ -232635,6 +234963,18 @@
             }
           }
         },
+        "UsageField": {
+          "description": "A provider counter that was not reported. Counts remain available as known subtotals, but consumers must not present these fields as complete totals.",
+          "type": "string",
+          "enum": [
+            "inputTokens",
+            "outputTokens",
+            "reasoningTokens",
+            "cacheReadInputTokens",
+            "cacheCreationInputTokens",
+            "totalTokens"
+          ]
+        },
         "UsagePurpose": {
           "oneOf": [
             {
@@ -232753,10 +235093,20 @@
               "minimum": 0.0
             },
             "totalTokens": {
-              "description": "Aggregate tokens. For ledger-derived totals this equals `input_tokens + output_tokens`; for legacy lumps it is the only known number (the input/output split was never recorded).",
+              "description": "Aggregate tokens, preferring each call's provider-reported total and otherwise using `input_tokens + output_tokens`. For legacy lumps it is the only known number (the input/output split was never recorded).",
               "type": "integer",
               "format": "uint64",
               "minimum": 0.0
+            },
+            "unreportedFields": {
+              "description": "`None` is legacy/unknown coverage; an empty list means all fields known.",
+              "type": [
+                "array",
+                "null"
+              ],
+              "items": {
+                "$ref": "#/definitions/UsageField"
+              }
             }
           }
         },
@@ -234709,6 +237059,16 @@
               "type": "integer",
               "format": "uint64",
               "minimum": 0.0
+            },
+            "unreportedFields": {
+              "description": "`None` is legacy/unknown coverage; an empty list means all fields known.",
+              "type": [
+                "array",
+                "null"
+              ],
+              "items": {
+                "$ref": "#/definitions/UsageField"
+              }
             }
           }
         },
@@ -235783,6 +238143,18 @@
             }
           }
         },
+        "UsageField": {
+          "description": "A provider counter that was not reported. Counts remain available as known subtotals, but consumers must not present these fields as complete totals.",
+          "type": "string",
+          "enum": [
+            "inputTokens",
+            "outputTokens",
+            "reasoningTokens",
+            "cacheReadInputTokens",
+            "cacheCreationInputTokens",
+            "totalTokens"
+          ]
+        },
         "UsagePurpose": {
           "oneOf": [
             {
@@ -235901,10 +238273,20 @@
               "minimum": 0.0
             },
             "totalTokens": {
-              "description": "Aggregate tokens. For ledger-derived totals this equals `input_tokens + output_tokens`; for legacy lumps it is the only known number (the input/output split was never recorded).",
+              "description": "Aggregate tokens, preferring each call's provider-reported total and otherwise using `input_tokens + output_tokens`. For legacy lumps it is the only known number (the input/output split was never recorded).",
               "type": "integer",
               "format": "uint64",
               "minimum": 0.0
+            },
+            "unreportedFields": {
+              "description": "`None` is legacy/unknown coverage; an empty list means all fields known.",
+              "type": [
+                "array",
+                "null"
+              ],
+              "items": {
+                "$ref": "#/definitions/UsageField"
+              }
             }
           }
         },

@@ -87,7 +87,12 @@ impl ChatCompletionStreamState {
             self.system_fingerprint = chunk.system_fingerprint;
         }
 
-        if let Some(usage) = chunk.usage.as_ref().map(completion_usage_to_usage) {
+        if let Some(usage) = chunk
+            .usage
+            .as_ref()
+            .map(completion_usage_to_usage)
+            .filter(Usage::is_reported)
+        {
             self.usage = Some(usage.clone());
             events.push(StreamEvent::UsageDelta(usage));
         }
@@ -355,8 +360,8 @@ impl ChatCompletionStreamState {
             service_tier: self.service_tier.clone(),
             system_fingerprint: self.system_fingerprint.clone(),
             usage: self.usage.as_ref().map(|usage| OpenAICompletionUsage {
-                prompt_tokens: usage.input_tokens,
-                completion_tokens: usage.output_tokens,
+                prompt_tokens: Some(usage.input_tokens),
+                completion_tokens: Some(usage.output_tokens),
                 total_tokens: usage.total_tokens,
                 prompt_tokens_details: Some(OpenAIPromptTokenDetails {
                     audio_tokens: None,

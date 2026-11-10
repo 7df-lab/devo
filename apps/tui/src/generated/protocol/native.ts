@@ -424,7 +424,18 @@ export type UsagePurpose = "turnQuery" | "autoReview" | "compaction" | "titleGen
 
 export type UsageCallOutcome = "succeeded" | "failed" | "cancelled";
 
-export type TokenUsage = { inputTokens: bigint, outputTokens: bigint, reasoningTokens: bigint,
+export type UsageField = "inputTokens" | "outputTokens" | "reasoningTokens" | "cacheReadInputTokens" | "cacheCreationInputTokens" | "totalTokens";
+
+export type TokenUsage = {
+/**
+ * `None` is legacy/unknown coverage; an empty list means all fields known.
+ */
+unreportedFields?: Array<UsageField> | null,
+/**
+ * Provider-reported total, which can include tokens outside the primary
+ * input/output counts. `None` preserves older ledger records.
+ */
+totalTokens?: bigint | null, inputTokens: bigint, outputTokens: bigint, reasoningTokens: bigint,
 /**
  * Billed at a different rate by most providers, hence separate.
  */
@@ -434,13 +445,21 @@ export type Money = { currency: string, micros: bigint, };
 
 export type UsageTotals = {
 /**
- * Aggregate tokens. For ledger-derived totals this equals
- * `input_tokens + output_tokens`; for legacy lumps it is the only known
- * number (the input/output split was never recorded).
+ * `None` is legacy/unknown coverage; an empty list means all fields known.
+ */
+unreportedFields?: Array<UsageField> | null,
+/**
+ * Aggregate tokens, preferring each call's provider-reported total and
+ * otherwise using `input_tokens + output_tokens`. For legacy lumps it is
+ * the only known number (the input/output split was never recorded).
  */
 totalTokens: bigint, inputTokens: bigint, outputTokens: bigint, reasoningTokens: bigint, cacheReadInputTokens: bigint, cacheCreationInputTokens: bigint, callCount: number, meteredCallCount: number, failedCallCount: number, cancelledCallCount: number, estimatedCost?: Money | null, };
 
-export type PurposeUsage = { purpose: UsagePurpose, inputTokens: bigint, outputTokens: bigint, reasoningTokens: bigint, cacheReadInputTokens: bigint, cacheCreationInputTokens: bigint, callCount: number, meteredCallCount: number, failedCallCount: number, cancelledCallCount: number, estimatedCost?: Money | null, };
+export type PurposeUsage = {
+/**
+ * `None` is legacy/unknown coverage; an empty list means all fields known.
+ */
+unreportedFields?: Array<UsageField> | null, purpose: UsagePurpose, inputTokens: bigint, outputTokens: bigint, reasoningTokens: bigint, cacheReadInputTokens: bigint, cacheCreationInputTokens: bigint, callCount: number, meteredCallCount: number, failedCallCount: number, cancelledCallCount: number, estimatedCost?: Money | null, };
 
 export type SessionUsage = { total: UsageTotals, byPurpose: Array<PurposeUsage>,
 /**

@@ -219,7 +219,7 @@ pub struct ServerRuntime {
     /// Per-parent `wait_agent` sequence cursors keyed by optional target string.
     agent_wait_cursors: Mutex<HashMap<SessionId, HashMap<String, u64>>>,
     /// Latest subagent turn usage grouped under the parent turn that requested the work.
-    subagent_usage: Mutex<subagent_usage::SubagentUsageState>,
+    usage_publication: Mutex<()>,
     /// Live client-owned reference search sessions.
     reference_searches: Mutex<
         HashMap<
@@ -467,7 +467,7 @@ impl ServerRuntime {
             agent_mailboxes: Mutex::new(HashMap::new()),
             agent_output_buffers: Mutex::new(HashMap::new()),
             agent_wait_cursors: Mutex::new(HashMap::new()),
-            subagent_usage: Mutex::new(subagent_usage::SubagentUsageState::default()),
+            usage_publication: Mutex::new(()),
             reference_searches: Mutex::new(HashMap::new()),
             command_exec_manager: command_exec::CommandExecManager::new(),
             active_workspace_baselines: Mutex::new(HashMap::new()),
@@ -495,6 +495,7 @@ impl ServerRuntime {
             schedule_store: crate::schedule_store::ScheduleStore::new(server_home),
             schedule_wake_cancel: CancellationToken::new(),
         });
+        runtime.start_usage_updates();
         runtime.start_schedule_wake_loop();
         runtime
     }

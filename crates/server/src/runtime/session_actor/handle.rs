@@ -22,7 +22,6 @@ use super::state::{ApprovalCacheSnapshot, DeferredItems, SessionActorState, Spaw
 use super::turn_working::TurnWorkingSet;
 use crate::execution::PendingApproval;
 use crate::execution::PersistedTurnItem;
-use crate::runtime::subagent_usage::ParentUsageSnapshot;
 use crate::runtime::turn_exec::ExecuteTurnRequest;
 use crate::runtime_session_summary::RuntimeSessionSummary;
 use crate::turn::RuntimeTurn;
@@ -581,17 +580,8 @@ impl SessionHandle {
             .await;
     }
 
-    #[allow(dead_code)]
-    pub(crate) async fn apply_parent_usage_snapshot(&self, snapshot: ParentUsageSnapshot) {
-        let _ = self
-            .send(SessionCommand::ApplyParentUsageSnapshot { snapshot })
-            .await;
-    }
-
-    /// Best-effort usage apply for callers that must not block on the mailbox
-    /// (child/parent turn event streams).
-    pub(crate) fn try_apply_parent_usage_snapshot(&self, snapshot: ParentUsageSnapshot) -> bool {
-        self.try_send(SessionCommand::ApplyParentUsageSnapshot { snapshot })
+    pub(crate) async fn refresh_usage(&self) {
+        let _ = self.tx.send(SessionCommand::RefreshUsage).await;
     }
 
     pub(crate) fn try_touch_last_activity(&self) -> bool {

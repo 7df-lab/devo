@@ -560,7 +560,6 @@ impl ServerRuntime {
             turn,
             query_outcome,
             event_summary,
-            usage_parent_session_id: usage_parent_session_id.as_ref().map(|id| *id),
         })
         .await;
         let inline = {

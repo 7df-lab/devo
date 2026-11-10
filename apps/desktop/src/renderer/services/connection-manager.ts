@@ -673,13 +673,13 @@ function coalescingKey(event: Event): string | undefined {
 }
 
 function createEventBatcher() {
-	let queue: Event[] = []
-	const coalesced = new Map<string, Event>()
+	let queue: Array<Event | undefined> = []
+	const coalesced = new Map<string, number>()
 	let scheduled: number | undefined
 	let lastFlush = 0
 
 	function flush() {
-		const events = [...queue, ...coalesced.values()]
+		const events = queue.filter((event): event is Event => event !== undefined)
 		queue = []
 		coalesced.clear()
 		scheduled = undefined
@@ -701,10 +701,13 @@ function createEventBatcher() {
 	function enqueue(event: Event) {
 		const key = coalescingKey(event)
 		if (key) {
-			coalesced.set(key, event)
-		} else {
-			queue.push(event)
+			const previous = coalesced.get(key)
+			if (previous !== undefined) queue[previous] = undefined
+			coalesced.set(key, queue.length)
 		}
+		// A replacement occupies its latest receive position. Moving all
+		// coalesced events to the end can replay old occupancy after new usage.
+		queue.push(event)
 
 		if (scheduled !== undefined) return
 

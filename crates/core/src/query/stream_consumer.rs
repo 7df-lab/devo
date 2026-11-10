@@ -266,8 +266,15 @@ async fn consume_provider_stream(
                             response.usage.cache_creation_input_tokens.unwrap_or(0);
                         session.total_cache_read_tokens +=
                             response.usage.cache_read_input_tokens.unwrap_or(0);
-                        session.last_input_tokens = response.usage.input_tokens;
-                        session.last_turn_tokens = response.usage.display_total_tokens();
+                        if response.usage.is_reported() {
+                            let missing = response.usage.unreported_fields.as_deref().unwrap_or(&[]);
+                            if !missing.contains(&devo_protocol::native::usage::UsageField::InputTokens) {
+                                session.last_input_tokens = response.usage.input_tokens;
+                            }
+                            if !missing.contains(&devo_protocol::native::usage::UsageField::TotalTokens) {
+                                session.last_turn_tokens = response.usage.display_total_tokens();
+                            }
+                        }
 
                         emit_query_event(
                             on_event,

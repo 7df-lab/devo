@@ -18,8 +18,8 @@ pub(super) fn query_event_delivery_policy(event: &QueryEvent) -> QueryEventDeliv
                 | devo_core::tools::ToolProgress::Completion { .. },
             ..
         }
-        | QueryEvent::UsageDelta { .. }
-        | QueryEvent::Usage { .. } => QueryEventDeliveryPolicy::BestEffort,
+        | QueryEvent::UsageDelta { .. } => QueryEventDeliveryPolicy::BestEffort,
+        QueryEvent::Usage { .. } => QueryEventDeliveryPolicy::MustDeliver,
         QueryEvent::ProviderRetryStatus(_)
         | QueryEvent::ProviderQueryFailed { .. }
         | QueryEvent::ContextCompactionStarted

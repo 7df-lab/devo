@@ -16,7 +16,6 @@ use super::snapshots::{
 use super::state::{ApprovalCacheSnapshot, DeferredItems, SessionActorState, SpawnSnapshot};
 use crate::execution::PendingApproval;
 use crate::execution::PersistedTurnItem;
-use crate::runtime::subagent_usage::ParentUsageSnapshot;
 use crate::runtime_session_summary::RuntimeSessionSummary;
 use crate::session::SessionHistoryEntry;
 use crate::turn::RuntimeTurn;
@@ -181,9 +180,7 @@ pub(crate) enum SessionCommand {
         scoped_item_ids: Option<Vec<devo_protocol::native::ids::ItemId>>,
         compaction_snapshot: Option<devo_core::CompactionSnapshotLine>,
     },
-    ApplyParentUsageSnapshot {
-        snapshot: ParentUsageSnapshot,
-    },
+    RefreshUsage,
     InterruptActiveTurn {
         reply: oneshot::Sender<Option<RuntimeTurn>>,
     },
