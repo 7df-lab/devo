@@ -431,6 +431,12 @@ impl ServerRuntime {
                 Box::pin(self.handle_turn_start_for_connection(Some(connection_id), id?, params))
                     .await,
             ),
+            "session/queue/steer" => {
+                Some(Box::pin(self.handle_session_queue_steer(id?, params)).await)
+            }
+            "session/queue/retry" => {
+                Some(Box::pin(self.handle_session_queue_retry(id?, params)).await)
+            }
             "turn/steer" => {
                 Some(Box::pin(self.handle_turn_steer(connection_id, id?, params)).await)
             }

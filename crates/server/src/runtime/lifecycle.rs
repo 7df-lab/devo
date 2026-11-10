@@ -199,6 +199,10 @@ impl ServerRuntime {
             }
         }
 
+        // A receipt proves admission, not consumption. Recover these rows
+        // before legacy replay, without inferring execution from user bubbles.
+        self.deps.db.recover_interrupted_queue_steers(&session_id)?;
+
         // Restore the turn queue non-destructively: SQLite stays the durable
         // mirror until items are consumed or removed, so a restart before the
         // queue drains does not lose pending input.

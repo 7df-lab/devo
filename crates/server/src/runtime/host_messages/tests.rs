@@ -146,6 +146,43 @@ async fn host_followups_keep_origin_in_queue_live_model_and_replay() -> Result<(
         "host queue content must not be re-authored"
     );
 
+    let before_steer = runtime
+        .load_canonical_history(&json!(50), session)
+        .await
+        .map_err(|error| anyhow::anyhow!("{error}"))?;
+    let steer = runtime
+        .handle_incoming(
+            connection,
+            json!({
+                "id": 51, "method": "session/queue/steer", "params": {
+                    "sessionId": session, "queueItemId": pending[0].id,
+                    "expectedTurnId": human["result"]["turn"]["id"]
+                }
+            }),
+        )
+        .await
+        .context("reject host steering")?;
+    assert!(
+        steer.get("error").is_some(),
+        "host queue input must not become human steering: {steer}"
+    );
+    assert_eq!(
+        serde_json::to_value(runtime.deps.db.list_pending(&session, QueueType::Turn)?)?,
+        serde_json::to_value(&pending)?
+    );
+    assert!(
+        runtime
+            .deps
+            .db
+            .list_pending(&session, QueueType::Steer)?
+            .is_empty()
+    );
+    let after_steer = runtime
+        .load_canonical_history(&json!(52), session)
+        .await
+        .map_err(|error| anyhow::anyhow!("{error}"))?;
+    assert_eq!(after_steer.items, before_steer.items);
+
     // Once a host follow-up starts, the preceding human input is no longer
     // the latest editable turn. Reject before interrupting that host turn.
     provider.release.add_permits(1);

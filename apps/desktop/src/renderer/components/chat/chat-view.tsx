@@ -1316,6 +1316,7 @@ export function ChatInputSection({
 		draggingId: draggingQueueItemId,
 		setDraggingId: setDraggingQueueItemId,
 		steerQueueItem,
+		retryQueueItem,
 		removeQueueItem,
 		editQueueItem,
 		reorderQueueItem,
@@ -2329,6 +2330,7 @@ export function ChatInputSection({
 										onPauseGoal={handlePauseGoal}
 										onResumeGoal={handleResumeGoal}
 										onClearGoal={handleClearGoal}
+										onRetryQueueItem={retryQueueItem}
 										onSteerQueueItem={steerQueueItem}
 										onEditQueueItem={handleEditQueueItem}
 										onRemoveQueueItem={removeQueueItem}

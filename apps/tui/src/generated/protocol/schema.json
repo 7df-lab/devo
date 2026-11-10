@@ -6808,6 +6808,10 @@
             },
             "queueItemId": {
               "$ref": "#/definitions/QueueItemId"
+            },
+            "recoveryRequired": {
+              "description": "Admission happened before a crash, but consumption is uncertain. Never auto-drain; explicit retry or discard requires user review.",
+              "type": "boolean"
             }
           }
         },
@@ -11692,6 +11696,10 @@
             },
             "queueItemId": {
               "$ref": "#/definitions/QueueItemId"
+            },
+            "recoveryRequired": {
+              "description": "Admission happened before a crash, but consumption is uncertain. Never auto-drain; explicit retry or discard requires user review.",
+              "type": "boolean"
             }
           }
         },
@@ -16339,6 +16347,10 @@
             },
             "queueItemId": {
               "$ref": "#/definitions/QueueItemId"
+            },
+            "recoveryRequired": {
+              "description": "Admission happened before a crash, but consumption is uncertain. Never auto-drain; explicit retry or discard requires user review.",
+              "type": "boolean"
             }
           }
         },
@@ -20101,6 +20113,10 @@
             },
             "queueItemId": {
               "$ref": "#/definitions/QueueItemId"
+            },
+            "recoveryRequired": {
+              "description": "Admission happened before a crash, but consumption is uncertain. Never auto-drain; explicit retry or discard requires user review.",
+              "type": "boolean"
             }
           }
         },
@@ -23295,6 +23311,10 @@
             },
             "queueItemId": {
               "$ref": "#/definitions/QueueItemId"
+            },
+            "recoveryRequired": {
+              "description": "Admission happened before a crash, but consumption is uncertain. Never auto-drain; explicit retry or discard requires user review.",
+              "type": "boolean"
             }
           }
         },
@@ -26752,6 +26772,10 @@
             },
             "queueItemId": {
               "$ref": "#/definitions/QueueItemId"
+            },
+            "recoveryRequired": {
+              "description": "Admission happened before a crash, but consumption is uncertain. Never auto-drain; explicit retry or discard requires user review.",
+              "type": "boolean"
             }
           }
         },
@@ -29932,6 +29956,10 @@
             },
             "queueItemId": {
               "$ref": "#/definitions/QueueItemId"
+            },
+            "recoveryRequired": {
+              "description": "Admission happened before a crash, but consumption is uncertain. Never auto-drain; explicit retry or discard requires user review.",
+              "type": "boolean"
             }
           }
         },
@@ -33116,6 +33144,10 @@
             },
             "queueItemId": {
               "$ref": "#/definitions/QueueItemId"
+            },
+            "recoveryRequired": {
+              "description": "Admission happened before a crash, but consumption is uncertain. Never auto-drain; explicit retry or discard requires user review.",
+              "type": "boolean"
             }
           }
         },
@@ -36394,6 +36426,10 @@
             },
             "queueItemId": {
               "$ref": "#/definitions/QueueItemId"
+            },
+            "recoveryRequired": {
+              "description": "Admission happened before a crash, but consumption is uncertain. Never auto-drain; explicit retry or discard requires user review.",
+              "type": "boolean"
             }
           }
         },
@@ -39578,6 +39614,10 @@
             },
             "queueItemId": {
               "$ref": "#/definitions/QueueItemId"
+            },
+            "recoveryRequired": {
+              "description": "Admission happened before a crash, but consumption is uncertain. Never auto-drain; explicit retry or discard requires user review.",
+              "type": "boolean"
             }
           }
         },
@@ -42969,6 +43009,10 @@
             },
             "queueItemId": {
               "$ref": "#/definitions/QueueItemId"
+            },
+            "recoveryRequired": {
+              "description": "Admission happened before a crash, but consumption is uncertain. Never auto-drain; explicit retry or discard requires user review.",
+              "type": "boolean"
             }
           }
         },
@@ -47491,6 +47535,10 @@
             },
             "queueItemId": {
               "$ref": "#/definitions/QueueItemId"
+            },
+            "recoveryRequired": {
+              "description": "Admission happened before a crash, but consumption is uncertain. Never auto-drain; explicit retry or discard requires user review.",
+              "type": "boolean"
             }
           }
         },
@@ -50659,6 +50707,10 @@
             },
             "queueItemId": {
               "$ref": "#/definitions/QueueItemId"
+            },
+            "recoveryRequired": {
+              "description": "Admission happened before a crash, but consumption is uncertain. Never auto-drain; explicit retry or discard requires user review.",
+              "type": "boolean"
             }
           }
         },
@@ -53835,6 +53887,10 @@
             },
             "queueItemId": {
               "$ref": "#/definitions/QueueItemId"
+            },
+            "recoveryRequired": {
+              "description": "Admission happened before a crash, but consumption is uncertain. Never auto-drain; explicit retry or discard requires user review.",
+              "type": "boolean"
             }
           }
         },
@@ -57003,6 +57059,10 @@
             },
             "queueItemId": {
               "$ref": "#/definitions/QueueItemId"
+            },
+            "recoveryRequired": {
+              "description": "Admission happened before a crash, but consumption is uncertain. Never auto-drain; explicit retry or discard requires user review.",
+              "type": "boolean"
             }
           }
         },
@@ -60171,6 +60231,10 @@
             },
             "queueItemId": {
               "$ref": "#/definitions/QueueItemId"
+            },
+            "recoveryRequired": {
+              "description": "Admission happened before a crash, but consumption is uncertain. Never auto-drain; explicit retry or discard requires user review.",
+              "type": "boolean"
             }
           }
         },
@@ -63347,6 +63411,10 @@
             },
             "queueItemId": {
               "$ref": "#/definitions/QueueItemId"
+            },
+            "recoveryRequired": {
+              "description": "Admission happened before a crash, but consumption is uncertain. Never auto-drain; explicit retry or discard requires user review.",
+              "type": "boolean"
             }
           }
         },
@@ -66515,6 +66583,10 @@
             },
             "queueItemId": {
               "$ref": "#/definitions/QueueItemId"
+            },
+            "recoveryRequired": {
+              "description": "Admission happened before a crash, but consumption is uncertain. Never auto-drain; explicit retry or discard requires user review.",
+              "type": "boolean"
             }
           }
         },
@@ -69698,6 +69770,10 @@
             },
             "queueItemId": {
               "$ref": "#/definitions/QueueItemId"
+            },
+            "recoveryRequired": {
+              "description": "Admission happened before a crash, but consumption is uncertain. Never auto-drain; explicit retry or discard requires user review.",
+              "type": "boolean"
             }
           }
         },
@@ -72874,6 +72950,10 @@
             },
             "queueItemId": {
               "$ref": "#/definitions/QueueItemId"
+            },
+            "recoveryRequired": {
+              "description": "Admission happened before a crash, but consumption is uncertain. Never auto-drain; explicit retry or discard requires user review.",
+              "type": "boolean"
             }
           }
         },
@@ -76482,6 +76562,10 @@
             },
             "queueItemId": {
               "$ref": "#/definitions/QueueItemId"
+            },
+            "recoveryRequired": {
+              "description": "Admission happened before a crash, but consumption is uncertain. Never auto-drain; explicit retry or discard requires user review.",
+              "type": "boolean"
             }
           }
         },
@@ -80531,6 +80615,10 @@
             },
             "queueItemId": {
               "$ref": "#/definitions/QueueItemId"
+            },
+            "recoveryRequired": {
+              "description": "Admission happened before a crash, but consumption is uncertain. Never auto-drain; explicit retry or discard requires user review.",
+              "type": "boolean"
             }
           }
         },
@@ -83756,6 +83844,10 @@
             },
             "queueItemId": {
               "$ref": "#/definitions/QueueItemId"
+            },
+            "recoveryRequired": {
+              "description": "Admission happened before a crash, but consumption is uncertain. Never auto-drain; explicit retry or discard requires user review.",
+              "type": "boolean"
             }
           }
         },
@@ -89590,6 +89682,10 @@
             },
             "queueItemId": {
               "$ref": "#/definitions/QueueItemId"
+            },
+            "recoveryRequired": {
+              "description": "Admission happened before a crash, but consumption is uncertain. Never auto-drain; explicit retry or discard requires user review.",
+              "type": "boolean"
             }
           }
         },
@@ -92772,6 +92868,10 @@
             },
             "queueItemId": {
               "$ref": "#/definitions/QueueItemId"
+            },
+            "recoveryRequired": {
+              "description": "Admission happened before a crash, but consumption is uncertain. Never auto-drain; explicit retry or discard requires user review.",
+              "type": "boolean"
             }
           }
         },
@@ -98826,6 +98926,10 @@
             },
             "queueItemId": {
               "$ref": "#/definitions/QueueItemId"
+            },
+            "recoveryRequired": {
+              "description": "Admission happened before a crash, but consumption is uncertain. Never auto-drain; explicit retry or discard requires user review.",
+              "type": "boolean"
             }
           }
         },
@@ -102059,6 +102163,10 @@
             },
             "queueItemId": {
               "$ref": "#/definitions/QueueItemId"
+            },
+            "recoveryRequired": {
+              "description": "Admission happened before a crash, but consumption is uncertain. Never auto-drain; explicit retry or discard requires user review.",
+              "type": "boolean"
             }
           }
         },
@@ -105243,6 +105351,10 @@
             },
             "queueItemId": {
               "$ref": "#/definitions/QueueItemId"
+            },
+            "recoveryRequired": {
+              "description": "Admission happened before a crash, but consumption is uncertain. Never auto-drain; explicit retry or discard requires user review.",
+              "type": "boolean"
             }
           }
         },
@@ -108430,6 +108542,10 @@
             },
             "queueItemId": {
               "$ref": "#/definitions/QueueItemId"
+            },
+            "recoveryRequired": {
+              "description": "Admission happened before a crash, but consumption is uncertain. Never auto-drain; explicit retry or discard requires user review.",
+              "type": "boolean"
             }
           }
         },
@@ -111598,6 +111714,10 @@
             },
             "queueItemId": {
               "$ref": "#/definitions/QueueItemId"
+            },
+            "recoveryRequired": {
+              "description": "Admission happened before a crash, but consumption is uncertain. Never auto-drain; explicit retry or discard requires user review.",
+              "type": "boolean"
             }
           }
         },
@@ -115254,6 +115374,10 @@
             },
             "queueItemId": {
               "$ref": "#/definitions/QueueItemId"
+            },
+            "recoveryRequired": {
+              "description": "Admission happened before a crash, but consumption is uncertain. Never auto-drain; explicit retry or discard requires user review.",
+              "type": "boolean"
             }
           }
         },
@@ -118434,6 +118558,10 @@
             },
             "queueItemId": {
               "$ref": "#/definitions/QueueItemId"
+            },
+            "recoveryRequired": {
+              "description": "Admission happened before a crash, but consumption is uncertain. Never auto-drain; explicit retry or discard requires user review.",
+              "type": "boolean"
             }
           }
         },
@@ -121624,6 +121752,10 @@
             },
             "queueItemId": {
               "$ref": "#/definitions/QueueItemId"
+            },
+            "recoveryRequired": {
+              "description": "Admission happened before a crash, but consumption is uncertain. Never auto-drain; explicit retry or discard requires user review.",
+              "type": "boolean"
             }
           }
         },
@@ -125611,6 +125743,10 @@
             },
             "queueItemId": {
               "$ref": "#/definitions/QueueItemId"
+            },
+            "recoveryRequired": {
+              "description": "Admission happened before a crash, but consumption is uncertain. Never auto-drain; explicit retry or discard requires user review.",
+              "type": "boolean"
             }
           }
         },
@@ -128787,6 +128923,10 @@
             },
             "queueItemId": {
               "$ref": "#/definitions/QueueItemId"
+            },
+            "recoveryRequired": {
+              "description": "Admission happened before a crash, but consumption is uncertain. Never auto-drain; explicit retry or discard requires user review.",
+              "type": "boolean"
             }
           }
         },
@@ -131981,6 +132121,10 @@
             },
             "queueItemId": {
               "$ref": "#/definitions/QueueItemId"
+            },
+            "recoveryRequired": {
+              "description": "Admission happened before a crash, but consumption is uncertain. Never auto-drain; explicit retry or discard requires user review.",
+              "type": "boolean"
             }
           }
         },
@@ -135969,6 +136113,10 @@
             },
             "queueItemId": {
               "$ref": "#/definitions/QueueItemId"
+            },
+            "recoveryRequired": {
+              "description": "Admission happened before a crash, but consumption is uncertain. Never auto-drain; explicit retry or discard requires user review.",
+              "type": "boolean"
             }
           }
         },
@@ -139174,6 +139322,10 @@
             },
             "queueItemId": {
               "$ref": "#/definitions/QueueItemId"
+            },
+            "recoveryRequired": {
+              "description": "Admission happened before a crash, but consumption is uncertain. Never auto-drain; explicit retry or discard requires user review.",
+              "type": "boolean"
             }
           }
         },
@@ -143275,6 +143427,10 @@
             },
             "queueItemId": {
               "$ref": "#/definitions/QueueItemId"
+            },
+            "recoveryRequired": {
+              "description": "Admission happened before a crash, but consumption is uncertain. Never auto-drain; explicit retry or discard requires user review.",
+              "type": "boolean"
             }
           }
         },
@@ -146451,6 +146607,10 @@
             },
             "queueItemId": {
               "$ref": "#/definitions/QueueItemId"
+            },
+            "recoveryRequired": {
+              "description": "Admission happened before a crash, but consumption is uncertain. Never auto-drain; explicit retry or discard requires user review.",
+              "type": "boolean"
             }
           }
         },
@@ -149892,6 +150052,10 @@
             },
             "queueItemId": {
               "$ref": "#/definitions/QueueItemId"
+            },
+            "recoveryRequired": {
+              "description": "Admission happened before a crash, but consumption is uncertain. Never auto-drain; explicit retry or discard requires user review.",
+              "type": "boolean"
             }
           }
         },
@@ -153379,6 +153543,10 @@
             },
             "queueItemId": {
               "$ref": "#/definitions/QueueItemId"
+            },
+            "recoveryRequired": {
+              "description": "Admission happened before a crash, but consumption is uncertain. Never auto-drain; explicit retry or discard requires user review.",
+              "type": "boolean"
             }
           }
         },
@@ -159754,6 +159922,10 @@
             },
             "queueItemId": {
               "$ref": "#/definitions/QueueItemId"
+            },
+            "recoveryRequired": {
+              "description": "Admission happened before a crash, but consumption is uncertain. Never auto-drain; explicit retry or discard requires user review.",
+              "type": "boolean"
             }
           }
         },
@@ -162163,6 +162335,10 @@
             },
             "queueItemId": {
               "$ref": "#/definitions/QueueItemId"
+            },
+            "recoveryRequired": {
+              "description": "Admission happened before a crash, but consumption is uncertain. Never auto-drain; explicit retry or discard requires user review.",
+              "type": "boolean"
             }
           }
         },
@@ -162762,6 +162938,10 @@
             },
             "queueItemId": {
               "$ref": "#/definitions/QueueItemId"
+            },
+            "recoveryRequired": {
+              "description": "Admission happened before a crash, but consumption is uncertain. Never auto-drain; explicit retry or discard requires user review.",
+              "type": "boolean"
             }
           }
         },
@@ -163203,6 +163383,368 @@
       "title": "SessionQueueRemoveResult",
       "type": "object"
     },
+    "SessionQueueRetryParams": {
+      "$schema": "http://json-schema.org/draft-07/schema#",
+      "title": "SessionQueueRetryParams",
+      "description": "Explicitly release held recovery input after reviewing possible prior effects. The server assigns a fresh queue identity; this request is never auto-retried.",
+      "type": "object",
+      "required": [
+        "queueItemId",
+        "sessionId"
+      ],
+      "properties": {
+        "queueItemId": {
+          "$ref": "#/definitions/QueueItemId"
+        },
+        "sessionId": {
+          "$ref": "#/definitions/SessionId"
+        }
+      },
+      "definitions": {
+        "QueueItemId": {
+          "type": "string"
+        },
+        "SessionId": {
+          "type": "string"
+        }
+      }
+    },
+    "SessionQueueRetryResult": {
+      "$schema": "http://json-schema.org/draft-07/schema#",
+      "title": "SessionQueueRetryResult",
+      "type": "object"
+    },
+    "SessionQueueSteerParams": {
+      "$schema": "http://json-schema.org/draft-07/schema#",
+      "title": "SessionQueueSteerParams",
+      "description": "Transfer an existing queue identity, never a reconstructed display preview. Retries return the durable admission receipt for the same session and item.",
+      "type": "object",
+      "required": [
+        "expectedTurnId",
+        "queueItemId",
+        "sessionId"
+      ],
+      "properties": {
+        "expectedTurnId": {
+          "$ref": "#/definitions/TurnId"
+        },
+        "queueItemId": {
+          "$ref": "#/definitions/QueueItemId"
+        },
+        "sessionId": {
+          "$ref": "#/definitions/SessionId"
+        }
+      },
+      "definitions": {
+        "QueueItemId": {
+          "type": "string"
+        },
+        "SessionId": {
+          "type": "string"
+        },
+        "TurnId": {
+          "type": "string"
+        }
+      }
+    },
+    "SessionQueueSteerResult": {
+      "$schema": "http://json-schema.org/draft-07/schema#",
+      "title": "SessionQueueSteerResult",
+      "description": "Admission does not prove consumption or exactly-once external effects.",
+      "oneOf": [
+        {
+          "type": "object",
+          "required": [
+            "outcome",
+            "queueItemId",
+            "turnId"
+          ],
+          "properties": {
+            "outcome": {
+              "type": "string",
+              "enum": [
+                "accepted"
+              ]
+            },
+            "queueItemId": {
+              "$ref": "#/definitions/QueueItemId"
+            },
+            "turnId": {
+              "$ref": "#/definitions/TurnId"
+            }
+          }
+        },
+        {
+          "type": "object",
+          "required": [
+            "entry",
+            "outcome"
+          ],
+          "properties": {
+            "entry": {
+              "$ref": "#/definitions/QueueEntry"
+            },
+            "outcome": {
+              "type": "string",
+              "enum": [
+                "keptQueued"
+              ]
+            }
+          }
+        }
+      ],
+      "definitions": {
+        "HostMessageDelivery": {
+          "type": "string",
+          "enum": [
+            "followUp",
+            "steer"
+          ]
+        },
+        "HostMessageOrigin": {
+          "type": "object",
+          "required": [
+            "delivery",
+            "eventId",
+            "sender",
+            "source"
+          ],
+          "properties": {
+            "delivery": {
+              "$ref": "#/definitions/HostMessageDelivery"
+            },
+            "eventId": {
+              "type": "string"
+            },
+            "sender": {
+              "description": "Host-resolved sender session or background task identity, never a claim extracted from the message body.",
+              "type": "string"
+            },
+            "source": {
+              "$ref": "#/definitions/HostMessageSource"
+            }
+          }
+        },
+        "HostMessageSource": {
+          "type": "string",
+          "enum": [
+            "agent",
+            "backgroundTask",
+            "schedule"
+          ]
+        },
+        "ImageDetail": {
+          "type": "string",
+          "enum": [
+            "low",
+            "high",
+            "auto"
+          ]
+        },
+        "QueueEntry": {
+          "type": "object",
+          "required": [
+            "enqueuedAt",
+            "input",
+            "position",
+            "preview",
+            "queueItemId"
+          ],
+          "properties": {
+            "enqueuedAt": {
+              "type": "string",
+              "format": "date-time"
+            },
+            "input": {
+              "description": "Full editable content; `session/queue/update` replaces it wholesale.",
+              "type": "array",
+              "items": {
+                "$ref": "#/definitions/UserInput"
+              }
+            },
+            "origin": {
+              "description": "Host-owned provenance for queued notifications; not editable user input.",
+              "anyOf": [
+                {
+                  "$ref": "#/definitions/HostMessageOrigin"
+                },
+                {
+                  "type": "null"
+                }
+              ]
+            },
+            "position": {
+              "type": "integer",
+              "format": "uint32",
+              "minimum": 0.0
+            },
+            "preview": {
+              "description": "Short single-line preview for list rendering.",
+              "type": "string"
+            },
+            "queueItemId": {
+              "$ref": "#/definitions/QueueItemId"
+            },
+            "recoveryRequired": {
+              "description": "Admission happened before a crash, but consumption is uncertain. Never auto-drain; explicit retry or discard requires user review.",
+              "type": "boolean"
+            }
+          }
+        },
+        "QueueItemId": {
+          "type": "string"
+        },
+        "TurnId": {
+          "type": "string"
+        },
+        "UserInput": {
+          "description": "One submission = one `UserMessage` item whose content is a list of parts.",
+          "oneOf": [
+            {
+              "type": "object",
+              "required": [
+                "text",
+                "type"
+              ],
+              "properties": {
+                "text": {
+                  "type": "string"
+                },
+                "type": {
+                  "type": "string",
+                  "enum": [
+                    "text"
+                  ]
+                }
+              }
+            },
+            {
+              "type": "object",
+              "required": [
+                "type",
+                "uri"
+              ],
+              "properties": {
+                "detail": {
+                  "anyOf": [
+                    {
+                      "$ref": "#/definitions/ImageDetail"
+                    },
+                    {
+                      "type": "null"
+                    }
+                  ]
+                },
+                "mimeType": {
+                  "type": [
+                    "string",
+                    "null"
+                  ]
+                },
+                "type": {
+                  "type": "string",
+                  "enum": [
+                    "image"
+                  ]
+                },
+                "uri": {
+                  "type": "string"
+                }
+              }
+            },
+            {
+              "type": "object",
+              "required": [
+                "path",
+                "type"
+              ],
+              "properties": {
+                "detail": {
+                  "anyOf": [
+                    {
+                      "$ref": "#/definitions/ImageDetail"
+                    },
+                    {
+                      "type": "null"
+                    }
+                  ]
+                },
+                "path": {
+                  "type": "string"
+                },
+                "type": {
+                  "type": "string",
+                  "enum": [
+                    "localImage"
+                  ]
+                }
+              }
+            },
+            {
+              "description": "Experimental; not part of the v1 guaranteed modalities.",
+              "type": "object",
+              "required": [
+                "type",
+                "uri"
+              ],
+              "properties": {
+                "mimeType": {
+                  "type": [
+                    "string",
+                    "null"
+                  ]
+                },
+                "type": {
+                  "type": "string",
+                  "enum": [
+                    "audio"
+                  ]
+                },
+                "uri": {
+                  "type": "string"
+                }
+              }
+            },
+            {
+              "type": "object",
+              "required": [
+                "name",
+                "type"
+              ],
+              "properties": {
+                "name": {
+                  "type": "string"
+                },
+                "type": {
+                  "type": "string",
+                  "enum": [
+                    "skill"
+                  ]
+                }
+              }
+            },
+            {
+              "type": "object",
+              "required": [
+                "type",
+                "uri"
+              ],
+              "properties": {
+                "type": {
+                  "type": "string",
+                  "enum": [
+                    "mention"
+                  ]
+                },
+                "uri": {
+                  "type": "string"
+                }
+              }
+            }
+          ]
+        }
+      }
+    },
     "SessionQueueUpdateParams": {
       "$schema": "http://json-schema.org/draft-07/schema#",
       "title": "SessionQueueUpdateParams",
@@ -163503,6 +164045,10 @@
             },
             "queueItemId": {
               "$ref": "#/definitions/QueueItemId"
+            },
+            "recoveryRequired": {
+              "description": "Admission happened before a crash, but consumption is uncertain. Never auto-drain; explicit retry or discard requires user review.",
+              "type": "boolean"
             }
           }
         },
@@ -167265,6 +167811,10 @@
             },
             "queueItemId": {
               "$ref": "#/definitions/QueueItemId"
+            },
+            "recoveryRequired": {
+              "description": "Admission happened before a crash, but consumption is uncertain. Never auto-drain; explicit retry or discard requires user review.",
+              "type": "boolean"
             }
           }
         },
@@ -171902,6 +172452,10 @@
             },
             "queueItemId": {
               "$ref": "#/definitions/QueueItemId"
+            },
+            "recoveryRequired": {
+              "description": "Admission happened before a crash, but consumption is uncertain. Never auto-drain; explicit retry or discard requires user review.",
+              "type": "boolean"
             }
           }
         },
@@ -176751,6 +177305,10 @@
             },
             "queueItemId": {
               "$ref": "#/definitions/QueueItemId"
+            },
+            "recoveryRequired": {
+              "description": "Admission happened before a crash, but consumption is uncertain. Never auto-drain; explicit retry or discard requires user review.",
+              "type": "boolean"
             }
           }
         },
@@ -180996,6 +181554,10 @@
             },
             "queueItemId": {
               "$ref": "#/definitions/QueueItemId"
+            },
+            "recoveryRequired": {
+              "description": "Admission happened before a crash, but consumption is uncertain. Never auto-drain; explicit retry or discard requires user review.",
+              "type": "boolean"
             }
           }
         },
@@ -186374,6 +186936,10 @@
             },
             "queueItemId": {
               "$ref": "#/definitions/QueueItemId"
+            },
+            "recoveryRequired": {
+              "description": "Admission happened before a crash, but consumption is uncertain. Never auto-drain; explicit retry or discard requires user review.",
+              "type": "boolean"
             }
           }
         },
@@ -189560,6 +190126,10 @@
             },
             "queueItemId": {
               "$ref": "#/definitions/QueueItemId"
+            },
+            "recoveryRequired": {
+              "description": "Admission happened before a crash, but consumption is uncertain. Never auto-drain; explicit retry or discard requires user review.",
+              "type": "boolean"
             }
           }
         },
@@ -194358,6 +194928,10 @@
             },
             "queueItemId": {
               "$ref": "#/definitions/QueueItemId"
+            },
+            "recoveryRequired": {
+              "description": "Admission happened before a crash, but consumption is uncertain. Never auto-drain; explicit retry or discard requires user review.",
+              "type": "boolean"
             }
           }
         },
@@ -199322,6 +199896,10 @@
             },
             "queueItemId": {
               "$ref": "#/definitions/QueueItemId"
+            },
+            "recoveryRequired": {
+              "description": "Admission happened before a crash, but consumption is uncertain. Never auto-drain; explicit retry or discard requires user review.",
+              "type": "boolean"
             }
           }
         },
@@ -202549,6 +203127,10 @@
             },
             "queueItemId": {
               "$ref": "#/definitions/QueueItemId"
+            },
+            "recoveryRequired": {
+              "description": "Admission happened before a crash, but consumption is uncertain. Never auto-drain; explicit retry or discard requires user review.",
+              "type": "boolean"
             }
           }
         },
@@ -205800,6 +206382,10 @@
             },
             "queueItemId": {
               "$ref": "#/definitions/QueueItemId"
+            },
+            "recoveryRequired": {
+              "description": "Admission happened before a crash, but consumption is uncertain. Never auto-drain; explicit retry or discard requires user review.",
+              "type": "boolean"
             }
           }
         },
@@ -209509,6 +210095,10 @@
             },
             "queueItemId": {
               "$ref": "#/definitions/QueueItemId"
+            },
+            "recoveryRequired": {
+              "description": "Admission happened before a crash, but consumption is uncertain. Never auto-drain; explicit retry or discard requires user review.",
+              "type": "boolean"
             }
           }
         },
@@ -213127,6 +213717,10 @@
             },
             "queueItemId": {
               "$ref": "#/definitions/QueueItemId"
+            },
+            "recoveryRequired": {
+              "description": "Admission happened before a crash, but consumption is uncertain. Never auto-drain; explicit retry or discard requires user review.",
+              "type": "boolean"
             }
           }
         },
@@ -216889,6 +217483,10 @@
             },
             "queueItemId": {
               "$ref": "#/definitions/QueueItemId"
+            },
+            "recoveryRequired": {
+              "description": "Admission happened before a crash, but consumption is uncertain. Never auto-drain; explicit retry or discard requires user review.",
+              "type": "boolean"
             }
           }
         },
@@ -220069,6 +220667,10 @@
             },
             "queueItemId": {
               "$ref": "#/definitions/QueueItemId"
+            },
+            "recoveryRequired": {
+              "description": "Admission happened before a crash, but consumption is uncertain. Never auto-drain; explicit retry or discard requires user review.",
+              "type": "boolean"
             }
           }
         },
@@ -221889,6 +222491,10 @@
             },
             "queueItemId": {
               "$ref": "#/definitions/QueueItemId"
+            },
+            "recoveryRequired": {
+              "description": "Admission happened before a crash, but consumption is uncertain. Never auto-drain; explicit retry or discard requires user review.",
+              "type": "boolean"
             }
           }
         },
@@ -223753,6 +224359,10 @@
             },
             "queueItemId": {
               "$ref": "#/definitions/QueueItemId"
+            },
+            "recoveryRequired": {
+              "description": "Admission happened before a crash, but consumption is uncertain. Never auto-drain; explicit retry or discard requires user review.",
+              "type": "boolean"
             }
           }
         },
@@ -226961,6 +227571,10 @@
             },
             "queueItemId": {
               "$ref": "#/definitions/QueueItemId"
+            },
+            "recoveryRequired": {
+              "description": "Admission happened before a crash, but consumption is uncertain. Never auto-drain; explicit retry or discard requires user review.",
+              "type": "boolean"
             }
           }
         },
@@ -230821,6 +231435,10 @@
             },
             "queueItemId": {
               "$ref": "#/definitions/QueueItemId"
+            },
+            "recoveryRequired": {
+              "description": "Admission happened before a crash, but consumption is uncertain. Never auto-drain; explicit retry or discard requires user review.",
+              "type": "boolean"
             }
           }
         },
@@ -234015,6 +234633,10 @@
             },
             "queueItemId": {
               "$ref": "#/definitions/QueueItemId"
+            },
+            "recoveryRequired": {
+              "description": "Admission happened before a crash, but consumption is uncertain. Never auto-drain; explicit retry or discard requires user review.",
+              "type": "boolean"
             }
           }
         },
@@ -237195,6 +237817,10 @@
             },
             "queueItemId": {
               "$ref": "#/definitions/QueueItemId"
+            },
+            "recoveryRequired": {
+              "description": "Admission happened before a crash, but consumption is uncertain. Never auto-drain; explicit retry or discard requires user review.",
+              "type": "boolean"
             }
           }
         },
@@ -239184,6 +239810,14 @@
     "session/queue/remove": {
       "outgoingRequest": "SessionQueueRemoveParams",
       "incomingResult": "SessionQueueRemoveResult"
+    },
+    "session/queue/retry": {
+      "outgoingRequest": "SessionQueueRetryParams",
+      "incomingResult": "SessionQueueRetryResult"
+    },
+    "session/queue/steer": {
+      "outgoingRequest": "SessionQueueSteerParams",
+      "incomingResult": "SessionQueueSteerResult"
     },
     "session/queue/update": {
       "outgoingRequest": "SessionQueueUpdateParams",

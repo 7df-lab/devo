@@ -428,6 +428,23 @@ pub static NATIVE_METHODS: &[MethodSpec] = &[
         required_capability: None,
         idempotency: Idempotency::None,
     },
+    MethodSpec {
+        name: "session/queue/steer",
+        params_schema: schema_of::<SessionQueueSteerParams>,
+        result_schema: schema_of::<SessionQueueSteerResult>,
+        error_codes: &[codes::SESSION_NOT_FOUND, codes::QUEUE_ITEM_NOT_FOUND],
+        required_capability: None,
+        // The existing queue identity is already the operation identity.
+        idempotency: Idempotency::None,
+    },
+    MethodSpec {
+        name: "session/queue/retry",
+        params_schema: schema_of::<SessionQueueRetryParams>,
+        result_schema: schema_of::<SessionQueueRetryResult>,
+        error_codes: &[codes::SESSION_NOT_FOUND, codes::QUEUE_ITEM_NOT_FOUND],
+        required_capability: None,
+        idempotency: Idempotency::None,
+    },
     // ── Catalog / context ──
     MethodSpec {
         name: "model/catalog/refresh",

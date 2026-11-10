@@ -5,6 +5,7 @@
 //! from the orchestration loop in this file.
 
 mod event;
+mod pending_input;
 mod prompt_estimate;
 mod provider_retry;
 mod stream_consumer;
@@ -523,41 +524,7 @@ pub async fn query(
     loop {
         let pending = session.take_turn_pending_input();
 
-        for item in &pending {
-            match &item.kind {
-                devo_protocol::PendingInputKind::UserText { text } => {
-                    session.push_message(Message::user(text.clone()));
-                }
-                devo_protocol::PendingInputKind::UserInput {
-                    prompt_text,
-                    prompt_messages,
-                    ..
-                } => {
-                    if prompt_messages.is_empty() {
-                        session.push_message(Message::user(prompt_text.clone()));
-                    } else {
-                        for prompt_message in prompt_messages {
-                            session.push_message(Message::user(prompt_message.clone()));
-                        }
-                    }
-                }
-                devo_protocol::PendingInputKind::ToolCallBlockedByHook {
-                    tool_use_id,
-                    reason,
-                } => {
-                    session.push_message(Message::user(format!(
-                        "[Tool call {} was blocked: {}]",
-                        tool_use_id, reason
-                    )));
-                }
-                devo_protocol::PendingInputKind::BudgetLimitSteering => {
-                    session.push_message(Message::system(
-                        "Note: The conversation is approaching the token budget limit. \
-                         Please be concise and consider wrapping up the current task.",
-                    ));
-                }
-            }
-        }
+        pending_input::push_pending_input(session, &pending);
 
         // Host goal changes must reach the checked-out working copy before
         // assembling another request, including after a Python completion call.

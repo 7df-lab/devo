@@ -503,8 +503,22 @@ async fn preset_change_and_explicit_sandbox_precedence_survive_cold_resume() -> 
             .await
             .context("preset update")?;
         assert!(response.get("error").is_none(), "{response}");
+        assert_eq!(
+            response["result"]["session"]["settings"]["sandboxProfile"],
+            serde_json::json!(sandbox),
+            "settings response must describe the applied sandbox",
+        );
         let before = session_settings(&runtime, connection, session_id, "session/read").await?;
         assert_eq!(before.sandbox_profile.as_deref(), Some(sandbox));
+        let canonical = devo_core::read_canonical_history(
+            &data_root
+                .path()
+                .join("sessions")
+                .join(format!("{session_id}.jsonl")),
+        )?
+        .session
+        .context("canonical session")?;
+        assert_eq!(canonical.settings, before);
         let restarted = build_runtime(data_root.path())?;
         restarted.load_persisted_sessions().await?;
         let connection = initialize_connection(&restarted, TestProtocol::Native).await?;
@@ -514,5 +528,66 @@ async fn preset_change_and_explicit_sandbox_precedence_survive_cold_resume() -> 
             "preset {preset} must replace the initial sandbox"
         );
     }
+    Ok(())
+}
+
+#[tokio::test]
+async fn explicit_sandbox_after_preset_change_is_not_a_noop() -> Result<()> {
+    let data_root = TempDir::new()?;
+    let cwd = data_root.path().join("repo");
+    std::fs::create_dir_all(&cwd)?;
+    write_project_config(
+        data_root.path(),
+        &devo_core::project_config_key(&cwd),
+        "strict",
+    )?;
+    let runtime = build_runtime(data_root.path())?;
+    let connection = initialize_connection(&runtime, TestProtocol::Native).await?;
+    let session_id = start_session(&runtime, connection, &cwd).await?;
+    let response = runtime
+        .handle_incoming(
+            connection,
+            serde_json::json!({
+                "id": 11,
+                "method": "session/metadata/update",
+                "params": {
+                    "sessionId": session_id,
+                    "expectedVersion": 0,
+                    "settings": { "permissionProfile": "default" }
+                }
+            }),
+        )
+        .await
+        .context("preset update")?;
+    assert!(response.get("error").is_none(), "{response}");
+    let response = update_sandbox_profile(&runtime, connection, session_id, "strict").await?;
+    assert!(response.get("error").is_none(), "{response}");
+    assert_eq!(
+        response["result"]["session"]["settings"]["sandboxProfile"],
+        serde_json::json!("strict"),
+    );
+    let before = session_settings(&runtime, connection, session_id, "session/read").await?;
+    let canonical = devo_core::read_canonical_history(
+        &data_root
+            .path()
+            .join("sessions")
+            .join(format!("{session_id}.jsonl")),
+    )?
+    .session
+    .context("canonical session")?;
+    assert_eq!(canonical.settings, before);
+    assert_eq!(
+        (before.permission_profile, before.sandbox_profile.clone()),
+        (
+            devo_protocol::native::model::PermissionProfile::Default,
+            Some("strict".to_string())
+        ),
+        "the explicit sandbox must be applied even when it matches the initial header",
+    );
+    let restarted = build_runtime(data_root.path())?;
+    restarted.load_persisted_sessions().await?;
+    let connection = initialize_connection(&restarted, TestProtocol::Native).await?;
+    let after = session_settings(&restarted, connection, session_id, "session/resume").await?;
+    assert_eq!(after, before);
     Ok(())
 }

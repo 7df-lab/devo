@@ -161,7 +161,14 @@ pub(super) async fn run_session_actor(
                     require_idle_session,
                     "PopQueuedTurnInput"
                 );
-                let popped = queue.pop_front().and_then(pop_queued_turn_input_data);
+                let popped = if queue
+                    .front()
+                    .is_some_and(crate::runtime::handlers::queue_steer::requires_queue_review)
+                {
+                    None
+                } else {
+                    queue.pop_front().and_then(pop_queued_turn_input_data)
+                };
                 let _ = reply.send(popped);
             }
             SessionCommand::EnqueuePendingTurnInput { item } => {
