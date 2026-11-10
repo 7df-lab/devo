@@ -79,7 +79,10 @@ async fn final_context_occupancy_waits_for_full_outbound_queue() -> Result<()> {
         .publish_live_context_occupancy(
             session_id,
             Some(1000),
-            Default::default(),
+            devo_core::RawContextBreakdown {
+                conversation: 1,
+                ..Default::default()
+            },
             50,
             OutboundDeliveryPolicy::BestEffort,
         )
@@ -91,7 +94,10 @@ async fn final_context_occupancy_waits_for_full_outbound_queue() -> Result<()> {
                 .publish_live_context_occupancy(
                     session_id,
                     Some(1000),
-                    Default::default(),
+                    devo_core::RawContextBreakdown {
+                        conversation: 1,
+                        ..Default::default()
+                    },
                     120,
                     OutboundDeliveryPolicy::Reliable,
                 )
