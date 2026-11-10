@@ -199,8 +199,8 @@ impl ServerRuntime {
         } else {
             model.clone()
         };
-        let seeded_settings = seed.as_ref().map(|seed| {
-            let mut settings = vec![
+        let mut initial_settings = seed.as_ref().map_or_else(Vec::new, |_| {
+            vec![
                 (
                     SessionSettingsField::Model,
                     serde_json::json!(persisted_model),
@@ -209,14 +209,7 @@ impl ServerRuntime {
                     SessionSettingsField::ModelBindingId,
                     serde_json::json!(model_binding_id),
                 ),
-            ];
-            if let Some(sandbox) = seed.config.sandbox_profile.as_ref() {
-                settings.push((
-                    SessionSettingsField::SandboxProfile,
-                    serde_json::json!(sandbox),
-                ));
-            }
-            settings
+            ]
         });
         let initial_effort = initial_turn_config.reasoning_effort_selection.clone();
         let mut invented_persistence =
@@ -252,8 +245,8 @@ impl ServerRuntime {
                 reasoning_effort: None,
             },
             settings: devo_protocol::native::session::SessionSettings {
-                // Sandbox temporarily disabled: new sessions advertise the
-                // full-access default (matches the session_context fallback).
+                // Replaced below by the resolved workspace policy before
+                // persistence or publication.
                 permission_profile: devo_protocol::native::model::PermissionProfile::FullAccess,
                 reasoning_effort: initial_effort,
                 mode: Some("build".to_string()),
@@ -319,6 +312,16 @@ impl ServerRuntime {
         let permission_preset =
             protocol_preset_from_safety(core_session.config.permission_profile.preset);
         summary.set_permission_preset(permission_preset);
+        summary.settings.sandbox_profile = core_session.config.sandbox_profile.clone();
+        // Freeze the resolved sandbox alongside the initial preset. Otherwise a
+        // cold resume re-derives the preset's sandbox and loses config overrides.
+        // A later preset change still clears this field through normal replay.
+        if let Some(sandbox) = core_session.config.sandbox_profile.as_ref() {
+            initial_settings.push((
+                SessionSettingsField::SandboxProfile,
+                serde_json::json!(sandbox),
+            ));
+        }
         if let Some(invented) = invented_persistence.as_mut() {
             invented.extras.permission_preset = Some(permission_preset);
         }
@@ -365,20 +368,12 @@ impl ServerRuntime {
             None => None,
         };
         if let Some(invented) = &invented_persistence {
-            let persisted = if let Some(settings) = seeded_settings {
-                self.rollout_store.append_seeded_session_meta_create_at(
-                    &invented.rollout_path,
-                    &summary.native,
-                    invented.extras.clone(),
-                    &settings,
-                )
-            } else {
-                self.rollout_store.append_session_meta_create_at(
-                    &invented.rollout_path,
-                    &summary.native,
-                    Some(invented.extras.clone()),
-                )
-            };
+            let persisted = self.rollout_store.append_seeded_session_meta_create_at(
+                &invented.rollout_path,
+                &summary.native,
+                invented.extras.clone(),
+                &initial_settings,
+            );
             if let Err(error) = persisted {
                 return self.error_response(
                     request_id,
@@ -940,8 +935,11 @@ impl ServerRuntime {
                 );
                 overlay_profile = Some(profile);
             }
-            if settings.sandbox_profile != current.sandbox_profile
-                && let Some(name) = &settings.sandbox_profile
+            // A preset change clears the saved sandbox. Reapply an explicit
+            // sandbox from the same patch even when it matches the old value.
+            if let Some(name) = &settings.sandbox_profile
+                && (overlay_profile.is_some()
+                    || settings.sandbox_profile != current.sandbox_profile)
             {
                 let native_name = match crate::sandbox_profile::normalize_sandbox_profile_name(
                     name,

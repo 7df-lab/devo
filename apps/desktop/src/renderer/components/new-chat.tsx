@@ -60,13 +60,13 @@ import {
 	DEFAULT_COMPOSER_PERMISSION_PROFILE,
 	type ComposerPermissionProfile,
 	PERMISSION_PICKER_ENABLED,
-	stashComposerPermissionForSession,
 } from "./chat/composer-permission"
 import { goalPromptText, parseComposerSlash } from "./chat/composer-slash"
 import { PromptAttachmentPreview } from "./chat/prompt-attachments"
 import { PromptToolbar, StatusBar } from "./chat/prompt-toolbar"
 import { SkillPickerDialog } from "./chat/skill-picker-dialog"
 import { NewChatProjectPicker } from "./new-chat-project-picker"
+import { persistNewChatLaunchSettings } from "./new-chat-settings"
 
 // ============================================================
 // Worktree mode toggle
@@ -253,8 +253,9 @@ export function NewChat() {
 	const [selectedVariant, setSelectedVariant] = useState<string | undefined>(undefined)
 	const [collaborationMode, setCollaborationMode] = useState<"build" | "plan">("build")
 	const [activeTrigger, setActiveTrigger] = useState<"goal" | null>(null)
+	// An unset picker inherits the server/project policy, rather than overwriting it.
 	const [permissionProfile, setPermissionProfile] =
-		useState<ComposerPermissionProfile>(DEFAULT_COMPOSER_PERMISSION_PROFILE)
+		useState<ComposerPermissionProfile | undefined>(undefined)
 	const [modelPickerOpen, setModelPickerOpen] = useState(false)
 	const [skillPickerOpen, setSkillPickerOpen] = useState(false)
 
@@ -554,23 +555,6 @@ export function NewChat() {
 		})
 	}, [selectedModel, selectedDirectory, selectedVariant, selectedAgent])
 
-	const persistLaunchSettings = useCallback(
-		async (directory: string, sessionId: string) => {
-			const client = getProjectClient(directory)
-			if (!client?.session?.updateSettings) return
-			try {
-				await client.session.updateSettings({
-					sessionId: sessionId,
-					permissionProfile,
-					mode: collaborationMode,
-				})
-			} catch (err) {
-				console.error("Failed to persist launch session settings:", err)
-			}
-		},
-		[collaborationMode, permissionProfile],
-	)
-
 	/** Navigate to the chat view for a given session. */
 	const navigateToSession = useCallback(
 		(sessionId: string) => {
@@ -598,8 +582,11 @@ export function NewChat() {
 			}
 
 			persistProjectModel()
-			stashComposerPermissionForSession(session.id, permissionProfile)
-			await persistLaunchSettings(selectedDirectory, session.id)
+			await persistNewChatLaunchSettings(getProjectClient(selectedDirectory), {
+				sessionId: session.id,
+				mode: collaborationMode,
+				permissionProfile,
+			})
 			navigateToSession(session.id)
 
 			await sendPrompt(selectedDirectory, session.id, promptText, {
@@ -620,7 +607,7 @@ export function NewChat() {
 			selectedVariant,
 			clearDraft,
 			persistProjectModel,
-			persistLaunchSettings,
+			permissionProfile,
 			navigateToSession,
 			collaborationMode,
 			vcs,
@@ -697,8 +684,11 @@ export function NewChat() {
 						branch: result.branchName,
 					})
 
-					stashComposerPermissionForSession(session.id, permissionProfile)
-					await persistLaunchSettings(sdkDirectory, session.id)
+					await persistNewChatLaunchSettings(getProjectClient(sdkDirectory), {
+						sessionId: session.id,
+						mode: collaborationMode,
+						permissionProfile,
+					})
 
 					// Navigate to the real session, then clean up the stub
 					navigateToSession(session.id)
@@ -732,7 +722,7 @@ export function NewChat() {
 			selectedVariant,
 			clearDraft,
 			persistProjectModel,
-			persistLaunchSettings,
+			permissionProfile,
 			navigateToSession,
 			collaborationMode,
 			navigate,
@@ -849,7 +839,7 @@ export function NewChat() {
 										<AttachButton disabled={launching || !selectedDirectory} />
 										{PERMISSION_PICKER_ENABLED && (
 											<ComposerPermissionPicker
-												value={permissionProfile}
+												value={permissionProfile ?? DEFAULT_COMPOSER_PERMISSION_PROFILE}
 												onChange={setPermissionProfile}
 												disabled={launching || !selectedDirectory}
 											/>

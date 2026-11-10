@@ -126,8 +126,8 @@ describe("composer persist-on-selection", () => {
 		).toBe(false)
 	})
 
-	test("new-session composer persists permission and plan onto the created session", () => {
-		expect(newChatSource.includes("persistLaunchSettings")).toBe(true)
+	test("new-session composer persists explicit permission and plan onto the created session", () => {
+		expect(newChatSource.includes("persistNewChatLaunchSettings")).toBe(true)
 		expect(newChatSource.includes("permissionProfile,")).toBe(true)
 		expect(newChatSource.includes("mode: collaborationMode")).toBe(true)
 		expect(newChatSource.includes("DEFAULT_COMPOSER_PERMISSION_PROFILE")).toBe(true)

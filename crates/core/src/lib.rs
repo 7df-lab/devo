@@ -24,6 +24,7 @@ mod response_item;
 mod resume_perf_probe;
 pub mod rlm_prompts;
 mod session;
+mod session_defaults;
 mod session_store;
 mod skills;
 mod state;
