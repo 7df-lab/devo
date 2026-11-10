@@ -376,3 +376,81 @@ async fn busy_edit_lifecycle_and_response_match_the_durable_envelope() -> Result
     );
     Ok(())
 }
+
+#[tokio::test(flavor = "multi_thread", worker_threads = 2)]
+async fn repeated_busy_edits_accept_first_attempt_and_preserve_cold_history() -> Result<()> {
+    let root = TempDir::new()?;
+    let (tx, mut calls) = mpsc::unbounded_channel();
+    let server = runtime(root.path(), tx.clone());
+    let (connection, mut notifications) = connect(&server).await?;
+    let session = new_session(&server, connection, root.path()).await?;
+    start(&server, connection, session, "busy original").await?;
+    let mut replacement = None;
+    for index in 1..=16 {
+        let (_, unfinished) = timeout(Duration::from_secs(10), calls.recv())
+            .await?
+            .context("active provider stream")?;
+        // Reads must remain available while the old query is still pending.
+        timeout(
+            Duration::from_secs(2),
+            rpc(&server, connection, "session/list", json!({})),
+        )
+        .await??;
+        timeout(
+            Duration::from_secs(2),
+            rpc(&server, connection, "runtime/ping", json!({})),
+        )
+        .await??;
+        let target = items(&server, connection, session)
+            .await?
+            .into_iter()
+            .rev()
+            .find(|item| matches!(item.item, Item::UserMessage { .. }))
+            .context("busy target")?;
+        let result: SessionMessageEditResult = serde_json::from_value(
+            timeout(
+                Duration::from_secs(12),
+                rpc(
+                    &server,
+                    connection,
+                    "session/message/edit",
+                    json!({
+                        "sessionId": session, "itemId": target.id, "expectedRevision": 0,
+                        "content": [{"type": "text", "text": format!("busy edit {index}")}],
+                        "workspaceRestore": "skip", "idempotencyKey": format!("busy-edit-{index}")
+                    }),
+                ),
+            )
+            .await??,
+        )?;
+        drop(unfinished);
+        assert_eq!(result.item.revision, target.revision + 1);
+        assert_eq!(result.item.parent_id, None);
+        replacement = result.replacement_turn_id;
+    }
+    finish(
+        &mut calls,
+        &mut notifications,
+        replacement.context("final replacement")?,
+    )
+    .await?;
+    let expected = items(&server, connection, session).await?;
+    assert_eq!(
+        transcript(&expected),
+        vec![
+            json!({"user": [{"type": "text", "text": "busy edit 16"}]}),
+            json!({"assistant": "answer"}),
+        ]
+    );
+    let restarted = runtime(root.path(), tx);
+    let (connection, _events) = connect(&restarted).await?;
+    rpc(
+        &restarted,
+        connection,
+        "session/resume",
+        json!({"sessionId": session}),
+    )
+    .await?;
+    assert_eq!(items(&restarted, connection, session).await?, expected);
+    Ok(())
+}

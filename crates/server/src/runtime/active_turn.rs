@@ -3,7 +3,7 @@ use std::sync::Arc;
 
 use devo_protocol::native::ids::SessionId;
 use devo_protocol::native::ids::TurnId;
-use tokio::sync::Mutex;
+use tokio::sync::{Mutex, Notify};
 use tokio_util::sync::CancellationToken;
 
 use super::session_actor::state::{SessionStreamState, SpawnSnapshot};
@@ -32,9 +32,26 @@ pub(crate) struct ActiveTurnExecution {
 #[derive(Default)]
 pub(crate) struct ActiveTurnRegistry {
     turns: Mutex<HashMap<SessionId, ActiveTurnExecution>>,
+    released: Notify,
 }
 
 impl ActiveTurnRegistry {
+    /// Waits for this execution's admission to be released after its actor merge.
+    /// A later turn must not extend the wait or be canceled by the caller.
+    pub(crate) async fn wait_for_turn_release(&self, session_id: SessionId, turn_id: TurnId) {
+        loop {
+            let released = self.released.notified();
+            tokio::pin!(released);
+            // Register before reading the predicate so cleanup cannot be lost
+            // between the registry read and the first poll of the notification.
+            released.as_mut().enable();
+            if self.active_turn_id(session_id).await != Some(turn_id) {
+                return;
+            }
+            released.await;
+        }
+    }
+
     fn entry(_session_id: &SessionId) -> ActiveTurnExecution {
         ActiveTurnExecution {
             turn: None,
@@ -163,7 +180,15 @@ impl ActiveTurnRegistry {
             execution.active_user_text_turn_id = Some(turn.id);
             execution.active_user_texts.clear();
         }
+        let changed = execution
+            .turn
+            .as_ref()
+            .is_some_and(|previous| previous.id != turn.id);
         execution.turn = Some(turn);
+        drop(turns);
+        if changed {
+            self.released.notify_waiters();
+        }
     }
 
     /// Claims a session for an in-flight turn when no active execution exists.
@@ -253,11 +278,14 @@ impl ActiveTurnRegistry {
     /// Drops all runtime state for a session turn, including stream mirrors.
     /// Returns any explicit goal activation atomically with releasing admission.
     pub(crate) async fn clear_runtime_handles(&self, session_id: SessionId) -> bool {
-        self.turns
+        let activation = self
+            .turns
             .lock()
             .await
             .remove(&session_id)
-            .is_some_and(|execution| execution.goal_continuation_requested)
+            .is_some_and(|execution| execution.goal_continuation_requested);
+        self.released.notify_waiters();
+        activation
     }
 
     pub(crate) async fn register_spawn_snapshot(
@@ -330,6 +358,7 @@ impl ActiveTurnRegistry {
 
     pub(crate) async fn remove_session(&self, session_id: SessionId) {
         self.turns.lock().await.remove(&session_id);
+        self.released.notify_waiters();
     }
 
     pub(crate) async fn has_session(&self, session_id: SessionId) -> bool {
@@ -388,5 +417,60 @@ impl ActiveTurnRegistry {
         if should_remove {
             turns.remove(session_id);
         }
+    }
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+    use pretty_assertions::assert_eq;
+    use std::task::Poll;
+
+    fn turn(session_id: SessionId) -> devo_protocol::native::turn::Turn {
+        serde_json::from_value(serde_json::json!({
+            "id": TurnId::new(), "sessionId": session_id, "sequence": 1,
+            "kind": "regular", "status": "inProgress",
+            "model": {"provider": "test", "model": "test-model"},
+            "startedAt": chrono::Utc::now()
+        }))
+        .expect("test turn")
+    }
+
+    #[tokio::test]
+    async fn release_wait_ignores_other_sessions_and_finishes_for_replaced_identity() {
+        let registry = ActiveTurnRegistry::default();
+        let session = SessionId::new();
+        let original = turn(session);
+        registry.register_turn(session, original.clone()).await;
+        let wait = registry.wait_for_turn_release(session, original.id);
+        tokio::pin!(wait);
+        assert_eq!(futures::poll!(&mut wait), Poll::Pending);
+        registry.clear_runtime_handles(SessionId::new()).await;
+        assert_eq!(futures::poll!(&mut wait), Poll::Pending);
+        registry.register_turn(session, original.clone()).await;
+        assert_eq!(futures::poll!(&mut wait), Poll::Pending);
+        let newer = turn(session);
+        registry.register_turn(session, newer.clone()).await;
+        assert_eq!(futures::poll!(&mut wait), Poll::Ready(()));
+        assert_eq!(registry.active_turn(session).await, Some(newer));
+    }
+
+    #[tokio::test]
+    async fn release_wait_observes_prior_cleanup_and_wakes_all_on_removal() {
+        let registry = ActiveTurnRegistry::default();
+        let session = SessionId::new();
+        let original = turn(session);
+        registry.register_turn(session, original.clone()).await;
+        let first = registry.wait_for_turn_release(session, original.id);
+        let second = registry.wait_for_turn_release(session, original.id);
+        tokio::pin!(first, second);
+        assert_eq!(futures::poll!(&mut first), Poll::Pending);
+        assert_eq!(futures::poll!(&mut second), Poll::Pending);
+        registry.remove_session(session).await;
+        assert_eq!(futures::poll!(&mut first), Poll::Ready(()));
+        assert_eq!(futures::poll!(&mut second), Poll::Ready(()));
+        let after = registry.wait_for_turn_release(session, original.id);
+        tokio::pin!(after);
+        assert_eq!(futures::poll!(&mut after), Poll::Ready(()));
     }
 }
