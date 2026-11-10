@@ -99,6 +99,7 @@ fn generated_native_typescript_has_unique_scoped_types_and_complete_item_graph()
 #[test]
 fn generated_native_typescript_matches_checked_in_tui_artifact() {
     let committed = include_str!("../../../apps/tui/src/generated/protocol/native.ts");
+    assert!(committed.contains("export type UsageField ="));
     assert_eq!(
         committed.replace("\r\n", "\n"),
         devo_protocol::acp_ts::generate_protocol_typescript()

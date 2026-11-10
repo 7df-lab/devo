@@ -16,7 +16,8 @@ import { BarChart3Icon, CoinsIcon, TimerIcon } from "lucide-react"
 import { Fragment, memo, useCallback, useEffect, useRef, useState } from "react"
 import { type SessionMetricsValue, sessionMetricsFamily } from "../atoms/derived/session-metrics"
 import type { ChatTurn } from "../hooks/use-session-chat"
-import { computeLatestTurnTimerSplit, formatTokens, formatWorkDuration } from "../lib/session-metrics"
+import { computeLatestTurnTimerSplit, formatWorkDuration } from "../lib/session-metrics"
+import { SessionUsageDetails } from "./session-usage-details"
 
 // ============================================================
 // Tool category display labels
@@ -107,7 +108,7 @@ export const SessionMetricsBar = memo(function SessionMetricsBar({
 			</Tooltip>
 
 			{/* Cost */}
-			{metrics.costRaw > 0 && (
+			{(metrics.costRaw ?? 0) > 0 && (
 				<>
 					<Separator />
 					<Tooltip>
@@ -129,8 +130,8 @@ export const SessionMetricsBar = memo(function SessionMetricsBar({
 				</>
 			)}
 
-		{/* Details popover -- full stats breakdown */}
-			{(metrics.tokensRaw > 0 || metrics.toolCallCount > 0) && (
+			{/* Details popover -- full stats breakdown */}
+			{((metrics.tokensRaw ?? 0) > 0 || metrics.toolCallCount > 0) && (
 				<>
 					<Separator />
 					<MetricsPopover metrics={metrics} />
@@ -168,7 +169,6 @@ function MetricsPopover({
 	triggerClassName?: string
 	triggerIconClassName?: string
 }) {
-	const { raw } = metrics
 
 	return (
 		<Popover>
@@ -188,47 +188,11 @@ function MetricsPopover({
 					{/* Summary row */}
 					<div className="grid grid-cols-3 gap-2">
 						<MetricCell label="Time" value={metrics.workTime} />
-						<MetricCell label="Cost" value={metrics.cost} />
+						<MetricCell label="Est. cost" value={metrics.cost} />
 						<MetricCell label="Tokens" value={metrics.tokens} />
 					</div>
 
-					{/* Token breakdown */}
-					{metrics.tokensRaw > 0 && (
-						<div>
-							<p className="mb-1.5 font-medium text-foreground/80">Token Breakdown</p>
-							<div className="grid grid-cols-[auto_1fr] gap-x-3 gap-y-0.5 text-muted-foreground">
-								<span>Input</span>
-								<span className="text-right tabular-nums">{formatTokens(raw.tokens.input)}</span>
-								<span>Output</span>
-								<span className="text-right tabular-nums">{formatTokens(raw.tokens.output)}</span>
-								{raw.tokens.reasoning > 0 && (
-									<>
-										<span>Reasoning</span>
-										<span className="text-right tabular-nums">
-											{formatTokens(raw.tokens.reasoning)}
-										</span>
-									</>
-								)}
-								<span>Cache read</span>
-								<span className="text-right tabular-nums">
-									{formatTokens(raw.tokens.cacheRead)}
-								</span>
-								{raw.tokens.cacheWrite > 0 && (
-									<>
-										<span>Cache write</span>
-										<span className="text-right tabular-nums">
-											{formatTokens(raw.tokens.cacheWrite)}
-										</span>
-									</>
-								)}
-							</div>
-							{metrics.cacheEfficiency > 0 && (
-								<p className="mt-1 text-muted-foreground">
-									Cache hit rate: {metrics.cacheEfficiencyFormatted}
-								</p>
-							)}
-						</div>
-					)}
+					<SessionUsageDetails usage={metrics.usage} />
 
 					{/* Exchanges + model distribution */}
 					<div>

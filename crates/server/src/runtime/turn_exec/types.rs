@@ -48,8 +48,6 @@ pub(super) struct PendingToolCall {
 }
 
 pub(crate) struct TurnEventStreamSummary {
-    /// Aggregate usage for the complete turn, including tool-use model legs.
-    pub(crate) turn_usage: Option<TurnUsage>,
     /// Usage from the most recent individual model invocation.
     pub(crate) latest_query_usage: Option<TurnUsage>,
     pub(crate) stop_reason: Option<devo_core::StopReason>,

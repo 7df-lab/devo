@@ -242,6 +242,7 @@ pub fn generate_protocol_typescript() -> String {
     push_decl::<native::session::GitInfo>(&cfg, &mut output);
     push_decl::<native::usage::UsagePurpose>(&cfg, &mut output);
     push_decl::<native::usage::UsageCallOutcome>(&cfg, &mut output);
+    push_decl::<native::usage::UsageField>(&cfg, &mut output);
     push_decl::<native::usage::TokenUsage>(&cfg, &mut output);
     push_decl::<native::usage::Money>(&cfg, &mut output);
     push_decl::<native::usage::UsageTotals>(&cfg, &mut output);

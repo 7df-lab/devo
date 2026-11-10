@@ -1544,6 +1544,9 @@ impl ServerRuntime {
         &self,
         session_id: SessionId,
     ) -> Result<Option<devo_protocol::native::session::Session>, String> {
+        self.usage_ledger
+            .load_session(session_id)
+            .map_err(|error| error.to_string())?;
         let rollout_path =
             self.resolve_existing_rollout_path(session_id, self.indexed_rollout_path(session_id))?;
         // Only the metadata header is needed here; the filtered meta reader
@@ -1572,6 +1575,9 @@ impl ServerRuntime {
             if let Some(history) = history_session.as_ref() {
                 session.version = session.version.max(history.version);
             }
+            if let Some(usage) = self.usage_ledger.session_usage(session_id) {
+                session.usage = usage;
+            }
             return Ok(Some(session));
         }
         let Some(mut session) = history_session else {
@@ -1580,6 +1586,9 @@ impl ServerRuntime {
         if let Some(model) = self.deps.model_catalog.get(&session.model.model) {
             session.settings.effective_context_window =
                 Some(crate::runtime::context_occupancy::resolved_compaction_limit(model));
+        }
+        if let Some(usage) = self.usage_ledger.session_usage(session_id) {
+            session.usage = usage;
         }
         Ok(Some(session))
     }
@@ -1594,6 +1603,12 @@ impl ServerRuntime {
         session_id: SessionId,
         session: &mut devo_protocol::native::session::Session,
     ) {
+        if let Err(error) = self.usage_ledger.load_session(session_id) {
+            tracing::warn!(%session_id, %error, "failed to replay session usage");
+        }
+        if let Some(usage) = self.usage_ledger.session_usage(session_id) {
+            session.usage = usage;
+        }
         match self.active_turns.active_turn(session_id).await {
             Some(turn) => {
                 session.status = devo_protocol::native::session::SessionStatus::Active;
@@ -1808,6 +1823,14 @@ impl ServerRuntime {
         let turn_counts = self.deps.db.list_turn_counts(&page_ids).unwrap_or_default();
         for session in &mut data {
             let session_id = session.id;
+            // Enrich only the requested page. Read committed calls directly,
+            // including unhydrated sessions and a delayed publication pump.
+            if let Err(error) = self.usage_ledger.load_session(session_id) {
+                tracing::warn!(%session_id, %error, "failed to replay listed session usage");
+            }
+            if let Some(usage) = self.usage_ledger.session_usage(session_id) {
+                session.usage = usage;
+            }
             if let Some(turn_id) = active_turn_ids.get(&session_id).copied() {
                 session.status = devo_protocol::native::session::SessionStatus::Active;
                 session.active_turn_id = Some(turn_id);

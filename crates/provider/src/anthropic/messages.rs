@@ -286,8 +286,10 @@ struct AnthropicStopDetails {
 
 #[derive(Debug, Clone, Deserialize, Serialize)]
 struct AnthropicUsage {
-    input_tokens: usize,
-    output_tokens: usize,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    input_tokens: Option<usize>,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    output_tokens: Option<usize>,
     #[serde(default)]
     cache_creation_input_tokens: Option<usize>,
     #[serde(default)]
@@ -712,16 +714,20 @@ fn map_usage(usage: &AnthropicUsage) -> Usage {
     let cache_creation_input_tokens = usage.cache_creation_input_tokens.unwrap_or(0);
     let cache_read_input_tokens = usage.cache_read_input_tokens.unwrap_or(0);
     Usage {
+        unreported_fields: None,
+        reported: usage.input_tokens.is_some() || usage.output_tokens.is_some(),
         input_tokens: usage
             .input_tokens
+            .unwrap_or(0)
             .saturating_add(cache_creation_input_tokens)
             .saturating_add(cache_read_input_tokens),
-        output_tokens: usage.output_tokens,
+        output_tokens: usage.output_tokens.unwrap_or(0),
         cache_creation_input_tokens: usage.cache_creation_input_tokens,
         cache_read_input_tokens: usage.cache_read_input_tokens,
         reasoning_output_tokens: None,
         total_tokens: None,
     }
+    .with_field_coverage(usage.input_tokens, usage.output_tokens)
 }
 
 fn build_provider_specific_response_payload(response: &AnthropicMessageResponse) -> Option<Value> {

@@ -1,5 +1,8 @@
 // @ts-nocheck
 
+import { sessionUsageFromProtocol } from "./native-usage"
+export { sessionUsageFromProtocol, newerSessionUsage, type SessionUsageSummary } from "./native-usage"
+
 import {
 	AsyncEventQueue,
 	type SessionConfigOption,
@@ -813,6 +816,7 @@ class NativeClient {
 	private sessions = new Map<string, Session>()
 	private sessionDirectories = new Map<string, string>()
 	private sessionStatuses = new Map<string, SessionStatus>()
+	private contextUsageRevisions = new Map<string, number>()
 	private promptStartedAtBySession = new Map<string, number>()
 	/** Session transcript: Native ItemEnvelope keyed by itemId (no Message/Part dual). */
 	private items = new Map<string, Map<string, NativeItemEnvelope>>()
@@ -1445,10 +1449,13 @@ class NativeClient {
 	context = {
 		usage: {
 			read: async (params: { sessionId: string }) => {
+				const revision = this.advanceContextUsageRevision(params.sessionId)
 				const result = (await this.requestCanonical("context/usage/read", {
 					sessionId: params.sessionId,
 				})) as { occupancy?: unknown }
-				this.emitContextUsage(params.sessionId, result.occupancy)
+				if (this.contextUsageRevisions.get(params.sessionId) === revision) {
+					this.emitContextUsage(params.sessionId, result.occupancy)
+				}
 				return { data: result.occupancy }
 			},
 		},
@@ -1680,6 +1687,7 @@ class NativeClient {
 	}
 
 	private async resumeSessionOnce(sessionId: string): Promise<void> {
+		const revision = this.advanceContextUsageRevision(sessionId)
 		try {
 			const resumed = (await this.requestCanonical("session/resume", { sessionId })) as {
 				session: Record<string, unknown>; lastContextOccupancy?: unknown; last_context_occupancy?: unknown
@@ -1688,7 +1696,9 @@ class NativeClient {
 			this.emit(enriched.directory ?? this.options.directory ?? defaultCwd(), {
 				type: "session.updated", properties: { info: enriched, session: enriched },
 			})
-			this.emitContextUsage(sessionId, resumed.lastContextOccupancy ?? resumed.last_context_occupancy)
+			if (this.contextUsageRevisions.get(sessionId) === revision) {
+				this.emitContextUsage(sessionId, resumed.lastContextOccupancy ?? resumed.last_context_occupancy)
+			}
 			await this.ensureSessionSubscription(sessionId)
 			this.resumedSessions.add(sessionId)
 			this.sessionsNeedingResume.delete(sessionId)
@@ -1759,6 +1769,7 @@ class NativeClient {
 			id,
 			snapshotBusy ? { type: "busy" } : existingInFlight ? existingStatus : { type: "idle" },
 		)
+		this.emitSessionUsage(id, info.usage)
 		return session
 	}
 
@@ -2252,24 +2263,28 @@ class NativeClient {
 			if (sessionId) this.emitContextUsage(sessionId, value.occupancy)
 			return true
 		}
-		if (method === "turn/usage/updated" || method === "session/usage/updated") {
+		if (method === "turn/usage/updated") {
 			const sessionId = String(value.sessionId ?? "")
-			const usage = objectRecord(value.usage) ?? {}
-			// Native usage uses the same camelCase query shape as the TUI.
-			const query = objectRecord(usage.query) ?? {}
+			const query = objectRecord(objectRecord(value.usage)?.query) ?? {}
 			const used = Number(query.totalTokens ?? 0)
 			const size = Number(value.contextWindow ?? 0)
 			if (sessionId) {
+				// Missing/placeholder usage may change the window, never erase a known context.
+				if (used > 0 || size > 0) this.advanceContextUsageRevision(sessionId)
 				this.emit(this.sessionDirectories.get(sessionId) ?? this.options.directory ?? defaultCwd(), {
-					type: "session.usage.updated",
+					type: "context.tokens.updated",
 					properties: {
-						sessionId: sessionId,
-						used,
-						size,
-						cost: 0,
+						sessionId, used: used > 0 ? used : undefined, size,
+						...(value.sessionTotals ? { sessionTotals: sessionUsageFromProtocol(value.sessionTotals) } : {}),
 					},
 				})
+				this.emitSessionUsage(sessionId, value.sessionTotals)
 			}
+			return true
+		}
+		if (method === "session/usage/updated") {
+			const sessionId = String(value.sessionId ?? "")
+			if (sessionId) this.emitSessionUsage(sessionId, value.usage)
 			return true
 		}
 		if (method === "model/queryRetrying") {
@@ -3199,9 +3214,25 @@ class NativeClient {
 		return this.currentConfigOptions()
 	}
 
+	private emitSessionUsage(sessionId: string, value: unknown): void {
+		const usage = sessionUsageFromProtocol(value)
+		if (!usage) return
+		this.emit(this.sessionDirectories.get(sessionId) ?? this.options.directory ?? defaultCwd(), {
+			type: "session.usage.updated",
+			properties: { sessionId, usage },
+		})
+	}
+
+	private advanceContextUsageRevision(sessionId: string): number {
+		const revision = (this.contextUsageRevisions.get(sessionId) ?? 0) + 1
+		this.contextUsageRevisions.set(sessionId, revision)
+		return revision
+	}
+
 	private emitContextUsage(sessionId: string, occupancyValue: unknown): boolean {
 		const occupancy = contextOccupancyFromProtocol(occupancyValue)
 		if (!occupancy) return false
+		this.advanceContextUsageRevision(sessionId)
 		this.emit(this.sessionDirectories.get(sessionId) ?? this.options.directory ?? defaultCwd(), {
 			type: "context.usage.updated",
 			properties: { sessionId: sessionId, occupancy },

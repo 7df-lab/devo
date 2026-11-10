@@ -259,7 +259,7 @@ impl ServerRuntime {
             Ok(history) => history,
             Err(response) => return response,
         };
-        let Some(turn) = history
+        let Some(mut turn) = history
             .turns
             .iter()
             .find(|turn| turn.id == params.turn_id)
@@ -271,6 +271,17 @@ impl ServerRuntime {
                 "turn does not exist",
             );
         };
+        if let Err(error) = self.usage_ledger.load_session(params.session_id) {
+            return self.error_response(
+                request_id,
+                ProtocolErrorCode::InternalError,
+                error.to_string(),
+            );
+        }
+        turn.usage = Some(
+            self.usage_ledger
+                .turn_usage(params.session_id, params.turn_id),
+        );
         serde_json::to_value(SuccessResponse {
             id: request_id,
             result: TurnReadResult { turn },

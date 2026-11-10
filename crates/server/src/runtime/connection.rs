@@ -811,6 +811,18 @@ impl ServerRuntime {
     /// Native connections receive identity wire frames (`item/*`, `turn/*`,
     /// deltas). ACP projects from the same [`ServerNotification`].
     pub(super) async fn broadcast_notification(&self, notification: ServerNotification) {
+        let policy = notification_delivery_policy(&notification);
+        self.broadcast_notification_with_policy(notification, policy)
+            .await;
+    }
+
+    /// Final model usage must use reliable admission even though provisional
+    /// samples share the same wire method and may be shed under backpressure.
+    pub(super) async fn broadcast_notification_with_policy(
+        &self,
+        notification: ServerNotification,
+        delivery_policy: OutboundDeliveryPolicy,
+    ) {
         if let ServerNotification::TurnCompleted { turn } = &notification {
             self.account_goal_turn_completed(turn).await;
         }
@@ -818,7 +830,6 @@ impl ServerRuntime {
             .await;
         let method = notification_method_name(&notification);
         let session_id = notification_legacy_session_id(&notification);
-        let delivery_policy = notification_delivery_policy(&notification);
         let (wire_method, wire_params) = wire_from_server_notification(&notification);
         let child_parent_by_session = self.child_parent_by_session().await;
         let event_cwd = if self

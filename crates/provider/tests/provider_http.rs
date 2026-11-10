@@ -303,40 +303,62 @@ async fn anthropic_messages_stream_uses_nested_message_start_usage() {
     assert_eq!(
         events,
         vec![
-            StreamEvent::UsageDelta(Usage {
-                input_tokens: 85_937,
-                output_tokens: 0,
-                cache_creation_input_tokens: Some(0),
-                cache_read_input_tokens: Some(85_888),
-                reasoning_output_tokens: None,
-                total_tokens: None,
-            }),
+            StreamEvent::UsageDelta(
+                Usage {
+                    unreported_fields: None,
+                    reported: true,
+                    input_tokens: 85_937,
+                    output_tokens: 0,
+                    cache_creation_input_tokens: Some(0),
+                    cache_read_input_tokens: Some(85_888),
+                    reasoning_output_tokens: None,
+                    total_tokens: None,
+                }
+                .with_field_coverage(
+                    /*input_tokens*/ Some(0),
+                    /*output_tokens*/ Some(0)
+                )
+            ),
             StreamEvent::TextStart { index: 0 },
             StreamEvent::TextDelta {
                 index: 0,
                 text: "ok".to_string()
             },
-            StreamEvent::UsageDelta(Usage {
-                input_tokens: 85_937,
-                output_tokens: 3_211,
-                cache_creation_input_tokens: Some(0),
-                cache_read_input_tokens: Some(85_888),
-                reasoning_output_tokens: None,
-                total_tokens: None,
-            }),
+            StreamEvent::UsageDelta(
+                Usage {
+                    unreported_fields: None,
+                    reported: true,
+                    input_tokens: 85_937,
+                    output_tokens: 3_211,
+                    cache_creation_input_tokens: Some(0),
+                    cache_read_input_tokens: Some(85_888),
+                    reasoning_output_tokens: None,
+                    total_tokens: None,
+                }
+                .with_field_coverage(
+                    /*input_tokens*/ Some(0),
+                    /*output_tokens*/ Some(0)
+                )
+            ),
             StreamEvent::MessageDone {
                 response: ModelResponse {
                     id: "msg_test".to_string(),
                     content: vec![ResponseContent::Text("ok".to_string())],
                     stop_reason: Some(StopReason::EndTurn),
                     usage: Usage {
+                        unreported_fields: None,
+                        reported: true,
                         input_tokens: 85_937,
                         output_tokens: 3_211,
                         cache_creation_input_tokens: Some(0),
                         cache_read_input_tokens: Some(85_888),
                         reasoning_output_tokens: None,
                         total_tokens: None,
-                    },
+                    }
+                    .with_field_coverage(
+                        /*input_tokens*/ Some(0),
+                        /*output_tokens*/ Some(0)
+                    ),
                     metadata: ResponseMetadata::default(),
                 },
             },
@@ -362,40 +384,59 @@ async fn anthropic_messages_stream_keeps_legacy_top_level_start_usage() {
     assert_eq!(
         events,
         vec![
-            StreamEvent::UsageDelta(Usage {
-                input_tokens: 3,
-                output_tokens: 0,
-                cache_creation_input_tokens: None,
-                cache_read_input_tokens: Some(1),
-                reasoning_output_tokens: None,
-                total_tokens: None,
-            }),
+            StreamEvent::UsageDelta(
+                Usage {
+                    unreported_fields: None,
+                    reported: true,
+                    input_tokens: 3,
+                    output_tokens: 0,
+                    cache_creation_input_tokens: None,
+                    cache_read_input_tokens: Some(1),
+                    reasoning_output_tokens: None,
+                    total_tokens: None,
+                }
+                .with_field_coverage(/*input_tokens*/ Some(0), /*output_tokens*/ None)
+            ),
             StreamEvent::TextStart { index: 0 },
             StreamEvent::TextDelta {
                 index: 0,
                 text: "legacy".to_string()
             },
-            StreamEvent::UsageDelta(Usage {
-                input_tokens: 3,
-                output_tokens: 3,
-                cache_creation_input_tokens: None,
-                cache_read_input_tokens: Some(1),
-                reasoning_output_tokens: None,
-                total_tokens: None,
-            }),
+            StreamEvent::UsageDelta(
+                Usage {
+                    unreported_fields: None,
+                    reported: true,
+                    input_tokens: 3,
+                    output_tokens: 3,
+                    cache_creation_input_tokens: None,
+                    cache_read_input_tokens: Some(1),
+                    reasoning_output_tokens: None,
+                    total_tokens: None,
+                }
+                .with_field_coverage(
+                    /*input_tokens*/ Some(0),
+                    /*output_tokens*/ Some(0)
+                )
+            ),
             StreamEvent::MessageDone {
                 response: ModelResponse {
                     id: "msg_legacy".to_string(),
                     content: vec![ResponseContent::Text("legacy".to_string())],
                     stop_reason: Some(StopReason::EndTurn),
                     usage: Usage {
+                        unreported_fields: None,
+                        reported: true,
                         input_tokens: 3,
                         output_tokens: 3,
                         cache_creation_input_tokens: None,
                         cache_read_input_tokens: Some(1),
                         reasoning_output_tokens: None,
                         total_tokens: None,
-                    },
+                    }
+                    .with_field_coverage(
+                        /*input_tokens*/ Some(0),
+                        /*output_tokens*/ Some(0)
+                    ),
                     metadata: ResponseMetadata::default(),
                 },
             },
@@ -420,14 +461,22 @@ async fn anthropic_messages_stream_completes_thinking_blocks_before_text() {
     assert_eq!(
         events,
         vec![
-            StreamEvent::UsageDelta(Usage {
-                input_tokens: 1,
-                output_tokens: 0,
-                cache_creation_input_tokens: None,
-                cache_read_input_tokens: None,
-                reasoning_output_tokens: None,
-                total_tokens: None,
-            }),
+            StreamEvent::UsageDelta(
+                Usage {
+                    unreported_fields: None,
+                    reported: true,
+                    input_tokens: 1,
+                    output_tokens: 0,
+                    cache_creation_input_tokens: None,
+                    cache_read_input_tokens: None,
+                    reasoning_output_tokens: None,
+                    total_tokens: None,
+                }
+                .with_field_coverage(
+                    /*input_tokens*/ Some(0),
+                    /*output_tokens*/ Some(0)
+                )
+            ),
             StreamEvent::ReasoningStart { index: 0 },
             StreamEvent::ReasoningDelta {
                 index: 0,
@@ -439,14 +488,22 @@ async fn anthropic_messages_stream_completes_thinking_blocks_before_text() {
                 index: 1,
                 text: "final".to_string()
             },
-            StreamEvent::UsageDelta(Usage {
-                input_tokens: 1,
-                output_tokens: 1,
-                cache_creation_input_tokens: None,
-                cache_read_input_tokens: None,
-                reasoning_output_tokens: None,
-                total_tokens: None,
-            }),
+            StreamEvent::UsageDelta(
+                Usage {
+                    unreported_fields: None,
+                    reported: true,
+                    input_tokens: 1,
+                    output_tokens: 1,
+                    cache_creation_input_tokens: None,
+                    cache_read_input_tokens: None,
+                    reasoning_output_tokens: None,
+                    total_tokens: None,
+                }
+                .with_field_coverage(
+                    /*input_tokens*/ Some(0),
+                    /*output_tokens*/ Some(0)
+                )
+            ),
             StreamEvent::MessageDone {
                 response: ModelResponse {
                     id: "msg_test".to_string(),
@@ -462,13 +519,19 @@ async fn anthropic_messages_stream_completes_thinking_blocks_before_text() {
                     ],
                     stop_reason: Some(StopReason::EndTurn),
                     usage: Usage {
+                        unreported_fields: None,
+                        reported: true,
                         input_tokens: 1,
                         output_tokens: 1,
                         cache_creation_input_tokens: None,
                         cache_read_input_tokens: None,
                         reasoning_output_tokens: None,
                         total_tokens: None,
-                    },
+                    }
+                    .with_field_coverage(
+                        /*input_tokens*/ Some(0),
+                        /*output_tokens*/ Some(0)
+                    ),
                     metadata: ResponseMetadata {
                         extras: vec![ResponseExtra::ReasoningText {
                             text: "plan".to_string(),

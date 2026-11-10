@@ -1,3 +1,4 @@
+import type { CumulativeUsage } from "../../core/usage-display.js";
 import type { AgentEvent, AgentMessage, ThinkingLevel } from "@earendil-works/pi-agent-core";
 import type { Api, ImageContent, Model, ServiceTier, TextContent, Transport, Usage } from "@earendil-works/pi-ai";
 import type { AgentSessionMessageReceipt, AgentSessionMessageSafetyStatus } from "../../core/agent-messages.js";
@@ -354,6 +355,7 @@ export interface AgentConnectionState {
 	scopedModels: AgentConnectionScopedModel[];
 	activeToolNames: string[];
 	contextUsage: SessionStats["contextUsage"];
+	cumulativeUsage?: CumulativeUsage;
 	/** One-line recent-work recap for the prompt UI. */
 	recap?: string;
 }
@@ -587,6 +589,8 @@ export interface AgentConnectionRlmChildAgentSnapshot {
 }
 
 export type AgentConnectionSessionEvent =
+	| { type: "context_usage_update"; contextUsage: SessionStats["contextUsage"] }
+	| { type: "session_usage_update"; cumulativeUsage: CumulativeUsage }
 	| AgentEvent
 	| { type: "ipython_sent_agent_message"; toolCallId: string; message: KernelSentAgentMessage }
 	| { type: "session_action_update"; actions: SessionActionSnapshot }

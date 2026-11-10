@@ -41,6 +41,7 @@ pub(super) async fn run_session_actor(
             }
             SessionCommand::MergeTurn { working, reply } => {
                 state.merge_turn_working_set(*working);
+                _runtime.refresh_actor_usage(&mut state);
                 let _ = reply.send(());
             }
             SessionCommand::GetSummary { reply } => {
@@ -432,8 +433,8 @@ pub(super) async fn run_session_actor(
                     state.core.set_prompt_messages(prompt_messages);
                 }
             }
-            SessionCommand::ApplyParentUsageSnapshot { snapshot } => {
-                snapshot.apply_to_actor_state(&mut state);
+            SessionCommand::RefreshUsage => {
+                _runtime.refresh_actor_usage(&mut state);
             }
             SessionCommand::InterruptActiveTurn { reply } => {
                 let now = Utc::now();

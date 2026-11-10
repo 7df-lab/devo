@@ -105,7 +105,9 @@ impl ModelProviderSDK for GoogleGenerativeAiProvider {
     ) -> Result<Pin<Box<dyn Stream<Item = Result<StreamEvent>> + Send>>> {
         // The normalized stream contract remains useful even when a compatible
         // endpoint only supports generateContent: surface the completed
-        // response as text/tool events followed by MessageDone.
+        // response as text/tool events followed by MessageDone. This is a
+        // synthetic stream: no content or usage arrives before the full
+        // generateContent response completes.
         let response = self.completion(request).await?;
         let stream_response = response.clone();
         let stream = async_stream::try_stream! {
@@ -127,7 +129,9 @@ impl ModelProviderSDK for GoogleGenerativeAiProvider {
                     | ResponseContent::ProviderReasoning { .. } => {}
                 }
             }
-            yield StreamEvent::UsageDelta(stream_response.usage.clone());
+            if stream_response.usage.is_reported() {
+                yield StreamEvent::UsageDelta(stream_response.usage.clone());
+            }
             yield StreamEvent::MessageDone { response: stream_response };
         };
         Ok(Box::pin(stream))
@@ -302,6 +306,28 @@ fn parse_response(value: Value) -> Result<ModelResponse> {
     let usage = value.get("usageMetadata");
     let input_tokens = token_count(usage, "promptTokenCount");
     let output_tokens = token_count(usage, "candidatesTokenCount");
+    let mut normalized_usage = Usage {
+        reported: input_tokens.is_some() || output_tokens.is_some(),
+        input_tokens: input_tokens.unwrap_or(0),
+        output_tokens: output_tokens.unwrap_or(0),
+        cache_read_input_tokens: token_count(usage, "cachedContentTokenCount"),
+        reasoning_output_tokens: token_count(usage, "thoughtsTokenCount"),
+        total_tokens: usage
+            .and_then(|usage| usage.get("totalTokenCount"))
+            .and_then(Value::as_u64)
+            .map(|value| value as usize),
+        ..Usage::default()
+    }
+    .with_field_coverage(input_tokens, output_tokens);
+    // Google candidate tokens exclude thoughts, so input + candidate tokens
+    // is only a subtotal when thoughts are reported without a provider total.
+    if normalized_usage.total_tokens.is_none()
+        && normalized_usage.reasoning_output_tokens.is_some()
+        && let Some(unreported) = &mut normalized_usage.unreported_fields
+        && !unreported.contains(&devo_protocol::native::usage::UsageField::TotalTokens)
+    {
+        unreported.push(devo_protocol::native::usage::UsageField::TotalTokens);
+    }
     Ok(ModelResponse {
         id: value
             .get("responseId")
@@ -310,24 +336,16 @@ fn parse_response(value: Value) -> Result<ModelResponse> {
             .to_string(),
         content,
         stop_reason,
-        usage: Usage {
-            input_tokens,
-            output_tokens,
-            total_tokens: usage
-                .and_then(|usage| usage.get("totalTokenCount"))
-                .and_then(Value::as_u64)
-                .map(|value| value as usize),
-            ..Usage::default()
-        },
+        usage: normalized_usage,
         metadata: ResponseMetadata::default(),
     })
 }
 
-fn token_count(usage: Option<&Value>, field: &str) -> usize {
+fn token_count(usage: Option<&Value>, field: &str) -> Option<usize> {
     usage
         .and_then(|usage| usage.get(field))
         .and_then(Value::as_u64)
-        .unwrap_or(0) as usize
+        .map(|tokens| tokens as usize)
 }
 
 #[cfg(test)]

@@ -1,3 +1,4 @@
+import type { SessionUsageSummary } from "@devo-ai/sdk/v2/client"
 import { atom } from "jotai"
 import { atomFamily } from "jotai-family"
 import type { ContextOccupancy } from "../lib/context-occupancy"
@@ -11,6 +12,7 @@ export interface SessionNativeState {
 		size: unknown
 		cost?: unknown
 	}
+	cumulativeUsage?: SessionUsageSummary
 	occupancy?: ContextOccupancy
 }
 

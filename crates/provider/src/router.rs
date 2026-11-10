@@ -7,7 +7,7 @@ use devo_protocol::{ModelRequest, ProviderWireApi, StreamEvent};
 use futures::Stream;
 
 use crate::error::ProviderError;
-use crate::provider::ModelProviderSDK;
+use crate::provider::{ModelProviderSDK, UsageObserver};
 
 /// Identifies the configured provider that should handle one model request.
 #[derive(Debug, Clone, PartialEq, Eq, Hash)]
@@ -74,6 +74,24 @@ pub trait ProviderRouter: Send + Sync {
         request: ModelRequest,
     ) -> Result<devo_protocol::ModelResponse, ProviderError>;
 
+    /// Complete a request while forwarding reported usage before completion.
+    ///
+    /// The default preserves compatibility for custom routers that only expose
+    /// a final response. Routers wrapping provider SDKs must forward the observer
+    /// to retain partial usage on failed or cancelled requests.
+    async fn complete_with_usage_observer(
+        &self,
+        route: ProviderRoute,
+        request: ModelRequest,
+        usage_observer: UsageObserver,
+    ) -> Result<devo_protocol::ModelResponse, ProviderError> {
+        let response = self.complete(route, request).await?;
+        if response.usage.is_reported() {
+            usage_observer(&response.usage);
+        }
+        Ok(response)
+    }
+
     /// Checks whether a route has a usable adapter without making a request.
     /// Custom routers must opt in; unknown routes are never assumed routable.
     fn has_available_route(&self, _route: &ProviderRoute) -> bool {
@@ -123,6 +141,18 @@ impl ProviderRouter for SingleProviderRouter {
     ) -> Result<devo_protocol::ModelResponse, ProviderError> {
         self.provider
             .completion(request)
+            .await
+            .map_err(unknown_provider_error)
+    }
+
+    async fn complete_with_usage_observer(
+        &self,
+        _route: ProviderRoute,
+        request: ModelRequest,
+        usage_observer: UsageObserver,
+    ) -> Result<devo_protocol::ModelResponse, ProviderError> {
+        self.provider
+            .completion_with_usage_observer(request, usage_observer)
             .await
             .map_err(unknown_provider_error)
     }
@@ -204,6 +234,18 @@ impl ProviderRouter for MultiProviderRouter {
     ) -> Result<devo_protocol::ModelResponse, ProviderError> {
         self.provider_for_route(&route)?
             .completion(request)
+            .await
+            .map_err(unknown_provider_error)
+    }
+
+    async fn complete_with_usage_observer(
+        &self,
+        route: ProviderRoute,
+        request: ModelRequest,
+        usage_observer: UsageObserver,
+    ) -> Result<devo_protocol::ModelResponse, ProviderError> {
+        self.provider_for_route(&route)?
+            .completion_with_usage_observer(request, usage_observer)
             .await
             .map_err(unknown_provider_error)
     }

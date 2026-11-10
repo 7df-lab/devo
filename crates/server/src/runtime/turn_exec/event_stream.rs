@@ -35,7 +35,7 @@ pub(crate) const QUERY_EVENT_CHANNEL_CAPACITY: usize = 8192;
 ///
 /// Token deltas and lifecycle/control events must not be dropped: when the
 /// channel is full they apply backpressure to the producer. High-volume tool
-/// progress and usage updates remain best effort so they cannot wedge the turn
+/// progress and provisional usage updates remain best effort so they cannot wedge the turn
 /// forever on a stalled consumer.
 pub(super) async fn enqueue_query_event(
     event_tx: &mpsc::Sender<devo_core::QueryEvent>,
@@ -67,7 +67,7 @@ pub(crate) fn spawn_turn_event_stream(
     turn: crate::turn::RuntimeTurn,
     collaboration_mode: devo_protocol::CollaborationMode,
     event_tool_registry: Arc<devo_core::tools::ToolRegistry>,
-    usage_parent_session_id: Option<SessionId>,
+    _usage_parent_session_id: Option<SessionId>,
     usage_context_window: Option<u64>,
     mut event_rx: tokio::sync::mpsc::Receiver<devo_core::QueryEvent>,
 ) -> tokio::task::JoinHandle<TurnEventStreamSummary> {
@@ -98,13 +98,20 @@ pub(crate) fn spawn_turn_event_stream(
             .then(ProposedPlanParser::default);
         let mut proposed_plan_item = ProposedPlanStreamItem::default();
         let mut proposed_plan_leading_normal = String::new();
-        let mut turn_usage = None;
         let mut latest_query_usage = None;
         let mut stop_reason = None;
         let mut context_compaction = ContextCompactionLifecycle::default();
         let mut last_context_breakdown: Option<devo_core::RawContextBreakdown> = None;
         while let Some(event) = event_rx.recv().await {
             log_dequeued_query_event(&event);
+            let usage_delivery = match query_event_delivery_policy(&event) {
+                QueryEventDeliveryPolicy::MustDeliver => {
+                    super::super::outbound::OutboundDeliveryPolicy::Reliable
+                }
+                QueryEventDeliveryPolicy::BestEffort => {
+                    super::super::outbound::OutboundDeliveryPolicy::BestEffort
+                }
+            };
             match event {
                 devo_core::QueryEvent::ProviderRetryStatus(status) => {
                     let Some(max_attempts) = u32::try_from(status.max_attempts).ok() else {
@@ -357,76 +364,31 @@ pub(crate) fn spawn_turn_event_stream(
                     )
                     .await;
                 }
-                devo_core::QueryEvent::UsageDelta { usage } => {
+                devo_core::QueryEvent::UsageDelta { usage }
+                | devo_core::QueryEvent::Usage { usage } => {
                     let usage =
                         devo_protocol::native::usage::TurnUsage::from_provider_usage(&usage);
-                    turn_usage = Some(usage.clone());
-                    latest_query_usage = Some(usage.clone());
-                    let kind = super::super::subagent_usage::UsageUpdateKind::InFlight;
-                    if usage_parent_session_id.is_some() {
-                        let _ = runtime
-                            .publish_subagent_turn_usage(
-                                session_id,
-                                turn_for_events.turn_id(),
-                                usage.clone(),
-                                kind,
-                            )
-                            .await;
-                    } else {
-                        if let Some(snapshot) = runtime
-                            .publish_parent_turn_usage(
-                                usage_session_id,
-                                turn_for_events.turn_id(),
-                                usage.clone(),
-                                usage_context_window,
-                                kind,
-                            )
-                            .await
-                        {
-                            turn_usage = Some(snapshot.turn_usage.to_turn_usage());
-                            latest_query_usage = Some(snapshot.latest_query_usage.to_turn_usage());
-                        }
-                        if let Some(raw) = last_context_breakdown {
-                            runtime
-                                .publish_live_context_occupancy(
-                                    usage_session_id,
-                                    usage_context_window,
-                                    raw,
-                                    usage.display_total_tokens(),
+                    if usage.query.metered_call_count > 0
+                        && !usage
+                            .query
+                            .unreported_fields
+                            .as_ref()
+                            .is_some_and(|fields| {
+                                fields.contains(
+                                    &devo_protocol::native::usage::UsageField::TotalTokens,
                                 )
-                                .await;
-                        }
-                    }
-                }
-                devo_core::QueryEvent::Usage { usage } => {
-                    let usage =
-                        devo_protocol::native::usage::TurnUsage::from_provider_usage(&usage);
-                    turn_usage = Some(usage.clone());
-                    latest_query_usage = Some(usage.clone());
-                    let kind = super::super::subagent_usage::UsageUpdateKind::CompletedLeg;
-                    if usage_parent_session_id.is_some() {
-                        let _ = runtime
-                            .publish_subagent_turn_usage(
+                            })
+                    {
+                        latest_query_usage = Some(usage.clone());
+                        runtime
+                            .publish_query_usage(
                                 session_id,
                                 turn_for_events.turn_id(),
                                 usage.clone(),
-                                kind,
+                                usage_context_window,
+                                usage_delivery,
                             )
                             .await;
-                    } else {
-                        if let Some(snapshot) = runtime
-                            .publish_parent_turn_usage(
-                                usage_session_id,
-                                turn_for_events.turn_id(),
-                                usage.clone(),
-                                usage_context_window,
-                                kind,
-                            )
-                            .await
-                        {
-                            turn_usage = Some(snapshot.turn_usage.to_turn_usage());
-                            latest_query_usage = Some(snapshot.latest_query_usage.to_turn_usage());
-                        }
                         if let Some(raw) = last_context_breakdown {
                             runtime
                                 .publish_live_context_occupancy(
@@ -434,6 +396,7 @@ pub(crate) fn spawn_turn_event_stream(
                                     usage_context_window,
                                     raw,
                                     usage.display_total_tokens(),
+                                    usage_delivery,
                                 )
                                 .await;
                         }
@@ -490,7 +453,6 @@ pub(crate) fn spawn_turn_event_stream(
             "query event stream drained"
         );
         TurnEventStreamSummary {
-            turn_usage,
             latest_query_usage,
             stop_reason,
         }
@@ -982,5 +944,47 @@ async fn complete_deferred_stream_items(
         stream.deferred_assistant.take()
     } {
         complete_assistant_item(runtime, session_id, turn_id, item_id, item_seq, text).await;
+    }
+}
+
+#[cfg(test)]
+mod usage_delivery_tests {
+    use super::*;
+    use pretty_assertions::assert_eq;
+
+    #[tokio::test]
+    async fn final_usage_waits_for_a_full_queue_while_provisional_usage_can_drop() {
+        let (tx, mut rx) = mpsc::channel(1);
+        tx.send(devo_core::QueryEvent::TextDelta("busy".into()))
+            .await
+            .unwrap();
+        let usage = devo_protocol::Usage {
+            reported: true,
+            input_tokens: 100,
+            output_tokens: 20,
+            ..Default::default()
+        };
+        enqueue_query_event(
+            &tx,
+            devo_core::QueryEvent::UsageDelta {
+                usage: usage.clone(),
+            },
+        )
+        .await;
+        let final_usage = usage.clone();
+        let sender = tokio::spawn(async move {
+            enqueue_query_event(&tx, devo_core::QueryEvent::Usage { usage: final_usage }).await;
+        });
+        tokio::task::yield_now().await;
+        assert!(!sender.is_finished());
+        assert!(matches!(
+            rx.recv().await,
+            Some(devo_core::QueryEvent::TextDelta(_))
+        ));
+        let Some(devo_core::QueryEvent::Usage { usage: got }) = rx.recv().await else {
+            panic!("final usage lost")
+        };
+        assert_eq!(got, usage);
+        sender.await.unwrap();
     }
 }

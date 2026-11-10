@@ -44,7 +44,6 @@ function assistantMessage(timestamp: number, stopReason: AssistantMessage["stopR
 
 interface ActivityHarness {
   activityTracker: AgentActivityTracker;
-  contextUsageTokenBaseline: number;
   agentRunFileChanges: Map<string, string>;
   turnStartedAt: number | undefined;
   workingStartedAt: number | undefined;
@@ -63,7 +62,6 @@ function activityHarness(): ActivityHarness {
   Object.assign(mode, {
     isInitialized: true,
     activityTracker: tracker,
-    contextUsageTokenBaseline: 64,
     agentRunFileChanges: new Map([["previous.ts", "previous run"]]),
     turnStartedAt: undefined,
     workingStartedAt: 1500,
@@ -99,7 +97,6 @@ for (const source of ["agent", "backgroundTask", "schedule"] as const) {
       const followUp = delivery === "followUp";
       assert.deepEqual({
         status: mode.activityTracker.getStatus(),
-        baseline: mode.contextUsageTokenBaseline,
         fileChanges: [...mode.agentRunFileChanges],
         turnStartedAt: mode.turnStartedAt,
         workingStartedAt: mode.workingStartedAt,
@@ -108,7 +105,6 @@ for (const source of ["agent", "backgroundTask", "schedule"] as const) {
         displayedMessages: mode.displayedMessages,
       }, {
         status: { activity: followUp ? "waiting" : "executing", direction: "up", tokens: followUp ? 0 : 64 },
-        baseline: followUp ? 0 : 64,
         fileChanges: followUp ? [] : [["previous.ts", "previous run"]],
         turnStartedAt: followUp ? 2000 : undefined,
         workingStartedAt: followUp ? 2000 : 1500,

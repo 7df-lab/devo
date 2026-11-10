@@ -11,7 +11,7 @@ use tracing::debug;
 
 use crate::error::stream_error;
 use crate::http::invalid_status_error;
-use crate::{ModelProviderSDK, ProviderHttpOptions};
+use crate::{ModelProviderSDK, ProviderHttpOptions, UsageObserver};
 
 mod request;
 mod response;
@@ -95,11 +95,27 @@ impl OpenAIResponsesProvider {
 /// non-streaming [`ModelProviderSDK::completion`] surface.
 async fn fold_stream_response(
     mut events: Pin<Box<dyn Stream<Item = Result<StreamEvent>> + Send>>,
+    usage_observer: Option<UsageObserver>,
 ) -> Result<ModelResponse> {
     let mut response: Option<ModelResponse> = None;
     while let Some(event) = events.next().await {
-        if let StreamEvent::MessageDone { response: done } = event? {
-            response = Some(done);
+        match event? {
+            StreamEvent::UsageDelta(usage) => {
+                if usage.is_reported()
+                    && let Some(observer) = &usage_observer
+                {
+                    observer(&usage);
+                }
+            }
+            StreamEvent::MessageDone { response: done } => {
+                if done.usage.is_reported()
+                    && let Some(observer) = &usage_observer
+                {
+                    observer(&done.usage);
+                }
+                response = Some(done);
+            }
+            _ => {}
         }
     }
     response.ok_or_else(|| {
@@ -116,7 +132,16 @@ impl ModelProviderSDK for OpenAIResponsesProvider {
         // ("Stream must be set to true"), so the non-streaming surface is
         // served by folding the streaming events into a single response.
         let events = self.completion_stream(request).await?;
-        fold_stream_response(events).await
+        fold_stream_response(events, /*usage_observer*/ None).await
+    }
+
+    async fn completion_with_usage_observer(
+        &self,
+        request: ModelRequest,
+        usage_observer: UsageObserver,
+    ) -> Result<ModelResponse> {
+        let events = self.completion_stream(request).await?;
+        fold_stream_response(events, Some(usage_observer)).await
     }
 
     async fn completion_stream(
@@ -163,5 +188,45 @@ impl ModelProviderSDK for OpenAIResponsesProvider {
 
     fn name(&self) -> &str {
         "openai-responses"
+    }
+}
+
+#[cfg(test)]
+mod usage_observer_tests {
+    use std::sync::Arc;
+    use std::time::Duration;
+
+    use devo_protocol::Usage;
+    use pretty_assertions::assert_eq;
+
+    use super::*;
+
+    #[tokio::test]
+    async fn cancellation_keeps_the_last_observed_stream_sample() {
+        let reported = Usage {
+            reported: true,
+            input_tokens: 7,
+            output_tokens: 1,
+            ..Usage::default()
+        }
+        .with_field_coverage(
+            /*input_tokens*/ Some(7),
+            /*output_tokens*/ Some(1),
+        );
+        let events = futures::stream::iter([Ok(StreamEvent::UsageDelta(reported.clone()))])
+            .chain(futures::stream::pending());
+        let (sender, mut receiver) = tokio::sync::mpsc::unbounded_channel();
+        let observer: UsageObserver = Arc::new(move |usage| {
+            sender.send(usage.clone()).expect("observer receiver");
+        });
+        let completion = tokio::spawn(fold_stream_response(Box::pin(events), Some(observer)));
+        let sample = tokio::time::timeout(Duration::from_secs(10), receiver.recv())
+            .await
+            .expect("observe usage before completion")
+            .expect("reported sample");
+        completion.abort();
+        assert!(completion.await.unwrap_err().is_cancelled());
+        assert_eq!(sample, reported);
+        assert_eq!(receiver.recv().await, None);
     }
 }

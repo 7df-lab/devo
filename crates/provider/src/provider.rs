@@ -1,4 +1,5 @@
 use std::pin::Pin;
+use std::sync::Arc;
 
 use async_trait::async_trait;
 use devo_protocol::ModelRequest;
@@ -6,6 +7,7 @@ use devo_protocol::ModelResponse;
 use devo_protocol::ProviderWireApi;
 use devo_protocol::RequestRole;
 use devo_protocol::StreamEvent;
+use devo_protocol::Usage;
 use futures::Stream;
 
 /// Capability flags that describe what a provider family or model can emit.
@@ -88,6 +90,13 @@ pub trait ProviderAdapter: ModelProviderSDK {
     fn capabilities(&self, model_slug: &str) -> ProviderCapabilities;
 }
 
+/// Receives provider-reported cumulative usage snapshots during a completion.
+/// Callbacks run synchronously before awaiting more response data, so callers
+/// can retain partial usage if the completion fails or its future is dropped.
+/// The same snapshot may be observed again in the final response; consumers
+/// must replace/merge snapshots rather than add them as separate model calls.
+pub type UsageObserver = Arc<dyn Fn(&Usage) + Send + Sync>;
+
 /// A unified interface for model provider SDKs.
 ///
 /// Implementations handle the specifics of each provider SDK while exposing a
@@ -103,6 +112,24 @@ pub trait ModelProviderSDK: Send + Sync {
 
     /// Send a request and get a complete response.
     async fn completion(&self, request: ModelRequest) -> anyhow::Result<ModelResponse>;
+
+    /// Complete a request while preserving any usage available before it ends.
+    ///
+    /// The default retains the adapter's ordinary completion behavior and
+    /// reports its final sample. Adapters that internally consume a stream
+    /// should override this to observe partial samples before failure or
+    /// cancellation. Missing usage never invokes the observer.
+    async fn completion_with_usage_observer(
+        &self,
+        request: ModelRequest,
+        usage_observer: UsageObserver,
+    ) -> anyhow::Result<ModelResponse> {
+        let response = self.completion(request).await?;
+        if response.usage.is_reported() {
+            usage_observer(&response.usage);
+        }
+        Ok(response)
+    }
 
     /// Send a request and get a stream of incremental events.
     ///

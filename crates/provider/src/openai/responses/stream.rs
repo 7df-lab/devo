@@ -76,6 +76,15 @@ pub(super) fn decode_response_stream(
                     event => event,
                 };
                 if let Some(error) = super::stream_error::provider_error_from_event(event, &chunk, &request) {
+                    // Failed requests can still have billable usage. Surface the
+                    // provider sample before the error terminates the stream.
+                    if let Some(reported_usage) = chunk
+                        .get("usage")
+                        .and_then(parse_usage)
+                        .or_else(|| chunk.pointer("/response/usage").and_then(parse_usage))
+                    {
+                        yield StreamEvent::UsageDelta(reported_usage);
+                    }
                     Err(error)?;
                 }
 
@@ -362,6 +371,11 @@ pub(super) fn decode_response_stream(
                             }
                             let response = if let Some(parsed) = chunk.get("response") {
                                 let mut response = parse_response(parsed.clone())?;
+                                if !response.usage.is_reported()
+                                    && let Some(reported_usage) = &usage
+                                {
+                                    response.usage = reported_usage.clone();
+                                }
                                 if response.content.is_empty() {
                                     // Codex-style backends do not replay the
                                     // output items in the terminal

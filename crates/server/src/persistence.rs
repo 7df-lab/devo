@@ -1992,7 +1992,7 @@ fn merge_session_extras(
 
 /// Walks a rollout JSONL file, skipping blanks and stopping at a crash tail.
 /// Returns whether a truncated final line was seen.
-fn visit_rollout_lines(
+pub(crate) fn visit_rollout_lines(
     rollout_path: &Path,
     refuse_verb: &str,
     mut visit: impl FnMut(RolloutLine) -> Result<()>,
@@ -3036,6 +3036,7 @@ impl ReplayState {
         native.settings.effective_context_window = Some(applied_compaction_limit);
         native.usage = SessionUsage {
             total: UsageTotals {
+                unreported_fields: None,
                 total_tokens: self.total_tokens as u64,
                 input_tokens: self.total_input_tokens as u64,
                 output_tokens: self.total_output_tokens as u64,

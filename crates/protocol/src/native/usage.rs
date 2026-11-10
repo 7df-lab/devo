@@ -54,12 +54,45 @@ pub enum UsageCallOutcome {
     Cancelled,
 }
 
+/// A provider counter that was not reported. Counts remain available as known
+/// subtotals, but consumers must not present these fields as complete totals.
+#[derive(
+    Debug, Clone, Copy, PartialEq, Eq, PartialOrd, Ord, Serialize, Deserialize, JsonSchema, TS,
+)]
+#[serde(rename_all = "camelCase")]
+pub enum UsageField {
+    InputTokens,
+    OutputTokens,
+    ReasoningTokens,
+    CacheReadInputTokens,
+    CacheCreationInputTokens,
+    TotalTokens,
+}
+
+impl UsageField {
+    pub const ALL: [Self; 6] = [
+        Self::InputTokens,
+        Self::OutputTokens,
+        Self::ReasoningTokens,
+        Self::CacheReadInputTokens,
+        Self::CacheCreationInputTokens,
+        Self::TotalTokens,
+    ];
+}
+
 /// Provider-reported token usage for one call. Distinct from
 /// `ContextUsage` (context-window occupancy): usage answers "how much was
 /// spent", context answers "how full is the window".
-#[derive(Debug, Clone, Copy, Default, PartialEq, Eq, Serialize, Deserialize, JsonSchema, TS)]
+#[derive(Debug, Clone, Default, PartialEq, Eq, Serialize, Deserialize, JsonSchema, TS)]
 #[serde(rename_all = "camelCase")]
 pub struct TokenUsage {
+    /// `None` is legacy/unknown coverage; an empty list means all fields known.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub unreported_fields: Option<Vec<UsageField>>,
+    /// Provider-reported total, which can include tokens outside the primary
+    /// input/output counts. `None` preserves older ledger records.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub total_tokens: Option<u64>,
     pub input_tokens: u64,
     pub output_tokens: u64,
     pub reasoning_tokens: u64,
@@ -76,11 +109,25 @@ pub struct Money {
     pub micros: i64,
 }
 
+/// Captured parent ownership for a child model call. This persists the
+/// triggering parent turn rather than attributing delayed completions to
+/// whichever parent turn happens to be active when the call finishes.
+#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize, JsonSchema, TS)]
+#[serde(rename_all = "camelCase")]
+pub struct UsageAttribution {
+    pub session_id: SessionId,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub turn_id: Option<TurnId>,
+}
+
 /// One append-only metering record per model call attempt.
 #[derive(Debug, Clone, PartialEq, Serialize, Deserialize, JsonSchema, TS)]
 #[serde(rename_all = "camelCase")]
 pub struct UsageRecord {
     pub call_id: String,
+    /// Parent ownership captured at call start, absent on older records.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub parent: Option<UsageAttribution>,
     pub session_id: SessionId,
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub turn_id: Option<TurnId>,
@@ -99,12 +146,15 @@ pub struct UsageRecord {
 
 /// Aggregated token/call totals. `call_count` includes failed and cancelled
 /// attempts; `metered_call_count` counts attempts with reported usage.
-#[derive(Debug, Clone, Default, PartialEq, Eq, Serialize, Deserialize, JsonSchema, TS)]
+#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize, JsonSchema, TS)]
 #[serde(rename_all = "camelCase")]
 pub struct UsageTotals {
-    /// Aggregate tokens. For ledger-derived totals this equals
-    /// `input_tokens + output_tokens`; for legacy lumps it is the only known
-    /// number (the input/output split was never recorded).
+    /// `None` is legacy/unknown coverage; an empty list means all fields known.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub unreported_fields: Option<Vec<UsageField>>,
+    /// Aggregate tokens, preferring each call's provider-reported total and
+    /// otherwise using `input_tokens + output_tokens`. For legacy lumps it is
+    /// the only known number (the input/output split was never recorded).
     pub total_tokens: u64,
     pub input_tokens: u64,
     pub output_tokens: u64,
@@ -119,9 +169,31 @@ pub struct UsageTotals {
     pub estimated_cost: Option<Money>,
 }
 
+impl Default for UsageTotals {
+    fn default() -> Self {
+        Self {
+            unreported_fields: Some(Vec::new()),
+            total_tokens: 0,
+            input_tokens: 0,
+            output_tokens: 0,
+            reasoning_tokens: 0,
+            cache_read_input_tokens: 0,
+            cache_creation_input_tokens: 0,
+            call_count: 0,
+            metered_call_count: 0,
+            failed_call_count: 0,
+            cancelled_call_count: 0,
+            estimated_cost: None,
+        }
+    }
+}
+
 #[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize, JsonSchema, TS)]
 #[serde(rename_all = "camelCase")]
 pub struct PurposeUsage {
+    /// `None` is legacy/unknown coverage; an empty list means all fields known.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub unreported_fields: Option<Vec<UsageField>>,
     pub purpose: UsagePurpose,
     pub input_tokens: u64,
     pub output_tokens: u64,
@@ -152,8 +224,12 @@ impl TurnUsage {
     /// First-party live paths keep this Native shape end-to-end; overhead stays
     /// zero until AutoReview/Compaction metering is folded in.
     pub fn from_provider_usage(usage: &crate::Usage) -> Self {
+        if !usage.is_reported() {
+            return Self::default();
+        }
         Self {
             query: UsageTotals {
+                unreported_fields: usage.unreported_fields.clone(),
                 total_tokens: u64::try_from(usage.display_total_tokens()).unwrap_or(u64::MAX),
                 input_tokens: u64::try_from(usage.input_tokens).unwrap_or(u64::MAX),
                 output_tokens: u64::try_from(usage.output_tokens).unwrap_or(u64::MAX),
@@ -198,4 +274,54 @@ pub struct SessionUsage {
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub legacy: Option<UsageTotals>,
     pub updated_at: DateTime<Utc>,
+}
+
+#[cfg(test)]
+mod tests {
+    use pretty_assertions::assert_eq;
+    use serde_json::json;
+
+    use super::{TokenUsage, TurnUsage, UsageAttribution};
+    use crate::Usage;
+
+    #[test]
+    fn turn_usage_distinguishes_unknown_from_reported_zero() {
+        assert_eq!(
+            TurnUsage::from_provider_usage(&Usage::default()),
+            TurnUsage::default()
+        );
+        let reported_zero = Usage {
+            reported: true,
+            ..Usage::default()
+        };
+        let mut expected = TurnUsage::default();
+        expected.query.metered_call_count = 1;
+        expected.query.unreported_fields = None;
+        assert_eq!(TurnUsage::from_provider_usage(&reported_zero), expected);
+    }
+
+    #[test]
+    fn old_token_usage_and_parent_attribution_remain_readable() {
+        let value = json!({
+            "inputTokens": 1, "outputTokens": 2, "reasoningTokens": 3,
+            "cacheReadInputTokens": 4, "cacheCreationInputTokens": 5
+        });
+        let usage: TokenUsage = serde_json::from_value(value.clone()).unwrap();
+        assert_eq!(
+            usage,
+            TokenUsage {
+                unreported_fields: None,
+                total_tokens: None,
+                input_tokens: 1,
+                output_tokens: 2,
+                reasoning_tokens: 3,
+                cache_read_input_tokens: 4,
+                cache_creation_input_tokens: 5,
+            }
+        );
+        assert_eq!(serde_json::to_value(usage).unwrap(), value);
+        let attribution = json!({"sessionId": "00000000-0000-0000-0000-000000000001"});
+        let parent: UsageAttribution = serde_json::from_value(attribution.clone()).unwrap();
+        assert_eq!(serde_json::to_value(parent).unwrap(), attribution);
+    }
 }
