@@ -57,7 +57,7 @@ pub(crate) async fn execute_turn_task(
             &turn,
             &display_input,
             &input_image_paths,
-            input_mode.emits_user_message() && !user_message_already_emitted,
+            (!user_message_already_emitted).then_some(&input_mode),
             client_user_message_id.as_deref(),
         )
         .await;

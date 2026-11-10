@@ -136,7 +136,10 @@ impl ServerRuntime {
                         input_images: queued.input_images,
                         input_image_paths: queued.input_image_paths,
                         collaboration_mode: queued.collaboration_mode,
-                        input_mode: TurnInputMode::VisibleUserMessage,
+                        input_mode: queued.host_origin.map_or(
+                            TurnInputMode::VisibleUserMessage,
+                            TurnInputMode::HostMessage,
+                        ),
                         user_message_already_emitted: false,
                     })
                     .await;
@@ -223,7 +226,10 @@ impl ServerRuntime {
                     input_images: queued.input_images,
                     input_image_paths: queued.input_image_paths,
                     collaboration_mode: queued.collaboration_mode,
-                    input_mode: TurnInputMode::VisibleUserMessage,
+                    input_mode: queued.host_origin.map_or(
+                        TurnInputMode::VisibleUserMessage,
+                        TurnInputMode::HostMessage,
+                    ),
                     user_message_already_emitted: false,
                 }))
                 .await;
@@ -258,6 +264,7 @@ impl ServerRuntime {
         Some(QueuedTurnInput {
             // boundary: pending queue item id is already QueueItemId
             queued_item_id: popped.queued_input_id,
+            host_origin: popped.host_origin,
             client_user_message_id: popped.client_user_message_id,
             display_input: popped.display_input,
             input_text: popped.input_text,

@@ -68,12 +68,15 @@ impl ServerRuntime {
             Ok(history) => history,
             Err(response) => return Err(response),
         };
-        let Some(latest_user) = history.items.iter().rev().find(|item| {
-            matches!(
-                &item.item,
-                devo_protocol::native::item::Item::UserMessage { .. }
-            )
-        }) else {
+        // A later host turn is a real boundary, not something human editing
+        // may skip. Reject before interrupting that host's active work.
+        let Some(latest_user) = history
+            .items
+            .iter()
+            .rev()
+            .find(|item| crate::persisted_native_item::is_turn_input(&item.item))
+            .filter(|item| crate::persisted_native_item::is_human_turn_input(&item.item))
+        else {
             return Err(self.error_response(
                 request_id,
                 ProtocolErrorCode::OlderMessageRequiresFork,

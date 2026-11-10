@@ -122,3 +122,13 @@ export function itemDisplayText(envelope: NativeItemEnvelope): string {
 	}
 	return type
 }
+
+/** Only the latest input turn may be edited, and it must be human-authored. */
+export function latestEditableUserTurnIndex(turns: ChatTurn[]): number {
+	for (let index = turns.length - 1; index >= 0; index--) {
+		const envelope = turns[index].userMessage.info
+		if (!isUserMessageItem(envelope) || envelope.item.entry === "steer") continue
+		return envelope.item.origin == null ? index : -1
+	}
+	return -1
+}

@@ -67,6 +67,7 @@ import {
 import {
 	AGENT_MESSAGE_RECEIVED_PREVIEW_LABEL,
 	isAgentSessionMessage,
+	isHostFollowUpMessage,
 	startsAgentRun,
 } from "../../core/agent-messages.js";
 import {
@@ -5377,9 +5378,14 @@ export class InteractiveMode {
 
 		this.footer.invalidate();
 		this.updateConnectionStateFromEvent(event);
-		// A new user message resets the activity tracker to 0, so the in-flight baseline must
-		// reset with it. (agent_start on auto-retry does not reset the tracker.)
-		if (event.type === "message_start" && (event.message.role === "user" || isAgentSessionMessage(event.message))) {
+		// A new human/agent prompt or host follow-up resets the tracker to 0, so reset the
+		// baseline with it. Host steers and agent_start on auto-retry keep the current run.
+		if (
+			event.type === "message_start" &&
+			(event.message.role === "user" ||
+				isAgentSessionMessage(event.message) ||
+				isHostFollowUpMessage(event.message))
+		) {
 			this.contextUsageTokenBaseline = 0;
 			this.clearShortcutGuide();
 			this.agentRunFileChanges.clear();

@@ -100,7 +100,7 @@ export class UserMessageSelectorComponent extends Container {
 		this.addChild(new Text("Fork from Message", 1, 0));
 		this.addChild(
 			new Text(
-				theme.fg("muted", "Select a user message to copy the active path up to that point into a new session"),
+				theme.fg("muted", "Select a message to copy the active path up to that point into a new session"),
 				1,
 				0,
 			),

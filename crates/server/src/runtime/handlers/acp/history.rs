@@ -64,12 +64,24 @@ fn acp_update_from_native_history_item(
 ) -> Option<AcpSessionUpdate> {
     let message_id = Some(format!("history-{index}"));
     match item {
-        Item::UserMessage { content, .. } => {
+        Item::UserMessage {
+            content, origin, ..
+        } => {
             let text = user_text_from_content(content);
+            let mut meta = history_meta(index, None);
+            let text = if let Some(origin) = origin {
+                meta.insert(
+                    devo_protocol::DEVO_HOST_MESSAGE_ORIGIN_META.to_string(),
+                    serde_json::json!(origin),
+                );
+                devo_core::render_host_message(origin, &text)
+            } else {
+                text
+            };
             Some(AcpSessionUpdate::UserMessageChunk {
                 content: AcpContentBlock::text(text),
                 message_id,
-                meta: Some(history_meta(index, None)),
+                meta: Some(meta),
             })
         }
         Item::AssistantMessage { text, .. } => Some(AcpSessionUpdate::AgentMessageChunk {
@@ -261,6 +273,7 @@ mod tests {
     #[test]
     fn history_user_updates_include_stable_order_metadata_without_parent() {
         let entry = SessionHistoryEntry::item(Item::UserMessage {
+            origin: None,
             client_user_message_id: None,
             content: vec![UserInput::Text {
                 text: "hello".into(),

@@ -269,11 +269,14 @@ impl ServerRuntime {
         let expected_target_message_id = params
             .expected_target_message_id
             .or(params.target_message_id);
+        // Editing only replaces one turn. Skipping host descendants here would
+        // retain them in live context but detach them from the canonical tree.
         let Some(target) = session
             .persisted_turn_items
             .iter()
             .rev()
-            .find(|item| crate::persisted_native_item::is_user_message(&item.item))
+            .find(|item| crate::persisted_native_item::is_turn_input(&item.item))
+            .filter(|item| crate::persisted_native_item::is_human_turn_input(&item.item))
         else {
             return self.error_response(
                 request_id,
@@ -641,7 +644,7 @@ impl ServerRuntime {
         let branch_turn_count = session
             .persisted_turn_items
             .iter()
-            .filter(|item| crate::persisted_native_item::is_user_message(&item.item))
+            .filter(|item| crate::persisted_native_item::is_turn_input(&item.item))
             .count()
             .saturating_sub(1);
         session.latest_compaction_snapshot = None;

@@ -195,6 +195,9 @@ pub fn generate_protocol_typescript() -> String {
     push_decl::<native::item::FileChangeKind>(&cfg, &mut output);
     push_decl::<native::ids::GoalId>(&cfg, &mut output);
     push_decl::<native::item::UserMessageEntry>(&cfg, &mut output);
+    push_decl::<native::host_message::HostMessageOrigin>(&cfg, &mut output);
+    push_decl::<native::host_message::HostMessageSource>(&cfg, &mut output);
+    push_decl::<native::host_message::HostMessageDelivery>(&cfg, &mut output);
     push_decl::<native::item::PlanEntry>(&cfg, &mut output);
     push_decl::<native::item::PlanStepStatus>(&cfg, &mut output);
     push_decl::<native::item::ToolSource>(&cfg, &mut output);

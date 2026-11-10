@@ -64,6 +64,7 @@ import {
   applyGoalFromWire,
   countMessageStats,
   credentialSetParamsFromAuth,
+  hostMessagePrefix,
   mapMcpToExtensions,
   mapSkillSourceInfo,
   mapSkillsToResourceSkills,
@@ -1647,25 +1648,10 @@ export class NativeAgentConnection implements AgentConnection {
       if (this.sessionId !== sessionId || this.disposed) return;
       const entries = Array.isArray(result?.entries) ? result.entries : [];
       this.queueEntries = parseQueueWireEntries(entries);
-      const followUp: string[] = [];
-      for (const entry of entries) {
-        if (!entry || typeof entry !== "object") continue;
-        const record = entry as Record<string, unknown>;
-        const preview = String(record.preview ?? "").trim();
-        if (preview) {
-          followUp.push(preview);
-          continue;
-        }
-        const input = Array.isArray(record.input) ? record.input : [];
-        const parts: string[] = [];
-        for (const part of input) {
-          if (!part || typeof part !== "object") continue;
-          const text = (part as { text?: unknown }).text;
-          if (text != null) parts.push(String(text));
-        }
-        const joined = parts.join("\n").trim();
-        if (joined) followUp.push(joined);
-      }
+      const followUp = entries
+        .filter((entry) => entry && typeof entry === "object")
+        .map((entry) => queuePreviewText(entry as QueueWireEntry))
+        .filter(Boolean);
       // Steering is turn-scoped and not listed on the durable queue.
       this.queue = { steering: [...this.queue.steering], followUp };
       this.syncActionsFromQueue();
@@ -1719,6 +1705,7 @@ export class NativeAgentConnection implements AgentConnection {
     }
     const entry = this.queueEntries[index];
     if (!entry || queuePreviewText(entry) !== expectedText) return "rejected" as const;
+    if (entry.origin && mutation.type !== "delete") return "rejected" as const;
     const sessionId = this.requireSessionId();
     try {
       if (mutation.type === "delete") {
@@ -1969,7 +1956,7 @@ export class NativeAgentConnection implements AgentConnection {
       const turnId = String(env.turnId ?? env.turn_id ?? "");
       if (!turnId || seenTurns.has(turnId)) continue;
       seenTurns.add(turnId);
-      out.push({ entryId: turnId, text: extractText(item.content) });
+      out.push({ entryId: turnId, text: hostMessagePrefix(item.origin) + extractText(item.content) });
     }
     return out;
   }
