@@ -91,6 +91,10 @@ import type { SessionRosterParams, SessionRosterPage } from "./session-roster"
 export type { Session as NativeSession } from "./generated/native"
 export type { SessionRosterParams, SessionRosterPage } from "./session-roster"
 
+/** Legacy undo/redo is not an alias for destructive Native rollback. */
+export const SESSION_HISTORY_UNAVAILABLE =
+	"Session undo and redo are not supported. No rollback was performed."
+
 export type JsonRpcId = number | string
 
 export interface DevoNativeTransportEvent {
@@ -1108,12 +1112,12 @@ class NativeClient {
 				throw error
 			}
 		},
-		revert: async (params: { sessionId: string }) => ({
-			data: this.sessions.get(params.sessionId),
-		}),
-		unrevert: async (params: { sessionId: string }) => ({
-			data: this.sessions.get(params.sessionId),
-		}),
+		revert: async (_params: { sessionId: string }): Promise<{ data: Session | undefined }> => {
+			throw new Error(SESSION_HISTORY_UNAVAILABLE)
+		},
+		unrevert: async (_params: { sessionId: string }): Promise<{ data: Session | undefined }> => {
+			throw new Error(SESSION_HISTORY_UNAVAILABLE)
+		},
 		command: async (params: { sessionId: string; command: string; arguments?: string }) => {
 			const suffix = params.arguments ? ` ${params.arguments}` : ""
 			await this.session.promptAsync({
@@ -1395,9 +1399,18 @@ class NativeClient {
 	}
 
 	config = {
-		providers: async () => ({
-			data: providerDataFromConfigOptions(await this.ensureCurrentConfigOptions()),
-		}),
+		providers: async () => {
+			// Selectable routes must come from a fresh Native read, never an ACP
+			// session cache that retains the current model as a placeholder.
+			const result = await this.requestCanonical("model/preferences/read", {
+				...(this.options.directory ? { cwd: this.options.directory } : {}),
+			}) as { preferences: ModelPreferencesWire }
+			return {
+				data: providerDataFromConfigOptions(
+					sessionConfigOptionsFromModelPreferences(result.preferences),
+				),
+			}
+		},
 		get: async () => ({ data: configDataFromConfigOptions(await this.ensureCurrentConfigOptions()) }),
 		setOption: async (params: { configID: string; value: string }) => ({
 			data: configDataFromConfigOptions(

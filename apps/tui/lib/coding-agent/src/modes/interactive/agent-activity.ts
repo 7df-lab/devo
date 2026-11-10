@@ -1,4 +1,4 @@
-import { isAgentSessionMessage } from "../../core/agent-messages.js";
+import { isAgentSessionMessage, isHostFollowUpMessage } from "../../core/agent-messages.js";
 import type { AgentConnectionSessionEvent } from "../agent-connection/index.js";
 
 export type AgentActivity = "waiting" | "thinking" | "writing" | "writing-code" | "executing";
@@ -38,7 +38,11 @@ export class AgentActivityTracker {
 				break;
 
 			case "message_start":
-				if (event.message.role === "user" || isAgentSessionMessage(event.message)) {
+				if (
+					event.message.role === "user" ||
+					isAgentSessionMessage(event.message) ||
+					isHostFollowUpMessage(event.message)
+				) {
 					this.reset();
 				} else if (event.message.role === "assistant") {
 					this.activity = "waiting";

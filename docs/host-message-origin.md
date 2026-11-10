@@ -41,7 +41,11 @@ No new permission grants or approval decisions are synthesized. Host turn-start
 and queue inputs still count as turn boundaries for fork/rollback and rebuilt
 turn counters. The legacy `userTurnIndex` is an input-turn index in the linear
 journal, not a human-authorship filter. In-turn steer messages do not add a turn
-boundary. Human editing and composer Undo use a separate authorship check.
+boundary. Human message editing uses a separate authorship check on the latest input turn.
+A later host turn blocks editing an earlier human prompt; clients must fork to
+revisit it, rather than silently discard or retain different host descendants. Desktop session Undo and
+Redo remain disabled without interrupting a turn or invoking rollback, including
+when history contains host notifications.
 
 Desktop uses a separate labeled notification block rather than a human prompt
 bubble. Desktop and TUI show source labels for both live and reopened history,
@@ -100,5 +104,8 @@ a compromised host process.
 Regression coverage checks busy follow-up order, unchanged active model requests,
 durable queue provenance, queue edit rejection, host origin in Native history,
 live/replayed model wrappers, legacy decoding, source labels, optimistic human
-input reconciliation, and client mutation guards. Existing idle completion and
+input reconciliation, client mutation guards, and the disabled Desktop session
+Undo/Redo path after merging the session-history safety fix. Canonical message
+edit responses retain their persisted envelope, sequence, and explicit root
+parent semantics from the edit-history fix. Existing idle completion and
 family wake tests continue to cover actual producer routing.

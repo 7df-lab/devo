@@ -180,15 +180,21 @@ for (const source of ["agent", "backgroundTask", "schedule"]) {
 
 import { latestEditableUserTurnIndex } from "./derived/session-chat"
 
-test("human remains editable after host and synthetic messages", () => {
+test("only the latest input boundary may be edited and host boundaries block older humans", () => {
 	const human = userItem("human", "turn-1", 1, "2026-11-09T00:00:00Z")
 	const host = userItem("host", "turn-2", 2, "2026-11-09T00:00:01Z")
 	host.item.origin = { source: "agent", eventId: "e", sender: "worker", delivery: "followUp" }
-	const humanTurns = groupIntoTurns(mergeSessionItems([human]), [])
-	const mixedTurns = groupIntoTurns(mergeSessionItems([human, host]), [])
-	expect(latestEditableUserTurnIndex(humanTurns)).toBe(0)
-	expect(latestEditableUserTurnIndex(mixedTurns)).toBe(0)
-	expect(latestEditableUserTurnIndex(mixedTurns.slice(1))).toBe(-1)
+	const steer = userItem("steer", "turn-2", 3, "2026-11-09T00:00:02Z")
+	steer.item.entry = "steer"
+	const laterHuman = userItem("later-human", "turn-3", 4, "2026-11-09T00:00:03Z")
+	const editable = (items: NativeItemEnvelope[]) => latestEditableUserTurnIndex(groupIntoTurns(mergeSessionItems(items), []))
+	expect(editable([human])).toBe(0)
+	expect(editable([human, steer])).toBe(0)
+	expect(editable([human, host])).toBe(-1)
+	expect(editable([human, host, steer])).toBe(-1)
+	expect(editable([host])).toBe(-1)
+	expect(editable([human, host, laterHuman])).toBe(2)
 	const synthetic = { ...host, item: { type: "plan" } }
-	expect(latestEditableUserTurnIndex([...mixedTurns, { id: "plan", userMessage: { info: synthetic }, assistantMessages: [] }])).toBe(0)
+	const mixedTurns = groupIntoTurns(mergeSessionItems([human, host]), [])
+	expect(latestEditableUserTurnIndex([...mixedTurns, { id: "plan", userMessage: { info: synthetic }, assistantMessages: [] }])).toBe(-1)
 })

@@ -6,6 +6,7 @@ import type { Root } from "react-dom/client"
 import type { NativeItemEnvelope } from "@devo-ai/sdk/v2/client"
 import { appStore } from "../atoms/store"
 import { itemsFamily } from "../atoms/messages"
+import { sessionFamily } from "../atoms/sessions"
 
 const dom = new Window({ url: "http://localhost" })
 Object.assign(globalThis, {
@@ -39,8 +40,12 @@ function message(id: string, text: string, source?: string): NativeItemEnvelope 
 		},
 	}
 }
-async function mount(items: NativeItemEnvelope[]) {
+async function mount(items: NativeItemEnvelope[], status: "idle" | "busy") {
 	appStore.set(itemsFamily(sessionId), items)
+	appStore.set(sessionFamily(sessionId), {
+		session: { id: sessionId }, status: { type: status },
+		permissions: [], questions: [], directory: "/repo",
+	})
 	const container = document.createElement("div")
 	document.body.append(container)
 	root = createRoot(container)
@@ -50,35 +55,25 @@ afterEach(async () => {
 	await act(async () => root?.unmount())
 	root = undefined
 	appStore.set(itemsFamily(sessionId), [])
+	appStore.set(sessionFamily(sessionId), null)
 	document.body.replaceChildren()
 	calls.length = 0
 })
 
-for (const source of ["agent", "backgroundTask", "schedule"]) {
-	test(`Undo restores latest human draft before ${source}, never host text`, async () => {
-		await mount([message("1", "Older human"), message("2", "Latest human"), message("3", "Host result ready", source)])
-		expect(hook.canUndo).toBe(true)
-		let composerDraft: string | undefined
-		await act(async () => { composerDraft = await hook.undo() })
-		expect(composerDraft).toBe("Latest human")
-		expect(calls).toEqual([{ method: "revert", params: { sessionId } }])
-	})
-
-	test(`Undo with only ${source} input neither fills a draft nor invokes a mutation`, async () => {
-		await mount([message("1", "Host result ready", source)])
-		expect(hook.canUndo).toBe(false)
-		let composerDraft: string | undefined
-		await act(async () => { composerDraft = await hook.undo() })
-		expect(composerDraft).toBeUndefined()
-		expect(calls).toEqual([])
-	})
+for (const status of ["idle", "busy"] as const) {
+	for (const source of ["agent", "backgroundTask", "schedule"]) {
+		for (const withHuman of [true, false]) {
+			test(`${status}: ${source} history withHuman=${withHuman} keeps Undo and Redo disabled`, async () => {
+				const items = [
+					...(withHuman ? [message("1", "Latest human")] : []),
+					message("2", "Host result ready", source),
+				]
+				await mount(items, status)
+				expect({ canUndo: hook.canUndo, canRedo: hook.canRedo }).toEqual({ canUndo: false, canRedo: false })
+				for (const action of [hook.undo, hook.redo])
+					await expect(action()).rejects.toThrow("not supported")
+				expect({ calls, items: appStore.get(itemsFamily(sessionId)) }).toEqual({ calls: [], items })
+			})
+		}
+	}
 }
-
-test("ordinary human Undo preserves text and existing revert behavior", async () => {
-	await mount([message("1", "Original human draft")])
-	expect(hook.canUndo).toBe(true)
-	let composerDraft: string | undefined
-	await act(async () => { composerDraft = await hook.undo() })
-	expect(composerDraft).toBe("Original human draft")
-	expect(calls).toEqual([{ method: "revert", params: { sessionId } }])
-})

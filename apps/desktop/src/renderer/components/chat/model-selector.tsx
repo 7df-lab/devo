@@ -6,15 +6,15 @@ import {
 import { useIsMobile } from "@devo/ui/hooks/use-mobile"
 import { useNavigate } from "@tanstack/react-router"
 import { ChevronDownIcon } from "lucide-react"
-import { useEffect, useMemo, useState } from "react"
+import { useEffect, useLayoutEffect, useMemo, useState } from "react"
 import {
-	useProviderCatalog,
 	type CatalogProviderInfo,
 	type ModelRef,
-	type ProvidersData,
+	useProviderCatalog,
+	useProviders,
 } from "../../hooks/use-devo-data"
-import { invalidateProviderDependentQueries } from "../../lib/invalidate-provider-queries"
 import { useModelDirectory } from "../../hooks/use-model-directory"
+import { invalidateProviderDependentQueries } from "../../lib/invalidate-provider-queries"
 import { ConnectProviderDialog } from "../settings/connect-provider-dialog"
 import { isDesktopOAuthProvider } from "../settings/desktop-oauth-providers"
 import { TemplateConnectDialog } from "../settings/template-connect-dialog"
@@ -25,13 +25,10 @@ import {
 	ModelSelectorReasoningStrengthMobileView,
 } from "./model-selector-reasoning-strength"
 import { ModelSelectorTriggerLabel } from "./model-selector-trigger-label"
-import {
-	getVariantTriggerLabel,
-	resolveSelectedVariant,
-} from "./model-selector-variant-label"
+import { getVariantTriggerLabel, resolveSelectedVariant } from "./model-selector-variant-label"
 
 export interface ModelSelectorProps {
-	providers: ProvidersData | null
+	directory: string | null
 	effectiveModel: ModelRef | null
 	hasOverride: boolean
 	onSelectModel: (model: ModelRef | null) => void
@@ -49,7 +46,7 @@ export interface ModelSelectorProps {
 
 /** Shared desktop equivalent of /model, backed by Native preferences and catalog. */
 export function ModelSelector({
-	providers,
+	directory,
 	effectiveModel,
 	onSelectModel,
 	variants = [],
@@ -63,13 +60,37 @@ export function ModelSelector({
 	open: controlledOpen,
 	onOpenChange,
 }: ModelSelectorProps) {
+	const availability = useProviders(directory)
 	const catalog = useProviderCatalog()
-	const directory = useModelDirectory()
+	const modelDirectory = useModelDirectory()
 	const navigate = useNavigate()
 	const isMobile = useIsMobile()
+	const [localOpen, setLocalOpen] = useState(false)
+	const open = presentation === "inline" || (controlledOpen ?? localOpen)
+	const [wasOpen, setWasOpen] = useState(open)
+	const reopening = open && !wasOpen
+	useLayoutEffect(() => {
+		if (open === wasOpen) return
+		// Mount/scope/reconnect already trigger the shared query. A mounted
+		// popover reopening must recheck independently of catalog refresh.
+		if (open) availability.reload()
+		setWasOpen(open)
+	}, [open, wasOpen, availability.reload])
 	const models = useMemo(
-		() => buildPickerModels(providers, catalog.data, directory.data),
-		[providers, catalog.data, directory.data],
+		() =>
+			buildPickerModels(
+				reopening || availability.loading || availability.error ? null : availability.data,
+				catalog.data,
+				modelDirectory.data,
+			),
+		[
+			reopening,
+			availability.data,
+			availability.loading,
+			availability.error,
+			catalog.data,
+			modelDirectory.data,
+		],
 	)
 	const activeValue = effectiveModel
 		? effectiveModel.providerID === "session"
@@ -83,50 +104,54 @@ export function ModelSelector({
 		currentVariant,
 		allowDefaultVariant,
 	)
-	const [localOpen, setLocalOpen] = useState(false)
 	const [mobileVariantView, setMobileVariantView] = useState(false)
-	const [connection, setConnection] = useState<{
-		provider: CatalogProviderInfo
-		model: PickerModel
-	} | null>(null)
+	const [connection, setConnection] = useState<CatalogProviderInfo | null>(null)
 	// Catalog refetches must not restart an in-progress OAuth dialog.
 	const oauthProvider = useMemo(
-		() => (connection ? { ...connection.provider, env: [] } : null),
+		() => (connection ? { ...connection, env: [] } : null),
 		[connection],
 	)
-	const open = presentation === "inline" || (controlledOpen ?? localOpen)
 	useEffect(() => {
-		if (open) directory.refreshCatalog("ifStale")
-	}, [open, directory.refreshCatalog])
+		if (open) modelDirectory.refreshCatalog("ifStale")
+	}, [open, modelDirectory.refreshCatalog])
 	const changeOpen = (next: boolean) => {
 		setLocalOpen(next)
 		onOpenChange?.(next)
 		if (!next) setMobileVariantView(false)
 	}
+	const unavailableReason =
+		directory === null
+			? "Choose a project to load available models"
+			: !availability.connected
+				? "Connect to the server to load available models"
+				: reopening || availability.loading
+					? "Loading available models…"
+					: availability.error
+						? "Could not load model availability"
+						: null
 	const choose = (model: PickerModel) => {
+		if (unavailableReason) return
 		if (model.ready) {
 			onSelectModel(model.selection)
 			changeOpen(false)
 			return
 		}
-		const provider = catalog.data?.providers.find(
-			(entry) => entry.id === model.providerID,
-		)
+		const provider = catalog.data?.providers.find((entry) => entry.id === model.providerID)
 		if (provider) {
 			changeOpen(false)
-			setConnection({ provider, model })
+			setConnection(provider)
 		}
 	}
 	const connected = () => {
 		invalidateProviderDependentQueries()
 		catalog.reload()
-		if (connection) onSelectModel(connection.model.selection)
 		setConnection(null)
+		changeOpen(true)
 	}
 
 	const content = (
 		<>
-			{mobileVariantView && variants.length ? (
+			{mobileVariantView && variants.length && !unavailableReason ? (
 				<ModelSelectorReasoningStrengthMobileView
 					variants={variants}
 					selectedVariant={resolvedVariant}
@@ -140,20 +165,24 @@ export function ModelSelector({
 					<ModelPickerList
 						models={models}
 						activeValue={activeValue}
-						loading={catalog.loading || directory.loading}
-						error={catalog.error || directory.error}
-						onRetry={() => directory.refreshCatalog("force")}
+						loading={reopening || availability.loading || catalog.loading || modelDirectory.loading}
+						unavailableReason={unavailableReason}
+						error={availability.error || catalog.error || modelDirectory.error}
+						onRetry={() => {
+							if (availability.error) availability.reload()
+							else modelDirectory.refreshCatalog("force")
+						}}
 						onSelect={choose}
-						refreshing={directory.refreshing}
-						offline={directory.offline}
-						onRefresh={() => directory.refreshCatalog("force")}
+						refreshing={modelDirectory.refreshing}
+						offline={modelDirectory.offline}
+						onRefresh={() => modelDirectory.refreshCatalog("force")}
 						onManageProviders={() => {
 							changeOpen(false)
 							if (onManageProviders) onManageProviders()
 							else void navigate({ to: "/settings/providers" })
 						}}
 					/>
-					{variants.length > 0 && (
+					{variants.length > 0 && !unavailableReason && (
 						<ModelSelectorReasoningStrength
 							variants={variants}
 							selectedVariant={resolvedVariant}
@@ -183,11 +212,7 @@ export function ModelSelector({
 							{activeModel ? (
 								<ModelSelectorTriggerLabel
 									displayName={activeModel.displayName}
-									variantLabel={
-										variants.length
-											? getVariantTriggerLabel(resolvedVariant)
-											: null
-									}
+									variantLabel={variants.length ? getVariantTriggerLabel(resolvedVariant) : null}
 								/>
 							) : (
 								<span className="text-muted-foreground">Choose model</span>
@@ -204,13 +229,11 @@ export function ModelSelector({
 						</SearchableListPopoverContent>
 					</>
 				) : (
-					<div className="overflow-hidden rounded-xl border border-border/60">
-						{content}
-					</div>
+					<div className="overflow-hidden rounded-xl border border-border/60">{content}</div>
 				)}
 			</SearchableListPopover>
 			{connection &&
-				(isDesktopOAuthProvider(connection.provider.id) ? (
+				(isDesktopOAuthProvider(connection.id) ? (
 					<ConnectProviderDialog
 						provider={oauthProvider}
 						onClose={() => setConnection(null)}
@@ -218,7 +241,7 @@ export function ModelSelector({
 					/>
 				) : (
 					<TemplateConnectDialog
-						provider={connection.provider}
+						provider={connection}
 						open
 						onOpenChange={(next) => {
 							if (!next) setConnection(null)

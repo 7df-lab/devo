@@ -123,11 +123,12 @@ export function itemDisplayText(envelope: NativeItemEnvelope): string {
 	return type
 }
 
-/** Host notices and synthetic rows do not replace the latest editable human prompt. */
+/** Only the latest input turn may be edited, and it must be human-authored. */
 export function latestEditableUserTurnIndex(turns: ChatTurn[]): number {
 	for (let index = turns.length - 1; index >= 0; index--) {
 		const envelope = turns[index].userMessage.info
-		if (isUserMessageItem(envelope) && envelope.item.origin == null) return index
+		if (!isUserMessageItem(envelope) || envelope.item.entry === "steer") continue
+		return envelope.item.origin == null ? index : -1
 	}
 	return -1
 }

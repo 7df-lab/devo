@@ -90,8 +90,10 @@ afterEach(async () => {
 describe("connected provider details", () => {
 	test("shows inherited models alongside saved models without offering to delete templates", async () => {
 		await renderDialog()
+		expect(mount.textContent).toContain("Configured")
+		expect(mount.textContent).toContain("Model access has not been verified by saving this connection")
 		expect({
-			count: mount.textContent?.includes("4 models available."),
+			count: mount.textContent?.includes("4 models listed."),
 			inherited: mount.textContent?.includes("Luna"),
 			removeLabels: [...mount.querySelectorAll("button[aria-label]")].map(
 				(button) => button.getAttribute("aria-label"),

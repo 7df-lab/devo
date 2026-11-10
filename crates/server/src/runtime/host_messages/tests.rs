@@ -146,7 +146,45 @@ async fn host_followups_keep_origin_in_queue_live_model_and_replay() -> Result<(
         "host queue content must not be re-authored"
     );
 
-    provider.release.add_permits(3);
+    // Once a host follow-up starts, the preceding human input is no longer
+    // the latest editable turn. Reject before interrupting that host turn.
+    provider.release.add_permits(1);
+    tokio::time::timeout(Duration::from_secs(/*secs*/ 15), provider.started.acquire())
+        .await??
+        .forget();
+    let busy_history = runtime
+        .load_canonical_history(&json!(40), session)
+        .await
+        .map_err(|error| anyhow::anyhow!("{error}"))?;
+    let prior_human = busy_history
+        .items
+        .iter()
+        .find(|item| crate::persisted_native_item::is_human_turn_input(&item.item))
+        .context("preceding human input")?;
+    let host_turn = runtime.runtime_active_turn_id(session).await;
+    assert!(host_turn.is_some());
+    let rejected = runtime
+        .handle_incoming(
+            connection,
+            json!({
+                "id":41,"method":"session/message/edit","params":{
+                    "sessionId":session,"itemId":prior_human.id,"expectedRevision":0,
+                    "content":[{"type":"text","text":"rewrite before host"}],
+                    "workspaceRestore":"skip","idempotencyKey":"reject-before-busy-host"
+                }
+            }),
+        )
+        .await
+        .context("reject edit before busy host")?;
+    assert!(rejected.get("error").is_some(), "{rejected}");
+    assert_eq!(runtime.runtime_active_turn_id(session).await, host_turn);
+    let after_rejection = runtime
+        .load_canonical_history(&json!(42), session)
+        .await
+        .map_err(|error| anyhow::anyhow!("{error}"))?;
+    assert_eq!(after_rejection.items, busy_history.items);
+    assert_eq!(provider.requests.lock().expect("requests").len(), 2);
+    provider.release.add_permits(2);
     tokio::time::timeout(Duration::from_secs(/*secs*/ 15), async {
         let mut completed = 0;
         while let Some(event) = notifications.recv().await {
@@ -303,6 +341,33 @@ async fn host_followups_keep_origin_in_queue_live_model_and_replay() -> Result<(
         )))
     );
     drop(requests);
+    // The same boundary rule holds after the host finishes: do not silently
+    // retain host descendants live while dropping them from the edited tree.
+    let prior_human = history
+        .items
+        .iter()
+        .find(|item| crate::persisted_native_item::is_human_turn_input(&item.item))
+        .context("preceding human input")?;
+    let rejected = runtime
+        .handle_incoming(
+            connection,
+            json!({
+                "id":43,"method":"session/message/edit","params":{
+                    "sessionId":session,"itemId":prior_human.id,"expectedRevision":0,
+                    "content":[{"type":"text","text":"rewrite before finished host"}],
+                    "workspaceRestore":"skip","idempotencyKey":"reject-before-idle-host"
+                }
+            }),
+        )
+        .await
+        .context("reject edit before idle host")?;
+    assert!(rejected.get("error").is_some(), "{rejected}");
+    let after_rejection = runtime
+        .load_canonical_history(&json!(44), session)
+        .await
+        .map_err(|error| anyhow::anyhow!("{error}"))?;
+    assert_eq!(after_rejection.items, history.items);
+    assert_eq!(provider.requests.lock().expect("requests").len(), 3);
     // Turn addresses and counts include host inputs, independently of human
     // authorship. In particular atTurnId must work for visible host fork rows.
     let turn_inputs = history

@@ -8,6 +8,7 @@ import {
 	getModelVariants,
 	modelAllowsDefaultVariant,
 	resolveEffectiveModel,
+	useProviders,
 	type ModelRef,
 } from "../../hooks/use-devo-data"
 import {
@@ -39,20 +40,11 @@ export function ModelProviderSettings() {
 		queryFn: async () => {
 			const client = directory ? getProjectClient(directory) : getBaseClient()
 			if (!client) throw new Error("Not connected to server")
-			const [providers, config] = await Promise.all([
-				client.config.providers(),
-				client.config.get(),
-			])
-			return {
-				providers: {
-					providers: providers.data.providers,
-					defaults: providers.data.default,
-				},
-				model: config.data.model,
-			}
+			const config = await client.config.get()
+			return { model: config.data.model }
 		},
 	})
-	const providers = defaults.data?.providers ?? null
+	const { data: providers } = useProviders(directory)
 	const model = resolveEffectiveModel(
 		null,
 		null,
@@ -126,7 +118,7 @@ export function ModelProviderSettings() {
 					</p>
 					<ModelSelector
 						presentation="inline"
-						providers={providers}
+						directory={directory}
 						effectiveModel={model}
 						hasOverride={false}
 						variants={variants}

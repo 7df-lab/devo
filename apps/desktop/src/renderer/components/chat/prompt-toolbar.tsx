@@ -212,6 +212,8 @@ export interface PromptToolbarProps {
 	defaultAgent?: string
 	onSelectAgent: (agentName: string) => void
 
+	/** Workspace for the authoritative Native model choices. */
+	directory: string | null
 	/** Provider data for model selector */
 	providers: ProvidersData | null
 	/** The resolved effective model */
@@ -238,6 +240,7 @@ export function PromptToolbar({
 	selectedAgent,
 	defaultAgent,
 	onSelectAgent,
+	directory,
 	providers,
 	effectiveModel,
 	hasModelOverride,
@@ -287,7 +290,7 @@ export function PromptToolbar({
 			{hasAgents && <Separator orientation="vertical" className="mx-0.5 my-2 self-stretch" />}
 
 			<ModelSelector
-				providers={providers}
+				directory={directory}
 				effectiveModel={effectiveModel}
 				hasOverride={hasModelOverride}
 				onSelectModel={onSelectModel}

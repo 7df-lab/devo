@@ -8,7 +8,6 @@
  * (or pick another id) before save.
  */
 
-import type { CatalogModelInfo, CatalogProviderInfo, CatalogWireApi } from "@devo-ai/sdk/v2/client"
 import { Button } from "@devo/ui/components/button"
 import {
 	Dialog,
@@ -29,13 +28,11 @@ import {
 	SelectValue,
 } from "@devo/ui/components/select"
 import { Spinner } from "@devo/ui/components/spinner"
+import type { CatalogModelInfo, CatalogProviderInfo, CatalogWireApi } from "@devo-ai/sdk/v2/client"
 import { PlusIcon, Trash2Icon } from "lucide-react"
-import { useCallback, useMemo, useState } from "react"
+import { useCallback, useEffect, useId, useMemo, useRef, useState } from "react"
 import { getBaseClient } from "../../services/connection-manager"
-import {
-	isBuiltinTemplateProviderId,
-	suggestNonTemplateProviderId,
-} from "./custom-provider-id"
+import { isBuiltinTemplateProviderId, suggestNonTemplateProviderId } from "./custom-provider-id"
 
 const WIRE_API_OPTIONS: Array<{ value: CatalogWireApi; label: string }> = [
 	{ value: "openai_chat_completions", label: "OpenAI Chat Completions" },
@@ -89,11 +86,33 @@ export function CustomProviderDialog({
 	})
 	const [headers, setHeaders] = useState<HeaderEntry[]>(() => {
 		if (!existing?.headers) return []
-		return Object.entries(existing.headers).map(([key, value]) => ({ key, value }))
+		return Object.entries(existing.headers).map(([key, value]) => ({
+			key,
+			value,
+		}))
 	})
 	const [saving, setSaving] = useState(false)
-	const [error, setError] = useState<string | null>(null)
+	const [error, setError] = useState<{
+		message: string
+		field?: "provider-id" | "base-url"
+	} | null>(null)
+	const errorId = useId()
+	const providerIdInput = useRef<HTMLInputElement>(null)
+	const baseUrlInput = useRef<HTMLInputElement>(null)
 	const [builtinConflictOpen, setBuiltinConflictOpen] = useState(false)
+	const saveScope = useRef<{ saving: boolean } | null>(null)
+
+	// A completed write still refreshes shared data after dismissal, but its UI
+	// result belongs only to the form opening that started it.
+	useEffect(() => {
+		saveScope.current = open ? { saving: false } : null
+		setSaving(false)
+		setError(null)
+		setBuiltinConflictOpen(false)
+		return () => {
+			saveScope.current = null
+		}
+	}, [open])
 
 	const suggestedAlternateId = useMemo(
 		() => suggestNonTemplateProviderId(providerId, templateIds),
@@ -125,62 +144,72 @@ export function CustomProviderDialog({
 	}, [])
 
 	const persistProvider = useCallback(async () => {
-		const id = providerId.trim()
-		const client = getBaseClient()
-		if (!client) throw new Error("Not connected to server")
+		const scope = saveScope.current
+		if (!scope || scope.saving) return
+		scope.saving = true
+		setSaving(true)
+		setError(null)
+		try {
+			const id = providerId.trim()
+			const client = getBaseClient()
+			if (!client) throw new Error("Not connected to server")
 
-		const catalogModels: Record<string, CatalogModelInfo> = {}
-		for (const m of models) {
-			const mid = m.id.trim()
-			if (mid) {
-				catalogModels[mid] = { name: m.name.trim() || undefined }
+			const catalogModels: Record<string, CatalogModelInfo> = {}
+			for (const m of models) {
+				const mid = m.id.trim()
+				if (mid) {
+					catalogModels[mid] = { name: m.name.trim() || undefined }
+				}
+			}
+
+			const catalogHeaders: Record<string, string> = {}
+			for (const h of headers) {
+				if (h.key.trim()) {
+					catalogHeaders[h.key.trim()] = h.value
+				}
+			}
+
+			const provider: CatalogProviderInfo = {
+				id,
+				name: displayName.trim() || id,
+				baseUrl: baseUrl.trim(),
+				wireApis: [wireApi],
+				models: catalogModels,
+				enabled: true,
+				...(Object.keys(catalogHeaders).length > 0 ? { headers: catalogHeaders } : {}),
+			}
+
+			await client.provider.upsert({
+				provider,
+				...(apiKey.trim() ? { apiKey: apiKey.trim() } : {}),
+			})
+
+			if (saveScope.current === scope) onOpenChange(false)
+			onSaved()
+		} catch (err) {
+			if (saveScope.current === scope) {
+				setError({
+					message: err instanceof Error ? err.message : "Failed to save provider",
+				})
+			}
+		} finally {
+			if (saveScope.current === scope) {
+				scope.saving = false
+				setSaving(false)
 			}
 		}
-
-		const catalogHeaders: Record<string, string> = {}
-		for (const h of headers) {
-			if (h.key.trim()) {
-				catalogHeaders[h.key.trim()] = h.value
-			}
-		}
-
-		const provider: CatalogProviderInfo = {
-			id,
-			name: displayName.trim() || id,
-			baseUrl: baseUrl.trim(),
-			wireApis: [wireApi],
-			models: catalogModels,
-			enabled: true,
-			...(Object.keys(catalogHeaders).length > 0 ? { headers: catalogHeaders } : {}),
-		}
-
-		await client.provider.upsert({
-			provider,
-			...(apiKey.trim() ? { apiKey: apiKey.trim() } : {}),
-		})
-
-		onOpenChange(false)
-		onSaved()
-	}, [
-		providerId,
-		displayName,
-		baseUrl,
-		wireApi,
-		apiKey,
-		models,
-		headers,
-		onOpenChange,
-		onSaved,
-	])
+	}, [providerId, displayName, baseUrl, wireApi, apiKey, models, headers, onOpenChange, onSaved])
 
 	const handleSave = useCallback(async () => {
 		const id = providerId.trim()
 		if (!id) {
-			setError("Provider ID is required")
+			setError({ message: "Provider ID is required", field: "provider-id" })
+			providerIdInput.current?.focus()
 			return
 		}
 		if (!baseUrl.trim()) {
-			setError("Base URL is required")
+			setError({ message: "Base URL is required", field: "base-url" })
+			baseUrlInput.current?.focus()
 			return
 		}
 
@@ -190,28 +219,12 @@ export function CustomProviderDialog({
 			return
 		}
 
-		setSaving(true)
-		setError(null)
-		try {
-			await persistProvider()
-		} catch (err) {
-			setError(err instanceof Error ? err.message : "Failed to save provider")
-		} finally {
-			setSaving(false)
-		}
+		await persistProvider()
 	}, [providerId, baseUrl, isEdit, templateIds, persistProvider])
 
 	const handleOverlayBuiltin = useCallback(async () => {
 		setBuiltinConflictOpen(false)
-		setSaving(true)
-		setError(null)
-		try {
-			await persistProvider()
-		} catch (err) {
-			setError(err instanceof Error ? err.message : "Failed to save provider")
-		} finally {
-			setSaving(false)
-		}
+		await persistProvider()
 	}, [persistProvider])
 
 	const handleUseSuggestedId = useCallback(() => {
@@ -239,14 +252,17 @@ export function CustomProviderDialog({
 							</Label>
 							<Input
 								id="provider-id"
+								ref={providerIdInput}
+								aria-invalid={error?.field === "provider-id"}
+								aria-describedby={error?.field === "provider-id" ? errorId : undefined}
 								placeholder="my-provider"
 								value={providerId}
 								onChange={(e) => setProviderId(e.target.value)}
 								disabled={isEdit || saving}
 							/>
 							<p className="text-[12px] text-muted-foreground">
-								Lowercase letters, numbers, hyphens, or underscores. Avoid built-in ids
-								unless you intend to overlay that template.
+								Lowercase letters, numbers, hyphens, or underscores. Avoid built-in ids unless you
+								intend to overlay that template.
 							</p>
 						</div>
 
@@ -271,6 +287,9 @@ export function CustomProviderDialog({
 							</Label>
 							<Input
 								id="base-url"
+								ref={baseUrlInput}
+								aria-invalid={error?.field === "base-url"}
+								aria-describedby={error?.field === "base-url" ? errorId : undefined}
 								placeholder="https://api.example.com/v1"
 								value={baseUrl}
 								onChange={(e) => setBaseUrl(e.target.value)}
@@ -281,7 +300,13 @@ export function CustomProviderDialog({
 						{/* Wire API */}
 						<div className="flex flex-col gap-1.5">
 							<Label className="text-[13px]">Wire API</Label>
-							<Select value={wireApi} items={Object.fromEntries(WIRE_API_OPTIONS.map((option) => [option.value, option.label]))} onValueChange={(v) => setWireApi(v as CatalogWireApi)}>
+							<Select
+								value={wireApi}
+								items={Object.fromEntries(
+									WIRE_API_OPTIONS.map((option) => [option.value, option.label]),
+								)}
+								onValueChange={(v) => setWireApi(v as CatalogWireApi)}
+							>
 								<SelectTrigger aria-label="Wire API">
 									<SelectValue />
 								</SelectTrigger>
@@ -375,7 +400,12 @@ export function CustomProviderDialog({
 										className="flex-1"
 										disabled={saving}
 									/>
-									<Button variant="ghost" size="sm" onClick={() => removeHeader(i)} disabled={saving}>
+									<Button
+										variant="ghost"
+										size="sm"
+										onClick={() => removeHeader(i)}
+										disabled={saving}
+									>
 										<Trash2Icon className="size-3.5 stroke-[1.5]" />
 									</Button>
 								</div>
@@ -391,9 +421,16 @@ export function CustomProviderDialog({
 								Add header
 							</Button>
 						</div>
-
-						{error && <p className="text-[13px] text-destructive">{error}</p>}
 					</div>
+					{error && (
+						<p
+							id={errorId}
+							role="alert"
+							className="max-h-24 shrink-0 overflow-y-auto break-words text-[13px] text-destructive"
+						>
+							{error.message}
+						</p>
+					)}
 
 					<DialogFooter className="shrink-0 border-t border-border/60 pt-3">
 						<Button variant="outline" onClick={() => onOpenChange(false)} disabled={saving}>
@@ -417,9 +454,8 @@ export function CustomProviderDialog({
 					<DialogHeader className="gap-1.5">
 						<DialogTitle>Built-in provider ID</DialogTitle>
 						<DialogDescription>
-							<code className="text-foreground">{providerId.trim()}</code> is a built-in
-							provider. Overlaying merges with that template (same Connection id). Or pick
-							another id such as{" "}
+							<code className="text-foreground">{providerId.trim()}</code> is a built-in provider.
+							Overlaying merges with that template (same Connection id). Or pick another id such as{" "}
 							<code className="text-foreground">{suggestedAlternateId}</code>.
 						</DialogDescription>
 					</DialogHeader>

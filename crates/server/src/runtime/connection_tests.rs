@@ -5513,6 +5513,13 @@ async fn native_model_catalog_and_preferences() -> Result<()> {
         Arc::new(NoopProvider::failing()),
         catalog,
     );
+    // Preferences advertise installed Connection adapters, not the injected
+    // Default test adapter alone. Build the fixture's real local-only route.
+    runtime
+        .deps
+        .process_context
+        .reload_provider_router()
+        .await?;
     let connection_id = initialized_with_protocol_meta(&runtime, true).await;
     let listed: devo_protocol::native::rpc_admin::ModelListResult = json_result(
         &history_request(
