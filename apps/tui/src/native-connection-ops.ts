@@ -50,7 +50,7 @@ export function hostMessagePrefix(origin: unknown): string {
   if (origin == null || typeof origin !== "object") return "";
   const metadata = origin as Record<string, unknown>;
   const labels: Record<string, string> = { agent: "Agent message", backgroundTask: "Background notification", schedule: "Scheduled notification" };
-  return `[${labels[String(metadata.source)] ?? "Host notification"} · ${String(metadata.sender ?? "Host")}] `;
+  return `[${labels[String(metadata.source)] ?? "Host notification"} · ${String(metadata.senderName ?? metadata.sender_name ?? metadata.sender ?? "Host")}] `;
 }
 
 export function queuePreviewText(entry: QueueWireEntry): string {

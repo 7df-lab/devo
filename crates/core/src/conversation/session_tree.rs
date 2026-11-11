@@ -475,6 +475,7 @@ mod active_path_items_tests {
         Item::SubAgent {
             origin_call_id: None,
             agent_session_id: devo_protocol::SessionId::new(),
+            agent_nickname: None,
             parent_session_id: devo_protocol::SessionId::new(),
             role: None,
             task: task.to_owned(),

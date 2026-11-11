@@ -6,6 +6,7 @@
  */
 
 import { IPYTHON_STATE_RESTORED_CUSTOM_TYPE } from "@earendil-works/pi-coding-agent/messages";
+import { shapeHostedToolResult } from "./tool-results.js";
 import {
   bashResultFromCommandExecution,
   displayToolName,
@@ -152,13 +153,25 @@ export function nativeItemToAgentMessages(envelope: unknown): AgentMessageLike[]
       return [{
         role: "custom",
         customType: labels[String(origin.source)] ?? "Host notification",
-        content: [{ type: "text", text: `From: ${String(origin.sender ?? "Host")}` }, ...content],
+        content: [{ type: "text", text: `From: ${String(origin.senderName ?? origin.sender_name ?? origin.sender ?? "Host")}` }, ...content],
         display: true,
         details: { origin: item.origin },
         timestamp: ts,
       }];
     }
     return [{ role: "user", content, timestamp: ts }];
+  }
+
+  if (type === "subAgent" || type === "subagent" || type === "sub_agent") {
+    const name = String(item.agentNickname ?? item.agent_nickname ?? item.role ?? "agent");
+    return [{
+      role: "custom",
+      customType: "Agent spawned",
+      content: [{ type: "text", text: `Spawned ${name}` }, { type: "text", text: String(item.task ?? "") }],
+      display: true,
+      details: { agentSessionId: item.agentSessionId ?? item.agent_session_id },
+      timestamp: ts,
+    }];
   }
 
   if (type === "assistantMessage") {
@@ -200,19 +213,19 @@ export function nativeItemToAgentMessages(envelope: unknown): AgentMessageLike[]
 
   // Provider-hosted tools (web_search / web_fetch / …) — same tool row as builtins.
   if (type === "hostedToolCall" || type === "hosted_tool_call") {
-    const callId = String(item.callId ?? item.call_id ?? item.id ?? "");
+    const metadata = envelope as Record<string, unknown>;
+    const callId = String(item.callId || item.call_id || item.id || metadata.id || "");
     if (!callId) return [];
     const rawName = String(item.toolName ?? item.tool_name ?? item.name ?? "web_search");
     const toolName = displayToolName(rawName);
     const args = normalizeToolArgs(rawName, item.input ?? item.arguments ?? {});
-    const shaped = shapeToolResultOutput(item.output, item.displayContent ?? item.display_content);
-    const hasOutput = item.output != null || item.displayContent != null || item.display_content != null;
-    if (!hasOutput) {
+    const shaped = shapeHostedToolResult(item, metadata.state);
+    if (!shaped) {
       return [assistantToolCallMessage(callId, toolName, args, ts)];
     }
     return [
       assistantToolCallMessage(callId, toolName, args, ts),
-      toolResultMessage(callId, toolName, shaped, Boolean(item.isError ?? item.is_error), ts),
+      toolResultMessage(callId, toolName, shaped, shaped.isError, ts),
     ];
   }
 

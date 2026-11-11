@@ -2771,6 +2771,7 @@ mod tests {
                 event_id: "event".into(),
                 source: HostMessageSource::Agent,
                 sender: "parent".into(),
+                sender_name: None,
                 delivery: HostMessageDelivery::FollowUp,
             });
         }
@@ -3068,6 +3069,7 @@ mod tests {
                 devo_protocol::native::item::Item::SubAgent {
                     origin_call_id: None,
                     agent_session_id: devo_core::SessionId::new(),
+                    agent_nickname: None,
                     parent_session_id: devo_core::SessionId::new(),
                     role: Some("probe".to_string()),
                     task: "probe task".to_string(),

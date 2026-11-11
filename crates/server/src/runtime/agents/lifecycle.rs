@@ -500,6 +500,14 @@ mod tests {
             .await?;
         assert_eq!(child.agent_path, "root/planner");
         assert_eq!(grandchild.agent_path, "root/planner/reviewer");
+        // An idle parent with no turn still gets a child, but no display-only
+        // item may introduce an orphan turn into its durable transcript.
+        let history = runtime
+            .load_canonical_history(&serde_json::json!(3), parent_session_id)
+            .await
+            .map_err(|error| anyhow::anyhow!("{error}"))?;
+        assert_eq!(history.items, Vec::new());
+        assert_eq!(history.turns, Vec::new());
 
         runtime
             .agent_registries

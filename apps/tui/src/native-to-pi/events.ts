@@ -3,6 +3,7 @@
  * Projection stays inside the adapter — InteractiveMode never sees Native method names.
  */
 
+import { shapeHostedToolResult } from "./tool-results.js";
 import { nativeCumulativeUsage } from "./usage.js";
 import {
   nativeGoalToAgentGoal,
@@ -239,7 +240,7 @@ function sessionActionsFromQueue(params: Record<string, unknown>): Record<string
     const text = queuePreviewText(entry as Record<string, unknown>);
     const origin = (entry as Record<string, unknown>).origin as Record<string, unknown> | undefined;
     const labels: Record<string, string> = { agent: "Agent message", backgroundTask: "Background notification", schedule: "Scheduled notification" };
-    const label = origin ? `[${labels[String(origin.source)] ?? "Host notification"} · ${String(origin.sender ?? "Host")}] ` : "";
+    const label = origin ? `[${labels[String(origin.source)] ?? "Host notification"} · ${String(origin.senderName ?? origin.sender_name ?? origin.sender ?? "Host")}] ` : "";
     if (text) followUps.push(label + text);
   }
   return {
@@ -302,7 +303,7 @@ function projectItemStarted(
   const key = String(envelope.id ?? "");
   const type = item.type;
 
-  if (type === "userMessage") {
+  if (type === "userMessage" || type === "subAgent" || type === "subagent" || type === "sub_agent") {
     events.push(...closeImAssistantStreamIfOpen(state));
     events.push({
       type: "message_start",
@@ -386,6 +387,10 @@ function projectItemCompleted(
       message: liveAssistantMessage(state),
       assistantMessageEvent: { type: "thinking_end" },
     });
+  } else if (type === "toolCall" || type === "tool_call") {
+    // The server completes a generic call with its final input before emitting
+    // its separate result. Hosted providers may only reveal the query here.
+    events.push(...projectToolItemStarted(envelope, item, state.tools));
   } else if (type === "toolResult" || type === "tool_result") {
     const callId = String(item.callId ?? item.call_id ?? "");
     const resultValue = shapeToolResultOutput(item.output, item.displayContent ?? item.display_content);
@@ -404,19 +409,14 @@ function projectItemCompleted(
       }
     }
   } else if (type === "hostedToolCall" || type === "hosted_tool_call") {
-    const callId = String(item.callId ?? item.call_id ?? item.id ?? "");
-    const rawName = String(item.toolName ?? item.tool_name ?? item.name ?? "web_search");
-    const toolName = displayToolName(rawName);
-    if (!state.tools.toolNameByCall.has(callId)) {
-      state.tools.toolNameByCall.set(callId, toolName);
-    }
-    const hasOutput = item.output != null || item.displayContent != null || item.display_content != null;
-    if (hasOutput) {
-      const shaped = shapeToolResultOutput(item.output, item.displayContent ?? item.display_content);
-      events.push(
-        ...projectToolExecutionEnd(callId, shaped, Boolean(item.isError ?? item.is_error), state.tools),
-      );
-    }
+    const callId = String(item.callId || item.call_id || item.id || envelope.id || "");
+    if (!callId || state.tools.finishedCalls.has(callId)) return events;
+    events.push(...projectToolItemStarted(envelope, item, state.tools));
+    const itemState = ["failed", "interrupted", "lost"].includes(String(envelope.state))
+      ? envelope.state : "completed";
+    const shaped = shapeHostedToolResult(item, itemState)!;
+    const { isError, ...result } = shaped;
+    events.push(...projectToolExecutionEnd(callId, result, isError, state.tools));
   } else if (type === "commandExecution") {
     const callId = String(item.callId ?? item.call_id ?? "");
     events.push(
@@ -509,6 +509,9 @@ function projectItemUpdated(
   const key = String(envelope.id ?? "");
   const type = item.type;
 
+  if (type === "toolCall" || type === "tool_call" || type === "hostedToolCall" || type === "hosted_tool_call") {
+    return projectToolItemStarted(envelope, item, state.tools);
+  }
   if (type === "assistantMessage") {
     const text = String(item.text ?? "");
     state.openAssistantItem = key;

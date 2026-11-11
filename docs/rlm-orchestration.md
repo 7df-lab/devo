@@ -12,6 +12,22 @@ for result in results:
 await rlm.end_turn()
 ```
 
+## Transcript ownership
+
+Spawning records a parent-owned Native `subAgent` item with the assigned
+`agentNickname` and task. The TUI renders it as “Agent spawned”; the child's
+initial task, kernel notices, tool activity and response stay in the child's
+transcript and monitor. The spawn row is a historical snapshot, not a live
+lifecycle indicator; `agent/list` remains the authority for current child state.
+It is anchored to the parent's active or latest turn. A direct RPC spawn before
+any parent turn is still listed, but does not create a synthetic transcript turn. Live and replayed item notifications route by the
+owning `ItemEnvelope.sessionId`, not the sender of a host message.
+
+Incoming host messages retain their stable `origin.sender` identity and an
+optional host-resolved `origin.senderName` captured at delivery. Clients prefer
+that name for message and queue labels, with the sender identity as the fallback
+for older records. These messages remain non-human content, not authorization.
+
 ## Collect and progress
 
 `collect(targets=None, *, timeout_ms=0)` accepts a child name/id, spawn handle,

@@ -5,6 +5,7 @@
  * is projected inside this adapter (see native-to-pi/events.ts).
  */
 
+import { nativeNotificationSessionId } from "./native-notification-session.js";
 import { nativeCumulativeUsage, newerCumulativeUsage, unknownCumulativeUsage } from "./native-to-pi/usage.js";
 import type { CumulativeUsage } from "../lib/coding-agent/src/core/usage-display.js";
 import { ExplicitLoginModels } from "./explicit-login-models.js";
@@ -231,6 +232,7 @@ export class NativeAgentConnection implements AgentConnection {
   private subscriptionReplayDepth = 0;
   private messages: unknown[] = [];
   private sessionHistoryRevision = 0;
+  private transcriptNavigationGeneration = 0;
   private pendingInitialMessages?: { sessionId: string; revision: number; promise: Promise<never[]> };
   private streamState: StreamState = createStreamState();
   private model: AgentConnectionModel | undefined;
@@ -265,6 +267,7 @@ export class NativeAgentConnection implements AgentConnection {
   /** Keep the task handle after bash_end clears the active UI state. */
   private lastStartedBashItemId: string | null = null;
   private watchedSessionSubs = new Map<string, string>();
+  private watchedStreamStates = new Map<string, StreamState>();
   private sessionWatchers = new Map<
     string,
     Set<AgentConnectionEventListener>
@@ -406,13 +409,7 @@ export class NativeAgentConnection implements AgentConnection {
 
   private async handleNotificationAsync(method: string, params: unknown): Promise<void> {
     const p = (params && typeof params === "object" ? params : {}) as Record<string, unknown>;
-    const notificationSessionId = String(
-      p.sessionId ??
-        p.session_id ??
-        (p.session as { id?: unknown } | undefined)?.id ??
-        (p.turn as { sessionId?: unknown } | undefined)?.sessionId ??
-        "",
-    );
+    const notificationSessionId = nativeNotificationSessionId(params);
     const appliesToActiveSession = !notificationSessionId || notificationSessionId === this.sessionId;
     const reportedTotals = method === "turn/usage/updated" ? nativeCumulativeUsage(p.sessionTotals) : undefined;
     const staleUsage = reportedTotals !== undefined &&
@@ -668,18 +665,16 @@ export class NativeAgentConnection implements AgentConnection {
 
   private fanoutWatchedSession(method: string, params: unknown): void {
     if (this.sessionWatchers.size === 0) return;
-    const p = (params && typeof params === "object" ? params : {}) as Record<string, unknown>;
-    const sid = String(
-      p.sessionId ??
-        p.session_id ??
-        (p.session as { id?: string } | undefined)?.id ??
-        (p.turn as { sessionId?: string } | undefined)?.sessionId ??
-        "",
-    );
+    const sid = nativeNotificationSessionId(params);
     for (const [watchedId, listeners] of this.sessionWatchers) {
       if (sid && sid !== watchedId) continue;
       if (!sid && watchedId !== this.sessionId) continue;
-      for (const ev of nativeNotificationToPiEvents(method, params, createStreamState())) {
+      let state = this.watchedStreamStates.get(watchedId);
+      if (!state) {
+        state = createStreamState();
+        this.watchedStreamStates.set(watchedId, state);
+      }
+      for (const ev of nativeNotificationToPiEvents(method, params, state)) {
         for (const listener of listeners) {
           try {
             void listener({ type: "session_event", event: ev as never });
@@ -1123,6 +1118,7 @@ export class NativeAgentConnection implements AgentConnection {
 
   async getInitialSnapshot(): Promise<AgentConnectionSnapshot> {
     const sessionId = this.sessionId;
+    const navigationGeneration = this.transcriptNavigationGeneration;
     const pending = this.pendingInitialMessages;
     let messagesPromise: Promise<never[]>;
     if (sessionId && pending?.sessionId === sessionId) {
@@ -1148,7 +1144,7 @@ export class NativeAgentConnection implements AgentConnection {
       measureAsync("snapshot.history", () => messagesPromise),
       measureAsync("snapshot.rlm_child_snapshots", () => this.getRlmChildSnapshots()),
     ]);
-    if (this.sessionId !== sessionId) return this.getInitialSnapshot();
+    if (this.sessionId !== sessionId || this.transcriptNavigationGeneration !== navigationGeneration) return this.getInitialSnapshot();
     void this.seedWorkspaceFileChangesRecap();
     return {
       state: this.buildState(),
@@ -1251,7 +1247,7 @@ export class NativeAgentConnection implements AgentConnection {
           id: itemId || agentSessionId,
           parentId: undefined,
           activeSessionId: agentSessionId || undefined,
-          label: String(item.role ?? item.task ?? itemId) || "agent",
+          label: String(item.agentNickname ?? item.agent_nickname ?? item.role ?? item.task ?? itemId) || "agent",
           status,
           sessionDir: this.cwd,
           recap: typeof item.task === "string" ? item.task : undefined,
@@ -3211,9 +3207,11 @@ export class NativeAgentConnection implements AgentConnection {
   ) {
     const id = String(targetId ?? "").trim();
     if (!id) return { cancelled: true as const };
+    const sessionId = this.requireSessionId();
+    const transitionGeneration = this.sessionTransitionGeneration;
     try {
       const result = (await this.rpc.request("session/tree/navigate", {
-        sessionId: this.requireSessionId(),
+        sessionId,
         entryId: id,
         ...(options?.summarize != null ? { summarize: options.summarize } : {}),
         ...(options?.customInstructions != null
@@ -3230,6 +3228,16 @@ export class NativeAgentConnection implements AgentConnection {
         aborted?: boolean;
       };
       if (result?.cancelled) return { cancelled: true as const, aborted: result.aborted };
+      if (sessionId !== this.sessionId || transitionGeneration !== this.sessionTransitionGeneration) {
+        return { cancelled: true as const };
+      }
+      // Navigation changes the active path without emitting item notifications.
+      // A resolved deferred initial snapshot still contains the abandoned path.
+      this.transcriptNavigationGeneration += 1;
+      this.sessionHistoryRevision += 1;
+      this.pendingInitialMessages = undefined;
+      this.messages = [];
+      this.streamState = createStreamState();
       return {
         cancelled: false as const,
         ...(result?.editorText != null ? { editorText: String(result.editorText) } : {}),
@@ -3368,6 +3376,7 @@ export class NativeAgentConnection implements AgentConnection {
         closed = true;
         listeners.clear();
         this.sessionWatchers.delete(sessionId);
+        this.watchedStreamStates.delete(sessionId);
         if (subscriptionId) {
           try {
             await this.rpc.request("subscription/unsubscribe", { subscriptionId });
@@ -3465,6 +3474,7 @@ export class NativeAgentConnection implements AgentConnection {
       this.watchedSessionSubs.delete(sessionId);
     }
     this.sessionWatchers.clear();
+    this.watchedStreamStates.clear();
     this.subscriptionId = null;
     this.listeners.clear();
     this.rosterListeners.clear();

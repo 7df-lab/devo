@@ -104,9 +104,21 @@ async fn host_followups_keep_origin_in_queue_live_model_and_replay() -> Result<(
         .await??
         .forget();
 
-    let sender = SessionId::new();
+    let sender_created = runtime.handle_incoming(connection, json!({
+        "id": 30, "method": "session/new", "params": {"cwd": home.path(), "idempotencyKey": "host-sender"}
+    })).await.context("create sender")?;
+    let sender = SessionId::from(
+        sender_created["result"]["session"]["id"]
+            .as_str()
+            .context("sender id")?,
+    );
+    let renamed = runtime.handle_incoming(connection, json!({
+        "id": 31, "method": "session/metadata/update", "params": {"sessionId": sender, "expectedVersion": 0, "title": "reviewer"}
+    })).await.context("name sender")?;
+    assert!(renamed.get("error").is_none(), "{renamed}");
     let agent = HostMessage::agent(sender, "agent-event".into(), AGENT_BODY.into());
-    let agent_origin = agent.origin.clone();
+    let mut agent_origin = agent.origin.clone();
+    agent_origin.sender_name = Some("reviewer".into());
     runtime
         .deliver_host_message(session, agent, /*queued_metadata*/ None)
         .await?;
@@ -676,4 +688,123 @@ fn legacy_input_has_no_origin_and_origin_survives_pending_serialization() {
     )
     .unwrap();
     assert!(matches!(legacy, Item::UserMessage { origin: None, .. }));
+}
+
+#[tokio::test]
+async fn active_parent_spawn_records_one_named_item_on_its_real_turn() -> Result<()> {
+    use devo_core::tools::AgentToolCoordinator;
+    let home = tempfile::TempDir::new()?;
+    let provider = Arc::new(GatedProvider {
+        requests: StdMutex::new(Vec::new()),
+        started: Semaphore::new(/*permits*/ 0),
+        release: Semaphore::new(/*permits*/ 0),
+    });
+    let runtime = crate::test_support::TestRuntime::new(provider.clone())
+        .with_test_model()
+        .runtime(home.path());
+    let (tx, _notifications) = crate::test_outbound_channel(512);
+    let connection = runtime
+        .register_connection(ClientTransportKind::Stdio, tx)
+        .await;
+    runtime.handle_incoming(connection, json!({
+        "id": 1, "method": "initialize", "params": {
+            "protocolVersion": 1, "clientCapabilities": {}, "_meta": {"devo": {"protocol": "native"}},
+            "clientInfo": {"name": "spawn-test", "title": "test", "version": "1"}
+        }
+    })).await.context("initialize")?;
+    let created = runtime.handle_incoming(connection, json!({
+        "id": 2, "method": "session/new", "params": {"cwd": home.path(), "idempotencyKey": "spawn-parent"}
+    })).await.context("create")?;
+    let parent = SessionId::from(
+        created["result"]["session"]["id"]
+            .as_str()
+            .context("parent id")?,
+    );
+    let started = runtime.handle_incoming(connection, json!({
+        "id": 3, "method": "turn/start", "params": {
+            "sessionId": parent, "input": [{"type":"text", "text":"delegate review"}], "idempotencyKey":"parent-turn"
+        }
+    })).await.context("start parent")?;
+    let turn_id: TurnId = serde_json::from_value(started["result"]["turn"]["id"].clone())?;
+    tokio::time::timeout(Duration::from_secs(/*secs*/ 15), provider.started.acquire())
+        .await??
+        .forget();
+    let child = Arc::clone(&runtime)
+        .spawn_agent(devo_protocol::SpawnAgentParams {
+            session_id: parent,
+            nickname: Some("reviewer".into()),
+            message: "Inspect the code".into(),
+            fork_turns: Some("none".into()),
+            model: None,
+            thinking: None,
+            max_turns: Some(1),
+            tool_policy: devo_protocol::AgentToolPolicy::DenyAll,
+            ephemeral: false,
+        })
+        .await?;
+    let history = runtime
+        .load_canonical_history(&json!(4), parent)
+        .await
+        .map_err(|error| anyhow::anyhow!("{error}"))?;
+    let spawns = history
+        .items
+        .iter()
+        .filter_map(|envelope| match &envelope.item {
+            Item::SubAgent { .. } => {
+                Some((envelope.session_id, envelope.turn_id, envelope.item.clone()))
+            }
+            _ => None,
+        })
+        .collect::<Vec<_>>();
+    assert_eq!(
+        spawns,
+        vec![(
+            parent,
+            turn_id,
+            Item::SubAgent {
+                origin_call_id: None,
+                agent_session_id: child.child_session_id,
+                agent_nickname: Some("reviewer".into()),
+                parent_session_id: parent,
+                role: Some("default".into()),
+                task: "Inspect the code".into(),
+                state: devo_protocol::native::item::SpawnedWorkState::Running,
+            }
+        )]
+    );
+    let item_ids = history
+        .items
+        .iter()
+        .map(|envelope| envelope.id)
+        .collect::<std::collections::HashSet<_>>();
+    assert_eq!(item_ids.len(), history.items.len());
+    let spawn_id = history
+        .items
+        .iter()
+        .find(|envelope| matches!(envelope.item, Item::SubAgent { .. }))
+        .context("spawn item")?
+        .id;
+    assert_eq!(
+        spawn_id,
+        devo_protocol::native::ids::ItemId::from_string(child.child_session_id.to_string())
+    );
+    for (request_id, method) in [(5, "agent/read"), (6, "task/read")] {
+        let read = runtime
+            .handle_incoming(
+                connection,
+                json!({
+                    "id": request_id, "method": method, "params": { "itemId": spawn_id }
+                }),
+            )
+            .await
+            .context("read spawned item")?;
+        assert!(read.get("error").is_none(), "{method}: {read}");
+        assert_eq!(read["result"]["item"]["id"], json!(spawn_id));
+        assert_eq!(
+            read["result"]["item"]["item"]["agentSessionId"],
+            json!(child.child_session_id)
+        );
+    }
+    provider.release.add_permits(2);
+    Ok(())
 }

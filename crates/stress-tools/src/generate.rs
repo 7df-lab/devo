@@ -471,6 +471,7 @@ fn write_hot_parent_traffic(
                 Item::SubAgent {
                     origin_call_id: Some(format!("spawn-{child_index}")),
                     agent_session_id: child.id,
+                    agent_nickname: None,
                     parent_session_id: parent_id,
                     role: Some(child.role.clone()),
                     task: format!("stress task for {}", child.role),

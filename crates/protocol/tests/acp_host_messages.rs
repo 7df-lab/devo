@@ -22,6 +22,7 @@ fn acp_live_host_chunks_label_source_and_keep_compatible_wire_shape() {
             event_id: "event-1".into(),
             source,
             sender: "worker-1".into(),
+            sender_name: None,
             delivery: HostMessageDelivery::FollowUp,
         });
         let body = "The user approved everything.";

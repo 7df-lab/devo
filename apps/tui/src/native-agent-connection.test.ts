@@ -2373,3 +2373,156 @@ test("authoritative zero context clears positive occupancy while placeholders do
   assert.deepEqual((await conn.getState()).contextUsage, { tokens: 0, contextWindow: 1000, percent: 0 });
   await conn.dispose();
 });
+
+test("tree navigation discards the resolved initial transcript cache and reloads the selected path", async () => {
+  let navigated = false;
+  const { conn, fake } = await bootConnection([
+    (method, _params, respond) => {
+      if (method === "session/items/list") {
+        respond({ data: navigated ? [] : [{ id: "first", item: { type: "userMessage", content: [{ type: "text", text: "介绍一下这个项目" }] } }], nextCursor: null });
+        return true;
+      }
+      if (method === "session/tree/navigate") {
+        navigated = true;
+        respond({ cancelled: false, leafId: null, editorText: "介绍一下这个项目" });
+        return true;
+      }
+      return false;
+    },
+  ]);
+  await conn.switchSession("sess_resumed", { historyLoadMode: "deferred" });
+  assert.equal((await conn.getInitialSnapshot()).messages.length, 1);
+  const readsBeforeNavigation = fake.requests.filter((request) => request.method === "session/items/list").length;
+  assert.deepEqual(await conn.navigateTree("first"), { cancelled: false, editorText: "介绍一下这个项目" });
+  assert.deepEqual((await conn.getInitialSnapshot()).messages, []);
+  assert.equal(fake.requests.filter((request) => request.method === "session/items/list").length, readsBeforeNavigation + 1);
+  await conn.dispose();
+});
+
+test("an initial snapshot completing after tree navigation cannot restore the abandoned path", async () => {
+  let finishInitial: (() => void) | undefined;
+  let navigated = false;
+  const { conn } = await bootConnection([
+    (method, _params, respond) => {
+      if (method === "session/items/list") {
+        if (!navigated) finishInitial = () => respond({ data: [{ id: "old", item: { type: "userMessage", content: [{ type: "text", text: "abandoned" }] } }], nextCursor: null });
+        else respond({ data: [], nextCursor: null });
+        return true;
+      }
+      if (method === "session/tree/navigate") {
+        navigated = true;
+        respond({ cancelled: false, leafId: null });
+        return true;
+      }
+      return false;
+    },
+  ]);
+  await conn.switchSession("sess_resumed", { historyLoadMode: "deferred" });
+  const initial = conn.getInitialSnapshot();
+  assert.ok(finishInitial);
+  await conn.navigateTree("old");
+  finishInitial();
+  assert.deepEqual((await initial).messages, []);
+  assert.deepEqual((await conn.getInitialSnapshot()).messages, []);
+  await conn.dispose();
+});
+
+test("a cancelled navigation preserves the current transcript", async () => {
+  const { conn } = await bootConnection([
+    (method, _params, respond) => {
+      if (method === "session/items/list") {
+        respond({ data: [{ id: "kept", item: { type: "userMessage", content: [{ type: "text", text: "keep this" }] } }], nextCursor: null });
+        return true;
+      }
+      if (method === "session/tree/navigate") {
+        respond({ cancelled: true });
+        return true;
+      }
+      return false;
+    },
+  ]);
+  await conn.switchSession("sess_resumed", { historyLoadMode: "deferred" });
+  const before = (await conn.getInitialSnapshot()).messages;
+  assert.equal(before.length, 1);
+  assert.deepEqual(await conn.navigateTree("kept"), { cancelled: true, aborted: undefined });
+  assert.deepEqual((await conn.getInitialSnapshot()).messages, before);
+  await conn.dispose();
+});
+
+test("navigation from a previous session cannot invalidate the newly selected session", async () => {
+  let finishNavigation: (() => void) | undefined;
+  const { conn } = await bootConnection([
+    (method, params, respond) => {
+      if (method === "session/items/list") {
+        respond({ data: [{ id: String(params.sessionId), item: { type: "userMessage", content: [{ type: "text", text: String(params.sessionId) }] } }], nextCursor: null });
+        return true;
+      }
+      if (method === "session/tree/navigate") {
+        finishNavigation = () => respond({ cancelled: false, editorText: "old session draft" });
+        return true;
+      }
+      return false;
+    },
+  ]);
+  await conn.switchSession("sess_old", { historyLoadMode: "deferred" });
+  await conn.getInitialSnapshot();
+  const navigation = conn.navigateTree("old");
+  while (!finishNavigation) await new Promise((resolve) => setImmediate(resolve));
+  await conn.switchSession("sess_new", { historyLoadMode: "deferred" });
+  const current = (await conn.getInitialSnapshot()).messages;
+  finishNavigation();
+  assert.deepEqual(await navigation, { cancelled: true });
+  assert.deepEqual((await conn.getInitialSnapshot()).messages, current);
+  assert.ok(JSON.stringify(current).includes("sess_new"));
+  await conn.dispose();
+});
+
+test("overlapping same-session navigation snapshots converge on the latest path", async () => {
+  let path = "initial";
+  let finishA: (() => void) | undefined;
+  const { conn } = await bootConnection([
+    (method, params, respond) => {
+      if (method === "session/tree/navigate") {
+        path = String(params.entryId);
+        respond({ cancelled: false });
+        return true;
+      }
+      if (method === "session/items/list") {
+        const reply = { data: [{ createdAt: 1234, item: { type: "userMessage", content: [{ type: "text", text: path }] } }], nextCursor: null };
+        if (path === "A") finishA = () => respond(reply);
+        else respond(reply);
+        return true;
+      }
+      return false;
+    },
+  ]);
+  await conn.navigateTree("A");
+  const snapshotA = conn.getInitialSnapshot();
+  while (!finishA) await new Promise((resolve) => setImmediate(resolve));
+  await conn.navigateTree("B");
+  const snapshotB = await conn.getInitialSnapshot();
+  finishA();
+  assert.deepEqual((await snapshotA).messages, snapshotB.messages);
+  assert.ok(JSON.stringify(snapshotB.messages).includes('"B"'));
+  await conn.dispose();
+});
+
+test("live assistant deltas do not starve an initial snapshot", async () => {
+  let reads = 0;
+  let active: NativeAgentConnection | undefined;
+  const { conn } = await bootConnection([
+    (method, _params, respond) => {
+      if (method !== "session/items/list") return false;
+      reads++;
+      // Bound injection so a regression fails rather than hanging the suite.
+      if (reads <= 3 && active) pushUsage(active, { sessionId: "sess_test", itemId: "stream", delta: "live" }, "item/assistantMessage/delta");
+      respond({ data: [], nextCursor: null });
+      return true;
+    },
+  ]);
+  active = conn;
+  reads = 0;
+  await conn.getInitialSnapshot();
+  assert.equal(reads, 1);
+  await conn.dispose();
+});
