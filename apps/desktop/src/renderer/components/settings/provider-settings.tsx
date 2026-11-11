@@ -21,7 +21,7 @@ import {
 	PlusIcon,
 	RefreshCwIcon,
 } from "lucide-react"
-import { useCallback, useMemo, useState } from "react"
+import { useCallback, useMemo, useRef, useState } from "react"
 import { useProviderCatalog } from "../../hooks/use-devo-data"
 import { invalidateProviderDependentQueries } from "../../lib/invalidate-provider-queries"
 import { POPULAR_PROVIDER_IDS } from "../../lib/providers"
@@ -51,6 +51,7 @@ export function ProviderSettings() {
 	const [connectionDetail, setConnectionDetail] = useState<CatalogProviderInfo | null>(null)
 	const [disconnectTarget, setDisconnectTarget] = useState<CatalogProviderInfo | null>(null)
 	const [disconnecting, setDisconnecting] = useState(false)
+	const disconnectPending = useRef(false)
 	const [disconnectError, setDisconnectError] = useState<string | null>(null)
 	const [showAllTemplates, setShowAllTemplates] = useState(false)
 
@@ -80,7 +81,8 @@ export function ProviderSettings() {
 	}, [catalog, templates, showAllTemplates])
 
 	const handleDisconnect = useCallback(async () => {
-		if (!disconnectTarget) return
+		if (!disconnectTarget || disconnectPending.current) return
+		disconnectPending.current = true
 		setDisconnecting(true)
 		setDisconnectError(null)
 		try {
@@ -92,6 +94,7 @@ export function ProviderSettings() {
 		} catch (error) {
 			setDisconnectError(error instanceof Error ? error.message : "Failed to disconnect provider")
 		} finally {
+			disconnectPending.current = false
 			setDisconnecting(false)
 		}
 	}, [disconnectTarget])
@@ -258,8 +261,8 @@ export function ProviderSettings() {
 			)}
 
 			{/* Remove connection confirmation */}
-			<Dialog open={!!disconnectTarget} onOpenChange={(open) => { if (!open) setDisconnectTarget(null) }}>
-				<DialogContent className="sm:max-w-lg gap-5 p-5">
+			<Dialog open={!!disconnectTarget} onOpenChange={(open) => { if (!open && !disconnectPending.current) setDisconnectTarget(null) }}>
+				<DialogContent className="sm:max-w-lg gap-5 p-5" showCloseButton={!disconnecting}>
 					<DialogHeader className="gap-1.5">
 						<DialogTitle className="text-base font-medium tracking-tight">
 							Disconnect {disconnectTarget?.name}?
@@ -270,7 +273,7 @@ export function ProviderSettings() {
 						</DialogHeader>
 						{disconnectError && <p role="alert" className="text-sm text-destructive">{disconnectError}</p>}
 						<DialogFooter className="gap-2 sm:justify-end">
-						<Button variant="outline" size="sm" onClick={() => setDisconnectTarget(null)}>
+						<Button variant="outline" size="sm" disabled={disconnecting} onClick={() => setDisconnectTarget(null)}>
 							Cancel
 						</Button>
 						<Button variant="destructive" size="sm" disabled={disconnecting} onClick={handleDisconnect}>
