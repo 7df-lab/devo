@@ -112,7 +112,7 @@ async function run() {
       case "schedule":
         // An explicit argument avoids the bare slash-command completion step.
         await send("/heartbeat status");
-        await waitFor("heartbeat status", (_events, text) => /No active heartbeat|Heartbeat(?:s)?\s+(?:manager|scheduled)/i.test(text));
+        await waitFor("heartbeat status", (_events, text) => /No active scheduled task|Scheduled task\s+Status:/i.test(text));
         break;
       case "heartbeat": {
         const marker = `hb-tui-fire-${Date.now()}`;
@@ -121,7 +121,7 @@ async function run() {
         // Native user item rather than matching the echoed command.
         await waitFor("delivered heartbeat", (events) => scheduledDelivered(events, marker));
         await send("/heartbeat clear");
-        await waitFor("heartbeat clear", (_events, text) => /Heartbeat cleared/i.test(text));
+        await waitFor("heartbeat clear", (_events, text) => /Scheduled task cleared/i.test(text));
         break;
       }
     }
