@@ -6,14 +6,14 @@
  *
  * Backup structure:
  *   ~/.config/devo/backups/
- *     2026-02-11T12-00-00/
+ *     2026-02-11T12-00-00-000001/
  *       manifest.json        -- metadata + file list
  *       files/
  *         0001.dat           -- file contents, keyed by manifest index
  *         0002.dat
  *         ...
  */
-import { readdir } from "node:fs/promises"
+import { mkdir, readdir } from "node:fs/promises"
 import { join } from "node:path"
 import { ensureDir, exists, safeReadFile, safeReadJson, writeFileSafe } from "../utils/fs"
 import { stringifyJson } from "../utils/json"
@@ -78,7 +78,20 @@ export async function createBackup(
 
 	const backupsDir = paths.ocBackupsDir()
 	const timestamp = new Date().toISOString().replace(/[:.]/g, "-").slice(0, 19)
-	const backupDir = join(backupsDir, timestamp)
+	await ensureDir(backupsDir)
+	// Reserve atomically; ordered suffixes also break equal-time restore ties.
+	let sequence = 0
+	let backupDir = join(backupsDir, timestamp)
+	while (true) {
+		try {
+			await mkdir(backupDir)
+			break
+		} catch (error) {
+			if ((error as NodeJS.ErrnoException).code !== "EEXIST") throw error
+			sequence++
+			backupDir = join(backupsDir, `${timestamp}-${String(sequence).padStart(6, "0")}`)
+		}
+	}
 	const filesDir = join(backupDir, "files")
 
 	await ensureDir(filesDir)
@@ -145,7 +158,11 @@ export async function listBackups(): Promise<BackupInfo[]> {
 	}
 
 	// Sort newest first
-	backups.sort((a, b) => b.manifest.createdAt.localeCompare(a.manifest.createdAt))
+	backups.sort((a, b) => {
+		const byTime = b.manifest.createdAt.localeCompare(a.manifest.createdAt)
+		if (byTime !== 0) return byTime
+		return b.id.localeCompare(a.id, "en", { numeric: true })
+	})
 
 	return backups
 }
@@ -158,7 +175,7 @@ export async function listBackups(): Promise<BackupInfo[]> {
  * - Files that existed before migration are restored to their original content
  * - Files that were newly created by migration are deleted
  *
- * @param backupId - Backup directory name (timestamp), or "latest" for the most recent
+ * @param backupId - Backup directory name, or "latest" for the most recent
  * @returns Summary of what was restored
  */
 export async function restore(backupId?: string): Promise<RestoreResult> {
