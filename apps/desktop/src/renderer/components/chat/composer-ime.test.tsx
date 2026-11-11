@@ -196,6 +196,61 @@ describe("composer IME keyboard ownership", () => {
 			composition: ["start", "blur"],
 		})
 	})
+	for (const customCallbacks of [false, true]) {
+		test(`resumes Enter submission after interrupted composition: custom callbacks ${customCallbacks}`, async () => {
+			const textarea = await renderComposer(false, customCallbacks)
+			await act(async () => textarea.focus())
+			await compose(textarea, "compositionstart")
+			await key(textarea, "Enter")
+			expect(submitted).toBe(0)
+
+			await act(async () => {
+				textarea.blur()
+				textarea.focus()
+			})
+			expect((await key(textarea, "Enter")).defaultPrevented).toBe(true)
+			expect({ submitted, composition }).toEqual({
+				submitted: 1,
+				composition: customCallbacks ? ["start", "blur"] : ["blur"],
+			})
+
+			// A fresh IME session still owns its keys after recovery.
+			await compose(textarea, "compositionstart")
+			await key(textarea, "Enter")
+			expect(submitted).toBe(1)
+			await compose(textarea, "compositionend")
+			await key(textarea, "Enter", { keyCode: 229 })
+			expect(submitted).toBe(1)
+			await key(textarea, "Enter")
+			expect(submitted).toBe(2)
+		})
+	}
+
+	for (const end of ["blur", "compositionend"]) {
+		test(`resumes submission synchronously after ${end}`, async () => {
+			const textarea = await renderComposer(false, false)
+			await act(async () => textarea.focus())
+			await compose(textarea, "compositionstart")
+			await act(async () => {
+				if (end === "blur") {
+					textarea.blur()
+					textarea.focus()
+				} else {
+					textarea.dispatchEvent(
+						new dom.CompositionEvent("compositionend", { bubbles: true }) as unknown as Event,
+					)
+				}
+				textarea.dispatchEvent(
+					new dom.KeyboardEvent("keydown", {
+						key: "Enter",
+						bubbles: true,
+						cancelable: true,
+					}) as unknown as Event,
+				)
+			})
+			expect({ submitted, forwardedKeys }).toEqual({ submitted: 1, forwardedKeys: ["Enter"] })
+		})
+	}
 	test("retains normal navigation, selection, dismissal, and shortcuts", async () => {
 		const textarea = await renderComposer()
 		await key(textarea, "ArrowUp")

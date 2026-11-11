@@ -778,10 +778,10 @@ export const PromptInputTextarea = ({
 }: PromptInputTextareaProps) => {
 	const controller = useOptionalPromptInputController()
 	const attachments = usePromptInputAttachments()
-	const [isComposing, setIsComposing] = useState(false)
 
 	const handleKeyDown: KeyboardEventHandler<HTMLTextAreaElement> = useCallback(
 		(e) => {
+			// InputGroupTextarea owns IME state, including blur recovery.
 			// Call the external onKeyDown handler first
 			onKeyDown?.(e)
 
@@ -791,9 +791,6 @@ export const PromptInputTextarea = ({
 			}
 
 			if (e.key === "Enter") {
-				if (isComposing || e.nativeEvent.isComposing) {
-					return
-				}
 				if (e.shiftKey) {
 					return
 				}
@@ -820,7 +817,7 @@ export const PromptInputTextarea = ({
 				}
 			}
 		},
-		[onKeyDown, isComposing, attachments],
+		[onKeyDown, attachments],
 	)
 
 	const handlePaste: ClipboardEventHandler<HTMLTextAreaElement> = useCallback(
@@ -850,9 +847,6 @@ export const PromptInputTextarea = ({
 		[attachments],
 	)
 
-	const handleCompositionEnd = useCallback(() => setIsComposing(false), [])
-	const handleCompositionStart = useCallback(() => setIsComposing(true), [])
-
 	const controlledProps = controller
 		? {
 				onChange: (e: ChangeEvent<HTMLTextAreaElement>) => {
@@ -872,8 +866,6 @@ export const PromptInputTextarea = ({
 				className,
 			)}
 			name="message"
-			onCompositionEnd={handleCompositionEnd}
-			onCompositionStart={handleCompositionStart}
 			onKeyDown={handleKeyDown}
 			onPaste={handlePaste}
 			placeholder={placeholder}
