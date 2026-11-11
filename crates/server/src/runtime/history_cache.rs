@@ -15,7 +15,9 @@ use devo_core::{CanonicalHistory, read_canonical_history_for_session};
 use devo_protocol::native::ids::SessionId;
 use tokio::sync::Mutex;
 
-const MAX_CACHED_HISTORY_BYTES: u64 = 4 * 1024 * 1024;
+// Charge retained entries by journal bytes, not projected heap usage. A single
+// journal may use the whole budget: a smaller per-entry cap makes every page
+// reparse otherwise cacheable histories. This is not a strict RSS bound.
 const MAX_TOTAL_CACHE_BYTES: u64 = 16 * 1024 * 1024;
 const MAX_CACHE_ENTRIES: usize = 4;
 
@@ -82,7 +84,7 @@ impl HistoryCache {
         let history = Arc::new(history);
 
         if let Some(version) = version
-            && version.len <= MAX_CACHED_HISTORY_BYTES
+            && version.len <= MAX_TOTAL_CACHE_BYTES
             && file_version(&path).is_ok_and(|after| after == Some(version))
         {
             self.insert(session_id, path, version, Arc::clone(&history))
@@ -267,3 +269,7 @@ mod tests {
         assert_eq!(cache.parse_count(), 2);
     }
 }
+
+#[cfg(test)]
+#[path = "history_cache_large_tests.rs"]
+mod large_history_tests;
