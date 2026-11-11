@@ -40,7 +40,13 @@ export function RuleSettings({
 		return [...dirs]
 	}, [desktopFolders, discovery.projects])
 
-	const { data: files = [], isLoading, error, refetch } = useQuery({
+	const {
+		data: files = [],
+		isLoading,
+		isSuccess,
+		error,
+		refetch,
+	} = useQuery({
 		queryKey: ["rule-files", directories],
 		queryFn: async (): Promise<RuleFileInfo[]> => {
 			if (!isElectron) return []
@@ -144,14 +150,10 @@ export function RuleSettings({
 				))}
 			</SettingsSection>
 
-			{missingProjectDirs.length > 0 && (
+			{isElectron && isSuccess && missingProjectDirs.length > 0 && (
 				<SettingsSection title="Create AGENTS.md">
 					{missingProjectDirs.map((directory) => (
-						<SettingsRow
-							key={directory}
-							label={folderName(directory)}
-							description={directory}
-						>
+						<SettingsRow key={directory} label={folderName(directory)} description={directory}>
 							<Button
 								size="sm"
 								variant="outline"
