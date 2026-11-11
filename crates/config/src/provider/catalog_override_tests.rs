@@ -15,10 +15,13 @@ fn legacy_apply(
             .providers
             .iter()
             .flat_map(|(provider_id, provider)| {
-                provider.models.keys().filter_map(move |model_id| {
-                    (reference == model_id || reference == &format!("{provider_id}/{model_id}"))
-                        .then(|| (provider_id.clone(), model_id.clone()))
-                })
+                provider
+                    .models
+                    .keys()
+                    .filter(move |model_id| {
+                        reference == *model_id || reference == &format!("{provider_id}/{model_id}")
+                    })
+                    .map(move |model_id| (provider_id.clone(), model_id.clone()))
             })
             .collect::<Vec<_>>();
         for (provider, model) in matches {
