@@ -196,7 +196,9 @@ async fn failed_turn_start_persistence_restores_claimed_fifo_barrier() -> Result
 
 #[tokio::test]
 async fn failed_steer_history_persistence_holds_unconsumed_prefix() -> Result<()> {
-    let home = tempfile::tempdir()?;
+    // A storage path containing an HTTP-looking status must not turn a local
+    // accounting failure into a retry of an already successful model request.
+    let home = tempfile::Builder::new().prefix("inbox-503-").tempdir()?;
     let provider = Arc::new(InboxProvider {
         requests: StdMutex::new(Vec::new()),
         started: Semaphore::new(/*permits*/ 0),
@@ -234,10 +236,11 @@ async fn failed_steer_history_persistence_holds_unconsumed_prefix() -> Result<()
         .await
         .expect_err("steer history append must fail");
     provider.release.add_permits(1);
-    tokio::time::timeout(Duration::from_secs(/*secs*/ 15), async {
+    let settled = tokio::time::timeout(Duration::from_secs(/*secs*/ 15), async {
         loop {
             let snapshot = handle.turn_reservation_snapshot().await.unwrap();
             if runtime.runtime_active_turn_id(session).await.is_none()
+                && snapshot.active_turn.is_none()
                 && snapshot.pending_turn_queue.lock().unwrap().len() == 2
             {
                 break;
@@ -245,8 +248,19 @@ async fn failed_steer_history_persistence_holds_unconsumed_prefix() -> Result<()
             tokio::time::sleep(Duration::from_millis(/*millis*/ 10)).await;
         }
     })
-    .await
-    .context("failed boundary did not settle")?;
+    .await;
+    if settled.is_err() {
+        let snapshot = handle.turn_reservation_snapshot().await.unwrap();
+        eprintln!(
+            "settle timeout active={:?} actor={:?} pending={:?} steer={:?} requests={}",
+            runtime.runtime_active_turn_id(session).await,
+            snapshot.active_turn,
+            snapshot.pending_turn_queue.lock().unwrap(),
+            snapshot.steer_input_queue.lock().unwrap(),
+            provider.requests.lock().unwrap().len()
+        );
+    }
+    settled.context("failed boundary did not settle")?;
     let listed = runtime
         .handle_incoming(
             connection,
@@ -257,6 +271,7 @@ async fn failed_steer_history_persistence_holds_unconsumed_prefix() -> Result<()
     let entries = listed["result"]["entries"].as_array().context("entries")?;
     assert_eq!(entries.len(), 2);
     assert_eq!(entries[0]["recoveryRequired"], json!(true), "{listed}");
+    assert_eq!(entries[1]["recoveryRequired"], json!(true), "{listed}");
     assert_eq!(entries[0]["preview"], "STEER_0");
     assert_eq!(entries[1]["preview"], "STEER_1");
     assert_eq!(provider.requests.lock().unwrap().len(), 1);

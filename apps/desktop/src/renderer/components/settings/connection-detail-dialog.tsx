@@ -149,6 +149,8 @@ export function ConnectionDetailDialog({
 	const handleEdit = useCallback(async () => {
 		if (!onEdit || mutationPending) return
 		const version = ++discoveryVersion.current
+		// Editing supersedes discovery, including its pending indicator.
+		setDiscovering(false)
 		setEditing(true)
 		setError(null)
 		try {

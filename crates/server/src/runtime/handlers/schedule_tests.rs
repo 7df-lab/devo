@@ -154,7 +154,10 @@ async fn active_schedules_share_fifo_until_safe_boundary() -> Result<()> {
     }))
     .db_file("schedule.db")
     .runtime(data_root.path());
-    let (outbound, _receiver) = test_outbound_channel(16);
+    let (outbound, mut receiver) = test_outbound_channel(16);
+    // Exercise a connected client, not a full transport that parks lifecycle
+    // notifications after enough gated-provider ticks under parallel CI load.
+    let notifications = tokio::spawn(async move { while receiver.recv().await.is_some() {} });
     let connection_id = runtime
         .register_connection(ClientTransportKind::Stdio, outbound)
         .await;
@@ -427,6 +430,8 @@ async fn active_schedules_share_fifo_until_safe_boundary() -> Result<()> {
     );
     runtime.schedule_store.delete(&repeat_job.job_id)?;
     open.store(true, Ordering::SeqCst);
+    runtime.shutdown().await;
+    notifications.abort();
     Ok(())
 }
 

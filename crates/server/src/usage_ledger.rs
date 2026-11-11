@@ -404,14 +404,20 @@ impl CallAttemptGuard {
             return Ok(());
         }
         self.terminal = true;
-        self.ledger.record(
-            &self.call_id,
-            &self.context,
-            &self.provider_name,
-            &self.request,
-            outcome,
-            usage,
-        )
+        self.ledger
+            .record(
+                &self.call_id,
+                &self.context,
+                &self.provider_name,
+                &self.request,
+                outcome,
+                usage,
+            )
+            .map_err(|error| {
+                anyhow::Error::new(devo_core::durable_execution::ModelCallPersistenceError(
+                    error,
+                ))
+            })
     }
 }
 

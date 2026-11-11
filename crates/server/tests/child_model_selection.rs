@@ -207,7 +207,7 @@ async fn spawn_selected(
 async fn python_spawn_routes_child_sibling_grandchild_and_followup_independently() -> Result<()> {
     let home = TempDir::new()?;
     write_config(home.path())?;
-    let parent = Arc::new(ScriptedProvider::new([
+    let parent = Arc::new(ScriptedProvider::for_agent_tasks([
         ScriptedProvider::ipython_code_tool_call(
             r#"
 available = await rlm.find_models()
@@ -226,7 +226,7 @@ print('SELECTION_AND_DISCOVERY_OK')
         ScriptedProvider::completed("parent or sibling complete"),
         ScriptedProvider::completed("parent or sibling complete"),
     ]));
-    let child = Arc::new(ScriptedProvider::new([
+    let child = Arc::new(ScriptedProvider::for_agent_tasks([
         ScriptedProvider::ipython_code_tool_call(
             r#"
 grandchild = await rlm.spawn('Inherit the immediate parent model and thinking', name='grandchild')
@@ -255,16 +255,18 @@ print('GRANDCHILD_INHERITANCE_OK')
         parent_completed["params"]["turn"]["status"],
         json!("completed"),
         "parent turn failed: {parent_completed}; requests: {:?}",
-        bindings(&parent.requests())
+        bindings(&parent.task_requests())
     );
-    wait_for_stream_calls(&parent, 3).await.with_context(|| {
-        format!(
-            "parent requests: {:?}; child requests: {:?}",
-            bindings(&parent.requests()),
-            bindings(&child.requests())
-        )
-    })?;
-    wait_for_stream_calls(&child, 3).await?;
+    wait_for_task_stream_calls(&parent, 3)
+        .await
+        .with_context(|| {
+            format!(
+                "parent requests: {:?}; child requests: {:?}",
+                bindings(&parent.task_requests()),
+                bindings(&child.task_requests())
+            )
+        })?;
+    wait_for_task_stream_calls(&child, 3).await?;
     let agents = request_agent_list(&runtime, connection, root).await?;
     let selected = agents
         .agents
@@ -273,6 +275,11 @@ print('GRANDCHILD_INHERITANCE_OK')
         .context("selected child")?;
     let selected_id = selected.session_id;
     wait_completed(&runtime, connection, root, "selected").await?;
+    wait_completed(&runtime, connection, selected_id, "grandchild").await?;
+    // The grandchild also wakes its parent. Keep that real turn separate from
+    // the selected child's scripted task and explicit follow-up.
+    wait_for_completion_requests(&child, /*expected*/ 1).await?;
+    wait_for_session_idle(&runtime, connection, selected_id).await?;
     request_agent_send_message(
         &runtime,
         connection,
@@ -281,10 +288,10 @@ print('GRANDCHILD_INHERITANCE_OK')
         "Follow up using the same model",
     )
     .await?;
-    wait_for_stream_calls(&child, 4).await?;
+    wait_for_task_stream_calls(&child, 4).await?;
     wait_completed(&runtime, connection, root, "selected").await?;
     assert_eq!(
-        bindings(&parent.requests()),
+        bindings(&parent.task_requests()),
         vec![
             (
                 ModelProfileKey::CatalogSlug(PARENT.to_string()),
@@ -295,7 +302,7 @@ print('GRANDCHILD_INHERITANCE_OK')
         ]
     );
     assert_eq!(
-        bindings(&child.requests()),
+        bindings(&child.task_requests()),
         vec![
             (
                 ModelProfileKey::CatalogSlug(CHILD.to_string()),
@@ -312,8 +319,18 @@ print('GRANDCHILD_INHERITANCE_OK')
             .iter()
             .any(|agent| agent.agent_nickname == "grandchild")
     );
-    assert_python_stdout(&parent.requests(), "SELECTION_AND_DISCOVERY_OK\n")?;
-    assert_python_stdout(&child.requests(), "GRANDCHILD_INHERITANCE_OK\n")?;
+    assert_python_stdout(&parent.task_requests(), "SELECTION_AND_DISCOVERY_OK\n")?;
+    assert_python_stdout(&child.task_requests(), "GRANDCHILD_INHERITANCE_OK\n")?;
+    let completion_requests = child.completion_requests();
+    assert_eq!(
+        bindings(&completion_requests),
+        vec![(
+            ModelProfileKey::CatalogSlug(CHILD.to_string()),
+            "wire-child".to_string(),
+            Some(ReasoningEffort::High)
+        )]
+    );
+    runtime.shutdown().await;
     Ok(())
 }
 
@@ -321,28 +338,32 @@ print('GRANDCHILD_INHERITANCE_OK')
 async fn child_binding_and_thinking_survive_runtime_restart() -> Result<()> {
     let home = TempDir::new()?;
     write_config(home.path())?;
-    let parent = Arc::new(ScriptedProvider::new([]));
-    let child = Arc::new(ScriptedProvider::new([ScriptedProvider::completed(
-        "initial child",
-    )]));
+    let parent = Arc::new(ScriptedProvider::for_agent_tasks([]));
+    let child = Arc::new(ScriptedProvider::for_agent_tasks([
+        ScriptedProvider::completed("initial child"),
+    ]));
     let first = runtime(home.path(), parent.clone(), child.clone());
     let (connection, _notifications) = initialize_connection(&first).await?;
     let root = start_parent_session(&first, connection, home.path()).await?;
     let spawned = spawn_selected(&first, root, CHILD, "high").await?;
     wait_completed(&first, connection, root, &spawned.agent_path).await?;
     assert_eq!(
-        bindings(&child.requests()),
+        bindings(&child.task_requests()),
         vec![(
             ModelProfileKey::CatalogSlug(CHILD.to_string()),
             "wire-child".to_string(),
             Some(ReasoningEffort::High)
         )]
     );
+    wait_for_session_idle(&first, connection, spawned.child_session_id).await?;
+    wait_for_completion_requests(&parent, /*expected*/ 1).await?;
+    wait_for_session_idle(&first, connection, root).await?;
+    first.shutdown().await;
     drop(first);
 
-    let restored_child = Arc::new(ScriptedProvider::new([ScriptedProvider::completed(
-        "restored child",
-    )]));
+    let restored_child = Arc::new(ScriptedProvider::for_agent_tasks([
+        ScriptedProvider::completed("restored child"),
+    ]));
     let restored = runtime(home.path(), parent.clone(), restored_child.clone());
     restored.load_persisted_sessions().await?;
     let (connection, mut notifications) = initialize_connection(&restored).await?;
@@ -363,14 +384,28 @@ async fn child_binding_and_thinking_survive_runtime_restart() -> Result<()> {
     .await?;
     wait_for_parent_turn_completed(&mut notifications, spawned.child_session_id).await?;
     assert_eq!(
-        bindings(&restored_child.requests()),
+        bindings(&restored_child.task_requests()),
         vec![(
             ModelProfileKey::CatalogSlug(CHILD.to_string()),
             "wire-child".to_string(),
             Some(ReasoningEffort::High)
         )]
     );
-    assert_eq!(parent.requests().len(), 0);
+    assert_eq!(parent.task_requests().len(), 0);
+    let completion_requests = parent.completion_requests();
+    assert!(!completion_requests.is_empty());
+    assert_eq!(
+        bindings(&completion_requests),
+        vec![
+            (
+                ModelProfileKey::CatalogSlug(PARENT.to_string()),
+                "wire-parent".to_string(),
+                None
+            );
+            completion_requests.len()
+        ]
+    );
+    restored.shutdown().await;
     Ok(())
 }
 
@@ -379,8 +414,8 @@ async fn invalid_child_selection_is_rejected_before_agent_creation_or_provider_c
 {
     let home = TempDir::new()?;
     write_config(home.path())?;
-    let parent = Arc::new(ScriptedProvider::new([]));
-    let child = Arc::new(ScriptedProvider::new([]));
+    let parent = Arc::new(ScriptedProvider::for_agent_tasks([]));
+    let child = Arc::new(ScriptedProvider::for_agent_tasks([]));
     let runtime = runtime(home.path(), parent.clone(), child.clone());
     let (connection, _notifications) = initialize_connection(&runtime).await?;
     let root = start_parent_session(&runtime, connection, home.path()).await?;
@@ -412,15 +447,19 @@ async fn invalid_child_selection_is_rejected_before_agent_creation_or_provider_c
 async fn restored_child_with_disconnected_route_never_falls_back_to_parent() -> Result<()> {
     let home = TempDir::new()?;
     write_config(home.path())?;
-    let parent = Arc::new(ScriptedProvider::new([]));
-    let child = Arc::new(ScriptedProvider::new([ScriptedProvider::completed(
-        "initial child",
-    )]));
+    let parent = Arc::new(ScriptedProvider::for_agent_tasks([]));
+    let child = Arc::new(ScriptedProvider::for_agent_tasks([
+        ScriptedProvider::completed("initial child"),
+    ]));
     let first = runtime(home.path(), parent.clone(), child.clone());
     let (connection, _notifications) = initialize_connection(&first).await?;
     let root = start_parent_session(&first, connection, home.path()).await?;
     let spawned = spawn_selected(&first, root, CHILD, "high").await?;
     wait_completed(&first, connection, root, &spawned.agent_path).await?;
+    wait_for_session_idle(&first, connection, spawned.child_session_id).await?;
+    wait_for_completion_requests(&parent, /*expected*/ 1).await?;
+    wait_for_session_idle(&first, connection, root).await?;
+    first.shutdown().await;
     drop(first);
 
     let mut router = MultiProviderRouter::new(parent.clone());
@@ -442,6 +481,7 @@ async fn restored_child_with_disconnected_route_never_falls_back_to_parent() -> 
         response.get("error").is_none(),
         "read-only resume must remain available: {response}"
     );
+    let calls_before_restart = (parent.requests().len(), child.requests().len());
     let response = restored
         .handle_incoming(
             connection,
@@ -461,7 +501,14 @@ async fn restored_child_with_disconnected_route_never_falls_back_to_parent() -> 
             .contains("route is unavailable"),
         "missing child route must fail explicitly: {response}"
     );
-    assert_eq!((parent.requests().len(), child.requests().len()), (0, 1));
+    assert_eq!(
+        (parent.task_requests().len(), child.task_requests().len()),
+        (0, 1)
+    );
+    assert_eq!(
+        (parent.requests().len(), child.requests().len()),
+        calls_before_restart
+    );
     Ok(())
 }
 
@@ -469,12 +516,12 @@ async fn restored_child_with_disconnected_route_never_falls_back_to_parent() -> 
 async fn concurrent_sibling_admissions_keep_distinct_model_bindings() -> Result<()> {
     let home = TempDir::new()?;
     write_config(home.path())?;
-    let parent = Arc::new(ScriptedProvider::new([ScriptedProvider::completed(
-        "inherited sibling",
-    )]));
-    let child = Arc::new(ScriptedProvider::new([ScriptedProvider::completed(
-        "selected sibling",
-    )]));
+    let parent = Arc::new(ScriptedProvider::for_agent_tasks([
+        ScriptedProvider::completed("inherited sibling"),
+    ]));
+    let child = Arc::new(ScriptedProvider::for_agent_tasks([
+        ScriptedProvider::completed("selected sibling"),
+    ]));
     let runtime = runtime(home.path(), parent.clone(), child.clone());
     let (connection, _notifications) = initialize_connection(&runtime).await?;
     let root = start_parent_session(&runtime, connection, home.path()).await?;
@@ -494,7 +541,7 @@ async fn concurrent_sibling_admissions_keep_distinct_model_bindings() -> Result<
         2
     );
     assert_eq!(
-        bindings(&parent.requests()),
+        bindings(&parent.task_requests()),
         vec![(
             ModelProfileKey::CatalogSlug(PARENT.to_string()),
             "wire-parent".to_string(),
@@ -502,7 +549,7 @@ async fn concurrent_sibling_admissions_keep_distinct_model_bindings() -> Result<
         )]
     );
     assert_eq!(
-        bindings(&child.requests()),
+        bindings(&child.task_requests()),
         vec![(
             ModelProfileKey::CatalogSlug(CHILD.to_string()),
             "wire-child".to_string(),
@@ -516,21 +563,23 @@ async fn concurrent_sibling_admissions_keep_distinct_model_bindings() -> Result<
 async fn invalid_selection_does_not_poison_later_spawn_during_active_parent_turn() -> Result<()> {
     let home = TempDir::new()?;
     write_config(home.path())?;
-    let parent = Arc::new(ScriptedProvider::pending());
-    let child = Arc::new(ScriptedProvider::new([ScriptedProvider::completed(
-        "valid child",
-    )]));
+    let parent = Arc::new(ScriptedProvider::pending_agent_tasks());
+    let child = Arc::new(ScriptedProvider::for_agent_tasks([
+        ScriptedProvider::completed("valid child"),
+    ]));
     let runtime = runtime(home.path(), parent.clone(), child.clone());
     let (connection, mut notifications) = initialize_connection(&runtime).await?;
     let root = start_parent_session(&runtime, connection, home.path()).await?;
     start_turn(&runtime, connection, root, "Keep the parent turn active").await?;
-    wait_for_stream_calls(&parent, 1).await.with_context(|| {
-        format!(
-            "parent requests: {:?}; child requests: {:?}",
-            bindings(&parent.requests()),
-            bindings(&child.requests())
-        )
-    })?;
+    wait_for_task_stream_calls(&parent, 1)
+        .await
+        .with_context(|| {
+            format!(
+                "parent requests: {:?}; child requests: {:?}",
+                bindings(&parent.task_requests()),
+                bindings(&child.task_requests())
+            )
+        })?;
     assert!(
         spawn_selected(&runtime, root, "alternate/no-such-model", "high")
             .await
@@ -546,14 +595,14 @@ async fn invalid_selection_does_not_poison_later_spawn_during_active_parent_turn
         1
     );
     assert_eq!(
-        bindings(&child.requests()),
+        bindings(&child.task_requests()),
         vec![(
             ModelProfileKey::CatalogSlug(CHILD.to_string()),
             "wire-child".to_string(),
             Some(ReasoningEffort::High)
         )]
     );
-    assert_eq!(parent.requests().len(), 1);
+    assert_eq!(parent.task_requests().len(), 1);
     let interrupted = runtime
         .handle_incoming(
             connection,
@@ -578,7 +627,7 @@ async fn independent_root_inherits_named_non_effort_variant() -> Result<()> {
         "fast": {"request": {"speed":"fast"}}
     });
     std::fs::write(&path, serde_json::to_vec(&config)?)?;
-    let parent = Arc::new(ScriptedProvider::new([
+    let parent = Arc::new(ScriptedProvider::for_agent_tasks([
         ScriptedProvider::ipython_code_tool_call(
             r#"
 from pathlib import Path
@@ -592,7 +641,7 @@ await rlm.end_turn()
     let runtime = runtime(
         home.path(),
         parent.clone(),
-        Arc::new(ScriptedProvider::pending()),
+        Arc::new(ScriptedProvider::pending_agent_tasks()),
     );
     let (connection, mut notifications) = initialize_connection(&runtime).await?;
     let session = start_parent_session(&runtime, connection, home.path()).await?;
@@ -625,10 +674,10 @@ await rlm.end_turn()
         "{completed}"
     );
     let child: SessionId = std::fs::read_to_string(home.path().join("variant-root"))?.parse()?;
-    wait_for_stream_calls(&parent, 2).await?;
+    wait_for_task_stream_calls(&parent, 2).await?;
     assert_eq!(
         parent
-            .requests()
+            .task_requests()
             .iter()
             .map(|request| request.extra_body.clone())
             .collect::<Vec<_>>(),
@@ -644,15 +693,16 @@ await rlm.end_turn()
         .await
         .context("read variant root")?;
     assert_eq!(read["result"]["session"]["model"]["variant"], json!("fast"));
+    wait_for_session_idle(&runtime, connection, child).await?;
     runtime.shutdown().await;
     drop(runtime);
-    let resumed_provider = Arc::new(ScriptedProvider::new([ScriptedProvider::completed(
-        "after restart",
-    )]));
+    let resumed_provider = Arc::new(ScriptedProvider::for_agent_tasks([
+        ScriptedProvider::completed("after restart"),
+    ]));
     let restored = self::runtime(
         home.path(),
         resumed_provider.clone(),
-        Arc::new(ScriptedProvider::pending()),
+        Arc::new(ScriptedProvider::pending_agent_tasks()),
     );
     restored.load_persisted_sessions().await?;
     let (connection, mut notifications) = initialize_connection(&restored).await?;
@@ -690,9 +740,9 @@ await rlm.end_turn()
         json!("completed"),
         "{completed}"
     );
-    wait_for_stream_calls(&resumed_provider, 1).await?;
+    wait_for_task_stream_calls(&resumed_provider, 1).await?;
     assert_eq!(
-        resumed_provider.requests()[0].extra_body,
+        resumed_provider.task_requests()[0].extra_body,
         Some(json!({"speed":"fast"}))
     );
     Ok(())

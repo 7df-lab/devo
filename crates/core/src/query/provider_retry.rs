@@ -69,6 +69,14 @@ pub(crate) enum ProviderRetryDecision {
 }
 
 pub(crate) fn classify_error(e: &anyhow::Error) -> ErrorClass {
+    // This must precede remote-error and string heuristics. Local file paths,
+    // identifiers, or I/O sources can contain status codes or timeout words.
+    if e.chain()
+        .any(|cause| cause.is::<crate::durable_execution::ModelCallPersistenceError>())
+    {
+        return ErrorClass::Unretryable;
+    }
+
     for cause in e.chain() {
         let Some(provider_error) = cause.downcast_ref::<ProviderError>() else {
             continue;

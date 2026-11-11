@@ -43,10 +43,16 @@ pub enum StreamScript {
     Pending,
 }
 
+enum CompletionResponses {
+    Scripted,
+    Acknowledge,
+}
+
 pub struct ScriptedProvider {
     scripts: Mutex<VecDeque<StreamScript>>,
     requests: Mutex<Vec<ModelRequest>>,
     stream_calls: AtomicUsize,
+    completion_responses: CompletionResponses,
 }
 
 impl ScriptedProvider {
@@ -55,7 +61,20 @@ impl ScriptedProvider {
             scripts: Mutex::new(scripts.into_iter().collect()),
             requests: Mutex::new(Vec::new()),
             stream_calls: AtomicUsize::new(0),
+            completion_responses: CompletionResponses::Scripted,
         }
+    }
+
+    /// Script task calls independently of automatic child terminal inbox turns.
+    /// Completion turns still execute, are captured, and return a real response.
+    pub fn for_agent_tasks(scripts: impl IntoIterator<Item = StreamScript>) -> Self {
+        let mut provider = Self::new(scripts);
+        provider.completion_responses = CompletionResponses::Acknowledge;
+        provider
+    }
+
+    pub fn pending_agent_tasks() -> Self {
+        Self::for_agent_tasks([StreamScript::Pending])
     }
 
     pub fn pending() -> Self {
@@ -124,6 +143,51 @@ impl ScriptedProvider {
     pub fn requests(&self) -> Vec<ModelRequest> {
         self.requests.lock().expect("lock requests").clone()
     }
+
+    pub fn task_requests(&self) -> Vec<ModelRequest> {
+        self.requests()
+            .into_iter()
+            .filter(|request| !is_child_completion_request(request))
+            .collect()
+    }
+
+    pub fn task_stream_calls(&self) -> usize {
+        self.task_requests().len()
+    }
+
+    pub fn completion_requests(&self) -> Vec<ModelRequest> {
+        self.requests()
+            .into_iter()
+            .filter(is_child_completion_request)
+            .collect()
+    }
+}
+
+/// Classify only the new terminal notification, never an earlier notification
+/// in history or an ordinary agent-to-agent follow-up that needs its own script.
+pub fn is_child_completion_request(request: &ModelRequest) -> bool {
+    request.messages.last().is_some_and(|message| {
+        message.content.iter().any(|content| {
+            let RequestContent::Text { text } = content else {
+                return false;
+            };
+            let Some(origin) = text
+                .lines()
+                .next()
+                .and_then(|line| line.strip_prefix("[Host notification: "))
+                .and_then(|line| line.strip_suffix(']'))
+                .and_then(|json| {
+                    serde_json::from_str::<devo_protocol::native::host_message::HostMessageOrigin>(
+                        json,
+                    )
+                    .ok()
+                })
+            else {
+                return false;
+            };
+            origin.event_id.starts_with("child:")
+        })
+    })
 }
 
 #[async_trait]
@@ -142,8 +206,17 @@ impl ModelProviderSDK for ScriptedProvider {
         &self,
         request: ModelRequest,
     ) -> Result<Pin<Box<dyn futures::Stream<Item = Result<StreamEvent>> + Send>>> {
+        let acknowledge = matches!(self.completion_responses, CompletionResponses::Acknowledge)
+            && is_child_completion_request(&request);
         self.requests.lock().expect("lock requests").push(request);
         self.stream_calls.fetch_add(1, Ordering::SeqCst);
+        if acknowledge {
+            return Ok(Box::pin(futures::stream::iter(
+                text_response_events("Acknowledged child completion.")
+                    .into_iter()
+                    .map(Ok),
+            )));
+        }
         let script = self
             .scripts
             .lock()
@@ -484,7 +557,11 @@ pub async fn start_turn_with_approval_policy(
         )
         .await
         .context("turn/start")?;
-    Ok(serde_json::from_value::<devo_server::SuccessResponse<TurnStartResult>>(response)?.result)
+    Ok(
+        serde_json::from_value::<devo_server::SuccessResponse<TurnStartResult>>(response.clone())
+            .with_context(|| format!("turn/start response: {response}"))?
+            .result,
+    )
 }
 
 pub async fn wait_for_parent_turn_completed(
@@ -525,6 +602,64 @@ pub async fn wait_for_stream_calls(provider: &ScriptedProvider, expected: usize)
     })
     .await
     .with_context(|| format!("timed out waiting for {expected} provider stream calls"))?
+}
+
+pub async fn wait_for_task_stream_calls(
+    provider: &ScriptedProvider,
+    expected: usize,
+) -> Result<()> {
+    timeout(Duration::from_secs(/*secs*/ 5), async {
+        loop {
+            if provider.task_stream_calls() >= expected {
+                return Ok(());
+            }
+            tokio::time::sleep(Duration::from_millis(/*millis*/ 10)).await;
+        }
+    })
+    .await
+    .with_context(|| format!("timed out waiting for {expected} task provider calls"))?
+}
+
+pub async fn wait_for_completion_requests(
+    provider: &ScriptedProvider,
+    expected: usize,
+) -> Result<()> {
+    timeout(Duration::from_secs(/*secs*/ 10), async {
+        loop {
+            if provider.completion_requests().len() >= expected {
+                return Ok(());
+            }
+            tokio::time::sleep(Duration::from_millis(/*millis*/ 10)).await;
+        }
+    })
+    .await
+    .with_context(|| format!("timed out waiting for {expected} automatic completion requests"))?
+}
+
+/// Call after observing the expected terminal events. A completed notification
+/// precedes merge/admission cleanup; snapshots must not race that final work.
+pub async fn wait_for_session_idle(
+    runtime: &Arc<ServerRuntime>,
+    connection_id: u64,
+    session_id: devo_protocol::SessionId,
+) -> Result<()> {
+    timeout(Duration::from_secs(/*secs*/ 10), async {
+        loop {
+            let read = runtime.handle_incoming(connection_id, serde_json::json!({
+                "id":"wait-idle-read", "method":"session/read", "params":{"sessionId":session_id}
+            })).await.context("read session while settling")?;
+            let queue = runtime.handle_incoming(connection_id, serde_json::json!({
+                "id":"wait-idle-queue", "method":"session/queue/list", "params":{"sessionId":session_id}
+            })).await.context("read queue while settling")?;
+            anyhow::ensure!(read.get("error").is_none(), "{read}");
+            anyhow::ensure!(queue.get("error").is_none(), "{queue}");
+            if read["result"]["session"]["activeTurnId"].is_null()
+                && queue["result"]["entries"].as_array().is_some_and(Vec::is_empty) {
+                return Ok(());
+            }
+            tokio::time::sleep(Duration::from_millis(/*millis*/ 10)).await;
+        }
+    }).await.with_context(|| format!("session {session_id} did not settle"))?
 }
 
 fn text_response_events(text: &str) -> Vec<StreamEvent> {

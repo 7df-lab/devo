@@ -135,6 +135,41 @@ fn hosted_tool_schemas_follow_provider_capabilities() {
 }
 
 #[test]
+fn local_model_accounting_errors_never_retry_remote_calls() {
+    for source in [
+        anyhow::anyhow!("open /tmp/session-503-429-context_too_long.jsonl failed"),
+        anyhow::Error::new(std::io::Error::new(
+            std::io::ErrorKind::TimedOut,
+            "local disk timed out",
+        )),
+        anyhow::Error::new(devo_provider::error::ProviderError::ProviderServerError {
+            message: "nested storage adapter failure".into(),
+            status_code: Some(503),
+            provider_name: None,
+        }),
+    ] {
+        let error = anyhow::Error::new(crate::durable_execution::ModelCallPersistenceError(source))
+            .context("stream ended while recording usage");
+        assert_eq!(
+            super::classify_error(&error),
+            super::ErrorClass::Unretryable
+        );
+        let mut retries = 0;
+        let mut compacted = false;
+        assert!(matches!(
+            super::provider_retry_decision(&error, &mut retries, &mut compacted),
+            super::ProviderRetryDecision::Fail
+        ));
+        assert_eq!(retries, 0);
+        assert!(!compacted);
+        assert!(
+            error.chain().count() > 1,
+            "storage cause must remain available"
+        );
+    }
+}
+
+#[test]
 fn error_classification_and_retry_policy() {
     let network_cases = [
         anyhow::anyhow!("request timed out while connecting"),

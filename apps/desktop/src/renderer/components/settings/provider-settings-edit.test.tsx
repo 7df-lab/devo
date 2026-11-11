@@ -53,6 +53,7 @@ const catalog = {
 let finishRemove: (() => void) | undefined
 const modelRemove = mock(() => new Promise<void>((resolve) => { finishRemove = resolve }))
 const list = mock(async () => ({ data: { providers: catalog.providers, connectedProviderIds: ["local"], connectionModels: catalog.connectionModels } }))
+const discover = mock(async () => ({ providerId: "local", models: {} }))
 const reload = mock(() => {})
 const upsert = mock(async (_params: unknown) => ({}))
 mock.module("../../hooks/use-devo-data", () => ({
@@ -62,7 +63,7 @@ mock.module("../../lib/invalidate-provider-queries", () => ({
 	invalidateProviderDependentQueries: () => {},
 }))
 mock.module("../../services/connection-manager", () => ({
-	getBaseClient: () => ({ provider: { upsert, modelRemove, list } }),
+	getBaseClient: () => ({ provider: { upsert, modelRemove, list, discover } }),
 }))
 mock.module("./desktop-oauth-actions", () => ({ DesktopOAuthActions: () => null }))
 mock.module("./connect-provider-dialog", () => ({ ConnectProviderDialog: () => null }))
@@ -105,6 +106,8 @@ afterEach(async () => {
 	mount?.remove()
 	upsert.mockReset()
 	upsert.mockImplementation(async () => ({}))
+	discover.mockReset()
+	discover.mockImplementation(async () => ({ providerId: "local", models: {} }))
 	reload.mockClear()
 	modelRemove.mockClear()
 	list.mockReset()
@@ -258,4 +261,32 @@ test("pending Add model cannot dismiss and unlock connection Edit before its wri
 	await click("Edit connection")
 	expect(list).toHaveBeenCalledTimes(1)
 	expect(document.getElementById("provider-id")).not.toBeNull()
+})
+
+
+test.each(["resolve", "reject"])("failed Edit during discovery leaves Discover retryable when the old read %ss", async (outcome) => {
+	let finishDiscovery: ((value: Awaited<ReturnType<typeof discover>>) => void) | undefined
+	let failDiscovery: ((error: Error) => void) | undefined
+	discover.mockImplementationOnce(() => new Promise((resolve, reject) => {
+		finishDiscovery = resolve
+		failDiscovery = reject
+	}))
+	list.mockImplementationOnce(async () => { throw new Error("Catalog unavailable") })
+	await render()
+	const row = [...document.querySelectorAll("button")].find((button) => button.textContent?.includes("Local QA"))!
+	await act(async () => row.click())
+	await click("Discover")
+	await click("Edit connection")
+	expect(document.body.textContent).toContain("Catalog unavailable")
+	await act(async () => {
+		if (outcome === "resolve") finishDiscovery!({ providerId: "local", models: { stale: { name: "Stale discovery model" } } })
+		else failDiscovery!(new Error("Stale discovery failure"))
+	})
+	expect(document.body.textContent).not.toContain("Stale discovery")
+	expect(document.querySelector('[role="alert"]')?.textContent).toBe("Catalog unavailable")
+	const discoverButton = [...document.querySelectorAll("button")].find((button) => button.textContent?.trim() === "Discover")!
+	expect(discoverButton.disabled).toBe(false)
+	await click("Discover")
+	expect(discover).toHaveBeenCalledTimes(2)
+	expect(document.querySelector('[role="alert"]')).toBeNull()
 })

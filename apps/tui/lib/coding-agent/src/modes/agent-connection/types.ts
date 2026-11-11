@@ -306,6 +306,10 @@ export interface AgentConnectionSnapshot {
 	messages: AgentMessage[];
 	/** In-flight assistant message, separate from finalized transcript messages. */
 	streamingMessage?: AgentMessage;
+	/** Native identities represented by the restored in-flight assistant row. */
+	streamingItemIds?: string[];
+	/** Birth prefixes for deltas received before Native history hydration. */
+	streamingPrefixes?: Record<string, { kind: "text" | "thinking"; prefix: string }>;
 	sessionContext?: AgentConnectionSessionContext;
 	sessionTree?: { tree: AgentConnectionSessionTreeNode[]; leafId: string | null };
 	parent?: AgentConnectionParentMetadata;
@@ -314,6 +318,8 @@ export interface AgentConnectionSnapshot {
 	lastEventSequence?: number;
 	lastEventCursor?: AgentConnectionEventCursor;
 	replay?: AgentConnectionReplayInfo;
+	/** Completed durable items already represented by the transcript snapshot. */
+	completedItemRevisions?: Record<string, number>;
 }
 
 export interface AgentConnectionScopedModel {
@@ -657,7 +663,7 @@ export type AgentConnectionSessionEvent =
 	  };
 
 export type AgentConnectionEvent =
-	| { type: "session_event"; event: AgentConnectionSessionEvent }
+	| { type: "session_event"; event: AgentConnectionSessionEvent; sourceItem?: { id: string; revision?: number; missingTextBaseIds?: string[] } }
 	| { type: "side_question_event"; event: AgentConnectionSideQuestionEvent }
 	| { type: "session_replaced"; state: AgentConnectionState; messages: AgentMessage[] }
 	| { type: "session_resynced"; snapshot: AgentConnectionSnapshot }

@@ -889,9 +889,31 @@ impl SessionHandle {
         turn: RuntimeTurn,
         turn_config: TurnConfig,
     ) -> Option<bool> {
+        self.try_activate_runtime_turn(turn, turn_config, false)
+            .await
+    }
+
+    /// Resume a persisted, unfinished turn through the approval control path.
+    /// This does not admit a new input or consume any held inbox item.
+    pub(crate) async fn try_resume_runtime_turn(
+        &self,
+        turn: RuntimeTurn,
+        turn_config: TurnConfig,
+    ) -> Option<bool> {
+        self.try_activate_runtime_turn(turn, turn_config, true)
+            .await
+    }
+
+    async fn try_activate_runtime_turn(
+        &self,
+        turn: RuntimeTurn,
+        turn_config: TurnConfig,
+        resume_existing: bool,
+    ) -> Option<bool> {
         let (reply_tx, reply_rx) = oneshot::channel();
         if !self
             .send(SessionCommand::TryBeginActiveTurn {
+                resume_existing,
                 turn,
                 turn_config,
                 reply: reply_tx,

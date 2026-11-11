@@ -19,7 +19,9 @@ use support::initialize_connection;
 use support::spawn_child_named;
 use support::start_parent_session;
 use support::start_turn;
+use support::wait_for_completion_requests;
 use support::wait_for_parent_turn_completed;
+use support::wait_for_session_idle;
 
 fn build_runtime(data_root: &Path, provider: Arc<ScriptedProvider>) -> Arc<ServerRuntime> {
     devo_server::test_support::TestRuntime::new(provider)
@@ -93,7 +95,7 @@ fn assert_identity(prompt: &str, depth: u32, parent: Option<&str>) {
 #[tokio::test]
 async fn root_and_ordinary_fork_keep_root_identity_before_and_after_capture() -> Result<()> {
     let data_root = TempDir::new()?;
-    let provider = Arc::new(ScriptedProvider::new([
+    let provider = Arc::new(ScriptedProvider::for_agent_tasks([
         ScriptedProvider::completed("root done"),
         ScriptedProvider::completed("fork done"),
     ]));
@@ -129,7 +131,7 @@ async fn root_and_ordinary_fork_keep_root_identity_before_and_after_capture() ->
         /*parent*/ None,
     );
 
-    let requests = provider.requests();
+    let requests = provider.task_requests();
     assert_eq!(requests.len(), 2);
     for request in requests {
         assert_identity(
@@ -145,7 +147,7 @@ async fn root_and_ordinary_fork_keep_root_identity_before_and_after_capture() ->
 #[tokio::test]
 async fn slash_named_descendants_keep_identity_with_inherited_context_and_resume() -> Result<()> {
     let data_root = TempDir::new()?;
-    let provider = Arc::new(ScriptedProvider::new([
+    let provider = Arc::new(ScriptedProvider::for_agent_tasks([
         ScriptedProvider::completed("child done"),
         ScriptedProvider::completed("grandchild done"),
     ]));
@@ -163,6 +165,8 @@ async fn slash_named_descendants_keep_identity_with_inherited_context_and_resume
     .await?;
     assert_eq!(child.agent_path, "root/review/api");
     wait_for_parent_turn_completed(&mut notifications, child.child_session_id).await?;
+    wait_for_completion_requests(&provider, /*expected*/ 1).await?;
+    wait_for_session_idle(&runtime, connection_id, root).await?;
     // Root subscriptions cover direct children only. Resume subscribes to the
     // child's own descendants before the grandchild starts.
     rpc(
@@ -182,12 +186,15 @@ async fn slash_named_descendants_keep_identity_with_inherited_context_and_resume
     .await?;
     wait_for_parent_turn_completed(&mut notifications, grandchild.child_session_id).await?;
     assert_eq!(grandchild.agent_path, "root/review/api/grandchild");
+    wait_for_completion_requests(&provider, /*expected*/ 3).await?;
+    wait_for_session_idle(&runtime, connection_id, child.child_session_id).await?;
+    wait_for_session_idle(&runtime, connection_id, root).await?;
 
     let descendants = [
         (child.child_session_id, 1, "root"),
         (grandchild.child_session_id, 2, "root/review/api"),
     ];
-    let requests = provider.requests();
+    let requests = provider.task_requests();
     assert_eq!(requests.len(), descendants.len());
     for ((session_id, depth, parent), request) in descendants.iter().zip(&requests) {
         assert_identity(
@@ -201,9 +208,25 @@ async fn slash_named_descendants_keep_identity_with_inherited_context_and_resume
             Some(parent),
         );
     }
+    let completion_requests = provider.completion_requests();
+    assert_eq!(completion_requests.len(), 3);
+    for (request, (depth, parent)) in
+        completion_requests
+            .iter()
+            .zip([(0, None), (1, Some("root")), (0, None)])
+    {
+        assert_identity(
+            request
+                .system
+                .as_deref()
+                .context("completion provider system")?,
+            depth,
+            parent,
+        );
+    }
     runtime.shutdown().await;
 
-    let resumed_provider = Arc::new(ScriptedProvider::new([
+    let resumed_provider = Arc::new(ScriptedProvider::for_agent_tasks([
         ScriptedProvider::completed("child resumed"),
         ScriptedProvider::completed("grandchild resumed"),
     ]));
@@ -212,6 +235,7 @@ async fn slash_named_descendants_keep_identity_with_inherited_context_and_resume
     let (connection_id, mut notifications) = initialize_connection(&rebuilt).await?;
     for (session_id, depth, parent) in descendants {
         rpc(&rebuilt, connection_id, "session/resume", session_id).await?;
+        wait_for_session_idle(&rebuilt, connection_id, session_id).await?;
         // A newly restored actor has no captured SessionContext yet.
         assert_identity(
             &read_prompt(&rebuilt, connection_id, session_id).await?,
@@ -226,7 +250,7 @@ async fn slash_named_descendants_keep_identity_with_inherited_context_and_resume
             Some(parent),
         );
     }
-    let requests = resumed_provider.requests();
+    let requests = resumed_provider.task_requests();
     assert_eq!(requests.len(), descendants.len());
     for ((_, depth, parent), request) in descendants.iter().zip(&requests) {
         assert_identity(
