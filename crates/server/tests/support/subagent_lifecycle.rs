@@ -387,7 +387,24 @@ pub async fn wait_for_session_notification(
     method: &str,
     session_id: devo_protocol::SessionId,
 ) -> Result<serde_json::Value> {
-    timeout(Duration::from_secs(5), async {
+    wait_for_session_notification_with_timeout(
+        notifications_rx,
+        method,
+        session_id,
+        Duration::from_secs(/*secs*/ 5),
+    )
+    .await
+}
+
+/// Wait with a caller-owned end-to-end budget for multi-step integration work.
+/// The default helper retains its short deadline for ordinary single turns.
+pub async fn wait_for_session_notification_with_timeout(
+    notifications_rx: &mut mpsc::Receiver<serde_json::Value>,
+    method: &str,
+    session_id: devo_protocol::SessionId,
+    wait_timeout: Duration,
+) -> Result<serde_json::Value> {
+    timeout(wait_timeout, async {
         while let Some(value) = notifications_rx.recv().await {
             if notification_matches_session(&value, method, session_id) {
                 return Ok(value);

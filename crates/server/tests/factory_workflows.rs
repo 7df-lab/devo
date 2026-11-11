@@ -6,6 +6,7 @@ use anyhow::{Context, Result};
 use pretty_assertions::assert_eq;
 use serde_json::json;
 use std::sync::Arc;
+use std::time::Duration;
 use support::*;
 
 #[tokio::test]
@@ -51,8 +52,17 @@ await rlm.end_turn()
         Some("never"),
     )
     .await?;
-    let completed =
-        wait_for_session_notification(&mut notifications, "turn/completed", parent).await?;
+    // The Python workflow/child wait allows 10 seconds, in addition to kernel
+    // startup and child admission. Do not expire the outer wait after 5 seconds.
+    let completion_wait_started = std::time::Instant::now();
+    let completed = wait_for_session_notification_with_timeout(
+        &mut notifications,
+        "turn/completed",
+        parent,
+        Duration::from_secs(/*secs*/ 30),
+    )
+    .await?;
+    let completion_wait_elapsed = completion_wait_started.elapsed();
     assert_eq!(
         completed["params"]["turn"]["status"],
         json!("completed"),
@@ -67,6 +77,7 @@ await rlm.end_turn()
     let join = message_texts(&requests[3]).join("\n");
     assert!(join.contains(r#""accept": "accepted result""#), "{join}");
     assert!(!join.contains(r#""reject":"#), "{join}");
+    eprintln!("guarded factory completion wait: {completion_wait_elapsed:?}");
     Ok(())
 }
 
@@ -104,8 +115,15 @@ await rlm.end_turn()
         Some("never"),
     )
     .await?;
-    let completed =
-        wait_for_session_notification(&mut notifications, "turn/completed", parent).await?;
+    // The Python workflow/child wait allows 10 seconds, in addition to kernel
+    // startup and child admission. Do not expire the outer wait after 5 seconds.
+    let completed = wait_for_session_notification_with_timeout(
+        &mut notifications,
+        "turn/completed",
+        parent,
+        Duration::from_secs(/*secs*/ 30),
+    )
+    .await?;
     assert_eq!(
         completed["params"]["turn"]["status"],
         json!("completed"),
@@ -158,8 +176,15 @@ await rlm.end_turn()
         Some("never"),
     )
     .await?;
-    let completed =
-        wait_for_session_notification(&mut notifications, "turn/completed", parent).await?;
+    // The Python workflow/child wait allows 10 seconds, in addition to kernel
+    // startup and child admission. Do not expire the outer wait after 5 seconds.
+    let completed = wait_for_session_notification_with_timeout(
+        &mut notifications,
+        "turn/completed",
+        parent,
+        Duration::from_secs(/*secs*/ 30),
+    )
+    .await?;
     assert_eq!(
         completed["params"]["turn"]["status"],
         json!("completed"),
@@ -177,4 +202,49 @@ await rlm.end_turn()
         "{join}"
     );
     Ok(())
+}
+
+#[tokio::test(start_paused = true)]
+async fn factory_notification_budget_accepts_completion_after_default_deadline() -> Result<()> {
+    let session = devo_protocol::SessionId::new();
+    let expected = json!({"method": "turn/completed", "params": {"sessionId": session}});
+    let (sender, mut notifications) = tokio::sync::mpsc::channel(1);
+    let notification = expected.clone();
+    tokio::spawn(async move {
+        tokio::time::sleep(Duration::from_secs(/*secs*/ 6)).await;
+        sender
+            .send(notification)
+            .await
+            .expect("notification receiver");
+    });
+    let actual = wait_for_session_notification_with_timeout(
+        &mut notifications,
+        "turn/completed",
+        session,
+        Duration::from_secs(/*secs*/ 30),
+    )
+    .await?;
+    assert_eq!(actual, expected);
+    Ok(())
+}
+
+#[tokio::test(start_paused = true)]
+async fn ordinary_notification_wait_retains_five_second_deadline() {
+    let session = devo_protocol::SessionId::new();
+    let (sender, mut notifications) = tokio::sync::mpsc::channel(1);
+    let sent = tokio::spawn(async move {
+        tokio::time::sleep(Duration::from_secs(/*secs*/ 6)).await;
+        sender
+            .send(json!({"method": "turn/completed", "params": {"sessionId": session}}))
+            .await
+    });
+    let error = wait_for_session_notification(&mut notifications, "turn/completed", session)
+        .await
+        .expect_err("the default deadline must not be widened");
+    assert_eq!(
+        error.to_string(),
+        format!("timed out waiting for turn/completed for {session}")
+    );
+    drop(notifications);
+    assert!(sent.await.expect("sender task").is_err());
 }
