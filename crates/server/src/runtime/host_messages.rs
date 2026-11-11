@@ -18,6 +18,7 @@ impl HostMessage {
                 event_id,
                 source: HostMessageSource::Agent,
                 sender: sender.to_string(),
+                sender_name: None,
                 delivery: HostMessageDelivery::FollowUp,
             },
             text,
@@ -45,6 +46,7 @@ impl HostMessage {
                     .unwrap_or_else(|| uuid::Uuid::new_v4().to_string()),
                 source: HostMessageSource::BackgroundTask,
                 sender: format!("{session_id}:{kind}:{identity}"),
+                sender_name: None,
                 delivery: HostMessageDelivery::FollowUp,
             },
             text,
@@ -59,7 +61,15 @@ impl ServerRuntime {
         message: HostMessage,
         queued_metadata: Option<serde_json::Value>,
     ) -> Result<crate::turn::RuntimeTurn, ToolCallError> {
-        let HostMessage { origin, text } = message;
+        let HostMessage { mut origin, text } = message;
+        if origin.source == HostMessageSource::Agent
+            && let Some(sender) = self
+                .session(SessionId::from_string(origin.sender.clone()))
+                .await
+            && let Some(summary) = sender.summary().await
+        {
+            origin.sender_name = summary.agent_nickname.or(summary.native.title);
+        }
         let display_input = text.clone();
         let input_text = text;
         let mut metadata = queued_metadata

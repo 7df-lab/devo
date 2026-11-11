@@ -26,6 +26,8 @@ import {
 	type ShellCompletion,
 } from "./shell-completion.js";
 import { ToolPanel } from "./tool-panel.js";
+import { expandedToolOutput, formatCollapsedToolPreview, summarizeToolArgs, truncateExpandedToolOutput } from "./tool-execution-preview.js";
+export { formatCollapsedToolPreview, summarizeToolArgs } from "./tool-execution-preview.js";
 
 export interface ToolExecutionOptions {
 	showImages?: boolean;
@@ -339,11 +341,6 @@ export class ToolExecutionComponent extends Container {
 		// Collapsed conversation mode: keep the tool row to a short preview so
 		// hosted web_search / large dumps never paint the full payload inline.
 		if (!this.expanded) {
-			// web_search already carries the query on the panel header — skip the
-			// body so collapsed mode stays a single status line (ipython-like).
-			if (isWebSearchToolName(this.toolName)) {
-				return undefined;
-			}
 			const preview = formatCollapsedToolPreview(output);
 			if (!preview) return undefined;
 			return new Text(theme.fg("toolOutput", preview), 0, 0);
@@ -734,9 +731,10 @@ export class ToolExecutionComponent extends Container {
 	}
 
 	private getTextOutput(): string {
-		return getRenderedTextOutput(this.result, this.showImages, {
+		const text = getRenderedTextOutput(this.result, this.showImages, {
 			includeImageDimensions: this.includeImageDimensions,
 		});
+		return this.expanded ? expandedToolOutput(text, this.result?.details) : text;
 	}
 
 	private formatFallbackPreview(text: string): string {
@@ -763,94 +761,10 @@ export class ToolExecutionComponent extends Container {
 		}
 		const output = this.getTextOutput();
 		if (output) {
-			if (!this.expanded && isWebSearchToolName(this.toolName)) {
-				// Collapsed web_search: header-only (query · done). Expand for hits.
-			} else {
-				parts.push(this.formatFallbackPreview(output));
-			}
+			parts.push(this.formatFallbackPreview(output));
 		}
 		return parts.join("\n\n");
 	}
-}
-
-const COLLAPSED_TOOL_PREVIEW_CHARS = 240;
-const COLLAPSED_TOOL_PREVIEW_LINES = 2;
-const EXPANDED_TOOL_PREVIEW_CHARS = 12_000;
-const EXPANDED_TOOL_PREVIEW_LINES = 120;
-
-function isWebSearchToolName(toolName: string): boolean {
-	const name = toolName.toLowerCase();
-	return name === "web_search" || name === "websearch" || name === "web-search";
-}
-
-/** One-line arg preview for common tools (especially web_search query). */
-export function summarizeToolArgs(toolName: string, args: unknown): string {
-	if (!args || typeof args !== "object") return "";
-	const record = args as Record<string, unknown>;
-	const name = toolName.toLowerCase();
-	const pick = (...keys: string[]): string => {
-		for (const key of keys) {
-			const value = record[key];
-			if (typeof value === "string" && value.trim()) {
-				return value.trim().replace(/\s+/g, " ");
-			}
-		}
-		return "";
-	};
-
-	if (name === "web_search" || name === "websearch" || name === "web-search") {
-		const query = pick("query", "q", "search", "text");
-		return query ? truncatePlain(query, 80) : "";
-	}
-	if (name === "web_fetch" || name === "webfetch" || name === "web-fetch" || name === "fetch_url") {
-		const url = pick("url", "uri", "href");
-		return url ? truncatePlain(url, 80) : "";
-	}
-	if (name === "bash" || name === "shell_command" || name === "exec_command") {
-		const command = pick("command", "cmd");
-		return command ? truncatePlain(command, 80) : "";
-	}
-	if (name === "ipython") {
-		const code = pick("code");
-		return code ? truncatePlain(code.split(/\r?\n/).find((line) => line.trim()) ?? code, 80) : "";
-	}
-	const generic = pick("query", "url", "path", "command", "message", "prompt");
-	return generic ? truncatePlain(generic, 80) : "";
-}
-
-export function formatCollapsedToolPreview(text: string): string {
-	const lines = text.replace(/\r\n/g, "\n").split("\n").filter((line) => line.trim().length > 0);
-	if (lines.length === 0) return "";
-	const head = lines.slice(0, COLLAPSED_TOOL_PREVIEW_LINES).join("\n");
-	const truncated = truncatePlain(head.replace(/\s+/g, " ").trim(), COLLAPSED_TOOL_PREVIEW_CHARS);
-	const hidden = Math.max(0, lines.length - COLLAPSED_TOOL_PREVIEW_LINES);
-	if (hidden > 0 || text.length > COLLAPSED_TOOL_PREVIEW_CHARS) {
-		const more =
-			hidden > 0
-				? `… ${hidden} more lines`
-				: `… ${Math.max(1, text.length - COLLAPSED_TOOL_PREVIEW_CHARS)} more chars`;
-		return `${truncated} ${more}`;
-	}
-	return truncated;
-}
-
-function truncateExpandedToolOutput(text: string): string {
-	const lines = text.replace(/\r\n/g, "\n").split("\n");
-	if (lines.length <= EXPANDED_TOOL_PREVIEW_LINES && text.length <= EXPANDED_TOOL_PREVIEW_CHARS) {
-		return text;
-	}
-	const head = lines.slice(0, EXPANDED_TOOL_PREVIEW_LINES).join("\n");
-	const clipped =
-		head.length > EXPANDED_TOOL_PREVIEW_CHARS
-			? `${head.slice(0, EXPANDED_TOOL_PREVIEW_CHARS).trimEnd()}…`
-			: head;
-	const hiddenLines = Math.max(0, lines.length - EXPANDED_TOOL_PREVIEW_LINES);
-	return `${clipped}\n… truncated (${hiddenLines > 0 ? `${hiddenLines} more lines` : "output capped"})`;
-}
-
-function truncatePlain(text: string, maxChars: number): string {
-	if (text.length <= maxChars) return text;
-	return `${text.slice(0, Math.max(0, maxChars - 1)).trimEnd()}…`;
 }
 
 export function selectLatestToolExpandHint(

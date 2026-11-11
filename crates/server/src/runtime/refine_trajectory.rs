@@ -192,6 +192,7 @@ mod tests {
             event_id: "event".into(),
             source: HostMessageSource::Agent,
             sender: "child".into(),
+            sender_name: None,
             delivery: HostMessageDelivery::FollowUp,
         };
         let evidence = selected_evidence(

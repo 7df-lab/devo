@@ -211,6 +211,7 @@ mod turn_input_tests {
                     event_id: "event".into(),
                     source,
                     sender: "worker".into(),
+                    sender_name: None,
                     delivery: HostMessageDelivery::FollowUp,
                 });
                 let item = Item::UserMessage {

@@ -7,6 +7,9 @@ import { formatCollapsedToolPreview, summarizeToolArgs, ToolExecutionComponent }
 test("summarizeToolArgs shows web_search query", () => {
 	assert.equal(summarizeToolArgs("web_search", { query: "Rust async docs" }), "Rust async docs");
 	assert.equal(summarizeToolArgs("websearch", { q: "short" }), "short");
+	assert.equal(summarizeToolArgs("web_search", { action: { type: "search", queries: ["Rust docs", "Async Rust"] } }), "Rust docs; Async Rust");
+	assert.equal(summarizeToolArgs("web_search", { type: "open_page", url: "https://example.test" }), "https://example.test");
+	assert.equal(summarizeToolArgs("web_fetch", { action: { url: "https://example.test" } }), "https://example.test");
 });
 
 test("formatCollapsedToolPreview never keeps huge dumps", () => {
@@ -17,6 +20,29 @@ test("formatCollapsedToolPreview never keeps huge dumps", () => {
 });
 
 const stripAnsi = (text: string): string => text.replace(/\u001b\[[0-?]*[ -/]*[@-~]/g, "");
+
+for (const toolName of ["web_search", "web_fetch"]) {
+	for (const withDefinition of [false, true]) {
+		test(`${toolName} displays bounded results and errors with definition=${withDefinition}`, () => {
+			initTheme();
+			const ui = { requestRender() {} } as unknown as TUI;
+			const cell = new ToolExecutionComponent(toolName, "call", {}, {}, withDefinition ? { name: toolName, label: "Web tool", description: "", parameters: {} } : undefined, ui, process.cwd());
+			cell.updateResult({ content: [{ type: "text", text: "Search unavailable: rate limit exceeded" }], isError: true });
+			const error = cell.render(80).map(stripAnsi).join("\n");
+			assert.match(error, /error/);
+			assert.match(error, /Search unavailable: rate limit exceeded/);
+			const fullText = Array.from({ length: 160 }, (_, index) => `Fetched line ${index}: ${"x".repeat(100)}`).join("\n");
+			cell.updateResult({ content: [{ type: "text", text: fullText }], isError: false });
+			const collapsed = cell.render(80).map(stripAnsi).join("\n");
+			assert.match(collapsed, /Fetched line 0/);
+			assert.ok(collapsed.length < 600);
+			cell.setExpanded(true);
+			assert.match(cell.render(80).map(stripAnsi).join("\n"), /truncated/);
+			cell.setExpanded(false);
+			assert.equal(cell.render(80).map(stripAnsi).join("\n"), collapsed);
+		});
+	}
+}
 
 test("update_plan renders a dedicated checklist cell", () => {
 	initTheme();

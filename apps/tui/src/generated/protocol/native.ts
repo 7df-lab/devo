@@ -52,7 +52,11 @@ export type HostMessageOrigin = { eventId: string, source: HostMessageSource,
  * Host-resolved sender session or background task identity, never a claim
  * extracted from the message body.
  */
-sender: string, delivery: HostMessageDelivery, };
+sender: string,
+/**
+ * Host-resolved display name, captured at delivery for stable replay.
+ */
+senderName?: string | null, delivery: HostMessageDelivery, };
 
 export type HostMessageSource = "agent" | "backgroundTask" | "schedule";
 
@@ -146,7 +150,11 @@ commandPattern?: Array<string> | null,
 /**
  * Suggested command prefix for persistent exec-policy approval.
  */
-commandPrefix?: Array<string> | null, target?: ApprovalTarget | null, decision?: ApprovalDecision | null, } | { "type": "userInputRequest", requestId: string, targetItemId?: ItemId | null, questions: Array<UserQuestion>, answers?: JsonValue | null, } | { "type": "subAgent", originCallId?: string | null, agentSessionId: SessionId, parentSessionId: SessionId, role?: string | null, task: string, state: SpawnedWorkState, } | { "type": "backgroundTask", originCallId?: string | null, taskKind: BackgroundTaskKind, state: SpawnedWorkState, executionHandle?: string | null, cwd?: string | null, exitCode?: number | null,
+commandPrefix?: Array<string> | null, target?: ApprovalTarget | null, decision?: ApprovalDecision | null, } | { "type": "userInputRequest", requestId: string, targetItemId?: ItemId | null, questions: Array<UserQuestion>, answers?: JsonValue | null, } | { "type": "subAgent", originCallId?: string | null, agentSessionId: SessionId,
+/**
+ * Host-assigned child name; older journals may omit it.
+ */
+agentNickname?: string | null, parentSessionId: SessionId, role?: string | null, task: string, state: SpawnedWorkState, } | { "type": "backgroundTask", originCallId?: string | null, taskKind: BackgroundTaskKind, state: SpawnedWorkState, executionHandle?: string | null, cwd?: string | null, exitCode?: number | null,
 /**
  * User `!` shell command text when `task_kind` is `Shell`.
  */

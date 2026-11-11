@@ -39,6 +39,7 @@ pub(in crate::runtime) fn subagent_item_from_agent_info(
         item: Item::SubAgent {
             origin_call_id: None,
             agent_session_id: info.session_id,
+            agent_nickname: Some(info.agent_nickname.clone()),
             parent_session_id: info.parent_session_id.unwrap_or(info.session_id),
             role: (!info.agent_role.is_empty()).then(|| info.agent_role.clone()),
             task: info

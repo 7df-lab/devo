@@ -5712,6 +5712,13 @@
               "description": "Host-resolved sender session or background task identity, never a claim extracted from the message body.",
               "type": "string"
             },
+            "senderName": {
+              "description": "Host-resolved display name, captured at delivery for stable replay.",
+              "type": [
+                "string",
+                "null"
+              ]
+            },
             "source": {
               "$ref": "#/definitions/HostMessageSource"
             }
@@ -6197,6 +6204,13 @@
               "properties": {
                 "agentSessionId": {
                   "$ref": "#/definitions/SessionId"
+                },
+                "agent_nickname": {
+                  "description": "Host-assigned child name; older journals may omit it.",
+                  "type": [
+                    "string",
+                    "null"
+                  ]
                 },
                 "originCallId": {
                   "type": [
@@ -8705,6 +8719,13 @@
               "description": "Host-resolved sender session or background task identity, never a claim extracted from the message body.",
               "type": "string"
             },
+            "senderName": {
+              "description": "Host-resolved display name, captured at delivery for stable replay.",
+              "type": [
+                "string",
+                "null"
+              ]
+            },
             "source": {
               "$ref": "#/definitions/HostMessageSource"
             }
@@ -9190,6 +9211,13 @@
               "properties": {
                 "agentSessionId": {
                   "$ref": "#/definitions/SessionId"
+                },
+                "agent_nickname": {
+                  "description": "Host-assigned child name; older journals may omit it.",
+                  "type": [
+                    "string",
+                    "null"
+                  ]
                 },
                 "originCallId": {
                   "type": [
@@ -10600,6 +10628,13 @@
               "description": "Host-resolved sender session or background task identity, never a claim extracted from the message body.",
               "type": "string"
             },
+            "senderName": {
+              "description": "Host-resolved display name, captured at delivery for stable replay.",
+              "type": [
+                "string",
+                "null"
+              ]
+            },
             "source": {
               "$ref": "#/definitions/HostMessageSource"
             }
@@ -11085,6 +11120,13 @@
               "properties": {
                 "agentSessionId": {
                   "$ref": "#/definitions/SessionId"
+                },
+                "agent_nickname": {
+                  "description": "Host-assigned child name; older journals may omit it.",
+                  "type": [
+                    "string",
+                    "null"
+                  ]
                 },
                 "originCallId": {
                   "type": [
@@ -13540,6 +13582,13 @@
               "description": "Host-resolved sender session or background task identity, never a claim extracted from the message body.",
               "type": "string"
             },
+            "senderName": {
+              "description": "Host-resolved display name, captured at delivery for stable replay.",
+              "type": [
+                "string",
+                "null"
+              ]
+            },
             "source": {
               "$ref": "#/definitions/HostMessageSource"
             }
@@ -14025,6 +14074,13 @@
               "properties": {
                 "agentSessionId": {
                   "$ref": "#/definitions/SessionId"
+                },
+                "agent_nickname": {
+                  "description": "Host-assigned child name; older journals may omit it.",
+                  "type": [
+                    "string",
+                    "null"
+                  ]
                 },
                 "originCallId": {
                   "type": [
@@ -15251,6 +15307,13 @@
               "description": "Host-resolved sender session or background task identity, never a claim extracted from the message body.",
               "type": "string"
             },
+            "senderName": {
+              "description": "Host-resolved display name, captured at delivery for stable replay.",
+              "type": [
+                "string",
+                "null"
+              ]
+            },
             "source": {
               "$ref": "#/definitions/HostMessageSource"
             }
@@ -15736,6 +15799,13 @@
               "properties": {
                 "agentSessionId": {
                   "$ref": "#/definitions/SessionId"
+                },
+                "agent_nickname": {
+                  "description": "Host-assigned child name; older journals may omit it.",
+                  "type": [
+                    "string",
+                    "null"
+                  ]
                 },
                 "originCallId": {
                   "type": [
@@ -19017,6 +19087,13 @@
               "description": "Host-resolved sender session or background task identity, never a claim extracted from the message body.",
               "type": "string"
             },
+            "senderName": {
+              "description": "Host-resolved display name, captured at delivery for stable replay.",
+              "type": [
+                "string",
+                "null"
+              ]
+            },
             "source": {
               "$ref": "#/definitions/HostMessageSource"
             }
@@ -19502,6 +19579,13 @@
               "properties": {
                 "agentSessionId": {
                   "$ref": "#/definitions/SessionId"
+                },
+                "agent_nickname": {
+                  "description": "Host-assigned child name; older journals may omit it.",
+                  "type": [
+                    "string",
+                    "null"
+                  ]
                 },
                 "originCallId": {
                   "type": [
@@ -22215,6 +22299,13 @@
               "description": "Host-resolved sender session or background task identity, never a claim extracted from the message body.",
               "type": "string"
             },
+            "senderName": {
+              "description": "Host-resolved display name, captured at delivery for stable replay.",
+              "type": [
+                "string",
+                "null"
+              ]
+            },
             "source": {
               "$ref": "#/definitions/HostMessageSource"
             }
@@ -22700,6 +22791,13 @@
               "properties": {
                 "agentSessionId": {
                   "$ref": "#/definitions/SessionId"
+                },
+                "agent_nickname": {
+                  "description": "Host-assigned child name; older journals may omit it.",
+                  "type": [
+                    "string",
+                    "null"
+                  ]
                 },
                 "originCallId": {
                   "type": [
@@ -25676,6 +25774,13 @@
               "description": "Host-resolved sender session or background task identity, never a claim extracted from the message body.",
               "type": "string"
             },
+            "senderName": {
+              "description": "Host-resolved display name, captured at delivery for stable replay.",
+              "type": [
+                "string",
+                "null"
+              ]
+            },
             "source": {
               "$ref": "#/definitions/HostMessageSource"
             }
@@ -26161,6 +26266,13 @@
               "properties": {
                 "agentSessionId": {
                   "$ref": "#/definitions/SessionId"
+                },
+                "agent_nickname": {
+                  "description": "Host-assigned child name; older journals may omit it.",
+                  "type": [
+                    "string",
+                    "null"
+                  ]
                 },
                 "originCallId": {
                   "type": [
@@ -28860,6 +28972,13 @@
               "description": "Host-resolved sender session or background task identity, never a claim extracted from the message body.",
               "type": "string"
             },
+            "senderName": {
+              "description": "Host-resolved display name, captured at delivery for stable replay.",
+              "type": [
+                "string",
+                "null"
+              ]
+            },
             "source": {
               "$ref": "#/definitions/HostMessageSource"
             }
@@ -29345,6 +29464,13 @@
               "properties": {
                 "agentSessionId": {
                   "$ref": "#/definitions/SessionId"
+                },
+                "agent_nickname": {
+                  "description": "Host-assigned child name; older journals may omit it.",
+                  "type": [
+                    "string",
+                    "null"
+                  ]
                 },
                 "originCallId": {
                   "type": [
@@ -32048,6 +32174,13 @@
               "description": "Host-resolved sender session or background task identity, never a claim extracted from the message body.",
               "type": "string"
             },
+            "senderName": {
+              "description": "Host-resolved display name, captured at delivery for stable replay.",
+              "type": [
+                "string",
+                "null"
+              ]
+            },
             "source": {
               "$ref": "#/definitions/HostMessageSource"
             }
@@ -32533,6 +32666,13 @@
               "properties": {
                 "agentSessionId": {
                   "$ref": "#/definitions/SessionId"
+                },
+                "agent_nickname": {
+                  "description": "Host-assigned child name; older journals may omit it.",
+                  "type": [
+                    "string",
+                    "null"
+                  ]
                 },
                 "originCallId": {
                   "type": [
@@ -35330,6 +35470,13 @@
               "description": "Host-resolved sender session or background task identity, never a claim extracted from the message body.",
               "type": "string"
             },
+            "senderName": {
+              "description": "Host-resolved display name, captured at delivery for stable replay.",
+              "type": [
+                "string",
+                "null"
+              ]
+            },
             "source": {
               "$ref": "#/definitions/HostMessageSource"
             }
@@ -35815,6 +35962,13 @@
               "properties": {
                 "agentSessionId": {
                   "$ref": "#/definitions/SessionId"
+                },
+                "agent_nickname": {
+                  "description": "Host-assigned child name; older journals may omit it.",
+                  "type": [
+                    "string",
+                    "null"
+                  ]
                 },
                 "originCallId": {
                   "type": [
@@ -38518,6 +38672,13 @@
               "description": "Host-resolved sender session or background task identity, never a claim extracted from the message body.",
               "type": "string"
             },
+            "senderName": {
+              "description": "Host-resolved display name, captured at delivery for stable replay.",
+              "type": [
+                "string",
+                "null"
+              ]
+            },
             "source": {
               "$ref": "#/definitions/HostMessageSource"
             }
@@ -39003,6 +39164,13 @@
               "properties": {
                 "agentSessionId": {
                   "$ref": "#/definitions/SessionId"
+                },
+                "agent_nickname": {
+                  "description": "Host-assigned child name; older journals may omit it.",
+                  "type": [
+                    "string",
+                    "null"
+                  ]
                 },
                 "originCallId": {
                   "type": [
@@ -41913,6 +42081,13 @@
               "description": "Host-resolved sender session or background task identity, never a claim extracted from the message body.",
               "type": "string"
             },
+            "senderName": {
+              "description": "Host-resolved display name, captured at delivery for stable replay.",
+              "type": [
+                "string",
+                "null"
+              ]
+            },
             "source": {
               "$ref": "#/definitions/HostMessageSource"
             }
@@ -42398,6 +42573,13 @@
               "properties": {
                 "agentSessionId": {
                   "$ref": "#/definitions/SessionId"
+                },
+                "agent_nickname": {
+                  "description": "Host-assigned child name; older journals may omit it.",
+                  "type": [
+                    "string",
+                    "null"
+                  ]
                 },
                 "originCallId": {
                   "type": [
@@ -44962,6 +45144,13 @@
             "agentSessionId": {
               "$ref": "#/definitions/SessionId"
             },
+            "agent_nickname": {
+              "description": "Host-assigned child name; older journals may omit it.",
+              "type": [
+                "string",
+                "null"
+              ]
+            },
             "originCallId": {
               "type": [
                 "string",
@@ -45532,6 +45721,13 @@
             "sender": {
               "description": "Host-resolved sender session or background task identity, never a claim extracted from the message body.",
               "type": "string"
+            },
+            "senderName": {
+              "description": "Host-resolved display name, captured at delivery for stable replay.",
+              "type": [
+                "string",
+                "null"
+              ]
             },
             "source": {
               "$ref": "#/definitions/HostMessageSource"
@@ -46439,6 +46635,13 @@
               "description": "Host-resolved sender session or background task identity, never a claim extracted from the message body.",
               "type": "string"
             },
+            "senderName": {
+              "description": "Host-resolved display name, captured at delivery for stable replay.",
+              "type": [
+                "string",
+                "null"
+              ]
+            },
             "source": {
               "$ref": "#/definitions/HostMessageSource"
             }
@@ -46924,6 +47127,13 @@
               "properties": {
                 "agentSessionId": {
                   "$ref": "#/definitions/SessionId"
+                },
+                "agent_nickname": {
+                  "description": "Host-assigned child name; older journals may omit it.",
+                  "type": [
+                    "string",
+                    "null"
+                  ]
                 },
                 "originCallId": {
                   "type": [
@@ -49611,6 +49821,13 @@
               "description": "Host-resolved sender session or background task identity, never a claim extracted from the message body.",
               "type": "string"
             },
+            "senderName": {
+              "description": "Host-resolved display name, captured at delivery for stable replay.",
+              "type": [
+                "string",
+                "null"
+              ]
+            },
             "source": {
               "$ref": "#/definitions/HostMessageSource"
             }
@@ -50096,6 +50313,13 @@
               "properties": {
                 "agentSessionId": {
                   "$ref": "#/definitions/SessionId"
+                },
+                "agent_nickname": {
+                  "description": "Host-assigned child name; older journals may omit it.",
+                  "type": [
+                    "string",
+                    "null"
+                  ]
                 },
                 "originCallId": {
                   "type": [
@@ -52791,6 +53015,13 @@
               "description": "Host-resolved sender session or background task identity, never a claim extracted from the message body.",
               "type": "string"
             },
+            "senderName": {
+              "description": "Host-resolved display name, captured at delivery for stable replay.",
+              "type": [
+                "string",
+                "null"
+              ]
+            },
             "source": {
               "$ref": "#/definitions/HostMessageSource"
             }
@@ -53276,6 +53507,13 @@
               "properties": {
                 "agentSessionId": {
                   "$ref": "#/definitions/SessionId"
+                },
+                "agent_nickname": {
+                  "description": "Host-assigned child name; older journals may omit it.",
+                  "type": [
+                    "string",
+                    "null"
+                  ]
                 },
                 "originCallId": {
                   "type": [
@@ -55963,6 +56201,13 @@
               "description": "Host-resolved sender session or background task identity, never a claim extracted from the message body.",
               "type": "string"
             },
+            "senderName": {
+              "description": "Host-resolved display name, captured at delivery for stable replay.",
+              "type": [
+                "string",
+                "null"
+              ]
+            },
             "source": {
               "$ref": "#/definitions/HostMessageSource"
             }
@@ -56448,6 +56693,13 @@
               "properties": {
                 "agentSessionId": {
                   "$ref": "#/definitions/SessionId"
+                },
+                "agent_nickname": {
+                  "description": "Host-assigned child name; older journals may omit it.",
+                  "type": [
+                    "string",
+                    "null"
+                  ]
                 },
                 "originCallId": {
                   "type": [
@@ -59135,6 +59387,13 @@
               "description": "Host-resolved sender session or background task identity, never a claim extracted from the message body.",
               "type": "string"
             },
+            "senderName": {
+              "description": "Host-resolved display name, captured at delivery for stable replay.",
+              "type": [
+                "string",
+                "null"
+              ]
+            },
             "source": {
               "$ref": "#/definitions/HostMessageSource"
             }
@@ -59620,6 +59879,13 @@
               "properties": {
                 "agentSessionId": {
                   "$ref": "#/definitions/SessionId"
+                },
+                "agent_nickname": {
+                  "description": "Host-assigned child name; older journals may omit it.",
+                  "type": [
+                    "string",
+                    "null"
+                  ]
                 },
                 "originCallId": {
                   "type": [
@@ -62315,6 +62581,13 @@
               "description": "Host-resolved sender session or background task identity, never a claim extracted from the message body.",
               "type": "string"
             },
+            "senderName": {
+              "description": "Host-resolved display name, captured at delivery for stable replay.",
+              "type": [
+                "string",
+                "null"
+              ]
+            },
             "source": {
               "$ref": "#/definitions/HostMessageSource"
             }
@@ -62800,6 +63073,13 @@
               "properties": {
                 "agentSessionId": {
                   "$ref": "#/definitions/SessionId"
+                },
+                "agent_nickname": {
+                  "description": "Host-assigned child name; older journals may omit it.",
+                  "type": [
+                    "string",
+                    "null"
+                  ]
                 },
                 "originCallId": {
                   "type": [
@@ -65487,6 +65767,13 @@
               "description": "Host-resolved sender session or background task identity, never a claim extracted from the message body.",
               "type": "string"
             },
+            "senderName": {
+              "description": "Host-resolved display name, captured at delivery for stable replay.",
+              "type": [
+                "string",
+                "null"
+              ]
+            },
             "source": {
               "$ref": "#/definitions/HostMessageSource"
             }
@@ -65972,6 +66259,13 @@
               "properties": {
                 "agentSessionId": {
                   "$ref": "#/definitions/SessionId"
+                },
+                "agent_nickname": {
+                  "description": "Host-assigned child name; older journals may omit it.",
+                  "type": [
+                    "string",
+                    "null"
+                  ]
                 },
                 "originCallId": {
                   "type": [
@@ -68674,6 +68968,13 @@
               "description": "Host-resolved sender session or background task identity, never a claim extracted from the message body.",
               "type": "string"
             },
+            "senderName": {
+              "description": "Host-resolved display name, captured at delivery for stable replay.",
+              "type": [
+                "string",
+                "null"
+              ]
+            },
             "source": {
               "$ref": "#/definitions/HostMessageSource"
             }
@@ -69159,6 +69460,13 @@
               "properties": {
                 "agentSessionId": {
                   "$ref": "#/definitions/SessionId"
+                },
+                "agent_nickname": {
+                  "description": "Host-assigned child name; older journals may omit it.",
+                  "type": [
+                    "string",
+                    "null"
+                  ]
                 },
                 "originCallId": {
                   "type": [
@@ -71854,6 +72162,13 @@
               "description": "Host-resolved sender session or background task identity, never a claim extracted from the message body.",
               "type": "string"
             },
+            "senderName": {
+              "description": "Host-resolved display name, captured at delivery for stable replay.",
+              "type": [
+                "string",
+                "null"
+              ]
+            },
             "source": {
               "$ref": "#/definitions/HostMessageSource"
             }
@@ -72339,6 +72654,13 @@
               "properties": {
                 "agentSessionId": {
                   "$ref": "#/definitions/SessionId"
+                },
+                "agent_nickname": {
+                  "description": "Host-assigned child name; older journals may omit it.",
+                  "type": [
+                    "string",
+                    "null"
+                  ]
                 },
                 "originCallId": {
                   "type": [
@@ -75466,6 +75788,13 @@
               "description": "Host-resolved sender session or background task identity, never a claim extracted from the message body.",
               "type": "string"
             },
+            "senderName": {
+              "description": "Host-resolved display name, captured at delivery for stable replay.",
+              "type": [
+                "string",
+                "null"
+              ]
+            },
             "source": {
               "$ref": "#/definitions/HostMessageSource"
             }
@@ -75951,6 +76280,13 @@
               "properties": {
                 "agentSessionId": {
                   "$ref": "#/definitions/SessionId"
+                },
+                "agent_nickname": {
+                  "description": "Host-assigned child name; older journals may omit it.",
+                  "type": [
+                    "string",
+                    "null"
+                  ]
                 },
                 "originCallId": {
                   "type": [
@@ -79519,6 +79855,13 @@
               "description": "Host-resolved sender session or background task identity, never a claim extracted from the message body.",
               "type": "string"
             },
+            "senderName": {
+              "description": "Host-resolved display name, captured at delivery for stable replay.",
+              "type": [
+                "string",
+                "null"
+              ]
+            },
             "source": {
               "$ref": "#/definitions/HostMessageSource"
             }
@@ -80004,6 +80347,13 @@
               "properties": {
                 "agentSessionId": {
                   "$ref": "#/definitions/SessionId"
+                },
+                "agent_nickname": {
+                  "description": "Host-assigned child name; older journals may omit it.",
+                  "type": [
+                    "string",
+                    "null"
+                  ]
                 },
                 "originCallId": {
                   "type": [
@@ -82748,6 +83098,13 @@
               "description": "Host-resolved sender session or background task identity, never a claim extracted from the message body.",
               "type": "string"
             },
+            "senderName": {
+              "description": "Host-resolved display name, captured at delivery for stable replay.",
+              "type": [
+                "string",
+                "null"
+              ]
+            },
             "source": {
               "$ref": "#/definitions/HostMessageSource"
             }
@@ -83233,6 +83590,13 @@
               "properties": {
                 "agentSessionId": {
                   "$ref": "#/definitions/SessionId"
+                },
+                "agent_nickname": {
+                  "description": "Host-assigned child name; older journals may omit it.",
+                  "type": [
+                    "string",
+                    "null"
+                  ]
                 },
                 "originCallId": {
                   "type": [
@@ -85673,6 +86037,13 @@
               "description": "Host-resolved sender session or background task identity, never a claim extracted from the message body.",
               "type": "string"
             },
+            "senderName": {
+              "description": "Host-resolved display name, captured at delivery for stable replay.",
+              "type": [
+                "string",
+                "null"
+              ]
+            },
             "source": {
               "$ref": "#/definitions/HostMessageSource"
             }
@@ -86158,6 +86529,13 @@
               "properties": {
                 "agentSessionId": {
                   "$ref": "#/definitions/SessionId"
+                },
+                "agent_nickname": {
+                  "description": "Host-assigned child name; older journals may omit it.",
+                  "type": [
+                    "string",
+                    "null"
+                  ]
                 },
                 "originCallId": {
                   "type": [
@@ -88586,6 +88964,13 @@
               "description": "Host-resolved sender session or background task identity, never a claim extracted from the message body.",
               "type": "string"
             },
+            "senderName": {
+              "description": "Host-resolved display name, captured at delivery for stable replay.",
+              "type": [
+                "string",
+                "null"
+              ]
+            },
             "source": {
               "$ref": "#/definitions/HostMessageSource"
             }
@@ -89071,6 +89456,13 @@
               "properties": {
                 "agentSessionId": {
                   "$ref": "#/definitions/SessionId"
+                },
+                "agent_nickname": {
+                  "description": "Host-assigned child name; older journals may omit it.",
+                  "type": [
+                    "string",
+                    "null"
+                  ]
                 },
                 "originCallId": {
                   "type": [
@@ -91772,6 +92164,13 @@
               "description": "Host-resolved sender session or background task identity, never a claim extracted from the message body.",
               "type": "string"
             },
+            "senderName": {
+              "description": "Host-resolved display name, captured at delivery for stable replay.",
+              "type": [
+                "string",
+                "null"
+              ]
+            },
             "source": {
               "$ref": "#/definitions/HostMessageSource"
             }
@@ -92257,6 +92656,13 @@
               "properties": {
                 "agentSessionId": {
                   "$ref": "#/definitions/SessionId"
+                },
+                "agent_nickname": {
+                  "description": "Host-assigned child name; older journals may omit it.",
+                  "type": [
+                    "string",
+                    "null"
+                  ]
                 },
                 "originCallId": {
                   "type": [
@@ -97830,6 +98236,13 @@
               "description": "Host-resolved sender session or background task identity, never a claim extracted from the message body.",
               "type": "string"
             },
+            "senderName": {
+              "description": "Host-resolved display name, captured at delivery for stable replay.",
+              "type": [
+                "string",
+                "null"
+              ]
+            },
             "source": {
               "$ref": "#/definitions/HostMessageSource"
             }
@@ -98315,6 +98728,13 @@
               "properties": {
                 "agentSessionId": {
                   "$ref": "#/definitions/SessionId"
+                },
+                "agent_nickname": {
+                  "description": "Host-assigned child name; older journals may omit it.",
+                  "type": [
+                    "string",
+                    "null"
+                  ]
                 },
                 "originCallId": {
                   "type": [
@@ -101067,6 +101487,13 @@
               "description": "Host-resolved sender session or background task identity, never a claim extracted from the message body.",
               "type": "string"
             },
+            "senderName": {
+              "description": "Host-resolved display name, captured at delivery for stable replay.",
+              "type": [
+                "string",
+                "null"
+              ]
+            },
             "source": {
               "$ref": "#/definitions/HostMessageSource"
             }
@@ -101552,6 +101979,13 @@
               "properties": {
                 "agentSessionId": {
                   "$ref": "#/definitions/SessionId"
+                },
+                "agent_nickname": {
+                  "description": "Host-assigned child name; older journals may omit it.",
+                  "type": [
+                    "string",
+                    "null"
+                  ]
                 },
                 "originCallId": {
                   "type": [
@@ -104255,6 +104689,13 @@
               "description": "Host-resolved sender session or background task identity, never a claim extracted from the message body.",
               "type": "string"
             },
+            "senderName": {
+              "description": "Host-resolved display name, captured at delivery for stable replay.",
+              "type": [
+                "string",
+                "null"
+              ]
+            },
             "source": {
               "$ref": "#/definitions/HostMessageSource"
             }
@@ -104740,6 +105181,13 @@
               "properties": {
                 "agentSessionId": {
                   "$ref": "#/definitions/SessionId"
+                },
+                "agent_nickname": {
+                  "description": "Host-assigned child name; older journals may omit it.",
+                  "type": [
+                    "string",
+                    "null"
+                  ]
                 },
                 "originCallId": {
                   "type": [
@@ -107446,6 +107894,13 @@
               "description": "Host-resolved sender session or background task identity, never a claim extracted from the message body.",
               "type": "string"
             },
+            "senderName": {
+              "description": "Host-resolved display name, captured at delivery for stable replay.",
+              "type": [
+                "string",
+                "null"
+              ]
+            },
             "source": {
               "$ref": "#/definitions/HostMessageSource"
             }
@@ -107931,6 +108386,13 @@
               "properties": {
                 "agentSessionId": {
                   "$ref": "#/definitions/SessionId"
+                },
+                "agent_nickname": {
+                  "description": "Host-assigned child name; older journals may omit it.",
+                  "type": [
+                    "string",
+                    "null"
+                  ]
                 },
                 "originCallId": {
                   "type": [
@@ -110618,6 +111080,13 @@
               "description": "Host-resolved sender session or background task identity, never a claim extracted from the message body.",
               "type": "string"
             },
+            "senderName": {
+              "description": "Host-resolved display name, captured at delivery for stable replay.",
+              "type": [
+                "string",
+                "null"
+              ]
+            },
             "source": {
               "$ref": "#/definitions/HostMessageSource"
             }
@@ -111103,6 +111572,13 @@
               "properties": {
                 "agentSessionId": {
                   "$ref": "#/definitions/SessionId"
+                },
+                "agent_nickname": {
+                  "description": "Host-assigned child name; older journals may omit it.",
+                  "type": [
+                    "string",
+                    "null"
+                  ]
                 },
                 "originCallId": {
                   "type": [
@@ -114278,6 +114754,13 @@
               "description": "Host-resolved sender session or background task identity, never a claim extracted from the message body.",
               "type": "string"
             },
+            "senderName": {
+              "description": "Host-resolved display name, captured at delivery for stable replay.",
+              "type": [
+                "string",
+                "null"
+              ]
+            },
             "source": {
               "$ref": "#/definitions/HostMessageSource"
             }
@@ -114763,6 +115246,13 @@
               "properties": {
                 "agentSessionId": {
                   "$ref": "#/definitions/SessionId"
+                },
+                "agent_nickname": {
+                  "description": "Host-assigned child name; older journals may omit it.",
+                  "type": [
+                    "string",
+                    "null"
+                  ]
                 },
                 "originCallId": {
                   "type": [
@@ -117462,6 +117952,13 @@
               "description": "Host-resolved sender session or background task identity, never a claim extracted from the message body.",
               "type": "string"
             },
+            "senderName": {
+              "description": "Host-resolved display name, captured at delivery for stable replay.",
+              "type": [
+                "string",
+                "null"
+              ]
+            },
             "source": {
               "$ref": "#/definitions/HostMessageSource"
             }
@@ -117947,6 +118444,13 @@
               "properties": {
                 "agentSessionId": {
                   "$ref": "#/definitions/SessionId"
+                },
+                "agent_nickname": {
+                  "description": "Host-assigned child name; older journals may omit it.",
+                  "type": [
+                    "string",
+                    "null"
+                  ]
                 },
                 "originCallId": {
                   "type": [
@@ -120656,6 +121160,13 @@
               "description": "Host-resolved sender session or background task identity, never a claim extracted from the message body.",
               "type": "string"
             },
+            "senderName": {
+              "description": "Host-resolved display name, captured at delivery for stable replay.",
+              "type": [
+                "string",
+                "null"
+              ]
+            },
             "source": {
               "$ref": "#/definitions/HostMessageSource"
             }
@@ -121141,6 +121652,13 @@
               "properties": {
                 "agentSessionId": {
                   "$ref": "#/definitions/SessionId"
+                },
+                "agent_nickname": {
+                  "description": "Host-assigned child name; older journals may omit it.",
+                  "type": [
+                    "string",
+                    "null"
+                  ]
                 },
                 "originCallId": {
                   "type": [
@@ -124647,6 +125165,13 @@
               "description": "Host-resolved sender session or background task identity, never a claim extracted from the message body.",
               "type": "string"
             },
+            "senderName": {
+              "description": "Host-resolved display name, captured at delivery for stable replay.",
+              "type": [
+                "string",
+                "null"
+              ]
+            },
             "source": {
               "$ref": "#/definitions/HostMessageSource"
             }
@@ -125132,6 +125657,13 @@
               "properties": {
                 "agentSessionId": {
                   "$ref": "#/definitions/SessionId"
+                },
+                "agent_nickname": {
+                  "description": "Host-assigned child name; older journals may omit it.",
+                  "type": [
+                    "string",
+                    "null"
+                  ]
                 },
                 "originCallId": {
                   "type": [
@@ -127827,6 +128359,13 @@
               "description": "Host-resolved sender session or background task identity, never a claim extracted from the message body.",
               "type": "string"
             },
+            "senderName": {
+              "description": "Host-resolved display name, captured at delivery for stable replay.",
+              "type": [
+                "string",
+                "null"
+              ]
+            },
             "source": {
               "$ref": "#/definitions/HostMessageSource"
             }
@@ -128312,6 +128851,13 @@
               "properties": {
                 "agentSessionId": {
                   "$ref": "#/definitions/SessionId"
+                },
+                "agent_nickname": {
+                  "description": "Host-assigned child name; older journals may omit it.",
+                  "type": [
+                    "string",
+                    "null"
+                  ]
                 },
                 "originCallId": {
                   "type": [
@@ -131025,6 +131571,13 @@
               "description": "Host-resolved sender session or background task identity, never a claim extracted from the message body.",
               "type": "string"
             },
+            "senderName": {
+              "description": "Host-resolved display name, captured at delivery for stable replay.",
+              "type": [
+                "string",
+                "null"
+              ]
+            },
             "source": {
               "$ref": "#/definitions/HostMessageSource"
             }
@@ -131510,6 +132063,13 @@
               "properties": {
                 "agentSessionId": {
                   "$ref": "#/definitions/SessionId"
+                },
+                "agent_nickname": {
+                  "description": "Host-assigned child name; older journals may omit it.",
+                  "type": [
+                    "string",
+                    "null"
+                  ]
                 },
                 "originCallId": {
                   "type": [
@@ -135017,6 +135577,13 @@
               "description": "Host-resolved sender session or background task identity, never a claim extracted from the message body.",
               "type": "string"
             },
+            "senderName": {
+              "description": "Host-resolved display name, captured at delivery for stable replay.",
+              "type": [
+                "string",
+                "null"
+              ]
+            },
             "source": {
               "$ref": "#/definitions/HostMessageSource"
             }
@@ -135502,6 +136069,13 @@
               "properties": {
                 "agentSessionId": {
                   "$ref": "#/definitions/SessionId"
+                },
+                "agent_nickname": {
+                  "description": "Host-assigned child name; older journals may omit it.",
+                  "type": [
+                    "string",
+                    "null"
+                  ]
                 },
                 "originCallId": {
                   "type": [
@@ -138226,6 +138800,13 @@
               "description": "Host-resolved sender session or background task identity, never a claim extracted from the message body.",
               "type": "string"
             },
+            "senderName": {
+              "description": "Host-resolved display name, captured at delivery for stable replay.",
+              "type": [
+                "string",
+                "null"
+              ]
+            },
             "source": {
               "$ref": "#/definitions/HostMessageSource"
             }
@@ -138711,6 +139292,13 @@
               "properties": {
                 "agentSessionId": {
                   "$ref": "#/definitions/SessionId"
+                },
+                "agent_nickname": {
+                  "description": "Host-assigned child name; older journals may omit it.",
+                  "type": [
+                    "string",
+                    "null"
+                  ]
                 },
                 "originCallId": {
                   "type": [
@@ -142331,6 +142919,13 @@
               "description": "Host-resolved sender session or background task identity, never a claim extracted from the message body.",
               "type": "string"
             },
+            "senderName": {
+              "description": "Host-resolved display name, captured at delivery for stable replay.",
+              "type": [
+                "string",
+                "null"
+              ]
+            },
             "source": {
               "$ref": "#/definitions/HostMessageSource"
             }
@@ -142816,6 +143411,13 @@
               "properties": {
                 "agentSessionId": {
                   "$ref": "#/definitions/SessionId"
+                },
+                "agent_nickname": {
+                  "description": "Host-assigned child name; older journals may omit it.",
+                  "type": [
+                    "string",
+                    "null"
+                  ]
                 },
                 "originCallId": {
                   "type": [
@@ -145511,6 +146113,13 @@
               "description": "Host-resolved sender session or background task identity, never a claim extracted from the message body.",
               "type": "string"
             },
+            "senderName": {
+              "description": "Host-resolved display name, captured at delivery for stable replay.",
+              "type": [
+                "string",
+                "null"
+              ]
+            },
             "source": {
               "$ref": "#/definitions/HostMessageSource"
             }
@@ -145996,6 +146605,13 @@
               "properties": {
                 "agentSessionId": {
                   "$ref": "#/definitions/SessionId"
+                },
+                "agent_nickname": {
+                  "description": "Host-assigned child name; older journals may omit it.",
+                  "type": [
+                    "string",
+                    "null"
+                  ]
                 },
                 "originCallId": {
                   "type": [
@@ -148956,6 +149572,13 @@
               "description": "Host-resolved sender session or background task identity, never a claim extracted from the message body.",
               "type": "string"
             },
+            "senderName": {
+              "description": "Host-resolved display name, captured at delivery for stable replay.",
+              "type": [
+                "string",
+                "null"
+              ]
+            },
             "source": {
               "$ref": "#/definitions/HostMessageSource"
             }
@@ -149441,6 +150064,13 @@
               "properties": {
                 "agentSessionId": {
                   "$ref": "#/definitions/SessionId"
+                },
+                "agent_nickname": {
+                  "description": "Host-assigned child name; older journals may omit it.",
+                  "type": [
+                    "string",
+                    "null"
+                  ]
                 },
                 "originCallId": {
                   "type": [
@@ -152447,6 +153077,13 @@
               "description": "Host-resolved sender session or background task identity, never a claim extracted from the message body.",
               "type": "string"
             },
+            "senderName": {
+              "description": "Host-resolved display name, captured at delivery for stable replay.",
+              "type": [
+                "string",
+                "null"
+              ]
+            },
             "source": {
               "$ref": "#/definitions/HostMessageSource"
             }
@@ -152932,6 +153569,13 @@
               "properties": {
                 "agentSessionId": {
                   "$ref": "#/definitions/SessionId"
+                },
+                "agent_nickname": {
+                  "description": "Host-assigned child name; older journals may omit it.",
+                  "type": [
+                    "string",
+                    "null"
+                  ]
                 },
                 "originCallId": {
                   "type": [
@@ -156130,6 +156774,13 @@
               "description": "Host-resolved sender session or background task identity, never a claim extracted from the message body.",
               "type": "string"
             },
+            "senderName": {
+              "description": "Host-resolved display name, captured at delivery for stable replay.",
+              "type": [
+                "string",
+                "null"
+              ]
+            },
             "source": {
               "$ref": "#/definitions/HostMessageSource"
             }
@@ -156615,6 +157266,13 @@
               "properties": {
                 "agentSessionId": {
                   "$ref": "#/definitions/SessionId"
+                },
+                "agent_nickname": {
+                  "description": "Host-assigned child name; older journals may omit it.",
+                  "type": [
+                    "string",
+                    "null"
+                  ]
                 },
                 "originCallId": {
                   "type": [
@@ -158826,6 +159484,13 @@
               "description": "Host-resolved sender session or background task identity, never a claim extracted from the message body.",
               "type": "string"
             },
+            "senderName": {
+              "description": "Host-resolved display name, captured at delivery for stable replay.",
+              "type": [
+                "string",
+                "null"
+              ]
+            },
             "source": {
               "$ref": "#/definitions/HostMessageSource"
             }
@@ -159311,6 +159976,13 @@
               "properties": {
                 "agentSessionId": {
                   "$ref": "#/definitions/SessionId"
+                },
+                "agent_nickname": {
+                  "description": "Host-assigned child name; older journals may omit it.",
+                  "type": [
+                    "string",
+                    "null"
+                  ]
                 },
                 "originCallId": {
                   "type": [
@@ -162271,6 +162943,13 @@
               "description": "Host-resolved sender session or background task identity, never a claim extracted from the message body.",
               "type": "string"
             },
+            "senderName": {
+              "description": "Host-resolved display name, captured at delivery for stable replay.",
+              "type": [
+                "string",
+                "null"
+              ]
+            },
             "source": {
               "$ref": "#/definitions/HostMessageSource"
             }
@@ -162824,6 +163503,13 @@
             "sender": {
               "description": "Host-resolved sender session or background task identity, never a claim extracted from the message body.",
               "type": "string"
+            },
+            "senderName": {
+              "description": "Host-resolved display name, captured at delivery for stable replay.",
+              "type": [
+                "string",
+                "null"
+              ]
             },
             "source": {
               "$ref": "#/definitions/HostMessageSource"
@@ -163520,6 +164206,13 @@
               "description": "Host-resolved sender session or background task identity, never a claim extracted from the message body.",
               "type": "string"
             },
+            "senderName": {
+              "description": "Host-resolved display name, captured at delivery for stable replay.",
+              "type": [
+                "string",
+                "null"
+              ]
+            },
             "source": {
               "$ref": "#/definitions/HostMessageSource"
             }
@@ -163980,6 +164673,13 @@
             "sender": {
               "description": "Host-resolved sender session or background task identity, never a claim extracted from the message body.",
               "type": "string"
+            },
+            "senderName": {
+              "description": "Host-resolved display name, captured at delivery for stable replay.",
+              "type": [
+                "string",
+                "null"
+              ]
             },
             "source": {
               "$ref": "#/definitions/HostMessageSource"
@@ -166715,6 +167415,13 @@
               "description": "Host-resolved sender session or background task identity, never a claim extracted from the message body.",
               "type": "string"
             },
+            "senderName": {
+              "description": "Host-resolved display name, captured at delivery for stable replay.",
+              "type": [
+                "string",
+                "null"
+              ]
+            },
             "source": {
               "$ref": "#/definitions/HostMessageSource"
             }
@@ -167200,6 +167907,13 @@
               "properties": {
                 "agentSessionId": {
                   "$ref": "#/definitions/SessionId"
+                },
+                "agent_nickname": {
+                  "description": "Host-assigned child name; older journals may omit it.",
+                  "type": [
+                    "string",
+                    "null"
+                  ]
                 },
                 "originCallId": {
                   "type": [
@@ -171356,6 +172070,13 @@
               "description": "Host-resolved sender session or background task identity, never a claim extracted from the message body.",
               "type": "string"
             },
+            "senderName": {
+              "description": "Host-resolved display name, captured at delivery for stable replay.",
+              "type": [
+                "string",
+                "null"
+              ]
+            },
             "source": {
               "$ref": "#/definitions/HostMessageSource"
             }
@@ -171841,6 +172562,13 @@
               "properties": {
                 "agentSessionId": {
                   "$ref": "#/definitions/SessionId"
+                },
+                "agent_nickname": {
+                  "description": "Host-assigned child name; older journals may omit it.",
+                  "type": [
+                    "string",
+                    "null"
+                  ]
                 },
                 "originCallId": {
                   "type": [
@@ -174385,6 +175113,13 @@
               "description": "Host-resolved sender session or background task identity, never a claim extracted from the message body.",
               "type": "string"
             },
+            "senderName": {
+              "description": "Host-resolved display name, captured at delivery for stable replay.",
+              "type": [
+                "string",
+                "null"
+              ]
+            },
             "source": {
               "$ref": "#/definitions/HostMessageSource"
             }
@@ -174870,6 +175605,13 @@
               "properties": {
                 "agentSessionId": {
                   "$ref": "#/definitions/SessionId"
+                },
+                "agent_nickname": {
+                  "description": "Host-assigned child name; older journals may omit it.",
+                  "type": [
+                    "string",
+                    "null"
+                  ]
                 },
                 "originCallId": {
                   "type": [
@@ -176209,6 +176951,13 @@
               "description": "Host-resolved sender session or background task identity, never a claim extracted from the message body.",
               "type": "string"
             },
+            "senderName": {
+              "description": "Host-resolved display name, captured at delivery for stable replay.",
+              "type": [
+                "string",
+                "null"
+              ]
+            },
             "source": {
               "$ref": "#/definitions/HostMessageSource"
             }
@@ -176694,6 +177443,13 @@
               "properties": {
                 "agentSessionId": {
                   "$ref": "#/definitions/SessionId"
+                },
+                "agent_nickname": {
+                  "description": "Host-assigned child name; older journals may omit it.",
+                  "type": [
+                    "string",
+                    "null"
+                  ]
                 },
                 "originCallId": {
                   "type": [
@@ -180414,6 +181170,13 @@
               "description": "Host-resolved sender session or background task identity, never a claim extracted from the message body.",
               "type": "string"
             },
+            "senderName": {
+              "description": "Host-resolved display name, captured at delivery for stable replay.",
+              "type": [
+                "string",
+                "null"
+              ]
+            },
             "source": {
               "$ref": "#/definitions/HostMessageSource"
             }
@@ -180899,6 +181662,13 @@
               "properties": {
                 "agentSessionId": {
                   "$ref": "#/definitions/SessionId"
+                },
+                "agent_nickname": {
+                  "description": "Host-assigned child name; older journals may omit it.",
+                  "type": [
+                    "string",
+                    "null"
+                  ]
                 },
                 "originCallId": {
                   "type": [
@@ -185840,6 +186610,13 @@
               "description": "Host-resolved sender session or background task identity, never a claim extracted from the message body.",
               "type": "string"
             },
+            "senderName": {
+              "description": "Host-resolved display name, captured at delivery for stable replay.",
+              "type": [
+                "string",
+                "null"
+              ]
+            },
             "source": {
               "$ref": "#/definitions/HostMessageSource"
             }
@@ -186325,6 +187102,13 @@
               "properties": {
                 "agentSessionId": {
                   "$ref": "#/definitions/SessionId"
+                },
+                "agent_nickname": {
+                  "description": "Host-assigned child name; older journals may omit it.",
+                  "type": [
+                    "string",
+                    "null"
+                  ]
                 },
                 "originCallId": {
                   "type": [
@@ -189030,6 +189814,13 @@
               "description": "Host-resolved sender session or background task identity, never a claim extracted from the message body.",
               "type": "string"
             },
+            "senderName": {
+              "description": "Host-resolved display name, captured at delivery for stable replay.",
+              "type": [
+                "string",
+                "null"
+              ]
+            },
             "source": {
               "$ref": "#/definitions/HostMessageSource"
             }
@@ -189515,6 +190306,13 @@
               "properties": {
                 "agentSessionId": {
                   "$ref": "#/definitions/SessionId"
+                },
+                "agent_nickname": {
+                  "description": "Host-assigned child name; older journals may omit it.",
+                  "type": [
+                    "string",
+                    "null"
+                  ]
                 },
                 "originCallId": {
                   "type": [
@@ -192125,6 +192923,13 @@
               "description": "Host-resolved sender session or background task identity, never a claim extracted from the message body.",
               "type": "string"
             },
+            "senderName": {
+              "description": "Host-resolved display name, captured at delivery for stable replay.",
+              "type": [
+                "string",
+                "null"
+              ]
+            },
             "source": {
               "$ref": "#/definitions/HostMessageSource"
             }
@@ -192610,6 +193415,13 @@
               "properties": {
                 "agentSessionId": {
                   "$ref": "#/definitions/SessionId"
+                },
+                "agent_nickname": {
+                  "description": "Host-assigned child name; older journals may omit it.",
+                  "type": [
+                    "string",
+                    "null"
+                  ]
                 },
                 "originCallId": {
                   "type": [
@@ -193832,6 +194644,13 @@
               "description": "Host-resolved sender session or background task identity, never a claim extracted from the message body.",
               "type": "string"
             },
+            "senderName": {
+              "description": "Host-resolved display name, captured at delivery for stable replay.",
+              "type": [
+                "string",
+                "null"
+              ]
+            },
             "source": {
               "$ref": "#/definitions/HostMessageSource"
             }
@@ -194317,6 +195136,13 @@
               "properties": {
                 "agentSessionId": {
                   "$ref": "#/definitions/SessionId"
+                },
+                "agent_nickname": {
+                  "description": "Host-assigned child name; older journals may omit it.",
+                  "type": [
+                    "string",
+                    "null"
+                  ]
                 },
                 "originCallId": {
                   "type": [
@@ -196774,6 +197600,13 @@
               "description": "Host-resolved sender session or background task identity, never a claim extracted from the message body.",
               "type": "string"
             },
+            "senderName": {
+              "description": "Host-resolved display name, captured at delivery for stable replay.",
+              "type": [
+                "string",
+                "null"
+              ]
+            },
             "source": {
               "$ref": "#/definitions/HostMessageSource"
             }
@@ -197259,6 +198092,13 @@
               "properties": {
                 "agentSessionId": {
                   "$ref": "#/definitions/SessionId"
+                },
+                "agent_nickname": {
+                  "description": "Host-assigned child name; older journals may omit it.",
+                  "type": [
+                    "string",
+                    "null"
+                  ]
                 },
                 "originCallId": {
                   "type": [
@@ -198800,6 +199640,13 @@
               "description": "Host-resolved sender session or background task identity, never a claim extracted from the message body.",
               "type": "string"
             },
+            "senderName": {
+              "description": "Host-resolved display name, captured at delivery for stable replay.",
+              "type": [
+                "string",
+                "null"
+              ]
+            },
             "source": {
               "$ref": "#/definitions/HostMessageSource"
             }
@@ -199285,6 +200132,13 @@
               "properties": {
                 "agentSessionId": {
                   "$ref": "#/definitions/SessionId"
+                },
+                "agent_nickname": {
+                  "description": "Host-assigned child name; older journals may omit it.",
+                  "type": [
+                    "string",
+                    "null"
+                  ]
                 },
                 "originCallId": {
                   "type": [
@@ -202031,6 +202885,13 @@
               "description": "Host-resolved sender session or background task identity, never a claim extracted from the message body.",
               "type": "string"
             },
+            "senderName": {
+              "description": "Host-resolved display name, captured at delivery for stable replay.",
+              "type": [
+                "string",
+                "null"
+              ]
+            },
             "source": {
               "$ref": "#/definitions/HostMessageSource"
             }
@@ -202516,6 +203377,13 @@
               "properties": {
                 "agentSessionId": {
                   "$ref": "#/definitions/SessionId"
+                },
+                "agent_nickname": {
+                  "description": "Host-assigned child name; older journals may omit it.",
+                  "type": [
+                    "string",
+                    "null"
+                  ]
                 },
                 "originCallId": {
                   "type": [
@@ -205286,6 +206154,13 @@
               "description": "Host-resolved sender session or background task identity, never a claim extracted from the message body.",
               "type": "string"
             },
+            "senderName": {
+              "description": "Host-resolved display name, captured at delivery for stable replay.",
+              "type": [
+                "string",
+                "null"
+              ]
+            },
             "source": {
               "$ref": "#/definitions/HostMessageSource"
             }
@@ -205771,6 +206646,13 @@
               "properties": {
                 "agentSessionId": {
                   "$ref": "#/definitions/SessionId"
+                },
+                "agent_nickname": {
+                  "description": "Host-assigned child name; older journals may omit it.",
+                  "type": [
+                    "string",
+                    "null"
+                  ]
                 },
                 "originCallId": {
                   "type": [
@@ -208999,6 +209881,13 @@
               "description": "Host-resolved sender session or background task identity, never a claim extracted from the message body.",
               "type": "string"
             },
+            "senderName": {
+              "description": "Host-resolved display name, captured at delivery for stable replay.",
+              "type": [
+                "string",
+                "null"
+              ]
+            },
             "source": {
               "$ref": "#/definitions/HostMessageSource"
             }
@@ -209484,6 +210373,13 @@
               "properties": {
                 "agentSessionId": {
                   "$ref": "#/definitions/SessionId"
+                },
+                "agent_nickname": {
+                  "description": "Host-assigned child name; older journals may omit it.",
+                  "type": [
+                    "string",
+                    "null"
+                  ]
                 },
                 "originCallId": {
                   "type": [
@@ -212621,6 +213517,13 @@
               "description": "Host-resolved sender session or background task identity, never a claim extracted from the message body.",
               "type": "string"
             },
+            "senderName": {
+              "description": "Host-resolved display name, captured at delivery for stable replay.",
+              "type": [
+                "string",
+                "null"
+              ]
+            },
             "source": {
               "$ref": "#/definitions/HostMessageSource"
             }
@@ -213106,6 +214009,13 @@
               "properties": {
                 "agentSessionId": {
                   "$ref": "#/definitions/SessionId"
+                },
+                "agent_nickname": {
+                  "description": "Host-assigned child name; older journals may omit it.",
+                  "type": [
+                    "string",
+                    "null"
+                  ]
                 },
                 "originCallId": {
                   "type": [
@@ -216387,6 +217297,13 @@
               "description": "Host-resolved sender session or background task identity, never a claim extracted from the message body.",
               "type": "string"
             },
+            "senderName": {
+              "description": "Host-resolved display name, captured at delivery for stable replay.",
+              "type": [
+                "string",
+                "null"
+              ]
+            },
             "source": {
               "$ref": "#/definitions/HostMessageSource"
             }
@@ -216872,6 +217789,13 @@
               "properties": {
                 "agentSessionId": {
                   "$ref": "#/definitions/SessionId"
+                },
+                "agent_nickname": {
+                  "description": "Host-assigned child name; older journals may omit it.",
+                  "type": [
+                    "string",
+                    "null"
+                  ]
                 },
                 "originCallId": {
                   "type": [
@@ -219571,6 +220495,13 @@
               "description": "Host-resolved sender session or background task identity, never a claim extracted from the message body.",
               "type": "string"
             },
+            "senderName": {
+              "description": "Host-resolved display name, captured at delivery for stable replay.",
+              "type": [
+                "string",
+                "null"
+              ]
+            },
             "source": {
               "$ref": "#/definitions/HostMessageSource"
             }
@@ -220056,6 +220987,13 @@
               "properties": {
                 "agentSessionId": {
                   "$ref": "#/definitions/SessionId"
+                },
+                "agent_nickname": {
+                  "description": "Host-assigned child name; older journals may omit it.",
+                  "type": [
+                    "string",
+                    "null"
+                  ]
                 },
                 "originCallId": {
                   "type": [
@@ -222424,6 +223362,13 @@
               "description": "Host-resolved sender session or background task identity, never a claim extracted from the message body.",
               "type": "string"
             },
+            "senderName": {
+              "description": "Host-resolved display name, captured at delivery for stable replay.",
+              "type": [
+                "string",
+                "null"
+              ]
+            },
             "source": {
               "$ref": "#/definitions/HostMessageSource"
             }
@@ -223263,6 +224208,13 @@
               "description": "Host-resolved sender session or background task identity, never a claim extracted from the message body.",
               "type": "string"
             },
+            "senderName": {
+              "description": "Host-resolved display name, captured at delivery for stable replay.",
+              "type": [
+                "string",
+                "null"
+              ]
+            },
             "source": {
               "$ref": "#/definitions/HostMessageSource"
             }
@@ -223748,6 +224700,13 @@
               "properties": {
                 "agentSessionId": {
                   "$ref": "#/definitions/SessionId"
+                },
+                "agent_nickname": {
+                  "description": "Host-assigned child name; older journals may omit it.",
+                  "type": [
+                    "string",
+                    "null"
+                  ]
                 },
                 "originCallId": {
                   "type": [
@@ -226475,6 +227434,13 @@
               "description": "Host-resolved sender session or background task identity, never a claim extracted from the message body.",
               "type": "string"
             },
+            "senderName": {
+              "description": "Host-resolved display name, captured at delivery for stable replay.",
+              "type": [
+                "string",
+                "null"
+              ]
+            },
             "source": {
               "$ref": "#/definitions/HostMessageSource"
             }
@@ -226960,6 +227926,13 @@
               "properties": {
                 "agentSessionId": {
                   "$ref": "#/definitions/SessionId"
+                },
+                "agent_nickname": {
+                  "description": "Host-assigned child name; older journals may omit it.",
+                  "type": [
+                    "string",
+                    "null"
+                  ]
                 },
                 "originCallId": {
                   "type": [
@@ -230339,6 +231312,13 @@
               "description": "Host-resolved sender session or background task identity, never a claim extracted from the message body.",
               "type": "string"
             },
+            "senderName": {
+              "description": "Host-resolved display name, captured at delivery for stable replay.",
+              "type": [
+                "string",
+                "null"
+              ]
+            },
             "source": {
               "$ref": "#/definitions/HostMessageSource"
             }
@@ -230824,6 +231804,13 @@
               "properties": {
                 "agentSessionId": {
                   "$ref": "#/definitions/SessionId"
+                },
+                "agent_nickname": {
+                  "description": "Host-assigned child name; older journals may omit it.",
+                  "type": [
+                    "string",
+                    "null"
+                  ]
                 },
                 "originCallId": {
                   "type": [
@@ -233537,6 +234524,13 @@
               "description": "Host-resolved sender session or background task identity, never a claim extracted from the message body.",
               "type": "string"
             },
+            "senderName": {
+              "description": "Host-resolved display name, captured at delivery for stable replay.",
+              "type": [
+                "string",
+                "null"
+              ]
+            },
             "source": {
               "$ref": "#/definitions/HostMessageSource"
             }
@@ -234022,6 +235016,13 @@
               "properties": {
                 "agentSessionId": {
                   "$ref": "#/definitions/SessionId"
+                },
+                "agent_nickname": {
+                  "description": "Host-assigned child name; older journals may omit it.",
+                  "type": [
+                    "string",
+                    "null"
+                  ]
                 },
                 "originCallId": {
                   "type": [
@@ -236721,6 +237722,13 @@
               "description": "Host-resolved sender session or background task identity, never a claim extracted from the message body.",
               "type": "string"
             },
+            "senderName": {
+              "description": "Host-resolved display name, captured at delivery for stable replay.",
+              "type": [
+                "string",
+                "null"
+              ]
+            },
             "source": {
               "$ref": "#/definitions/HostMessageSource"
             }
@@ -237206,6 +238214,13 @@
               "properties": {
                 "agentSessionId": {
                   "$ref": "#/definitions/SessionId"
+                },
+                "agent_nickname": {
+                  "description": "Host-assigned child name; older journals may omit it.",
+                  "type": [
+                    "string",
+                    "null"
+                  ]
                 },
                 "originCallId": {
                   "type": [

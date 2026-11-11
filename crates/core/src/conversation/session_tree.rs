@@ -97,6 +97,10 @@ pub fn resolve_leaf_id(
     history: &CanonicalHistory,
     parents: &HashMap<ItemId, Option<ItemId>>,
 ) -> Option<ItemId> {
+    // A durable null leaf is an explicit rewind to the root, not legacy data.
+    if history.leaf_epoch > 0 && history.leaf_id.is_none() {
+        return None;
+    }
     if let Some(leaf) = history.leaf_id
         && (parents.contains_key(&leaf) || history.items.iter().any(|item| item.id == leaf))
     {
@@ -148,6 +152,9 @@ pub fn active_path_item_ids(history: &CanonicalHistory) -> HashSet<ItemId> {
 /// when no path resolves (no or empty tree — single-line sessions and
 /// forks), leaving callers the linear history.
 pub fn active_path_items(history: &CanonicalHistory) -> Option<Vec<ItemEnvelope>> {
+    if history.leaf_epoch > 0 && history.leaf_id.is_none() {
+        return Some(Vec::new());
+    }
     let active = active_path_item_ids(history);
     if active.is_empty() {
         return None;
@@ -475,6 +482,7 @@ mod active_path_items_tests {
         Item::SubAgent {
             origin_call_id: None,
             agent_session_id: devo_protocol::SessionId::new(),
+            agent_nickname: None,
             parent_session_id: devo_protocol::SessionId::new(),
             role: None,
             task: task.to_owned(),
@@ -495,6 +503,23 @@ mod active_path_items_tests {
             item,
             parent_id,
         }
+    }
+
+    #[test]
+    fn explicit_root_rewind_does_not_restore_the_abandoned_journal() {
+        let mut history = CanonicalHistory {
+            items: vec![envelope(ItemId::new(), 1, None, user_message("abandoned"))],
+            leaf_epoch: 1,
+            ..CanonicalHistory::default()
+        };
+        assert_eq!(
+            resolve_leaf_id(&history, &resolve_parent_map(&history)),
+            None
+        );
+        assert_eq!(active_path_items(&history), Some(Vec::new()));
+        assert_eq!(active_path_item_ids(&history), HashSet::new());
+        history.leaf_epoch = 0;
+        assert_eq!(active_path_items(&history), Some(history.items.clone()));
     }
 
     /// Linear journal of a rewound session: turn 1 kept, turn 2 abandoned,

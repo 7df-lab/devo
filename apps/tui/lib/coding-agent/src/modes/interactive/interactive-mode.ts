@@ -758,6 +758,7 @@ export class InteractiveMode {
 	// Serializes session event handling; see subscribeToAgent
 	private sessionEventQueue: Promise<void> = Promise.resolve();
 	private sessionEventGeneration = 0;
+	private treeNavigationRenderGeneration = 0;
 	private fastModeToggleQueue: Promise<void> = Promise.resolve();
 
 	private pendingTools = new Map<string, ToolExecutionComponent>();
@@ -4517,13 +4518,25 @@ export class InteractiveMode {
 	}
 
 	private async renderTreeNavigation(result: { editorText?: string }): Promise<void> {
-		this.clearSideQuestion({ abort: true });
-		this.chatContainer.clear();
-		await this.renderInitialMessages();
-		if (result.editorText && !this.editor.getText().trim()) {
-			this.editor.setText(result.editorText);
-		}
-		this.showStatus("Navigated to selected point");
+		const generation = ++this.treeNavigationRenderGeneration;
+		const sessionGeneration = this.sessionEventGeneration;
+		// A second navigation can finish while the first snapshot is loading.
+		// Serialize transcript replacement, and discard stale editor/status updates.
+		const render = this.sessionEventQueue.then(async () => {
+			if (generation !== this.treeNavigationRenderGeneration || sessionGeneration !== this.sessionEventGeneration) return;
+			this.clearSideQuestion({ abort: true });
+			this.chatContainer.clear();
+			await this.renderInitialMessages();
+			if (generation !== this.treeNavigationRenderGeneration || sessionGeneration !== this.sessionEventGeneration) return;
+			if (result.editorText && !this.editor.getText().trim()) {
+				this.editor.setText(result.editorText);
+			}
+			this.showStatus("Navigated to selected point");
+			// Replace visible rows from the abandoned path, rather than append.
+			this.ui.requestRender(true);
+		});
+		this.sessionEventQueue = render.catch(() => {});
+		await render;
 	}
 
 	private setupEditorSubmitHandler(): void {
@@ -6687,7 +6700,10 @@ export class InteractiveMode {
 	}
 
 	async renderInitialMessages(): Promise<void> {
+		const connection = this.agentConnection;
+		const generation = this.sessionEventGeneration;
 		const snapshot = await measureAsync("snapshot.initial_total", () => this.agentConnection.getInitialSnapshot());
+		if (!this.isCurrentConnectionGeneration(connection, generation)) return;
 		const context = this.getSessionContextFromConnectionSnapshot(snapshot);
 		const state = snapshot.state;
 		const streamingMessage = snapshot.streamingMessage;

@@ -42,6 +42,15 @@ cd apps/tui && npm start
 
 Config/auth: `DEVO_CODING_AGENT_DIR` / `PRIME_AGENT_CODING_AGENT_DIR` → `~/.devo` (never `~/.prime`).
 
+## Tool output
+
+Web search, web fetch, and other provider-hosted tools use the same call/result
+lifecycle in live turns and restored history. Queries and URLs are refreshed
+when the provider supplies final arguments. Collapsed rows show a bounded result
+preview, including failures, rather than hiding web search output behind a status.
+Ctrl+O expands result details: search titles, URLs and snippets, or fetched page
+text. Expanded output is capped to keep large provider responses manageable.
+
 ## Traces
 
 Native protocol traffic (TUI ↔ server NDJSON) can be recorded for debugging.
@@ -64,6 +73,14 @@ In-session control via `/traces`:
 Devo traces are local-only: there is no upload/login path. `/traces` is host-owned — the vendored
 upload-oriented builtin is disabled through `excludedBuiltinCommands` (`src/host.ts`) and Devo serves
 the command from `src/native-agent-connection.ts` over the `src/native-traffic-log.ts` sink.
+
+## Transcript navigation
+
+Tree navigation replaces the visible transcript with the selected active path. Navigating to
+an earlier user message restores that message to an empty editor rather than replaying it twice.
+Deferred history from an abandoned path is invalidated; overlapping navigation renders are
+serialized so a late snapshot cannot append an old branch or overwrite the latest draft.
+Normal live model deltas do not delay initial history rendering.
 
 ## Tests
 

@@ -432,6 +432,34 @@ impl ServerRuntime {
                 "failed to persist child session metadata to database"
             );
         }
+        // A historical snapshot of the parent's spawn action. Current child
+        // lifecycle remains authoritative in agent/list, not in this row.
+        // Direct RPC spawns before the first parent turn have no transcript
+        // anchor; do not manufacture a turn solely for a display item.
+        if let Some(parent_turn_id) = parent_usage_turn_id {
+            let item_id =
+                devo_protocol::native::ids::ItemId::from_string(child_session_id.to_string());
+            let item_seq = self.allocate_item_sequence(&parent_session_id).await;
+            let item = devo_protocol::native::item::Item::SubAgent {
+                origin_call_id: None,
+                agent_session_id: child_session_id,
+                agent_nickname: Some(nickname.clone()),
+                parent_session_id,
+                role: Some(role.clone()),
+                task: params.message.clone(),
+                state: devo_protocol::native::item::SpawnedWorkState::Running,
+            };
+            self.emit_native_item_started(
+                parent_session_id,
+                parent_turn_id,
+                item_id,
+                Some(item_seq),
+                item.clone(),
+            )
+            .await;
+            self.complete_native_item(parent_session_id, parent_turn_id, item_id, item_seq, item)
+                .await;
+        }
         let start_runtime = Arc::clone(self);
         let start_session = child_handle
             .native_session()

@@ -289,6 +289,9 @@ pub enum Item {
         #[schemars(rename = "agentSessionId")]
         #[ts(rename = "agentSessionId")]
         agent_session_id: SessionId,
+        /// Host-assigned child name; older journals may omit it.
+        #[serde(default, skip_serializing_if = "Option::is_none")]
+        agent_nickname: Option<String>,
         #[schemars(rename = "parentSessionId")]
         #[ts(rename = "parentSessionId")]
         parent_session_id: SessionId,

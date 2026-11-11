@@ -2814,6 +2814,32 @@ async fn tree_navigate_scopes_next_turn_context_to_the_branch() -> Result<()> {
         serde_json::json!({ "sessionId": session_id, "entryId": first_user.id }),
     )
     .await?;
+    assert!(
+        list_native_items(&runtime, connection_id, session_id.to_string())
+            .await?
+            .is_empty()
+    );
+
+    let rebuilt_provider = Arc::new(CapturingProvider::default());
+    let rebuilt_runtime = build_runtime_with_provider(data_root.path(), rebuilt_provider.clone())?;
+    rebuilt_runtime.load_persisted_sessions().await?;
+    let (rebuilt_connection_id, rebuilt_notifications_rx) =
+        initialize_connection(&rebuilt_runtime).await?;
+    resume_session(&rebuilt_runtime, rebuilt_connection_id, 307, &session_id).await?;
+    assert!(
+        list_native_items(
+            &rebuilt_runtime,
+            rebuilt_connection_id,
+            session_id.to_string()
+        )
+        .await?
+        .is_empty()
+    );
+    let runtime = rebuilt_runtime;
+    let provider = rebuilt_provider;
+    let connection_id = rebuilt_connection_id;
+    let mut notifications_rx = rebuilt_notifications_rx;
+
     start_turn_and_wait(
         &runtime,
         connection_id,

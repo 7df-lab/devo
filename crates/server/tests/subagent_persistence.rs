@@ -846,10 +846,14 @@ async fn concurrent_turns_keep_shared_journal_attributed_and_sequenced() -> Resu
             .get(session_id)
             .map(HashSet::len)
             .unwrap_or_default();
-        assert_eq!(
-            item_count, 3,
-            "each concurrent text turn persists user + warning + assistant items in {session_id}"
-        );
+        // Only the already-running child spawns during its turn. Its durable
+        // outgoing row belongs to that real turn; idle root spawn adds no row.
+        let expected_count = if *session_id == child.child_session_id {
+            4
+        } else {
+            3
+        };
+        assert_eq!(item_count, expected_count, "item count in {session_id}");
         let mut unique = item_seqs
             .get(session_id)
             .cloned()
@@ -858,16 +862,45 @@ async fn concurrent_turns_keep_shared_journal_attributed_and_sequenced() -> Resu
         unique.dedup();
         assert_eq!(
             unique,
-            vec![1, 2, 3],
-            "each session must have three unique item seqs, not just parseable lines"
+            (1..=expected_count as u64).collect::<Vec<_>>(),
+            "each session must have contiguous unique item seqs"
         );
     }
     assert_eq!(
         seq_by_item.len(),
-        expected_ids.len() * 3,
+        expected_ids.len() * 3 + 1,
         "full expected item-id/seq count"
     );
 
+    let spawn_rows: Vec<_> = lines
+        .iter()
+        .filter_map(|line| match line {
+            RolloutLine::Item { item, .. } => match &item.item {
+                devo_protocol::native::item::Item::SubAgent {
+                    agent_session_id,
+                    agent_nickname,
+                    parent_session_id,
+                    ..
+                } => Some((
+                    item.session_id,
+                    *agent_session_id,
+                    agent_nickname.clone(),
+                    *parent_session_id,
+                )),
+                _ => None,
+            },
+            _ => None,
+        })
+        .collect();
+    assert_eq!(
+        spawn_rows,
+        vec![(
+            child.child_session_id,
+            grandchild.child_session_id,
+            Some("grandchild".to_owned()),
+            child.child_session_id,
+        )]
+    );
     Ok(())
 }
 
