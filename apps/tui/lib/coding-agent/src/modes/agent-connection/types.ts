@@ -541,6 +541,16 @@ export type AgentConnectionQueuedMessageMutation = QueuedMessageMutation;
 /** `unsupported` means an older remote daemon lacks queued-message mutation. */
 export type AgentConnectionQueuedMessageMutationStatus = QueuedMessageMutationStatus | "unsupported";
 
+/** Read-only session-owned process activity, projected from Native task/list. */
+export interface AgentConnectionShellTask {
+	id: string;
+	command: string;
+	state: "running" | "completed" | "failed" | "cancelled" | "lost";
+	cwd?: string;
+	exitCode?: number;
+	output?: string;
+}
+
 export interface AgentConnectionHeartbeat {
 	job: AgentCronJob;
 	sessionName?: string;
@@ -706,6 +716,8 @@ export interface AgentConnection {
 	acquireSessionInputPause(leaseKey: string): Promise<AgentConnectionSessionInputPause>;
 	listCronJobs(options?: { includeInactive?: boolean }): Promise<AgentCronJob[]>;
 	listHeartbeats(): Promise<AgentConnectionHeartbeat[]>;
+	/** Absent when the transport does not expose authoritative background process activity. */
+	listShellTasks?(): Promise<AgentConnectionShellTask[]>;
 	manageHeartbeat(
 		activeSessionId: string,
 		jobId: string,

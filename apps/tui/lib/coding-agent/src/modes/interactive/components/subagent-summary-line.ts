@@ -62,13 +62,37 @@ export function countRosterSubagentStatuses(
 	return counts;
 }
 
-/** One-line entry into the current session's scoped agents view. */
+export type ActivityLoadState = "ready" | "loading" | "unavailable" | "error";
+
+export interface HeartbeatSummaryCounts {
+	total: number;
+	active: number;
+	paused: number;
+	/** Epoch milliseconds of the next active heartbeat, if known. */
+	nextRunAt?: number;
+}
+
+export interface ShellSummaryCounts {
+	total: number;
+	running: number;
+	/** Omit when the backend cannot distinguish persistent shells. */
+	persistent?: number;
+}
+
+/** Session-scoped activity entry points; empty groups remain visible and navigable. */
 export class SubagentSummaryLine implements Component, Focusable {
 	focused = false;
 	private counts: SubagentSummaryCounts = { total: 0, running: 0, idle: 0, inactive: 0 };
+	private heartbeats: HeartbeatSummaryCounts = { total: 0, active: 0, paused: 0 };
+	private shells: ShellSummaryCounts = { total: 0, running: 0 };
+	private heartbeatState: ActivityLoadState = "loading";
+	private shellState: ActivityLoadState = "loading";
 	private openable = false;
+	private selected = 0;
 
 	onOpen?: () => void;
+	onOpenHeartbeats?: () => void;
+	onOpenShells?: () => void;
 	onCancel?: () => void;
 	onChatAction?: (data: string) => void;
 
@@ -80,7 +104,25 @@ export class SubagentSummaryLine implements Component, Focusable {
 	) {}
 
 	setSubagentCounts(counts: SubagentSummaryCounts): void {
-		this.counts = counts;
+		this.counts = { ...counts };
+	}
+
+	setHeartbeatCounts(counts: HeartbeatSummaryCounts): void {
+		this.heartbeats = { ...counts };
+		this.heartbeatState = "ready";
+	}
+
+	setShellCounts(counts: ShellSummaryCounts): void {
+		this.shells = { ...counts };
+		this.shellState = "ready";
+	}
+
+	setHeartbeatState(state: ActivityLoadState): void {
+		this.heartbeatState = state;
+	}
+
+	setShellState(state: ActivityLoadState): void {
+		this.shellState = state;
 	}
 
 	setOpenable(openable: boolean): void {
@@ -88,66 +130,75 @@ export class SubagentSummaryLine implements Component, Focusable {
 	}
 
 	isSelectable(): boolean {
-		return !this.getPickerOpen() && this.counts.total > 0 && this.openable;
+		return !this.getPickerOpen();
 	}
 
 	handleInput(data: string): void {
+		if (!this.isSelectable()) return;
 		const keybindings = getKeybindings();
-		if (keybindings.matches(data, "tui.select.confirm") || keybindings.matches(data, "app.agents.open")) {
-			if (this.isSelectable()) this.onOpen?.();
+		if (keybindings.matches(data, "app.agents.open")) {
+			this.onOpen?.();
+			return;
+		}
+		if (keybindings.matches(data, "tui.select.confirm")) {
+			[this.onOpen, this.onOpenHeartbeats, this.onOpenShells][this.selected]?.();
+			return;
+		}
+		if (keybindings.matches(data, "tui.select.cancel") || keybindings.matches(data, "app.agents.back")) {
+			this.onCancel?.();
+			return;
+		}
+		if (keybindings.matches(data, "tui.select.up") || keybindings.matches(data, "tui.editor.cursorLeft")) {
+			if (this.selected === 0) this.onCancel?.();
+			else this.selected -= 1;
 			return;
 		}
 		if (
-			keybindings.matches(data, "tui.select.up") ||
-			keybindings.matches(data, "tui.select.cancel") ||
-			keybindings.matches(data, "app.agents.back")
+			keybindings.matches(data, "tui.select.down") ||
+			keybindings.matches(data, "tui.editor.cursorRight") ||
+			keybindings.matches(data, "tui.input.tab")
 		) {
-			this.onCancel?.();
+			this.selected = (this.selected + 1) % 3;
 			return;
 		}
 		this.onChatAction?.(data);
 	}
 
 	render(width: number): string[] {
-		if (this.getPickerOpen()) return [];
+		if (this.getPickerOpen() || width < 1) return [];
 		const lines = this.renderInfoLine(width);
-		if (this.counts.total === 0) return lines;
-		if (width < 2) return lines;
-		const safeWidth = width;
-		const inner = safeWidth - 2;
-		const label = theme.fg("accent", "subagents");
-		const top = truncateToWidth(
-			`${theme.fg("border", "╭─ ")}${label}${theme.fg("border", ` ${"─".repeat(Math.max(0, inner - 3 - visibleWidth(label)))}╮`)}`,
-			safeWidth,
-			"…",
-		);
-		const counts =
-			theme.fg("success", `● ${this.counts.running} running`) +
-			"   " +
-			theme.fg("warning", `◐ ${this.counts.idle} idle`) +
-			"   " +
-			theme.fg("dim", `○ ${this.counts.inactive} inactive`);
-		const openHint = this.openable
-			? this.focused
-				? `${keyText("tui.select.confirm")}/${keyText("app.agents.open")} open`
-				: `${keyText("tui.editor.cursorDown", { primaryOnly: true })} select`
-			: "";
-		const gap = Math.max(1, inner - 2 - visibleWidth(counts) - visibleWidth(openHint));
-		const body = truncateToWidth(` ${counts}${" ".repeat(gap)}${theme.fg("dim", openHint)} `, inner, "…");
-		const pad = " ".repeat(Math.max(0, inner - visibleWidth(body)));
-		// Truncation may inject full ANSI resets; wrap each segment so the
-		// selection background survives past them (custom-editor precedent).
-		const content = this.focused
-			? `${body}${pad}`
-					.split("\x1b[0m")
-					.map((segment) => theme.bg("selectedBg", segment))
-					.join("\x1b[0m")
-			: `${body}${pad}`;
-		lines.push(
-			top,
-			`${theme.fg("border", "│")}${content}${theme.fg("border", "│")}`,
-			theme.fg("border", `╰${"─".repeat(inner)}╯`),
-		);
+		const heartbeatCount = this.heartbeatState === "ready" ? String(this.heartbeats.total) : this.heartbeatState;
+		const shellCount = this.shellState === "ready" ? String(this.shells.running) : this.shellState;
+		const groups = [
+			`Subagents ${this.counts.running}`,
+			`Heartbeats ${heartbeatCount}`,
+			`Shells ${shellCount}`,
+		];
+		if (!this.focused) {
+			const compact = groups.join(" · ");
+			// Narrow terminals retain each group instead of silently clipping the last group.
+			const rows = visibleWidth(compact) <= width ? [compact] : groups;
+			return [...lines, ...rows.map((row) => theme.fg("muted", truncateToWidth(row, width, "…")))];
+		}
+		let nextHeartbeat = "";
+		if (this.heartbeats.nextRunAt !== undefined && Number.isFinite(this.heartbeats.nextRunAt)) {
+			const seconds = Math.max(0, Math.ceil((this.heartbeats.nextRunAt - Date.now()) / 1000));
+			nextHeartbeat = ` · next ${seconds}s`;
+		}
+		const details = [
+			`Subagents · ${this.counts.running} running · ${this.counts.idle} idle · ${this.counts.inactive} inactive${this.openable ? "" : " · details unavailable"}`,
+			this.heartbeatState === "ready"
+				? `Heartbeats · ${this.heartbeats.active} active · ${this.heartbeats.paused} paused${nextHeartbeat}`
+				: `Heartbeats · ${this.heartbeatState}`,
+			this.shellState === "ready"
+				? `Shells · ${this.shells.running} running · ${this.shells.total} total${this.shells.persistent === undefined ? "" : ` · ${this.shells.persistent} persistent`}`
+				: `Shells · ${this.shellState}`,
+		];
+		for (const [index, detail] of details.entries()) {
+			const row = truncateToWidth(`${index === this.selected ? "›" : " "} ${detail}`, width, "…");
+			lines.push(index === this.selected ? theme.bg("selectedBg", row) : theme.fg("muted", row));
+		}
+		lines.push(theme.fg("dim", truncateToWidth(`↑/↓/tab select · ${keyText("tui.select.confirm")} open · ${keyText("tui.select.cancel")} back`, width, "…")));
 		return lines;
 	}
 
@@ -169,6 +220,6 @@ export class SubagentSummaryLine implements Component, Focusable {
 	}
 
 	invalidate(): void {
-		// Render output is derived from counts and focus state.
+		// Render output is derived from current state; the owner schedules redraws.
 	}
 }

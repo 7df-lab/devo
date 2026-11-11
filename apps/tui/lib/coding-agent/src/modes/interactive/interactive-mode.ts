@@ -1,3 +1,7 @@
+import { ActivityMonitor, type ActivitySnapshot } from "./activity-monitor.js";
+import { ShellActivityPanel } from "./components/shell-activity-panel.js";
+import type { ActivityLoadState } from "./components/subagent-summary-line.js";
+import type { AgentConnectionShellTask } from "../agent-connection/types.js";
 import { randomUUID } from "node:crypto";
 import * as fs from "node:fs";
 import * as os from "node:os";
@@ -772,6 +776,13 @@ export class InteractiveMode {
 
 	// One summary line below the editor, backed by the existing child-status stream.
 	private subagentSummaryLine: SubagentSummaryLine;
+	private activityMonitor: ActivityMonitor;
+	private activityStopped = false;
+	private activityInvalidated = false;
+	private heartbeatActivityState: ActivityLoadState = "loading";
+	private heartbeatMutationRevision = 0;
+	private shellActivityHandle: OverlayHandle | undefined;
+	private shellActivity: ActivitySnapshot<AgentConnectionShellTask> = { status: "loading" };
 	private subagentSnapshots = new Map<string, AgentConnectionRlmChildAgentSnapshot>();
 	private rlmNodeId: string | undefined;
 	private rosterBar: { summaries(): SessionSummary[]; dispose(): Promise<void> } | undefined;
@@ -900,6 +911,14 @@ export class InteractiveMode {
 			throw new Error("Local extension binding requires localSessionHost");
 		}
 		this.agentConnection.onBeforeSessionInvalidate(() => {
+			this.activityInvalidated = true;
+			this.heartbeatMutationRevision += 1;
+			this.activityMonitor?.stop();
+			this.closeShellActivity();
+			this.heartbeatActivityState = "loading";
+			this.shellActivity = { status: "loading" };
+			this.subagentSummaryLine?.setShellState("loading");
+			this.subagentSummaryLine?.setHeartbeatState("loading");
 			this.resetExtensionUI();
 			this.resetSideQuestion();
 		});
@@ -948,6 +967,30 @@ export class InteractiveMode {
 		);
 		this.subagentSummaryLine.setOpenable(this.options.returnToAgentsView === true);
 		this.subagentSummaryLine.onOpen = () => void this.openScopedAgentsView();
+		this.subagentSummaryLine.onOpenHeartbeats = () => void this.showHeartbeatManager();
+		this.subagentSummaryLine.onOpenShells = () => this.showShellActivity();
+		this.activityMonitor = new ActivityMonitor({
+			getConnection: () => this.agentConnection,
+			loadHeartbeats: async () => {
+				await this.refreshHeartbeatCatalog();
+				return this.heartbeatCatalog;
+			},
+			onHeartbeats: (snapshot) => {
+				this.heartbeatActivityState = snapshot.status;
+				this.subagentSummaryLine.setHeartbeatState(snapshot.status);
+				if (snapshot.status === "ready") this.updateSubagentSummaryLine();
+				this.ui.requestRender();
+			},
+			onShells: (snapshot) => {
+				this.shellActivity = snapshot;
+				this.subagentSummaryLine.setShellState(snapshot.status);
+				if (snapshot.status === "ready") this.subagentSummaryLine.setShellCounts({
+					total: snapshot.items.length,
+					running: snapshot.items.filter((task) => task.state === "running").length,
+				});
+				this.ui.requestRender();
+			},
+		});
 		this.subagentSummaryLine.onCancel = () => this.focusEditor();
 		this.subagentSummaryLine.onChatAction = (data) => this.handleSubagentSummaryChatAction(data);
 		this.footerDataProvider = new FooterDataProvider(this.uiServices.getInitialCwd());
@@ -2273,6 +2316,30 @@ export class InteractiveMode {
 		}
 	}
 
+	/** Resume activity reads after a rejected transition only when the displayed session is still active. */
+	private async withActivityTransition<T extends { cancelled: boolean }>(transition: () => Promise<T>): Promise<T> {
+		const displayedSessionId = this.connectionState?.sessionId;
+		let needsRecovery = true;
+		try {
+			const result = await transition();
+			needsRecovery = result.cancelled;
+			return result;
+		} finally {
+			if (needsRecovery) {
+				// Only restore the still-displayed session. The transport may already
+				// have switched internally before a subscription/history read failed.
+				const state = await this.agentConnection.getState().catch(() => undefined);
+				if (
+					!this.activityStopped && displayedSessionId !== undefined &&
+					state?.sessionId === displayedSessionId && this.connectionState?.sessionId === displayedSessionId
+				) {
+					this.activityInvalidated = false;
+					this.activityMonitor.start();
+				}
+			}
+		}
+	}
+
 	/**
 	 * Initialize the extension system with TUI-based UI context.
 	 */
@@ -2288,10 +2355,10 @@ export class InteractiveMode {
 					try {
 						const result =
 							options?.setup || options?.withSession
-								? await localSessionHost.newSession(options)
-								: await this.agentConnection.newSession(
+								? await this.withActivityTransition(() => localSessionHost.newSession(options))
+								: await this.withActivityTransition(() => this.agentConnection.newSession(
 										options?.parentSession ? { parentSession: options.parentSession } : undefined,
-									);
+									));
 						if (!result.cancelled) {
 							await this.renderCurrentSessionState();
 							this.ui.requestRender();
@@ -2304,8 +2371,8 @@ export class InteractiveMode {
 				fork: async (entryId, options) => {
 					try {
 						const result = options?.withSession
-							? await localSessionHost.fork(entryId, options)
-							: await this.agentConnection.fork(entryId, { position: options?.position });
+							? await this.withActivityTransition(() => localSessionHost.fork(entryId, options))
+							: await this.withActivityTransition(() => this.agentConnection.fork(entryId, { position: options?.position }));
 						if (!result.cancelled) {
 							await this.renderCurrentSessionState();
 							this.editor.setText("selectedText" in result ? (result.selectedText ?? "") : "");
@@ -2446,9 +2513,12 @@ export class InteractiveMode {
 		const refresh = (async () => {
 			do {
 				this.heartbeatRefreshRequested = false;
+				const mutationRevision = this.heartbeatMutationRevision;
 				const heartbeats = await connection.listHeartbeats();
 				if (!this.isCurrentConnectionGeneration(connection, generation)) return;
-				this.applyHeartbeatCatalog(heartbeats);
+				if (!this.activityStopped && !this.activityInvalidated && mutationRevision === this.heartbeatMutationRevision) {
+					this.applyHeartbeatCatalog(heartbeats);
+				}
 			} while (
 				this.heartbeatRefreshRequested &&
 				this.isCurrentConnectionGeneration(connection, generation)
@@ -2466,6 +2536,8 @@ export class InteractiveMode {
 
 	private applyHeartbeatCatalog(heartbeats: AgentConnectionHeartbeat[]): void {
 		this.heartbeatCatalog = heartbeats;
+		this.heartbeatActivityState = "ready";
+		this.subagentSummaryLine.setHeartbeatState("ready");
 		this.scheduleHeartbeatManagerRefresh();
 		this.updateSubagentSummaryLine();
 		this.ui.requestRender();
@@ -2708,11 +2780,13 @@ export class InteractiveMode {
 	}
 
 	private startPostRenderRefreshes(): void {
+		this.activityStopped = false;
+		this.activityInvalidated = false;
+		this.activityMonitor.start();
 		const connection = this.agentConnection;
 		const generation = this.sessionEventGeneration;
 		const refreshes: Promise<unknown>[] = [
 			measureAsync("post_render.roster_bar", () => this.subscribeToRosterBar()).catch(() => undefined),
-			measureAsync("post_render.heartbeat_catalog", () => this.refreshHeartbeatCatalog().catch(() => undefined)),
 		];
 		if (this.bindLocalSessionExtensions) {
 			refreshes.push(
@@ -3362,6 +3436,7 @@ export class InteractiveMode {
 		this.closeConfigurationMenu?.();
 		this.cancelActiveConnectionExtensionUiRequests();
 		this.closeHeartbeatManager();
+		this.closeShellActivity();
 		if (this.extensionSelector) {
 			this.hideExtensionSelector();
 		}
@@ -6066,6 +6141,18 @@ export class InteractiveMode {
 	}
 
 	private updateSubagentSummaryLine(): void {
+		const heartbeats = this.getScopedHeartbeats();
+		const nextRunAt = heartbeats
+			.filter((heartbeat) => heartbeat.job.status === "active")
+			.map((heartbeat) => Date.parse(heartbeat.job.nextRunAt ?? ""))
+			.filter(Number.isFinite);
+		this.subagentSummaryLine.setHeartbeatCounts({
+			total: heartbeats.length,
+			active: heartbeats.filter((heartbeat) => heartbeat.job.status === "active").length,
+			paused: heartbeats.filter((heartbeat) => heartbeat.job.status === "paused").length,
+			...(nextRunAt.length ? { nextRunAt: Math.min(...nextRunAt) } : {}),
+		});
+		this.subagentSummaryLine.setHeartbeatState(this.heartbeatActivityState);
 		const rosterSummaries = this.rosterBar?.summaries();
 		// A client-owned session has no row on the public roster; only then do the
 		// snapshots carry the bar. A public parent with zero roster children shows zero.
@@ -6210,24 +6297,12 @@ export class InteractiveMode {
 	private getTrayContextLabel(): string | undefined {
 		if (this.isInlinePickerOpen()) return undefined;
 		const goalLabel = this.getTrayGoalLabel();
-		const heartbeatLabel = this.getTrayHeartbeatLabel();
 		return (
-			[goalLabel, heartbeatLabel, this.getModelContextLabel()].filter((label) => label !== undefined).join(" · ") ||
+			[goalLabel, this.getModelContextLabel()].filter((label) => label !== undefined).join(" · ") ||
 			undefined
 		);
 	}
 
-	private getTrayHeartbeatLabel(): string | undefined {
-		const heartbeats = this.getScopedHeartbeats();
-		if (heartbeats.length === 0) {
-			return undefined;
-		}
-		const paused = heartbeats.filter((heartbeat) => heartbeat.job.status === "paused").length;
-		const count = `${heartbeats.length} heartbeat${heartbeats.length === 1 ? "" : "s"}`;
-		const pausedLabel = paused ? ` · ${paused} paused` : "";
-		const shortcut = keyText("app.heartbeats.open");
-		return `${count}${pausedLabel}${shortcut ? ` (${shortcut})` : ""}`;
-	}
 
 	private getTrayGoalLabel(): string | undefined {
 		const goal = this.getGoalState();
@@ -8622,7 +8697,7 @@ export class InteractiveMode {
 				userMessages.map((m) => ({ id: m.entryId, text: m.text })),
 				async (entryId) => {
 					try {
-						const result = await this.agentConnection.fork(entryId);
+						const result = await this.withActivityTransition(() => this.agentConnection.fork(entryId));
 						if (result.cancelled) {
 							done();
 							this.ui.requestRender();
@@ -8656,7 +8731,7 @@ export class InteractiveMode {
 				return;
 			}
 
-			const result = await this.agentConnection.fork(leafId, { position: "at" });
+			const result = await this.withActivityTransition(() => this.agentConnection.fork(leafId, { position: "at" }));
 			if (result.cancelled) {
 				this.ui.requestRender();
 				return;
@@ -8831,10 +8906,10 @@ export class InteractiveMode {
 		this.stopWorkingLoader();
 		try {
 			const result = options?.withSession
-				? await this.getLocalSessionHost().switchSession(sessionPath, {
+				? await this.withActivityTransition(() => this.getLocalSessionHost().switchSession(sessionPath, {
 						withSession: options.withSession,
-					})
-				: await this.agentConnection.switchSession(sessionPath);
+					}))
+				: await this.withActivityTransition(() => this.agentConnection.switchSession(sessionPath));
 			if (result.cancelled) {
 				return result;
 			}
@@ -8849,11 +8924,11 @@ export class InteractiveMode {
 					return { cancelled: true };
 				}
 				const result = options?.withSession
-					? await this.getLocalSessionHost().switchSession(sessionPath, {
+					? await this.withActivityTransition(() => this.getLocalSessionHost().switchSession(sessionPath, {
 							cwdOverride: selectedCwd,
 							withSession: options.withSession,
-						})
-					: await this.agentConnection.switchSession(sessionPath, { cwdOverride: selectedCwd });
+						}))
+					: await this.withActivityTransition(() => this.agentConnection.switchSession(sessionPath, { cwdOverride: selectedCwd }));
 				if (result.cancelled) {
 					return result;
 				}
@@ -9852,6 +9927,31 @@ export class InteractiveMode {
 		}
 	}
 
+	private showShellActivity(): void {
+		if (this.shellActivityHandle) {
+			this.shellActivityHandle.focus();
+			return;
+		}
+		const panel = new ShellActivityPanel({
+			getTasks: () => this.shellActivity.status === "ready" ? this.shellActivity.items : [],
+			getRows: () => this.ui.terminal.rows,
+			getError: () => this.shellActivity.status === "error" ? this.shellActivity.message : undefined,
+			getState: () => this.shellActivity.status,
+			onClose: () => this.closeShellActivity(),
+			requestRender: () => this.ui.requestRender(),
+		});
+		this.shellActivityHandle = this.showFullPaneOverlay(panel, {
+			fullWidth: true,
+			suspendFullscreenMouse: true,
+		});
+	}
+
+	private closeShellActivity(): void {
+		this.shellActivityHandle?.hide();
+		this.shellActivityHandle = undefined;
+		this.ui.requestRender();
+	}
+
 	private async showHeartbeatManager(): Promise<void> {
 		if (this.heartbeatManagerHandle) {
 			this.heartbeatManagerHandle.focus();
@@ -9946,6 +10046,7 @@ export class InteractiveMode {
 		if (updated.source === "heartbeat" && updated.activeSessionId === this.connectionState?.activeSessionId) {
 			this.patchConnectionState({ heartbeat: action === "stop" ? null : updated });
 		}
+		this.heartbeatMutationRevision += 1;
 		const remaining = this.heartbeatCatalog.filter((entry) => entry.job.id !== updated.id);
 		this.applyHeartbeatCatalog(
 			updated.status === "active" || updated.status === "paused"
@@ -10179,7 +10280,7 @@ ${interrupt ? `| \`${interrupt}\` | Interrupt current operation |\n` : ""}${shor
 		};
 		let created = false;
 		try {
-			const result = await this.agentConnection.newSession();
+			const result = await this.withActivityTransition(() => this.agentConnection.newSession());
 			if (result.cancelled) {
 				restorePrompt();
 				return;
@@ -10268,6 +10369,8 @@ ${interrupt ? `| \`${interrupt}\` | Interrupt current operation |\n` : ""}${shor
 	}
 
 	stop(options: { preserveAltScreen?: boolean } = {}): void {
+		this.activityStopped = true;
+		this.activityMonitor.stop();
 		this.closeConfigurationMenu?.();
 		this.unregisterSignalHandlers();
 		this.clearCtrlCExitHint({ render: false });
@@ -10280,6 +10383,7 @@ ${interrupt ? `| \`${interrupt}\` | Interrupt current operation |\n` : ""}${shor
 		this.stopWorkingPulse();
 		this.stopGoalTrayTimer();
 		this.closeHeartbeatManager();
+		this.closeShellActivity();
 		this.clearExtensionTerminalInputListeners();
 		this.footer.dispose();
 		this.footerDataProvider.dispose();

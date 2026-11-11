@@ -1,3 +1,6 @@
+#[path = "host_bash_activity.rs"]
+mod host_bash_activity;
+
 use std::collections::HashMap;
 use std::collections::HashSet;
 use std::collections::VecDeque;
@@ -898,6 +901,20 @@ impl ServerRuntime {
                     );
                 }
             };
+        if let Some(handle_id) = params
+            .item_id
+            .as_str()
+            .strip_prefix(host_bash_activity::PREFIX)
+            && let Some(snapshot) = devo_core::tools::host_bash::activity_snapshot(handle_id)
+        {
+            return success_response(
+                request_id,
+                devo_protocol::native::rpc_turn::TaskReadResult {
+                    item: host_bash_activity::item(&snapshot),
+                    output_tail: (!snapshot.output.is_empty()).then_some(snapshot.output),
+                },
+            );
+        }
         if let Some((parent_session_id, child_session_id)) =
             self.agent_item_target(params.item_id.as_str()).await
         {
@@ -983,6 +1000,11 @@ impl ServerRuntime {
             .task_snapshots_for_session(legacy_session_id)
             .await;
         tasks.extend(snapshots.iter().map(background_task_item_from_snapshot));
+        tasks.extend(
+            devo_core::tools::host_bash::session_activities(legacy_session_id.as_str())
+                .iter()
+                .map(host_bash_activity::item),
+        );
         success_response(
             request_id,
             devo_protocol::native::rpc_turn::TaskListResult { tasks },

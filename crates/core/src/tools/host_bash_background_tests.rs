@@ -135,6 +135,31 @@ async fn success_and_failure_publish_retained_terminal_snapshot() {
             WorkEvent::Completed(session_id, work_id, retained.clone())
         );
         assert_eq!(retained["result"]["running"], false);
+        // Native task/list observations survive Python's automatic forget.
+        let observed = super::session_activities(session_id.as_str());
+        assert_eq!(observed.len(), 1);
+        let snapshot = observed[0].clone();
+        assert_eq!(snapshot.command, command);
+        assert!(!snapshot.running);
+        assert_eq!(
+            snapshot.output,
+            retained["result"]["output"].as_str().unwrap()
+        );
+        assert_eq!(snapshot.exit_code, retained["result"]["exit_code"].as_i64());
+        assert_eq!(super::session_activities(SessionId::new().as_str()), vec![]);
+        assert_eq!(
+            control(
+                session_id.as_str(),
+                "bash.forget",
+                &json!({"handle_id": id})
+            ),
+            json!({"status":"ok","result":{"forgotten":true}})
+        );
+        assert_eq!(
+            super::session_activities(session_id.as_str()),
+            vec![snapshot.clone()]
+        );
+        assert_eq!(super::activity_snapshot(id), Some(snapshot));
         assert!(matches!(
             events.try_recv(),
             Err(mpsc::error::TryRecvError::Empty | mpsc::error::TryRecvError::Disconnected)
