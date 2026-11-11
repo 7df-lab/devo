@@ -117,6 +117,30 @@ export function nativeItemToAgentMessages(envelope: unknown): AgentMessageLike[]
   const type = item.type;
   const ts = createdAtMs(envelope);
 
+  if (type === "contextCompaction") {
+    const state = String((envelope as Record<string, unknown>).state ?? "completed");
+    // In-flight/failed items are not successful summaries. Their live status
+    // remains owned by compaction_start/end, rather than a false success card.
+    if (state !== "completed" || /^Compaction failed:/.test(String(item.summary ?? ""))) return [];
+    const usage = (value: unknown): number | undefined => {
+      if (!value || typeof value !== "object") return undefined;
+      const record = value as Record<string, unknown>;
+      const tokens = record.totalTokens;
+      return record.measured === true && typeof tokens === "number" && Number.isSafeInteger(tokens) && tokens >= 0
+        ? tokens : undefined;
+    };
+    const before = usage(item.before);
+    return [{
+      role: "compactionSummary",
+      summary: String(item.summary ?? "").replace(/^\s*<compaction_summary>\s*([\s\S]*?)\s*<\/compaction_summary>\s*$/, "$1"),
+      tokensBefore: before ?? 0,
+      tokensBeforeMeasured: before !== undefined,
+      tokensAfter: usage(item.after),
+      transcriptOrder: "native",
+      timestamp: ts,
+    }];
+  }
+
   if (type === "userMessage") {
     const parts = Array.isArray(item.content) ? item.content : [];
     const content: Array<Record<string, unknown>> = [];
