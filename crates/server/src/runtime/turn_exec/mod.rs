@@ -163,7 +163,6 @@ pub(crate) fn spawn_post_turn_scheduling(
             let _ = runtime
                 .drain_child_mailbox_into_user_turns(session_id)
                 .await;
-            return;
         }
         // Async completion follow-ups never overtake queued user input.
         runtime

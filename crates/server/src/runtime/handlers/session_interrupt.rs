@@ -93,6 +93,7 @@ impl ServerRuntime {
                 )
             })?;
             let _guard = handle.lock_state_change().await;
+            self.suspend_background_input(session_id);
             (
                 self.cancel_background_goal_wait(session_id),
                 self.runtime_active_turn_id(session_id).await,

@@ -6789,6 +6789,14 @@
             "queueItemId"
           ],
           "properties": {
+            "delivery": {
+              "default": "followUp",
+              "allOf": [
+                {
+                  "$ref": "#/definitions/HostMessageDelivery"
+                }
+              ]
+            },
             "enqueuedAt": {
               "type": "string",
               "format": "date-time"
@@ -11705,6 +11713,14 @@
             "queueItemId"
           ],
           "properties": {
+            "delivery": {
+              "default": "followUp",
+              "allOf": [
+                {
+                  "$ref": "#/definitions/HostMessageDelivery"
+                }
+              ]
+            },
             "enqueuedAt": {
               "type": "string",
               "format": "date-time"
@@ -16384,6 +16400,14 @@
             "queueItemId"
           ],
           "properties": {
+            "delivery": {
+              "default": "followUp",
+              "allOf": [
+                {
+                  "$ref": "#/definitions/HostMessageDelivery"
+                }
+              ]
+            },
             "enqueuedAt": {
               "type": "string",
               "format": "date-time"
@@ -20164,6 +20188,14 @@
             "queueItemId"
           ],
           "properties": {
+            "delivery": {
+              "default": "followUp",
+              "allOf": [
+                {
+                  "$ref": "#/definitions/HostMessageDelivery"
+                }
+              ]
+            },
             "enqueuedAt": {
               "type": "string",
               "format": "date-time"
@@ -23376,6 +23408,14 @@
             "queueItemId"
           ],
           "properties": {
+            "delivery": {
+              "default": "followUp",
+              "allOf": [
+                {
+                  "$ref": "#/definitions/HostMessageDelivery"
+                }
+              ]
+            },
             "enqueuedAt": {
               "type": "string",
               "format": "date-time"
@@ -26851,6 +26891,14 @@
             "queueItemId"
           ],
           "properties": {
+            "delivery": {
+              "default": "followUp",
+              "allOf": [
+                {
+                  "$ref": "#/definitions/HostMessageDelivery"
+                }
+              ]
+            },
             "enqueuedAt": {
               "type": "string",
               "format": "date-time"
@@ -30049,6 +30097,14 @@
             "queueItemId"
           ],
           "properties": {
+            "delivery": {
+              "default": "followUp",
+              "allOf": [
+                {
+                  "$ref": "#/definitions/HostMessageDelivery"
+                }
+              ]
+            },
             "enqueuedAt": {
               "type": "string",
               "format": "date-time"
@@ -33251,6 +33307,14 @@
             "queueItemId"
           ],
           "properties": {
+            "delivery": {
+              "default": "followUp",
+              "allOf": [
+                {
+                  "$ref": "#/definitions/HostMessageDelivery"
+                }
+              ]
+            },
             "enqueuedAt": {
               "type": "string",
               "format": "date-time"
@@ -36547,6 +36611,14 @@
             "queueItemId"
           ],
           "properties": {
+            "delivery": {
+              "default": "followUp",
+              "allOf": [
+                {
+                  "$ref": "#/definitions/HostMessageDelivery"
+                }
+              ]
+            },
             "enqueuedAt": {
               "type": "string",
               "format": "date-time"
@@ -39749,6 +39821,14 @@
             "queueItemId"
           ],
           "properties": {
+            "delivery": {
+              "default": "followUp",
+              "allOf": [
+                {
+                  "$ref": "#/definitions/HostMessageDelivery"
+                }
+              ]
+            },
             "enqueuedAt": {
               "type": "string",
               "format": "date-time"
@@ -43158,6 +43238,14 @@
             "queueItemId"
           ],
           "properties": {
+            "delivery": {
+              "default": "followUp",
+              "allOf": [
+                {
+                  "$ref": "#/definitions/HostMessageDelivery"
+                }
+              ]
+            },
             "enqueuedAt": {
               "type": "string",
               "format": "date-time"
@@ -47712,6 +47800,14 @@
             "queueItemId"
           ],
           "properties": {
+            "delivery": {
+              "default": "followUp",
+              "allOf": [
+                {
+                  "$ref": "#/definitions/HostMessageDelivery"
+                }
+              ]
+            },
             "enqueuedAt": {
               "type": "string",
               "format": "date-time"
@@ -50898,6 +50994,14 @@
             "queueItemId"
           ],
           "properties": {
+            "delivery": {
+              "default": "followUp",
+              "allOf": [
+                {
+                  "$ref": "#/definitions/HostMessageDelivery"
+                }
+              ]
+            },
             "enqueuedAt": {
               "type": "string",
               "format": "date-time"
@@ -54092,6 +54196,14 @@
             "queueItemId"
           ],
           "properties": {
+            "delivery": {
+              "default": "followUp",
+              "allOf": [
+                {
+                  "$ref": "#/definitions/HostMessageDelivery"
+                }
+              ]
+            },
             "enqueuedAt": {
               "type": "string",
               "format": "date-time"
@@ -57278,6 +57390,14 @@
             "queueItemId"
           ],
           "properties": {
+            "delivery": {
+              "default": "followUp",
+              "allOf": [
+                {
+                  "$ref": "#/definitions/HostMessageDelivery"
+                }
+              ]
+            },
             "enqueuedAt": {
               "type": "string",
               "format": "date-time"
@@ -60464,6 +60584,14 @@
             "queueItemId"
           ],
           "properties": {
+            "delivery": {
+              "default": "followUp",
+              "allOf": [
+                {
+                  "$ref": "#/definitions/HostMessageDelivery"
+                }
+              ]
+            },
             "enqueuedAt": {
               "type": "string",
               "format": "date-time"
@@ -63658,6 +63786,14 @@
             "queueItemId"
           ],
           "properties": {
+            "delivery": {
+              "default": "followUp",
+              "allOf": [
+                {
+                  "$ref": "#/definitions/HostMessageDelivery"
+                }
+              ]
+            },
             "enqueuedAt": {
               "type": "string",
               "format": "date-time"
@@ -66844,6 +66980,14 @@
             "queueItemId"
           ],
           "properties": {
+            "delivery": {
+              "default": "followUp",
+              "allOf": [
+                {
+                  "$ref": "#/definitions/HostMessageDelivery"
+                }
+              ]
+            },
             "enqueuedAt": {
               "type": "string",
               "format": "date-time"
@@ -70045,6 +70189,14 @@
             "queueItemId"
           ],
           "properties": {
+            "delivery": {
+              "default": "followUp",
+              "allOf": [
+                {
+                  "$ref": "#/definitions/HostMessageDelivery"
+                }
+              ]
+            },
             "enqueuedAt": {
               "type": "string",
               "format": "date-time"
@@ -73239,6 +73391,14 @@
             "queueItemId"
           ],
           "properties": {
+            "delivery": {
+              "default": "followUp",
+              "allOf": [
+                {
+                  "$ref": "#/definitions/HostMessageDelivery"
+                }
+              ]
+            },
             "enqueuedAt": {
               "type": "string",
               "format": "date-time"
@@ -76865,6 +77025,14 @@
             "queueItemId"
           ],
           "properties": {
+            "delivery": {
+              "default": "followUp",
+              "allOf": [
+                {
+                  "$ref": "#/definitions/HostMessageDelivery"
+                }
+              ]
+            },
             "enqueuedAt": {
               "type": "string",
               "format": "date-time"
@@ -80932,6 +81100,14 @@
             "queueItemId"
           ],
           "properties": {
+            "delivery": {
+              "default": "followUp",
+              "allOf": [
+                {
+                  "$ref": "#/definitions/HostMessageDelivery"
+                }
+              ]
+            },
             "enqueuedAt": {
               "type": "string",
               "format": "date-time"
@@ -84175,6 +84351,14 @@
             "queueItemId"
           ],
           "properties": {
+            "delivery": {
+              "default": "followUp",
+              "allOf": [
+                {
+                  "$ref": "#/definitions/HostMessageDelivery"
+                }
+              ]
+            },
             "enqueuedAt": {
               "type": "string",
               "format": "date-time"
@@ -90041,6 +90225,14 @@
             "queueItemId"
           ],
           "properties": {
+            "delivery": {
+              "default": "followUp",
+              "allOf": [
+                {
+                  "$ref": "#/definitions/HostMessageDelivery"
+                }
+              ]
+            },
             "enqueuedAt": {
               "type": "string",
               "format": "date-time"
@@ -93241,6 +93433,14 @@
             "queueItemId"
           ],
           "properties": {
+            "delivery": {
+              "default": "followUp",
+              "allOf": [
+                {
+                  "$ref": "#/definitions/HostMessageDelivery"
+                }
+              ]
+            },
             "enqueuedAt": {
               "type": "string",
               "format": "date-time"
@@ -97636,6 +97836,12 @@
         "queueItemId": {
           "$ref": "#/definitions/QueueItemId"
         },
+        "revision": {
+          "default": 0,
+          "type": "integer",
+          "format": "uint64",
+          "minimum": 0.0
+        },
         "sessionId": {
           "$ref": "#/definitions/SessionId"
         },
@@ -99313,6 +99519,14 @@
             "queueItemId"
           ],
           "properties": {
+            "delivery": {
+              "default": "followUp",
+              "allOf": [
+                {
+                  "$ref": "#/definitions/HostMessageDelivery"
+                }
+              ]
+            },
             "enqueuedAt": {
               "type": "string",
               "format": "date-time"
@@ -102564,6 +102778,14 @@
             "queueItemId"
           ],
           "properties": {
+            "delivery": {
+              "default": "followUp",
+              "allOf": [
+                {
+                  "$ref": "#/definitions/HostMessageDelivery"
+                }
+              ]
+            },
             "enqueuedAt": {
               "type": "string",
               "format": "date-time"
@@ -105766,6 +105988,14 @@
             "queueItemId"
           ],
           "properties": {
+            "delivery": {
+              "default": "followUp",
+              "allOf": [
+                {
+                  "$ref": "#/definitions/HostMessageDelivery"
+                }
+              ]
+            },
             "enqueuedAt": {
               "type": "string",
               "format": "date-time"
@@ -108971,6 +109201,14 @@
             "queueItemId"
           ],
           "properties": {
+            "delivery": {
+              "default": "followUp",
+              "allOf": [
+                {
+                  "$ref": "#/definitions/HostMessageDelivery"
+                }
+              ]
+            },
             "enqueuedAt": {
               "type": "string",
               "format": "date-time"
@@ -112157,6 +112395,14 @@
             "queueItemId"
           ],
           "properties": {
+            "delivery": {
+              "default": "followUp",
+              "allOf": [
+                {
+                  "$ref": "#/definitions/HostMessageDelivery"
+                }
+              ]
+            },
             "enqueuedAt": {
               "type": "string",
               "format": "date-time"
@@ -115831,6 +116077,14 @@
             "queueItemId"
           ],
           "properties": {
+            "delivery": {
+              "default": "followUp",
+              "allOf": [
+                {
+                  "$ref": "#/definitions/HostMessageDelivery"
+                }
+              ]
+            },
             "enqueuedAt": {
               "type": "string",
               "format": "date-time"
@@ -119029,6 +119283,14 @@
             "queueItemId"
           ],
           "properties": {
+            "delivery": {
+              "default": "followUp",
+              "allOf": [
+                {
+                  "$ref": "#/definitions/HostMessageDelivery"
+                }
+              ]
+            },
             "enqueuedAt": {
               "type": "string",
               "format": "date-time"
@@ -122237,6 +122499,14 @@
             "queueItemId"
           ],
           "properties": {
+            "delivery": {
+              "default": "followUp",
+              "allOf": [
+                {
+                  "$ref": "#/definitions/HostMessageDelivery"
+                }
+              ]
+            },
             "enqueuedAt": {
               "type": "string",
               "format": "date-time"
@@ -126242,6 +126512,14 @@
             "queueItemId"
           ],
           "properties": {
+            "delivery": {
+              "default": "followUp",
+              "allOf": [
+                {
+                  "$ref": "#/definitions/HostMessageDelivery"
+                }
+              ]
+            },
             "enqueuedAt": {
               "type": "string",
               "format": "date-time"
@@ -129436,6 +129714,14 @@
             "queueItemId"
           ],
           "properties": {
+            "delivery": {
+              "default": "followUp",
+              "allOf": [
+                {
+                  "$ref": "#/definitions/HostMessageDelivery"
+                }
+              ]
+            },
             "enqueuedAt": {
               "type": "string",
               "format": "date-time"
@@ -132648,6 +132934,14 @@
             "queueItemId"
           ],
           "properties": {
+            "delivery": {
+              "default": "followUp",
+              "allOf": [
+                {
+                  "$ref": "#/definitions/HostMessageDelivery"
+                }
+              ]
+            },
             "enqueuedAt": {
               "type": "string",
               "format": "date-time"
@@ -136654,6 +136948,14 @@
             "queueItemId"
           ],
           "properties": {
+            "delivery": {
+              "default": "followUp",
+              "allOf": [
+                {
+                  "$ref": "#/definitions/HostMessageDelivery"
+                }
+              ]
+            },
             "enqueuedAt": {
               "type": "string",
               "format": "date-time"
@@ -139877,6 +140179,14 @@
             "queueItemId"
           ],
           "properties": {
+            "delivery": {
+              "default": "followUp",
+              "allOf": [
+                {
+                  "$ref": "#/definitions/HostMessageDelivery"
+                }
+              ]
+            },
             "enqueuedAt": {
               "type": "string",
               "format": "date-time"
@@ -143996,6 +144306,14 @@
             "queueItemId"
           ],
           "properties": {
+            "delivery": {
+              "default": "followUp",
+              "allOf": [
+                {
+                  "$ref": "#/definitions/HostMessageDelivery"
+                }
+              ]
+            },
             "enqueuedAt": {
               "type": "string",
               "format": "date-time"
@@ -147190,6 +147508,14 @@
             "queueItemId"
           ],
           "properties": {
+            "delivery": {
+              "default": "followUp",
+              "allOf": [
+                {
+                  "$ref": "#/definitions/HostMessageDelivery"
+                }
+              ]
+            },
             "enqueuedAt": {
               "type": "string",
               "format": "date-time"
@@ -150649,6 +150975,14 @@
             "queueItemId"
           ],
           "properties": {
+            "delivery": {
+              "default": "followUp",
+              "allOf": [
+                {
+                  "$ref": "#/definitions/HostMessageDelivery"
+                }
+              ]
+            },
             "enqueuedAt": {
               "type": "string",
               "format": "date-time"
@@ -154154,6 +154488,14 @@
             "queueItemId"
           ],
           "properties": {
+            "delivery": {
+              "default": "followUp",
+              "allOf": [
+                {
+                  "$ref": "#/definitions/HostMessageDelivery"
+                }
+              ]
+            },
             "enqueuedAt": {
               "type": "string",
               "format": "date-time"
@@ -160561,6 +160903,14 @@
             "queueItemId"
           ],
           "properties": {
+            "delivery": {
+              "default": "followUp",
+              "allOf": [
+                {
+                  "$ref": "#/definitions/HostMessageDelivery"
+                }
+              ]
+            },
             "enqueuedAt": {
               "type": "string",
               "format": "date-time"
@@ -162914,6 +163264,12 @@
           "items": {
             "$ref": "#/definitions/QueueEntry"
           }
+        },
+        "revision": {
+          "default": 0,
+          "type": "integer",
+          "format": "uint64",
+          "minimum": 0.0
         }
       },
       "definitions": {
@@ -162981,6 +163337,14 @@
             "queueItemId"
           ],
           "properties": {
+            "delivery": {
+              "default": "followUp",
+              "allOf": [
+                {
+                  "$ref": "#/definitions/HostMessageDelivery"
+                }
+              ]
+            },
             "enqueuedAt": {
               "type": "string",
               "format": "date-time"
@@ -163370,6 +163734,34 @@
           "type": "object",
           "required": [
             "outcome",
+            "queue_item_id"
+          ],
+          "properties": {
+            "outcome": {
+              "type": "string",
+              "enum": [
+                "alreadyAccepted"
+              ]
+            },
+            "queue_item_id": {
+              "$ref": "#/definitions/QueueItemId"
+            },
+            "turn_id": {
+              "anyOf": [
+                {
+                  "$ref": "#/definitions/TurnId"
+                },
+                {
+                  "type": "null"
+                }
+              ]
+            }
+          }
+        },
+        {
+          "type": "object",
+          "required": [
+            "outcome",
             "turn"
           ],
           "properties": {
@@ -163591,6 +163983,14 @@
             "queueItemId"
           ],
           "properties": {
+            "delivery": {
+              "default": "followUp",
+              "allOf": [
+                {
+                  "$ref": "#/definitions/HostMessageDelivery"
+                }
+              ]
+            },
             "enqueuedAt": {
               "type": "string",
               "format": "date-time"
@@ -164103,7 +164503,7 @@
     "SessionQueueSteerParams": {
       "$schema": "http://json-schema.org/draft-07/schema#",
       "title": "SessionQueueSteerParams",
-      "description": "Transfer an existing queue identity, never a reconstructed display preview. Retries return the durable admission receipt for the same session and item.",
+      "description": "Legacy promotion request retained for wire compatibility. Strict FIFO servers reject it: delivery mode is fixed at admission.",
       "type": "object",
       "required": [
         "expectedTurnId",
@@ -164136,7 +164536,7 @@
     "SessionQueueSteerResult": {
       "$schema": "http://json-schema.org/draft-07/schema#",
       "title": "SessionQueueSteerResult",
-      "description": "Admission does not prove consumption or exactly-once external effects.",
+      "description": "Legacy promotion outcomes; current strict FIFO servers return InvalidParams.",
       "oneOf": [
         {
           "type": "object",
@@ -164244,6 +164644,14 @@
             "queueItemId"
           ],
           "properties": {
+            "delivery": {
+              "default": "followUp",
+              "allOf": [
+                {
+                  "$ref": "#/definitions/HostMessageDelivery"
+                }
+              ]
+            },
             "enqueuedAt": {
               "type": "string",
               "format": "date-time"
@@ -164712,6 +165120,14 @@
             "queueItemId"
           ],
           "properties": {
+            "delivery": {
+              "default": "followUp",
+              "allOf": [
+                {
+                  "$ref": "#/definitions/HostMessageDelivery"
+                }
+              ]
+            },
             "enqueuedAt": {
               "type": "string",
               "format": "date-time"
@@ -168492,6 +168908,14 @@
             "queueItemId"
           ],
           "properties": {
+            "delivery": {
+              "default": "followUp",
+              "allOf": [
+                {
+                  "$ref": "#/definitions/HostMessageDelivery"
+                }
+              ]
+            },
             "enqueuedAt": {
               "type": "string",
               "format": "date-time"
@@ -173147,6 +173571,14 @@
             "queueItemId"
           ],
           "properties": {
+            "delivery": {
+              "default": "followUp",
+              "allOf": [
+                {
+                  "$ref": "#/definitions/HostMessageDelivery"
+                }
+              ]
+            },
             "enqueuedAt": {
               "type": "string",
               "format": "date-time"
@@ -178028,6 +178460,14 @@
             "queueItemId"
           ],
           "properties": {
+            "delivery": {
+              "default": "followUp",
+              "allOf": [
+                {
+                  "$ref": "#/definitions/HostMessageDelivery"
+                }
+              ]
+            },
             "enqueuedAt": {
               "type": "string",
               "format": "date-time"
@@ -182291,6 +182731,14 @@
             "queueItemId"
           ],
           "properties": {
+            "delivery": {
+              "default": "followUp",
+              "allOf": [
+                {
+                  "$ref": "#/definitions/HostMessageDelivery"
+                }
+              ]
+            },
             "enqueuedAt": {
               "type": "string",
               "format": "date-time"
@@ -183519,6 +183967,12 @@
                     },
                     "queueItemId": {
                       "$ref": "#/definitions/QueueItemId"
+                    },
+                    "revision": {
+                      "default": 0,
+                      "type": "integer",
+                      "format": "uint64",
+                      "minimum": 0.0
                     },
                     "sessionId": {
                       "$ref": "#/definitions/SessionId"
@@ -187687,6 +188141,14 @@
             "queueItemId"
           ],
           "properties": {
+            "delivery": {
+              "default": "followUp",
+              "allOf": [
+                {
+                  "$ref": "#/definitions/HostMessageDelivery"
+                }
+              ]
+            },
             "enqueuedAt": {
               "type": "string",
               "format": "date-time"
@@ -190891,6 +191353,14 @@
             "queueItemId"
           ],
           "properties": {
+            "delivery": {
+              "default": "followUp",
+              "allOf": [
+                {
+                  "$ref": "#/definitions/HostMessageDelivery"
+                }
+              ]
+            },
             "enqueuedAt": {
               "type": "string",
               "format": "date-time"
@@ -195721,6 +196191,14 @@
             "queueItemId"
           ],
           "properties": {
+            "delivery": {
+              "default": "followUp",
+              "allOf": [
+                {
+                  "$ref": "#/definitions/HostMessageDelivery"
+                }
+              ]
+            },
             "enqueuedAt": {
               "type": "string",
               "format": "date-time"
@@ -200717,6 +201195,14 @@
             "queueItemId"
           ],
           "properties": {
+            "delivery": {
+              "default": "followUp",
+              "allOf": [
+                {
+                  "$ref": "#/definitions/HostMessageDelivery"
+                }
+              ]
+            },
             "enqueuedAt": {
               "type": "string",
               "format": "date-time"
@@ -203962,6 +204448,14 @@
             "queueItemId"
           ],
           "properties": {
+            "delivery": {
+              "default": "followUp",
+              "allOf": [
+                {
+                  "$ref": "#/definitions/HostMessageDelivery"
+                }
+              ]
+            },
             "enqueuedAt": {
               "type": "string",
               "format": "date-time"
@@ -207231,6 +207725,14 @@
             "queueItemId"
           ],
           "properties": {
+            "delivery": {
+              "default": "followUp",
+              "allOf": [
+                {
+                  "$ref": "#/definitions/HostMessageDelivery"
+                }
+              ]
+            },
             "enqueuedAt": {
               "type": "string",
               "format": "date-time"
@@ -210958,6 +211460,14 @@
             "queueItemId"
           ],
           "properties": {
+            "delivery": {
+              "default": "followUp",
+              "allOf": [
+                {
+                  "$ref": "#/definitions/HostMessageDelivery"
+                }
+              ]
+            },
             "enqueuedAt": {
               "type": "string",
               "format": "date-time"
@@ -214594,6 +215104,14 @@
             "queueItemId"
           ],
           "properties": {
+            "delivery": {
+              "default": "followUp",
+              "allOf": [
+                {
+                  "$ref": "#/definitions/HostMessageDelivery"
+                }
+              ]
+            },
             "enqueuedAt": {
               "type": "string",
               "format": "date-time"
@@ -218374,6 +218892,14 @@
             "queueItemId"
           ],
           "properties": {
+            "delivery": {
+              "default": "followUp",
+              "allOf": [
+                {
+                  "$ref": "#/definitions/HostMessageDelivery"
+                }
+              ]
+            },
             "enqueuedAt": {
               "type": "string",
               "format": "date-time"
@@ -221572,6 +222098,14 @@
             "queueItemId"
           ],
           "properties": {
+            "delivery": {
+              "default": "followUp",
+              "allOf": [
+                {
+                  "$ref": "#/definitions/HostMessageDelivery"
+                }
+              ]
+            },
             "enqueuedAt": {
               "type": "string",
               "format": "date-time"
@@ -223094,7 +223628,7 @@
     "TurnSteerParams": {
       "$schema": "http://json-schema.org/draft-07/schema#",
       "title": "TurnSteerParams",
-      "description": "Injects input into the running main turn: the item is persisted immediately (`entry = steer`) and takes effect at the next injection boundary. If the turn ended before injection, the input degrades back into the queue (message is never lost) — the result says which happened. This is distinct from the TUI `/btw` side question, which does not modify the main turn.",
+      "description": "Admits steer input to the session FIFO. The eligible head prefix takes effect at the next model-request boundary; a preceding follow-up blocks it until a later turn. Admission is not proof of model consumption. This is distinct from the TUI `/btw` side question, which does not modify the main turn.",
       "type": "object",
       "required": [
         "expectedTurnId",
@@ -223300,6 +223834,34 @@
         {
           "type": "object",
           "required": [
+            "outcome",
+            "queue_item_id"
+          ],
+          "properties": {
+            "outcome": {
+              "type": "string",
+              "enum": [
+                "alreadyAccepted"
+              ]
+            },
+            "queue_item_id": {
+              "$ref": "#/definitions/QueueItemId"
+            },
+            "turn_id": {
+              "anyOf": [
+                {
+                  "$ref": "#/definitions/TurnId"
+                },
+                {
+                  "type": "null"
+                }
+              ]
+            }
+          }
+        },
+        {
+          "type": "object",
+          "required": [
             "itemId",
             "outcome"
           ],
@@ -223316,7 +223878,7 @@
           }
         },
         {
-          "description": "Turn ended before the injection boundary; input was queued instead.",
+          "description": "Accepted into the FIFO, pending a safe boundary. The legacy outcome name is retained; entry.delivery still identifies steer versus follow-up.",
           "type": "object",
           "required": [
             "entry",
@@ -223403,6 +223965,14 @@
             "queueItemId"
           ],
           "properties": {
+            "delivery": {
+              "default": "followUp",
+              "allOf": [
+                {
+                  "$ref": "#/definitions/HostMessageDelivery"
+                }
+              ]
+            },
             "enqueuedAt": {
               "type": "string",
               "format": "date-time"
@@ -223444,6 +224014,9 @@
           }
         },
         "QueueItemId": {
+          "type": "string"
+        },
+        "TurnId": {
           "type": "string"
         },
         "UserInput": {
@@ -225285,6 +225858,14 @@
             "queueItemId"
           ],
           "properties": {
+            "delivery": {
+              "default": "followUp",
+              "allOf": [
+                {
+                  "$ref": "#/definitions/HostMessageDelivery"
+                }
+              ]
+            },
             "enqueuedAt": {
               "type": "string",
               "format": "date-time"
@@ -228511,6 +229092,14 @@
             "queueItemId"
           ],
           "properties": {
+            "delivery": {
+              "default": "followUp",
+              "allOf": [
+                {
+                  "$ref": "#/definitions/HostMessageDelivery"
+                }
+              ]
+            },
             "enqueuedAt": {
               "type": "string",
               "format": "date-time"
@@ -232389,6 +232978,14 @@
             "queueItemId"
           ],
           "properties": {
+            "delivery": {
+              "default": "followUp",
+              "allOf": [
+                {
+                  "$ref": "#/definitions/HostMessageDelivery"
+                }
+              ]
+            },
             "enqueuedAt": {
               "type": "string",
               "format": "date-time"
@@ -235601,6 +236198,14 @@
             "queueItemId"
           ],
           "properties": {
+            "delivery": {
+              "default": "followUp",
+              "allOf": [
+                {
+                  "$ref": "#/definitions/HostMessageDelivery"
+                }
+              ]
+            },
             "enqueuedAt": {
               "type": "string",
               "format": "date-time"
@@ -238799,6 +239404,14 @@
             "queueItemId"
           ],
           "properties": {
+            "delivery": {
+              "default": "followUp",
+              "allOf": [
+                {
+                  "$ref": "#/definitions/HostMessageDelivery"
+                }
+              ]
+            },
             "enqueuedAt": {
               "type": "string",
               "format": "date-time"

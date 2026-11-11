@@ -557,7 +557,8 @@ async fn steering_during_final_response_stays_in_the_active_turn() -> Result<()>
         .await
         .context("turn/steer response")?;
     assert!(steered.get("error").is_none(), "{steered}");
-    assert_eq!(steered["result"]["outcome"], json!("injected"));
+    assert_eq!(steered["result"]["outcome"], json!("degradedToQueue"));
+    assert_eq!(steered["result"]["entry"]["delivery"], json!("steer"));
     // The blocked model stream must not hold up the control plane.
     for (id, method, params) in [
         (7, "runtime/ping", json!({})),
@@ -622,7 +623,7 @@ async fn steering_during_final_response_stays_in_the_active_turn() -> Result<()>
             .iter()
             .filter_map(queue_updated_change)
             .collect::<Vec<_>>(),
-        Vec::<&str>::new(),
+        vec!["added", "drained"],
     );
     let requests = provider
         .stream_requests

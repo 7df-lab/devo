@@ -75,6 +75,15 @@ impl ServerRuntime {
             return false;
         }
         let (queued, turn, turn_config) = loop {
+            if self.hold_ineligible_inbox_head(session_id).await {
+                return false;
+            }
+            match self.consume_goal_inbox_head(session_id).await {
+                Ok(Some(true)) => return true,
+                Ok(Some(false)) => continue,
+                Ok(None) => {}
+                Err(()) => return false,
+            }
             let Some(queued) = self
                 .pop_next_queued_turn_input(
                     session_id,
@@ -89,14 +98,21 @@ impl ServerRuntime {
             {
                 break (queued, turn, config);
             }
-            // A rejected binding settles this input, not the remaining queue.
+            // A known invalid binding is rejected before any execution; continue.
         };
         if let Some((parent_session_id, parent_turn_id)) = queued.subagent_usage_owner {
             self.register_subagent_usage_owner(parent_session_id, session_id, parent_turn_id)
                 .await;
         }
-        self.activate_queued_turn(session_id, &turn, &turn_config, &queued.display_input)
-            .await;
+        if let Err(error) = self
+            .activate_queued_turn(session_id, &turn, &turn_config, &queued.display_input)
+            .await
+        {
+            tracing::error!(%session_id, %error, "failed to persist queued turn start");
+            self.restore_claimed_inbox_head_locked(session_id, queued.original, turn.turn_id())
+                .await;
+            return false;
+        }
         if let Some((parent_session_id, _)) = self.child_parent_and_path(session_id).await {
             self.complete_background_work(
                 parent_session_id,
@@ -169,6 +185,15 @@ impl ServerRuntime {
             .map(|snapshot| snapshot.pending_count)
             .unwrap_or_default();
         let (queued, turn, turn_config) = loop {
+            if self.hold_ineligible_inbox_head(session_id).await {
+                return false;
+            }
+            match self.consume_goal_inbox_head(session_id).await {
+                Ok(Some(true)) => return true,
+                Ok(Some(false)) => continue,
+                Ok(None) => {}
+                Err(()) => return false,
+            }
             let Some(queued) = self
                 .pop_next_queued_turn_input(session_id, /*require_idle_session*/ false)
                 .await
@@ -189,8 +214,15 @@ impl ServerRuntime {
             self.register_subagent_usage_owner(parent_session_id, session_id, parent_turn_id)
                 .await;
         }
-        self.activate_queued_turn(session_id, &turn, &turn_config, &queued.display_input)
-            .await;
+        if let Err(error) = self
+            .activate_queued_turn(session_id, &turn, &turn_config, &queued.display_input)
+            .await
+        {
+            tracing::error!(%session_id, %error, "failed to persist queued turn start");
+            self.restore_claimed_inbox_head_locked(session_id, queued.original, turn.turn_id())
+                .await;
+            return false;
+        }
         if let Some((parent_session_id, _)) = self.child_parent_and_path(session_id).await {
             self.complete_background_work(
                 parent_session_id,
@@ -245,23 +277,43 @@ impl ServerRuntime {
         require_idle_session: bool,
     ) -> Option<QueuedTurnInput> {
         let session_handle = self.sessions.lock().await.get(&session_id).cloned()?;
+        let reservation = session_handle.turn_reservation_snapshot().await?;
+        if require_idle_session && reservation.active_turn.is_some() {
+            return None;
+        }
+        let claimed_turn_id = TurnId::new();
+        let original = {
+            let queue = reservation
+                .pending_turn_queue
+                .lock()
+                .expect("pending queue mutex poisoned");
+            let item = queue.front()?.clone();
+            if crate::runtime::handlers::queue_steer::requires_queue_review(&item) {
+                return None;
+            }
+            if !reservation.ephemeral {
+                match self
+                    .deps
+                    .db
+                    .claim_queue_steer(&session_id, &item, &claimed_turn_id)
+                {
+                    Ok(true) => {}
+                    Ok(false) => return None,
+                    Err(error) => {
+                        tracing::error!(%session_id, %error, "inbox claim failed");
+                        return None;
+                    }
+                }
+            }
+            item
+        };
         let popped = session_handle
             .pop_queued_turn_input(require_idle_session)
             .await
             .flatten()?;
-        if let Err(error) = self.deps.db.remove_pending_by_id(
-            &session_id,
-            crate::db::QueueType::Turn,
-            &popped.queued_input_id,
-        ) {
-            tracing::warn!(
-                session_id = %session_id,
-                queued_input_id = %popped.queued_input_id,
-                error = %error,
-                "failed to remove dequeued turn input from database"
-            );
-        }
         Some(QueuedTurnInput {
+            claimed_turn_id,
+            original,
             // boundary: pending queue item id is already QueueItemId
             queued_item_id: popped.queued_input_id,
             host_origin: popped.host_origin,
@@ -297,10 +349,15 @@ impl ServerRuntime {
             Err(error) => {
                 let message = format!("Queued child turn could not start: {error}");
                 if let Some(parent) = reservation.summary.parent_session_id() {
-                    self.complete_background_work(
+                    let event_id = format!("agent:{session_id}:queued:{}", queued.queued_item_id);
+                    self.publish_background_completion(
                         parent,
-                        format!("agent:{session_id}:queued:{}", queued.queued_item_id),
-                        message.clone(),
+                        event_id.clone(),
+                        super::super::host_messages::HostMessage::agent(
+                            session_id,
+                            event_id,
+                            message.clone(),
+                        ),
                     );
                     self.set_agent_status(parent, session_id, SubagentStatus::Failed)
                         .await;
@@ -312,6 +369,22 @@ impl ServerRuntime {
                         Some(message),
                     )
                     .await;
+                }
+                if !reservation.ephemeral
+                    && let Err(error) = self.deps.db.remove_pending_by_id(
+                        &session_id,
+                        crate::db::QueueType::Steer,
+                        &queued.queued_item_id,
+                    )
+                {
+                    tracing::error!(%session_id, %error, "failed to settle rejected input");
+                    self.restore_claimed_inbox_head_locked(
+                        session_id,
+                        queued.original.clone(),
+                        queued.claimed_turn_id,
+                    )
+                    .await;
+                    return None;
                 }
                 self.broadcast_queue_updated(
                     session_id,
@@ -332,7 +405,7 @@ impl ServerRuntime {
             .as_ref()
             .map_or(1, |turn| turn.native.sequence + 1);
         let now = Utc::now();
-        let native_turn_id = devo_protocol::native::ids::TurnId::new();
+        let native_turn_id = queued.claimed_turn_id;
         let native_session_id = reservation.summary.native.id;
         let native = devo_protocol::native::turn::Turn {
             id: native_turn_id,
@@ -376,11 +449,18 @@ impl ServerRuntime {
         turn: &crate::turn::RuntimeTurn,
         turn_config: &devo_core::TurnConfig,
         display_input: &str,
-    ) {
+    ) -> anyhow::Result<()> {
         if let Some(session_handle) = self.session(session_id).await {
             session_handle
                 .activate_runtime_queued_turn(turn.clone(), turn_config.clone())
                 .await;
+            if session_handle
+                .turn_persistence_snapshot()
+                .await
+                .is_some_and(|snapshot| snapshot.rollout_path.is_some())
+            {
+                self.persist_turn_line_deduped(session_id, turn).await?;
+            }
             if let Some(spawn) = session_handle.spawn_snapshot().await {
                 self.register_turn_spawn_snapshot(session_id, turn.turn_id(), Arc::new(spawn))
                     .await;
@@ -394,10 +474,16 @@ impl ServerRuntime {
             self.add_active_turn_user_text(session_id, turn.turn_id(), display_input.to_string())
                 .await;
             if let Some((parent, _)) = self.child_parent_and_path(session_id).await {
+                self.active_turns
+                    .copy_connection_from_parent(session_id, parent)
+                    .await;
                 self.set_agent_status(parent, session_id, SubagentStatus::Running)
                     .await;
             }
+        } else {
+            anyhow::bail!("session disappeared before queued turn activation");
         }
+        Ok(())
     }
 }
 

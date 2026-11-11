@@ -78,6 +78,9 @@ import {
   parseQueueWireEntries,
   parseTracesSlash,
   queuePreviewText,
+  queueEditableText,
+  queueSelectionText,
+  queueWireRevision,
   workspacePathsFromChanges,
   type AuthCredentialLike,
   type QueueWireEntry,
@@ -186,7 +189,7 @@ function promptInput(message: string, images?: unknown[]) {
   return [...textInput(message), ...nativeImageUserInputs(images)];
 }
 
-function emptySessionActions() {
+function emptySessionActions(): AgentConnectionState["sessionActions"] {
   return {
     queuedCount: 0,
     steering: [] as string[],
@@ -251,9 +254,12 @@ export class NativeAgentConnection implements AgentConnection {
   private sessionVersion = 0;
   private goal = emptyGoalState();
   private sessionActions = emptySessionActions();
-  private queue: AgentConnectionQueueState = { steering: [], followUp: [] };
-  /** Native queue entries (follow-up lane); steering previews stay local until drained. */
+  private queue: AgentConnectionQueueState = { steering: [], followUp: [], ordered: [] };
+  /** Both delivery modes share the server-owned admission sequence. */
   private queueEntries: QueueWireEntry[] = [];
+  private queueRevision = 0;
+  /** Bound to this transport instance; a reconnect creates a fresh connection. */
+  private queueWireRevisions = new Map<string, number>();
   private steeringMode: "all" | "one-at-a-time" = "all";
   private followUpMode: "all" | "one-at-a-time" = "all";
   private autoCompactionEnabled = true;
@@ -412,6 +418,14 @@ export class NativeAgentConnection implements AgentConnection {
     const p = (params && typeof params === "object" ? params : {}) as Record<string, unknown>;
     const notificationSessionId = nativeNotificationSessionId(params);
     const appliesToActiveSession = !notificationSessionId || notificationSessionId === this.sessionId;
+    if (method === "queue/updated") {
+      const owner = notificationSessionId ?? this.sessionId;
+      const revision = queueWireRevision(p.revision);
+      if (owner && revision !== undefined) {
+        if (revision < (this.queueWireRevisions.get(owner) ?? -1)) return;
+        this.queueWireRevisions.set(owner, revision);
+      }
+    }
     const reportedTotals = method === "turn/usage/updated" ? nativeCumulativeUsage(p.sessionTotals) : undefined;
     const staleUsage = reportedTotals !== undefined &&
       newerCumulativeUsage(this.cumulativeUsage, reportedTotals) === this.cumulativeUsage;
@@ -498,7 +512,7 @@ export class NativeAgentConnection implements AgentConnection {
       this.notifyRoster();
     }
 
-    if (method === "queue/updated" && this.subscriptionReplayDepth === 0) {
+    if (method === "queue/updated" && this.subscriptionReplayDepth === 0 && !Array.isArray(p.queue)) {
       void this.refreshQueueFromServer();
     }
 
@@ -645,14 +659,19 @@ export class NativeAgentConnection implements AgentConnection {
         this.goal = (ev.goal ?? emptyGoalState()) as never;
       }
       if (ev.type === "session_action_update") {
+        this.queueRevision += 1;
+        const wire = params as { queue?: unknown };
+        if (Array.isArray(wire?.queue)) this.queueEntries = parseQueueWireEntries(wire.queue);
         const actions = (ev.actions ?? {}) as {
           steering?: string[];
           followUps?: string[];
           queuedCount?: number;
+          ordered?: AgentConnectionQueueState["ordered"];
         };
         this.queue = {
           steering: [...(actions.steering ?? [])],
           followUp: [...(actions.followUps ?? [])],
+          ordered: actions.ordered,
         };
         this.syncActionsFromQueue();
       }
@@ -1631,75 +1650,68 @@ export class NativeAgentConnection implements AgentConnection {
   }
 
   async getQueue(): Promise<AgentConnectionQueueState> {
-    return { steering: [...this.queue.steering], followUp: [...this.queue.followUp] };
+    return { steering: [...this.queue.steering], followUp: [...this.queue.followUp], ordered: this.queue.ordered?.map((item) => ({ ...item })) };
   }
 
-  /** Reconcile local Follow-up/Steering previews with durable `session/queue/list`. */
-  private async refreshQueueFromServer(sessionId: string | null = this.sessionId): Promise<void> {
-    if (!sessionId || this.disposed) return;
+  /** Reconcile both delivery modes with the authoritative durable queue. */
+  private async refreshQueueFromServer(sessionId: string | null = this.sessionId): Promise<boolean> {
+    if (!sessionId || this.disposed) return false;
+    const queueRevision = this.queueRevision;
     try {
-      const result = (await this.rpc.request("session/queue/list", { sessionId })) as { entries?: unknown[] };
-      if (this.sessionId !== sessionId || this.disposed) return;
+      const result = (await this.rpc.request("session/queue/list", { sessionId })) as { entries?: unknown[]; revision?: unknown };
+      if (this.sessionId !== sessionId || this.disposed) return false;
+      const revision = queueWireRevision(result?.revision);
+      if (revision !== undefined) {
+        if (revision < (this.queueWireRevisions.get(sessionId) ?? -1)) return true;
+        this.queueWireRevisions.set(sessionId, revision);
+      } else if (this.queueRevision !== queueRevision) return true;
+      this.queueRevision += 1;
       const entries = Array.isArray(result?.entries) ? result.entries : [];
       this.queueEntries = parseQueueWireEntries(entries);
-      const followUp = entries
-        .filter((entry) => entry && typeof entry === "object")
-        .map((entry) => queuePreviewText(entry as QueueWireEntry))
-        .filter(Boolean);
-      // Steering is turn-scoped and not listed on the durable queue.
-      this.queue = { steering: [...this.queue.steering], followUp };
+      let blocked = false;
+      const ordered = this.queueEntries.map((entry) => {
+        const delivery = entry.delivery ?? "followUp";
+        const text = queueSelectionText(entry);
+        const preview = queuePreviewText(entry);
+        const item = { id: entry.queueItemId, text, ...(text !== preview ? { preview } : {}), ...(queueEditableText(entry) === undefined ? { editable: false } : {}), delivery, blocked: blocked && delivery === "steer", ...(entry.recoveryRequired ? { recoveryRequired: true } : {}) };
+        blocked ||= delivery === "followUp" || entry.recoveryRequired === true;
+        return item;
+      });
+      this.queue = {
+        steering: ordered.filter((item) => item.delivery === "steer").map((item) => item.text),
+        followUp: ordered.filter((item) => item.delivery === "followUp").map((item) => item.text),
+        ordered,
+      };
       this.syncActionsFromQueue();
       this.emitSessionEvent({
         type: "session_action_update",
         actions: this.buildState().sessionActions,
       });
+      return true;
     } catch {
-      // Best-effort; keep last known local preview.
+      // Preserve the last known snapshot; callers requiring confirmation see failure.
+      return false;
     }
   }
   async mutateQueuedMessage(
     lane: "steering" | "followUp",
     index: number,
     expectedText: string,
-    mutation: { type: "delete" } | { type: "move"; direction: -1 | 1 } | { type: "replace"; text: string; images?: unknown[]; lane: "steering" | "followUp" },
+    mutation: ({ type: "delete" } | { type: "move"; direction: -1 | 1 } | { type: "replace"; text: string; images?: unknown[]; lane: "steering" | "followUp" }) & { queueItemId?: string },
   ) {
-    if (lane === "steering") {
-      // Steering previews are local until the server drains them; mutate locally.
-      if (this.queue.steering[index] !== expectedText) return "rejected" as const;
-      if (mutation.type === "delete") {
-        this.queue.steering.splice(index, 1);
-        this.syncActionsFromQueue();
-        return "applied" as const;
-      }
-      if (mutation.type === "move") {
-        const swap = index + mutation.direction;
-        if (swap < 0 || swap >= this.queue.steering.length) return "invalid" as const;
-        const tmp = this.queue.steering[index]!;
-        this.queue.steering[index] = this.queue.steering[swap]!;
-        this.queue.steering[swap] = tmp;
-        this.syncActionsFromQueue();
-        return "applied" as const;
-      }
-      if (mutation.type === "replace") {
-        this.queue.steering[index] = mutation.text;
-        if (mutation.lane === "followUp") {
-          this.queue.steering.splice(index, 1);
-          this.queue.followUp.push(mutation.text);
-        }
-        this.syncActionsFromQueue();
-        return "applied" as const;
-      }
-      return "invalid" as const;
-    }
+    // Both modes belong to the durable FIFO. Never mutate local previews.
+    if (mutation.type === "move") return "rejected" as const;
+    if (mutation.type === "replace" && mutation.lane !== lane) return "rejected" as const;
 
     try {
       await this.refreshQueueFromServer();
     } catch {
       return "unsupported" as const;
     }
-    const entry = this.queueEntries[index];
-    if (!entry || queuePreviewText(entry) !== expectedText) return "rejected" as const;
-    if (entry.origin && mutation.type !== "delete") return "rejected" as const;
+    const delivery = lane === "steering" ? "steer" : "followUp";
+    const entry = this.queueEntries.filter((item) => (item.delivery ?? "followUp") === delivery)[index];
+    if (!entry || queueSelectionText(entry) !== expectedText || (mutation.queueItemId && mutation.queueItemId !== entry.queueItemId)) return "rejected" as const;
+    if (mutation.type !== "delete" && queueEditableText(entry) === undefined) return "rejected" as const;
     const sessionId = this.requireSessionId();
     try {
       if (mutation.type === "delete") {
@@ -1710,30 +1722,12 @@ export class NativeAgentConnection implements AgentConnection {
         await this.refreshQueueFromServer();
         return "applied" as const;
       }
-      if (mutation.type === "move") {
-        const nextPos = entry.position + mutation.direction;
-        if (nextPos < 0) return "invalid" as const;
-        await this.rpc.request("session/queue/update", {
-          sessionId,
-          queueItemId: entry.queueItemId,
-          position: nextPos,
-        });
-        await this.refreshQueueFromServer();
-        return "applied" as const;
-      }
       if (mutation.type === "replace") {
         await this.rpc.request("session/queue/update", {
           sessionId,
           queueItemId: entry.queueItemId,
-          input: textInput(mutation.text),
+          input: promptInput(mutation.text, mutation.images),
         });
-        if (mutation.lane === "steering") {
-          await this.rpc.request("session/queue/remove", {
-            sessionId,
-            queueItemId: entry.queueItemId,
-          });
-          this.queue.steering.push(mutation.text);
-        }
         await this.refreshQueueFromServer();
         return "applied" as const;
       }
@@ -1745,26 +1739,30 @@ export class NativeAgentConnection implements AgentConnection {
 
   async clearQueue() {
     const sessionId = this.sessionId;
-    if (sessionId) {
-      try {
-        const result = (await this.rpc.request("session/queue/list", {
-          sessionId,
-        })) as { entries?: unknown };
-        const entries = parseQueueWireEntries(result?.entries);
-        for (const entry of entries) {
-          await this.rpc.request("session/queue/remove", {
-            sessionId,
-            queueItemId: entry.queueItemId,
-          });
+    if (!sessionId) return this.getQueue();
+    let failure: unknown;
+    try {
+      const result = (await this.rpc.request("session/queue/list", { sessionId })) as { entries?: unknown };
+      for (const entry of parseQueueWireEntries(result?.entries)) {
+        try {
+          await this.rpc.request("session/queue/remove", { sessionId, queueItemId: entry.queueItemId });
+        } catch (error) {
+          // An entry can be consumed between listing and removal. That one
+          // already left the queue, but every other requested removal remains.
+          if ((error as { code?: unknown })?.code !== "QueueItemNotFound") failure ??= error;
         }
-      } catch {
-        // fall through to local clear
       }
+    } catch (error) {
+      failure = error;
     }
-    this.queueEntries = [];
-    this.queue = { steering: [], followUp: [] };
-    this.syncActionsFromQueue();
-    this.emitSessionEvent({ type: "session_action_update", actions: this.buildState().sessionActions });
+    // Never paint a local clear: partial failure or concurrent admission can
+    // leave durable input that will still execute. Keep the last known state
+    // if refreshing fails and make that uncertainty visible to the caller.
+    const refreshed = await this.refreshQueueFromServer(sessionId);
+    if (failure) throw failure;
+    if (!refreshed && this.sessionId === sessionId) {
+      throw new Error("Queue removals finished, but the remaining queue could not be verified");
+    }
     return this.getQueue();
   }
 
@@ -1898,7 +1896,7 @@ export class NativeAgentConnection implements AgentConnection {
           targetSessionId,
           message,
           fromSessionId: this.sessionId ?? undefined,
-          deliveryStatus: outcome === "degradedtoqueue" ? "queued" : "delivered",
+          deliveryStatus: outcome === "degradedtoqueue" || outcome === "queued" ? "queued" : "delivered",
         }) as never;
       } catch {
         // fall through to queue
@@ -2441,26 +2439,22 @@ export class NativeAgentConnection implements AgentConnection {
 
   async steer(message: string, _images?: unknown[]): Promise<void> {
     // resumeIfIdle: no active turn → start one.
-    // Busy path: Native `turn/steer` injects raw input into the active turn.
+    // Busy path: Native turn/steer admits input into the shared FIFO.
     if (!this.isStreaming || !this.expectedTurnId) {
       await this.startTurn(message, _images);
       return;
     }
     const sessionId = this.requireSessionId();
-    this.queue.steering.push(message);
-    this.syncActionsFromQueue();
-    this.emitSessionEvent({ type: "session_action_update", actions: this.buildState().sessionActions });
     try {
       const input = promptInput(message, _images);
-      const result = (await this.rpc.request("turn/steer", {
+      await this.rpc.request("turn/steer", {
         sessionId,
         expectedTurnId: this.expectedTurnId,
         input,
         idempotencyKey: newIdempotencyKey("steer"),
-      })) as { outcome?: string; entry?: unknown };
-      if (String(result?.outcome ?? "").toLowerCase() === "degradedtoqueue") {
-        this.queue.followUp.push(message);
-      }
+      });
+      // Acceptance is not consumption: keep blocked steering in the queue.
+      await this.refreshQueueFromServer(sessionId);
     } catch (error) {
       // The server rejects steering a non-regular turn (e.g. a manual
       // compaction in flight) expecting clients to queue instead. Degrade to
@@ -2475,30 +2469,21 @@ export class NativeAgentConnection implements AgentConnection {
         return;
       }
       throw error;
-    } finally {
-      this.queue.steering = this.queue.steering.filter((text) => text !== message);
-      this.syncActionsFromQueue();
-      this.emitSessionEvent({ type: "session_action_update", actions: this.buildState().sessionActions });
     }
   }
 
   async followUp(message: string, _images?: unknown[]): Promise<void> {
     const sessionId = this.requireSessionId();
-    this.queue.followUp.push(message);
-    this.syncActionsFromQueue();
-    this.emitSessionEvent({ type: "session_action_update", actions: this.buildState().sessionActions });
     try {
       await this.rpc.request("session/queue/push", {
         sessionId,
         input: promptInput(message, _images),
         idempotencyKey: newIdempotencyKey("queue"),
       });
+      await this.refreshQueueFromServer(sessionId);
     } catch (error) {
-      // Roll back the optimistic entry: the server never accepted it, and a
-      // phantom queue row would linger until the next queue/updated event.
-      this.queue.followUp = this.queue.followUp.filter((text) => text !== message);
-      this.syncActionsFromQueue();
-      this.emitSessionEvent({ type: "session_action_update", actions: this.buildState().sessionActions });
+      // Same-text entries may be different accepted messages. Never delete by text.
+      await this.refreshQueueFromServer(sessionId);
       throw error;
     }
   }
@@ -3507,6 +3492,7 @@ export class NativeAgentConnection implements AgentConnection {
       queuedCount: this.queue.steering.length + this.queue.followUp.length,
       steering: [...this.queue.steering],
       followUps: [...this.queue.followUp],
+      ordered: this.queue.ordered,
     };
   }
 }

@@ -241,33 +241,26 @@ impl Fixture {
 }
 
 #[tokio::test]
-async fn concurrent_retries_return_one_receipt_and_transfer_complete_original() -> Result<()> {
+async fn concurrent_promotion_requests_preserve_original_followup() -> Result<()> {
     let mut f = Fixture::new().await?;
     let entry = f.queue("original").await;
     let (a, b) = tokio::join!(f.steer(&entry), f.steer(&entry));
-    let expected = json!({"outcome":"accepted","queueItemId":entry["queueItemId"],"turnId":f.turn});
     assert_eq!(
-        (a["result"].clone(), b["result"].clone()),
-        (expected.clone(), expected.clone())
+        (a["error"]["code"].clone(), b["error"]["code"].clone()),
+        (json!("InvalidParams"), json!("InvalidParams"))
     );
-    let pending = f.db.list_pending(&f.session, QueueType::Steer)?;
+    let pending = f.db.list_pending(&f.session, QueueType::Turn)?;
     assert_eq!(pending.len(), 1);
     let PendingInputKind::UserInput { input, .. } = &pending[0].kind else {
         panic!("full input required")
     };
     assert_eq!(serde_json::to_value(input)?, entry["input"]);
-    assert!(f.db.list_pending(&f.session, QueueType::Turn)?.is_empty());
-    // Lost response, empty queue cache, and unknown current turn still recover.
-    let retried = rpc(
-        &f.runtime,
-        f.connection,
-        "session/queue/steer",
-        json!({"sessionId":f.session,"queueItemId":entry["queueItemId"],"expectedTurnId":""}),
-    )
-    .await;
-    assert_eq!(retried["result"], expected);
+    assert_eq!(
+        pending[0].delivery(),
+        devo_protocol::native::host_message::HostMessageDelivery::FollowUp
+    );
     f.provider.release.notify_one();
-    completed(&mut f.notifications, 1).await?;
+    completed(&mut f.notifications, 2).await?;
     assert_eq!(f.provider.requests.lock().unwrap().len(), 2);
     Ok(())
 }
@@ -278,10 +271,7 @@ async fn stale_turn_preserves_input_and_other_sessions_cannot_claim_it() -> Resu
     let mut params = f.params(&entry);
     params["expectedTurnId"] = json!("stale");
     let reply = rpc(&f.runtime, f.connection, "session/queue/steer", params).await;
-    assert_eq!(
-        reply["result"],
-        json!({"outcome":"keptQueued","entry":entry})
-    );
+    assert_eq!(reply["error"]["code"], "InvalidParams");
     let created = rpc(
         &f.runtime,
         f.connection,
@@ -297,13 +287,13 @@ async fn stale_turn_preserves_input_and_other_sessions_cannot_claim_it() -> Resu
             .get("error")
             .is_some()
     );
-    assert!(f.db.list_pending(&f.session, QueueType::Steer)?.is_empty());
+    assert_eq!(f.db.list_pending(&f.session, QueueType::Turn)?.len(), 1);
     f.provider.release.notify_one();
     completed(&mut f.notifications, 2).await?;
     Ok(())
 }
 #[tokio::test]
-async fn concurrent_update_and_transfer_choose_one_full_payload() -> Result<()> {
+async fn concurrent_update_and_rejected_promotion_preserve_complete_payload() -> Result<()> {
     let mut f = Fixture::new().await?;
     let entry = f.queue("old").await;
     let replacement =
@@ -317,8 +307,8 @@ async fn concurrent_update_and_transfer_choose_one_full_payload() -> Result<()> 
         ),
         f.steer(&entry)
     );
-    assert_eq!(steered["result"]["outcome"], "accepted");
-    let pending = f.db.list_pending(&f.session, QueueType::Steer)?;
+    assert_eq!(steered["error"]["code"], "InvalidParams");
+    let pending = f.db.list_pending(&f.session, QueueType::Turn)?;
     let PendingInputKind::UserInput { input, .. } = &pending[0].kind else {
         panic!("full input required")
     };
@@ -331,7 +321,7 @@ async fn concurrent_update_and_transfer_choose_one_full_payload() -> Result<()> 
         }
     );
     f.provider.release.notify_one();
-    completed(&mut f.notifications, 1).await?;
+    completed(&mut f.notifications, 2).await?;
     Ok(())
 }
 #[tokio::test]
@@ -353,7 +343,7 @@ async fn concurrent_remove_and_transfer_have_one_owner() -> Result<()> {
     );
     let accepted = steered.get("error").is_none();
     assert_eq!(
-        f.db.list_pending(&f.session, QueueType::Steer)?.len(),
+        f.db.list_pending(&f.session, QueueType::Turn)?.len(),
         usize::from(accepted)
     );
     f.provider.release.notify_one();
@@ -366,11 +356,11 @@ async fn identical_text_with_distinct_ids_is_not_deduplicated() -> Result<()> {
     let a = f.queue("same").await;
     let b = f.queue("same").await;
     assert_ne!(a["queueItemId"], b["queueItemId"]);
-    assert_eq!(f.steer(&a).await["result"]["outcome"], "accepted");
-    assert_eq!(f.steer(&b).await["result"]["outcome"], "accepted");
-    assert_eq!(f.db.list_pending(&f.session, QueueType::Steer)?.len(), 2);
+    assert_eq!(f.steer(&a).await["error"]["code"], "InvalidParams");
+    assert_eq!(f.steer(&b).await["error"]["code"], "InvalidParams");
+    assert_eq!(f.db.list_pending(&f.session, QueueType::Turn)?.len(), 2);
     f.provider.release.notify_one();
-    completed(&mut f.notifications, 1).await?;
+    completed(&mut f.notifications, 3).await?;
     Ok(())
 }
 #[tokio::test]
@@ -381,18 +371,7 @@ async fn terminal_race_never_duplicates_the_original() -> Result<()> {
         let (reply, ()) = tokio::join!(f.steer(&entry), async {
             f.provider.release.notify_one();
         });
-        if reply.get("error").is_some() {
-            assert!(
-                reply["error"]["message"]
-                    .as_str()
-                    .unwrap()
-                    .contains("no longer queued")
-            );
-        } else {
-            assert!(
-                ["accepted", "keptQueued"].contains(&reply["result"]["outcome"].as_str().unwrap())
-            );
-        }
+        assert_eq!(reply["error"]["code"], "InvalidParams");
         timeout(Duration::from_secs(20), async {
             loop {
                 let read = rpc(
@@ -467,8 +446,8 @@ async fn recovered_fixture(
     assert!(db.claim_queue_steer(&session, &item, &TurnId::from("old-turn"))?);
     drop(first);
     if matches!(mode, RecoveryQueue::HeldWithFollowup) {
-        // A new explicit queue/push on idle starts a new turn by contract;
-        // this fixture models input already behind the held FIFO head.
+        // This fixture models input already behind the held FIFO head.
+        // New explicit admissions are also blocked by this same head.
         db.recover_interrupted_queue_steers(&session)?;
         let next = PendingInputItem::new(
             PendingInputKind::UserText {
@@ -532,9 +511,10 @@ async fn restart_holds_input_and_explicit_retry_creates_a_fresh_identity() -> Re
         json!({"sessionId":session,"queueItemId":item.id,"expectedTurnId":"other"}),
     )
     .await;
+    assert_eq!(receipt["error"]["code"], "InvalidParams");
     assert_eq!(
-        receipt["result"],
-        json!({"outcome":"accepted","queueItemId":item.id,"turnId":"old-turn"})
+        db.queue_steer_receipt(&session, &item.id)?,
+        Some(TurnId::from("old-turn"))
     );
     assert!(provider.requests.lock().unwrap().is_empty());
     let retried = rpc(
@@ -619,7 +599,7 @@ async fn failed_durable_claim_and_edit_preserve_the_original_queue() -> Result<(
     )
     .await;
     assert_eq!(listed["result"]["entries"], json!([entry]));
-    assert!(f.db.list_pending(&f.session, QueueType::Steer)?.is_empty());
+    assert_eq!(f.db.list_pending(&f.session, QueueType::Turn)?.len(), 1);
     connection.execute_batch("DROP TRIGGER reject_queue_change;")?;
     f.provider.release.notify_one();
     completed(&mut f.notifications, 2).await?;
@@ -627,72 +607,52 @@ async fn failed_durable_claim_and_edit_preserve_the_original_queue() -> Result<(
 }
 
 #[tokio::test]
-async fn settlement_failure_publishes_hold_and_explicit_retry_reconciles_it() -> Result<()> {
-    let mut f = Fixture::new().await?;
-    let entry = f.queue("review after failed settlement").await;
-    assert_eq!(f.steer(&entry).await["result"]["outcome"], "accepted");
-    let connection = rusqlite::Connection::open(f.temp.path().join("atomic_queue.db"))?;
-    connection.execute_batch("CREATE TRIGGER reject_settlement BEFORE DELETE ON pending_messages WHEN OLD.queue_type = 'steer' BEGIN SELECT RAISE(ABORT, 'synthetic settlement failure'); END;")?;
-    let interrupted = rpc(
-        &f.runtime,
-        f.connection,
-        "session/interrupt",
-        json!({"scope":{"scope":"session","sessionId":f.session}}),
+async fn failed_retry_preserves_recovered_barrier_until_storage_recovers() -> Result<()> {
+    let (temp, db, provider, runtime, connection, mut notifications, session, item) =
+        recovered_fixture(RecoveryQueue::HeldOnly).await?;
+    let storage = rusqlite::Connection::open(temp.path().join("atomic_queue.db"))?;
+    storage.execute_batch("CREATE TRIGGER reject_retry BEFORE UPDATE ON pending_messages BEGIN SELECT RAISE(ABORT, 'synthetic retry failure'); END;")?;
+    let retried = rpc(
+        &runtime,
+        connection,
+        "session/queue/retry",
+        json!({"sessionId":session,"queueItemId":item.id}),
     )
     .await;
-    assert!(interrupted.get("error").is_none(), "{interrupted}");
-    timeout(Duration::from_secs(20), async {
-        let mut held = false;
-        let mut terminal = false;
-        while let Some(value) = f.notifications.recv().await {
-            if value["method"] == "queue/updated"
-                && value["params"]["queue"].as_array().is_some_and(|entries| {
-                    entries.iter().any(|row| {
-                        row["queueItemId"] == entry["queueItemId"]
-                            && row["recoveryRequired"] == true
-                    })
-                })
-            {
-                held = true;
-            }
-            if value["method"] == "turn/completed" && value["params"]["turn"]["id"] == json!(f.turn)
-            {
-                terminal = true;
-            }
-            if held && terminal {
-                return;
-            }
-        }
-        panic!("notification channel closed before held recovery and terminal result");
-    })
-    .await?;
-    assert_eq!(f.provider.requests.lock().unwrap().len(), 1);
-    connection.execute_batch("DROP TRIGGER reject_settlement;")?;
+    assert!(retried.get("error").is_some(), "{retried}");
+    let pending = db.list_pending(&session, QueueType::Turn)?;
+    assert_eq!(pending.len(), 1);
+    assert_eq!(pending[0].id, item.id);
+    assert_eq!(
+        pending[0].metadata.as_ref().unwrap()["queueSteerRecoveryRequired"],
+        true
+    );
+    assert!(provider.requests.lock().unwrap().is_empty());
+    storage.execute_batch("DROP TRIGGER reject_retry;")?;
     let retried = rpc(
-        &f.runtime,
-        f.connection,
+        &runtime,
+        connection,
         "session/queue/retry",
-        json!({"sessionId":f.session,"queueItemId":entry["queueItemId"]}),
+        json!({"sessionId":session,"queueItemId":item.id}),
     )
     .await;
     assert_eq!(retried["result"], json!({}), "{retried}");
-    completed(&mut f.notifications, 1).await?;
-    assert_eq!(f.provider.requests.lock().unwrap().len(), 2);
+    timeout(Duration::from_secs(10), provider.started.notified()).await?;
+    provider.release.notify_one();
+    completed(&mut notifications, 1).await?;
+    assert_eq!(provider.requests.lock().unwrap().len(), 1);
     Ok(())
 }
 
 #[tokio::test]
 async fn explicit_new_input_does_not_release_an_existing_recovery_hold() -> Result<()> {
-    let (_temp, db, provider, runtime, connection, mut notifications, session, item) =
+    let (_temp, db, provider, runtime, connection, _notifications, session, item) =
         recovered_fixture(RecoveryQueue::HeldOnly).await?;
     let started = rpc(&runtime, connection, "session/queue/push", json!({"sessionId":session,
         "input":[{"type":"text","text":"independent explicit input"}],"idempotencyKey":"new-explicit"})).await;
-    assert_eq!(started["result"]["outcome"], "started");
-    timeout(Duration::from_secs(10), provider.started.notified()).await?;
-    provider.release.notify_one();
-    completed(&mut notifications, 1).await?;
+    assert_eq!(started["result"]["outcome"], "queued");
     let pending = db.list_pending(&session, QueueType::Turn)?;
-    assert_eq!(pending.len(), 1);
+    assert_eq!(pending.len(), 2);
     assert_eq!(
         (
             pending[0].id,
@@ -700,12 +660,12 @@ async fn explicit_new_input_does_not_release_an_existing_recovery_hold() -> Resu
         ),
         (item.id, json!(true))
     );
-    assert_eq!(provider.requests.lock().unwrap().len(), 1);
+    assert!(provider.requests.lock().unwrap().is_empty());
     Ok(())
 }
 
 #[tokio::test]
-async fn same_turn_recovery_reopens_atomic_queue_steering() -> Result<()> {
+async fn same_turn_recovery_preserves_followup_and_rejects_promotion() -> Result<()> {
     let mut f = Fixture::with_provider(Arc::new(GatedProvider {
         behavior: ProviderBehavior::FailThenRecover,
         ..GatedProvider::default()
@@ -741,20 +701,14 @@ async fn same_turn_recovery_reopens_atomic_queue_steering() -> Result<()> {
     timeout(Duration::from_secs(10), f.provider.started.notified()).await?;
 
     let entry = f.queue("steer the recovered attempt").await;
-    let expected = json!({
-        "outcome": "accepted",
-        "queueItemId": entry["queueItemId"],
-        "turnId": f.turn
-    });
-    assert_eq!(f.steer(&entry).await["result"], expected);
-    // A repeated resume and admission must not create another execution/transfer.
+    assert_eq!(f.steer(&entry).await["error"]["code"], "InvalidParams");
     let duplicate = rpc(&f.runtime, f.connection, "turn/resume", resume_params).await;
     assert_eq!(duplicate["result"], resumed["result"]);
-    assert_eq!(f.steer(&entry).await["result"], expected);
-    assert_eq!(f.db.list_pending(&f.session, QueueType::Steer)?.len(), 1);
+    assert_eq!(f.steer(&entry).await["error"]["code"], "InvalidParams");
+    assert_eq!(f.db.list_pending(&f.session, QueueType::Turn)?.len(), 1);
 
     f.provider.release.notify_one();
-    completed(&mut f.notifications, 1).await?;
+    completed(&mut f.notifications, 2).await?;
     let requests = f.provider.requests.lock().unwrap();
     assert_eq!(requests.len(), 3);
     assert_eq!(

@@ -2445,6 +2445,7 @@ export class InteractiveMode {
 		return {
 			steering: [...(this.connectionState?.sessionActions.steering ?? [])],
 			followUp: [...(this.connectionState?.sessionActions.followUps ?? [])],
+			ordered: this.connectionState?.sessionActions.ordered,
 		};
 	}
 
@@ -7277,6 +7278,10 @@ export class InteractiveMode {
 	}
 
 	private moveQueueSelection(direction: -1 | 1): void {
+		if (this.getConnectionQueue().ordered) {
+			this.showStatus("Strict FIFO: queued messages keep their admission order");
+			return;
+		}
 		if (this.pendingQueueEdit || !this.queueSelection.selected) return;
 		const sessionGeneration = this.sessionEventGeneration;
 		void this.enqueueQueueMutation(async () => {
@@ -7337,6 +7342,12 @@ export class InteractiveMode {
 	 */
 	private applyQueueSelection(text: string, targetLane: "steering" | "followUp"): Promise<boolean> {
 		if (this.pendingQueueEdit || !this.queueSelection.selected) return Promise.resolve(false);
+		const selectedEntry = this.getConnectionQueue().ordered?.find((entry) => entry.id === this.queueSelection.selected?.id);
+		if (text.trim() && selectedEntry?.editable === false) {
+			this.setEditorTextFromQueueSelection(text);
+			this.showStatus("This queued payload is read-only here (attachments, host input, or unavailable full text). Submit empty text to remove it; the original content has not been changed.");
+			return Promise.resolve(true);
+		}
 		const pendingQueueEdit = Symbol("pending-queue-edit");
 		this.pendingQueueEdit = pendingQueueEdit;
 		const sessionGeneration = this.sessionEventGeneration;
@@ -7374,7 +7385,7 @@ export class InteractiveMode {
 						selected.lane,
 						selected.index,
 						selected.text,
-						mutation,
+						{ ...mutation, queueItemId: selected.id },
 					);
 				} catch (error) {
 					if (discardStaleSelection()) return true;
@@ -7657,7 +7668,7 @@ export class InteractiveMode {
 		this.ui.requestRender();
 	}
 
-	private getAllQueuedMessages(): { steering: string[]; followUp: string[] } {
+	private getAllQueuedMessages(): AgentConnectionQueueState {
 		return this.getConnectionQueue();
 	}
 
@@ -7672,17 +7683,22 @@ export class InteractiveMode {
 		// Queued steering/follow-up previews are future turns, so they render in
 		// their own container below the execution indicator and recap.
 		this.queuedMessagesContainer.clear();
-		const { steering: steeringMessages, followUp: followUpMessages } = this.getAllQueuedMessages();
+		const { steering: steeringMessages, followUp: followUpMessages, ordered } = this.getAllQueuedMessages();
 		const hasQueuedMessages = steeringMessages.length > 0 || followUpMessages.length > 0;
 		if (hasQueuedMessages) {
 			this.queuedMessagesContainer.addChild(new Spacer(1));
-			for (const message of steeringMessages) {
-				const text = styleQueuedMessagePreview(message, "Steering", (name) => this.isRecognizedSlashCommand(name));
+			const entries: NonNullable<AgentConnectionQueueState["ordered"]> = ordered ?? [
+				...steeringMessages.map((text) => ({ id: "", text, delivery: "steer" as const, blocked: false })),
+				...followUpMessages.map((text) => ({ id: "", text, delivery: "followUp" as const, blocked: false })),
+			];
+			for (const [index, entry] of entries.entries()) {
+				const mode = entry.recoveryRequired ? "Held · review required" : entry.delivery === "steer" ? "Steering" : "Follow-up";
+				const label = ordered ? `${index + 1}. ${mode}${entry.blocked ? " · waiting behind earlier input" : ""}` : mode;
+				const text = styleQueuedMessagePreview(entry.preview ?? entry.text, label, (name) => this.isRecognizedSlashCommand(name));
 				this.queuedMessagesContainer.addChild(new TruncatedText(text, 1, 0));
 			}
-			for (const message of followUpMessages) {
-				const text = styleQueuedMessagePreview(message, "Follow-up", (name) => this.isRecognizedSlashCommand(name));
-				this.queuedMessagesContainer.addChild(new TruncatedText(text, 1, 0));
+			for (const entry of entries.filter((item) => item.recoveryRequired)) {
+				this.queuedMessagesContainer.addChild(new Text(theme.fg("warning", `Held input ${entry.id} is held after interruption, recovery, or a turn limit and may already have partially executed. Browse and remove it to discard. Explicit retry through Native session/queue/retry requires reviewing the prior turn and may be rejected while the turn limit applies; there is no automatic retry.`), 1, 0));
 			}
 			const dequeueHint = this.getAppKeyDisplay("app.message.navigateOlder");
 			const hintText = theme.fg("dim", `╰─ ${dequeueHint} to browse and edit queued messages`);

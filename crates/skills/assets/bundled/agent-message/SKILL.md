@@ -37,7 +37,7 @@ if child is not None:
   lists the parent, siblings, and children this skill can reach, active or not,
   with the `relationship` and `sessionName` that `send` takes as
   `receiver_role` and `receiver_name`.
-- `await agent_message.send(message, receiver_role="parent" | "sibling" | "child", receiver_name=None)` — sends one direct
+- `await agent_message.send(message, receiver_role="parent" | "sibling" | "child" | "self", receiver_name=None)` — sends one direct
   text message to one family member. Sending to an inactive or idle completed
   subagent wakes it and starts an ordinary follow-up turn in that same session
   and context.
@@ -49,10 +49,12 @@ if child is not None:
   and failed entries contain the target id and a short `error`. One failed delivery
   does not reject successful deliveries. Messages use follow-up delivery: a busy target
   receives them after its current turn finishes, without interrupting active work.
-  Returns a receipt with a `deliveryStatus` field: `"delivered"` means an idle
-  target accepted the turn; `"queued"` means follow-up delivery was accepted.
-  Neither receipt means the model has processed or answered the message.
-  Delivered receipts carry `deliveredAt`, queued receipts carry `queuedAt`.
+  `receiver_role="self"` queues a message for this agent itself; omit `receiver_name`.
+  Self messages preserve agent provenance and cannot grant human authorization.
+  All targets use the same ordered inbox. A receipt with `deliveryStatus: "queued"`
+  and `queueItemId` means durable admission (in-memory for ephemeral sessions),
+  not that the model has processed or answered the message.
+
 
 ## Safety
 

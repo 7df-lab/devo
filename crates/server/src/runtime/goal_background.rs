@@ -27,6 +27,7 @@ struct SessionWork {
     results: VecDeque<String>,
     deferred: Option<DeferredGoal>,
     suspended: bool,
+    input_suspended: bool,
 }
 
 #[derive(Default)]
@@ -45,6 +46,66 @@ impl ServerRuntime {
             session.goal_owned.insert(work_id.clone());
         }
         session.pending.insert(work_id);
+    }
+
+    /// Publish detached work through the owner inbox before releasing the goal
+    /// barrier. This runs outside session actors: origin lookup may query the
+    /// child actor whose terminal callback initiated the publication.
+    pub(super) fn publish_background_completion(
+        &self,
+        session_id: SessionId,
+        work_id: String,
+        message: super::host_messages::HostMessage,
+    ) {
+        let registered = self
+            .background_work
+            .lock()
+            .expect("background work mutex poisoned")
+            .sessions
+            .get(&session_id)
+            .is_some_and(|state| state.pending.contains(&work_id));
+        if !registered {
+            return;
+        }
+        let weak = self.self_weak.clone();
+        tokio::spawn(async move {
+            let mut delay = std::time::Duration::from_millis(100);
+            loop {
+                let Some(runtime) = weak.upgrade() else {
+                    return;
+                };
+                let pending = runtime
+                    .background_work
+                    .lock()
+                    .expect("background work mutex poisoned")
+                    .sessions
+                    .get(&session_id)
+                    .is_some_and(|state| state.pending.contains(&work_id));
+                if !pending || runtime.session(session_id).await.is_none() {
+                    return;
+                }
+                match runtime
+                    .deliver_host_message(session_id, message.clone(), None)
+                    .await
+                {
+                    Ok(_) => {
+                        // Admission transfers ownership to the durable inbox.
+                        runtime.complete_background_work(session_id, work_id, String::new());
+                        return;
+                    }
+                    Err(error) => {
+                        tracing::warn!(%session_id, %work_id, %error,
+                            retry_ms = delay.as_millis(),
+                            "background completion admission failed; retaining and retrying");
+                    }
+                }
+                // Do not keep the runtime alive during backoff. Closing an owner
+                // clears its work tickets; the next attempt cannot resurrect it.
+                drop(runtime);
+                tokio::time::sleep(delay).await;
+                delay = (delay * 2).min(std::time::Duration::from_secs(30));
+            }
+        });
     }
 
     pub(super) fn complete_background_work(
@@ -163,6 +224,37 @@ impl ServerRuntime {
         true
     }
 
+    pub(super) fn suspend_background_input(&self, session_id: SessionId) {
+        self.background_work
+            .lock()
+            .expect("background work mutex poisoned")
+            .sessions
+            .entry(session_id)
+            .or_default()
+            .input_suspended = true;
+    }
+
+    pub(super) fn resume_background_input(&self, session_id: SessionId) {
+        if let Some(session) = self
+            .background_work
+            .lock()
+            .expect("background work mutex poisoned")
+            .sessions
+            .get_mut(&session_id)
+        {
+            session.input_suspended = false;
+        }
+    }
+
+    pub(super) fn background_input_suspended(&self, session_id: SessionId) -> bool {
+        self.background_work
+            .lock()
+            .expect("background work mutex poisoned")
+            .sessions
+            .get(&session_id)
+            .is_some_and(|state| state.input_suspended)
+    }
+
     pub(super) fn cancel_background_goal_wait(&self, session_id: SessionId) -> bool {
         let mut work = self
             .background_work
@@ -225,7 +317,8 @@ impl ServerRuntime {
     }
 
     /// Legacy Python completion notices may arrive after the Rust producer's
-    /// terminal callback. Suppress only matching managed events for a goal.
+    /// terminal callback. Suppress matching managed events for every owner,
+    /// not only agents with an active goal.
     pub(super) fn background_notice_is_tracked(
         &self,
         session_id: SessionId,
@@ -247,7 +340,11 @@ impl ServerRuntime {
             .expect("background work mutex poisoned")
             .sessions
             .get(&session_id)
-            .is_some_and(|state| state.goal_owned.contains(&work_id))
+            .is_some_and(|state| {
+                state.pending.contains(&work_id)
+                    || state.settled.contains(&work_id)
+                    || state.goal_owned.contains(&work_id)
+            })
     }
 
     pub(super) fn take_background_work_results(&self, session_id: SessionId) -> Option<String> {
@@ -265,3 +362,12 @@ impl ServerRuntime {
         ))
     }
 }
+
+#[cfg(test)]
+mod tests;
+
+#[cfg(test)]
+mod nested_tests;
+
+#[cfg(test)]
+mod goal_tests;

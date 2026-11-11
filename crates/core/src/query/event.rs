@@ -133,8 +133,13 @@ pub struct ProviderRetryStatus {
     pub message: String,
 }
 
+/// Host callback that claims eligible input only at safe model-request boundaries.
+pub type InboxBoundary = Arc<dyn Fn() -> BoxFuture<'static, anyhow::Result<()>> + Send + Sync>;
+
 #[derive(Clone, Default)]
 pub struct QueryOptions {
+    /// Claim the FIFO steer prefix at a safe model boundary; never waits for tools.
+    pub inbox_boundary: Option<InboxBoundary>,
     /// Host-derived ancestry for this turn; never copy the parent's prompt identity.
     pub agent_identity: crate::AgentPromptIdentity,
     pub output_store: Option<Arc<devo_tools::output_store::OutputStore>>,

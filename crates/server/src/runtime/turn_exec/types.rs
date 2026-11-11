@@ -89,6 +89,8 @@ pub(crate) struct TurnQueryOutcome {
 }
 
 pub(super) struct QueuedTurnInput {
+    pub(super) claimed_turn_id: NativeTurnId,
+    pub(super) original: devo_protocol::PendingInputItem,
     /// Native queue entry id of the drained entry (`queue/updated`
     /// `drained` notification, 01 §4.3).
     pub(super) queued_item_id: devo_protocol::native::ids::QueueItemId,

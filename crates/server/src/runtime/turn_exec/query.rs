@@ -470,6 +470,15 @@ impl ServerRuntime {
                 &runtime,
                 Some(callback),
                 QueryOptions {
+                    inbox_boundary: Some({
+                        let runtime = Arc::clone(self);
+                        Arc::new(move || {
+                            let runtime = Arc::clone(&runtime);
+                            Box::pin(async move {
+                                runtime.claim_inbox_steers(session_id, turn_id).await
+                            })
+                        })
+                    }),
                     agent_identity,
                     output_store,
                     journal: state.rollout_path.as_ref().map(|path| {

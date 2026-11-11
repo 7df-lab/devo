@@ -105,6 +105,7 @@ impl ActiveTurnRegistry {
             .and_then(|execution| execution.connection_id)
     }
 
+    #[cfg(test)]
     pub(crate) async fn active_user_texts(
         &self,
         session_id: SessionId,

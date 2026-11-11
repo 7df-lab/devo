@@ -150,7 +150,12 @@ impl ServerRuntime {
                 request_id.clone(),
                 turn_params,
                 TurnStartQueuePolicy::RejectActive,
-                params.client_user_message_id.clone(),
+                Some(
+                    params
+                        .client_user_message_id
+                        .clone()
+                        .unwrap_or_else(|| format!("turn:{}", params.idempotency_key)),
+                ),
             )
             .await;
         let Ok(success) =
@@ -234,43 +239,7 @@ impl ServerRuntime {
                 "session does not exist",
             );
         };
-        // Registry presence is mailbox-free: `spawn_active_runtime_turn_task`
-        // records the turn before the stream is registered. Native busy
-        // clients must reject here instead of waiting on the actor.
-        if queue_policy == TurnStartQueuePolicy::RejectActive
-            && self
-                .runtime_active_turn_id(params.session_id)
-                .await
-                .is_some()
-        {
-            // An approval-parked turn never reaches a turn boundary on its
-            // own, so rejecting here would strand the user's message behind
-            // a permission request that can wait indefinitely. Preempt it
-            // (see `preempt_approval_parked_turn`) and re-check.
-            if self
-                .session_interactive
-                .has_pending_approval_for_host(params.session_id)
-                .await
-                && let Some(active_turn_id) = self.runtime_active_turn_id(params.session_id).await
-            {
-                self.preempt_approval_parked_turn(params.session_id, active_turn_id)
-                    .await;
-            }
-            if self
-                .runtime_active_turn_id(params.session_id)
-                .await
-                .is_some()
-            {
-                return self.error_response(
-                    request_id,
-                    ProtocolErrorCode::TurnAlreadyRunning,
-                    "session already has an active prompt turn",
-                );
-            }
-        }
-        // A busy session needs no state-change gate to enqueue: the queue
-        // mutex is the serialization point for queue ops (01 §4.3).
-        let Some(mut reservation) = self
+        let Some(reservation) = self
             .session_turn_reservation_snapshot(params.session_id)
             .await
         else {
@@ -280,27 +249,6 @@ impl ServerRuntime {
                 "session does not exist",
             );
         };
-        // Only admitting a new turn must serialize against rollback,
-        // message edit, and compaction via the gate. Re-read the
-        // reservation under the gate: a turn may have started meanwhile.
-        let state_change_guard = if reservation.active_turn.is_none() {
-            let guard = session_handle.lock_state_change().await;
-            let Some(fresh) = self
-                .session_turn_reservation_snapshot(params.session_id)
-                .await
-            else {
-                return self.error_response(
-                    request_id,
-                    ProtocolErrorCode::SessionNotFound,
-                    "session does not exist",
-                );
-            };
-            reservation = fresh;
-            Some(guard)
-        } else {
-            None
-        };
-        let mut state_change_guard = state_change_guard;
         let requested_cwd = params.cwd.clone();
         let workspace_root = requested_cwd
             .clone()
@@ -391,62 +339,47 @@ impl ServerRuntime {
                 format!("prompt blocked by hook: {reason}"),
             );
         }
+        // Resolve hooks and input outside admission: hooks may perform I/O.
+        // Re-snapshot under the short gate before checking idle/queue order.
+        let state_change_guard = session_handle.lock_state_change().await;
+        let Some(reservation) = self
+            .session_turn_reservation_snapshot(params.session_id)
+            .await
+        else {
+            return self.error_response(
+                request_id,
+                ProtocolErrorCode::SessionNotFound,
+                "session does not exist",
+            );
+        };
         let now = Utc::now();
         let mut cwd_change = None;
-        // Same starvation rule for the enqueue policy: a turn parked at an
-        // approval checkpoint never yields a turn boundary, so queueing
-        // behind it would strand the input. Preempt, then take the
-        // state-change gate (admission below relies on it and this path may
-        // not hold one yet) and re-read the reservation inside it; the block
-        // below handles whatever is still active. Rare race: the gate may
-        // already be held here, stretching the preempt's bounded wait past
-        // the gate's usual short critical section.
-        if let Some(active_turn_id) = reservation.active_turn.as_ref().map(|turn| turn.turn_id())
-            && self
-                .session_interactive
-                .has_pending_approval_for_host(params.session_id)
-                .await
+        if reservation.active_turn.is_some()
+            || !reservation
+                .pending_turn_queue
+                .lock()
+                .expect("pending queue mutex poisoned")
+                .is_empty()
         {
-            self.preempt_approval_parked_turn(params.session_id, active_turn_id)
-                .await;
-            if state_change_guard.is_none() {
-                state_change_guard = Some(session_handle.lock_state_change().await);
-            }
-            let Some(fresh) = self
-                .session_turn_reservation_snapshot(params.session_id)
-                .await
-            else {
-                return self.error_response(
-                    request_id,
-                    ProtocolErrorCode::SessionNotFound,
-                    "session does not exist",
-                );
-            };
-            reservation = fresh;
-        }
-        if let Some(active_turn) = reservation.active_turn.as_ref() {
             if queue_policy == TurnStartQueuePolicy::RejectActive {
                 return self.error_response(
                     request_id,
                     ProtocolErrorCode::TurnAlreadyRunning,
-                    "session already has an active prompt turn",
+                    "session already has active or queued input",
                 );
             }
-            let active_turn_id = active_turn.turn_id();
-            // A queued follow-up behind a goal-continuation turn must preempt
-            // it (see `preempt_goal_continuation_for_user_input`): the queued
-            // entry below then drains through the standard post-turn path.
-            // Regular turns are steerable and keep today's behavior.
-            if active_turn.native.kind == devo_protocol::native::turn::TurnKind::GoalContinuation {
-                self.preempt_goal_continuation_for_user_input(params.session_id, active_turn_id);
-            }
+            let active_turn_id = reservation
+                .active_turn
+                .as_ref()
+                .or(reservation.latest_turn.as_ref())
+                .map_or_else(TurnId::new, |turn| turn.turn_id());
             let queued_model = params
                 .model
                 .or_else(|| reservation.summary.model_name().map(str::to_string));
             let queued_model_binding_id = params
                 .model_binding_id
                 .or_else(|| reservation.summary.model_binding_id().map(str::to_string));
-            let item = devo_core::PendingInputItem::new(
+            let mut item = devo_core::PendingInputItem::new(
                 devo_core::PendingInputKind::UserInput {
                     input: params.input.clone(),
                     display_text: display_input.clone(),
@@ -462,45 +395,31 @@ impl ServerRuntime {
                 ),
                 now,
             );
+            item.assign_client_identity();
             let queued_input_id = item.id;
-            let persistence_error = if reservation.ephemeral {
-                None
-            } else {
-                self.deps
-                    .db
-                    .push_pending(&params.session_id, QueueType::Turn, &item)
-                    .err()
-            };
-            if let Some(error) = persistence_error {
-                if client_user_message_id.is_some() {
-                    return self.error_response(
-                        request_id,
-                        ProtocolErrorCode::InternalError,
-                        format!("failed to persist pending turn message: {error}"),
-                    );
-                }
-                tracing::warn!(
-                    session_id = %params.session_id,
-                    error = %error,
-                    "failed to persist pending turn message to database"
+            if let Err(error) = self.persist_inbox_item(
+                params.session_id,
+                reservation.ephemeral,
+                &reservation.pending_turn_queue,
+                &item,
+            ) {
+                return self.error_response(
+                    request_id,
+                    ProtocolErrorCode::InternalError,
+                    format!("failed to persist inbox input: {error}"),
                 );
             }
-            // Persist first so an accepted client-identified queue item is
-            // recoverable if the process stops before the in-memory push.
-            let queue_len_after = {
-                let mut queue = reservation
-                    .pending_turn_queue
-                    .lock()
-                    .expect("pending turn queue mutex should not be poisoned");
-                queue.push_back(item.clone());
-                queue.len()
-            };
+            let queue_len_after = reservation
+                .pending_turn_queue
+                .lock()
+                .expect("pending queue mutex poisoned")
+                .len();
             tracing::info!(
                 session_id = %params.session_id,
                 queued_input_id = %queued_input_id,
                 queue_len_after,
                 active_turn_id = %active_turn_id,
-                active_kind = ?active_turn.native.kind,
+                active_kind = ?reservation.active_turn.as_ref().map(|turn| turn.native.kind),
                 "queued follow-up input while turn active"
             );
             let sid = params.session_id;
@@ -602,6 +521,72 @@ impl ServerRuntime {
                 failure_reason: None,
             },
         };
+        let mut inbox_item = devo_protocol::PendingInputItem::new(
+            devo_protocol::PendingInputKind::UserInput {
+                input: params.input.clone(),
+                display_text: display_input.clone(),
+                prompt_text: resolved_input.prompt_text.clone(),
+                prompt_messages: resolved_input.prompt_messages.clone(),
+                prompt_images: resolved_input.images.clone(),
+            },
+            pending_turn_metadata(
+                params.collaboration_mode,
+                None,
+                None,
+                client_user_message_id.as_deref(),
+            ),
+            now,
+        );
+        inbox_item.assign_client_identity();
+        if let Err(error) = self.persist_inbox_item(
+            params.session_id,
+            reservation.ephemeral,
+            &reservation.pending_turn_queue,
+            &inbox_item,
+        ) {
+            return self.error_response(
+                request_id,
+                ProtocolErrorCode::InternalError,
+                format!("inbox admission failed: {error}"),
+            );
+        }
+        {
+            let mut queue = reservation
+                .pending_turn_queue
+                .lock()
+                .expect("pending queue mutex poisoned");
+            if queue.front().is_none_or(|head| head.id != inbox_item.id) {
+                return self.error_response(
+                    request_id,
+                    ProtocolErrorCode::TurnAlreadyRunning,
+                    "input already admitted or waiting behind older input",
+                );
+            }
+            if !reservation.ephemeral {
+                match self
+                    .deps
+                    .db
+                    .claim_queue_steer(&params.session_id, &inbox_item, &turn_id)
+                {
+                    Ok(true) => {}
+                    Ok(false) => {
+                        return self.error_response(
+                            request_id,
+                            ProtocolErrorCode::InternalError,
+                            "input already claimed",
+                        );
+                    }
+                    Err(error) => {
+                        return self.error_response(
+                            request_id,
+                            ProtocolErrorCode::InternalError,
+                            format!("inbox claim failed: {error}"),
+                        );
+                    }
+                }
+            }
+            queue.pop_front();
+        }
         session_handle
             .begin_runtime_turn(runtime_turn.clone(), turn_config.clone())
             .await;
@@ -629,7 +614,8 @@ impl ServerRuntime {
                 .persist_turn_line_deduped(params.session_id, &runtime_turn)
                 .await
         {
-            let _ = session_handle.clear_active_turn_if_matches(turn_id).await;
+            self.restore_claimed_inbox_head(params.session_id, inbox_item.clone(), turn_id)
+                .await;
             return self.error_response(
                 request_id,
                 ProtocolErrorCode::InternalError,

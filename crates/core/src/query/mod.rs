@@ -522,6 +522,9 @@ pub async fn query(
     }
 
     loop {
+        if let Some(boundary) = &options.inbox_boundary {
+            boundary().await.map_err(AgentError::Provider)?;
+        }
         let pending = session.take_turn_pending_input();
 
         pending_input::push_pending_input(session, &pending);
@@ -956,6 +959,14 @@ pub async fn query(
                 continue;
             }
             TurnContinuation::Complete { stop_reason } => {
+                if let Some(boundary) = &options.inbox_boundary
+                    && !options
+                        .cancel_token
+                        .as_ref()
+                        .is_some_and(CancellationToken::is_cancelled)
+                {
+                    boundary().await.map_err(AgentError::Provider)?;
+                }
                 // Steering can arrive while the final model response streams,
                 // even when that response has no tool calls. Consume it at the
                 // next request boundary in this turn instead of letting

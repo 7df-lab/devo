@@ -6,6 +6,12 @@ use devo_protocol::native::host_message::{
     HostMessageDelivery, HostMessageOrigin, HostMessageSource,
 };
 
+#[derive(Debug)]
+pub(super) struct HostDeliveryReceipt {
+    pub(super) queue_item_id: devo_protocol::QueueItemId,
+}
+
+#[derive(Clone)]
 pub(super) struct HostMessage {
     origin: HostMessageOrigin,
     text: String,
@@ -25,6 +31,50 @@ impl HostMessage {
         }
     }
 
+    pub(super) fn child_completion(
+        child_id: SessionId,
+        turn_id: TurnId,
+        status: &str,
+        text: String,
+    ) -> Self {
+        Self::agent(
+            child_id,
+            format!("child:{child_id}:{turn_id}:{status}"),
+            text,
+        )
+    }
+
+    pub(super) fn managed_completion(owner: SessionId, work_id: String, text: String) -> Self {
+        Self {
+            origin: HostMessageOrigin {
+                event_id: format!("background:{owner}:{work_id}:completed"),
+                source: HostMessageSource::BackgroundTask,
+                sender: format!("{owner}:{work_id}"),
+                sender_name: None,
+                delivery: HostMessageDelivery::FollowUp,
+            },
+            text,
+        }
+    }
+
+    pub(super) fn schedule(
+        session_id: SessionId,
+        occurrence_id: String,
+        text: String,
+        delivery: HostMessageDelivery,
+    ) -> Self {
+        Self {
+            origin: HostMessageOrigin {
+                event_id: occurrence_id,
+                source: HostMessageSource::Schedule,
+                sender: session_id.to_string(),
+                sender_name: None,
+                delivery,
+            },
+            text,
+        }
+    }
+
     pub(super) fn background(
         session_id: SessionId,
         notice: &serde_json::Value,
@@ -32,6 +82,14 @@ impl HostMessage {
     ) -> Self {
         let kind = notice["kind"].as_str().unwrap_or("background");
         let params = &notice["params"];
+        let work_id = match kind {
+            "async_bash_completion" => params["handle_id"].as_str().map(|id| format!("bash:{id}")),
+            "async_python_completion" => params["workId"].as_str().map(str::to_owned),
+            _ => None,
+        };
+        if let Some(work_id) = work_id {
+            return Self::managed_completion(session_id, work_id, text);
+        }
         let identity = params
             .get("handle_id")
             .or_else(|| params.get("cellId"))
@@ -43,7 +101,15 @@ impl HostMessage {
                 event_id: notice["eventId"]
                     .as_str()
                     .map(str::to_owned)
-                    .unwrap_or_else(|| uuid::Uuid::new_v4().to_string()),
+                    .unwrap_or_else(|| {
+                        if params.get("handle_id").is_some() || params.get("cellId").is_some() {
+                            format!("{session_id}:{kind}:{identity}:completed")
+                        } else {
+                            // Legacy PID-only callbacks have no process generation;
+                            // inventing durable dedup here would suppress PID reuse.
+                            uuid::Uuid::new_v4().to_string()
+                        }
+                    }),
                 source: HostMessageSource::BackgroundTask,
                 sender: format!("{session_id}:{kind}:{identity}"),
                 sender_name: None,
@@ -60,7 +126,7 @@ impl ServerRuntime {
         session_id: SessionId,
         message: HostMessage,
         queued_metadata: Option<serde_json::Value>,
-    ) -> Result<crate::turn::RuntimeTurn, ToolCallError> {
+    ) -> Result<HostDeliveryReceipt, ToolCallError> {
         let HostMessage { mut origin, text } = message;
         if origin.source == HostMessageSource::Agent
             && let Some(sender) = self
@@ -70,7 +136,6 @@ impl ServerRuntime {
         {
             origin.sender_name = summary.agent_nickname.or(summary.native.title);
         }
-        let display_input = text.clone();
         let input_text = text;
         let mut metadata = queued_metadata
             .and_then(|value| value.as_object().cloned())
@@ -135,7 +200,7 @@ impl ServerRuntime {
             .begin_lifecycle_operation_for_root(lifecycle_root)
             .map_err(ToolCallError::InvalidInput)?;
 
-        if reservation.max_turns.is_some_and(|max_turns| {
+        let turn_limit_reached = reservation.max_turns.is_some_and(|max_turns| {
             max_turns == 0
                 || reservation
                     .active_turn
@@ -145,36 +210,67 @@ impl ServerRuntime {
                     .latest_turn
                     .as_ref()
                     .is_some_and(|turn| turn.native.sequence >= max_turns)
-        }) {
-            return Err(ToolCallError::InvalidInput(
-                "agent maximum turn count reached".to_string(),
-            ));
-        }
+        });
 
-        if let Some(active_turn) = reservation.active_turn.clone() {
-            let item = devo_protocol::PendingInputItem::new(
-                devo_protocol::PendingInputKind::UserText { text: input_text },
-                queued_metadata,
-                Utc::now(),
-            );
-            if !reservation.ephemeral {
-                self.deps
-                    .db
-                    .push_pending(&session_id, QueueType::Turn, &item)
-                    .map_err(|error| ToolCallError::InternalError(error.to_string()))?;
-            }
-            if let Some((parent_session_id, _)) = self.child_parent_and_path(session_id).await {
-                self.register_background_work(
-                    parent_session_id,
-                    format!("agent:{session_id}:queued:{}", item.id),
+        let interrupted_owner = self.background_input_suspended(session_id)
+            || self
+                .active_turns
+                .cancel_token(session_id)
+                .await
+                .is_some_and(|token| token.is_cancelled())
+            || (reservation.active_turn.is_none()
+                && reservation.latest_turn.as_ref().is_some_and(|turn| {
+                    turn.native.status == devo_protocol::native::turn::TurnStatus::Interrupted
+                }));
+        let mut item = devo_protocol::PendingInputItem::new(
+            devo_protocol::PendingInputKind::UserText { text: input_text },
+            queued_metadata,
+            Utc::now(),
+        );
+        item.id = devo_protocol::QueueItemId::from_string(format!(
+            "qitem_host:{}",
+            serde_json::to_string(&(session_id, &origin.sender, &origin.event_id))
+                .expect("host inbox identity serializes")
+        ));
+        item.set_delivery(origin.delivery);
+        if turn_limit_reached || interrupted_owner {
+            // Preserve a completed producer's result without starting another
+            // model turn or keeping its background ticket pending forever.
+            crate::runtime::handlers::queue_steer::hold_for_review(&mut item);
+            item.metadata
+                .get_or_insert_with(|| serde_json::json!({}))
+                .as_object_mut()
+                .expect("inbox metadata is an object")
+                .insert(
+                    if turn_limit_reached {
+                        "maxTurnsReached"
+                    } else {
+                        "ownerInterrupted"
+                    }
+                    .into(),
+                    serde_json::json!(true),
                 );
-            }
-            session_handle
-                .enqueue_pending_turn_input(item.clone())
-                .await;
-            // Enqueue acknowledgement is a mailbox barrier before the idle kick.
-            let _ = session_handle.pending_queue_snapshot().await;
-            drop(_state_change_guard);
+        }
+        let admitted = self
+            .persist_inbox_item(
+                session_id,
+                reservation.ephemeral,
+                &reservation.pending_turn_queue,
+                &item,
+            )
+            .map_err(|error| ToolCallError::InternalError(error.to_string()))?;
+        if admitted
+            && !turn_limit_reached
+            && !interrupted_owner
+            && let Some((parent_session_id, _)) = self.child_parent_and_path(session_id).await
+        {
+            self.register_background_work(
+                parent_session_id,
+                format!("agent:{session_id}:queued:{}", item.id),
+            );
+        }
+        drop(_state_change_guard);
+        if admitted {
             self.broadcast_queue_updated(
                 session_id,
                 devo_protocol::native::queue::QueueChange::Added,
@@ -182,114 +278,13 @@ impl ServerRuntime {
                 None,
             )
             .await;
-            self.drain_queue_if_idle(session_id).await;
-            return Ok(active_turn);
         }
-
-        let turn_config = reservation
-            .runtime_context
-            .resolve_session_turn_config(
-                &reservation.summary,
-                session_model_selection(&reservation.summary),
-                reservation.summary.settings.reasoning_effort.clone(),
-            )
-            .map_err(|error| ToolCallError::InvalidInput(error.to_string()))?;
-        let resolved_request = turn_config
-            .model
-            .resolve_reasoning_effort_selection(turn_config.reasoning_effort_selection.as_deref());
-
-        let request_model = turn_config.provider_request_model(&resolved_request.request_model);
-        let now = Utc::now();
-        let sequence = reservation
-            .latest_turn
-            .as_ref()
-            .map_or(1, |turn| turn.native.sequence + 1);
-        let native_turn_id = devo_protocol::native::ids::TurnId::new();
-        let turn_id = native_turn_id;
-        let native_session_id = reservation.summary.native.id;
-        let runtime_turn = crate::turn::RuntimeTurn {
-            native: devo_protocol::native::turn::Turn {
-                id: native_turn_id,
-                session_id: native_session_id,
-                sequence,
-                kind: devo_protocol::native::turn::TurnKind::Regular,
-                status: devo_protocol::native::turn::TurnStatus::InProgress,
-                model: devo_protocol::native::model::ModelBinding {
-                    provider: turn_config
-                        .model_binding_id
-                        .clone()
-                        .unwrap_or_else(|| "unknown".to_string()),
-                    model: request_model,
-                    variant: turn_config.variant.clone(),
-                    reasoning_effort: resolved_request.effective_reasoning_effort,
-                },
-                collaboration_mode: Some(devo_protocol::CollaborationMode::Build),
-                started_at: now,
-                completed_at: None,
-                error: None,
-                usage: None,
-            },
-            extras: crate::turn::RuntimeTurnExtras {
-                request_thinking: resolved_request.request_thinking.clone(),
-                stop_reason: None,
-                failure_reason: None,
-            },
-        };
-
-        session_handle
-            .begin_runtime_turn(runtime_turn.clone(), turn_config.clone())
-            .await;
-
-        if let Err(error) = self.append_turn_start(session_id, &runtime_turn).await {
-            let _ = session_handle.clear_active_turn_if_matches(turn_id).await;
-            return Err(error);
-        }
-
-        self.broadcast_notification(
-            devo_protocol::native::event::ServerNotification::session_status_changed(
-                session_id,
-                SessionStatus::Active,
-                /*active_turn_id*/ None,
-            ),
-        )
-        .await;
-        self.broadcast_notification(
-            devo_protocol::native::event::ServerNotification::TurnStarted {
-                turn: Box::new(runtime_turn.native.clone()),
-            },
-        )
-        .await;
-
-        self.add_active_turn_user_text(session_id, turn_id, display_input.clone())
-            .await;
-        let runtime = Arc::clone(self);
-        let turn_for_task = runtime_turn.clone();
-        let turn_config_for_task = turn_config.clone();
-        if let Some(parent_session_id) = reservation.parent_session_id {
-            self.active_turns
-                .copy_connection_from_parent(session_id, parent_session_id)
-                .await;
-        }
-        self.spawn_active_runtime_turn_task(session_id, runtime_turn.clone(), None, async move {
-            runtime
-                .execute_turn(ExecuteTurnRequest {
-                    session_id,
-                    turn: turn_for_task,
-                    turn_config: turn_config_for_task,
-                    display_input,
-                    client_user_message_id: None,
-                    input: input_text,
-                    input_messages: Vec::new(),
-                    input_images: Vec::new(),
-                    input_image_paths: Vec::new(),
-                    collaboration_mode: devo_protocol::CollaborationMode::Build,
-                    input_mode: TurnInputMode::HostMessage(origin),
-                    user_message_already_emitted: false,
-                })
-                .await;
+        // Queue acceptance is not a claim that the model has consumed the input.
+        // Both idle and busy delivery retain the same persist-first ordering.
+        self.drain_queue_if_idle(session_id).await;
+        Ok(HostDeliveryReceipt {
+            queue_item_id: item.id,
         })
-        .await;
-        Ok(runtime_turn)
     }
 }
 

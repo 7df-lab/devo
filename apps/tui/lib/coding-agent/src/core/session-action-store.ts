@@ -13,13 +13,28 @@ export function queuedMessageLaneDeliveryPolicy(lane: QueuedMessageLane): Delive
 	return lane === "steering" ? "next_turn_boundary" : "when_run_idle";
 }
 
-export type QueuedMessageMutation =
+export type QueuedMessageMutation = (
 	| { type: "delete" }
 	| { type: "move"; direction: -1 | 1 }
-	| { type: "replace"; text: string; images?: ImageContent[]; lane: QueuedMessageLane };
+	| { type: "replace"; text: string; images?: ImageContent[]; lane: QueuedMessageLane }
+) & { queueItemId?: string };
 export type QueuedMessageMutationStatus = "applied" | "rejected" | "invalid";
 
+export interface OrderedQueuedMessage {
+	id: string;
+	text: string;
+	preview?: string;
+	/** False when the editor cannot round-trip the complete queued payload. */
+	editable?: boolean;
+	delivery: "steer" | "followUp";
+	blocked: boolean;
+	/** Consumption is uncertain after recovery; never retry automatically. */
+	recoveryRequired?: boolean;
+}
+
 export interface SessionActionSnapshot {
+	/** Authoritative admission order; compatibility lane arrays are projections only. */
+	ordered?: readonly OrderedQueuedMessage[];
 	queuedCount: number;
 	steering: readonly string[];
 	followUps: readonly string[];

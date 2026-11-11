@@ -209,6 +209,11 @@ pub async fn dispatch_host_request_with_bridge(bridge: &HostBridge, data: Value)
                     "params": params,
                 }),
             );
+            if let Some(runtime) = bridge.runtime() {
+                runtime
+                    .drain_async_tool_completion_notices(bridge.session_id)
+                    .await;
+            }
             ok_result(json!({ "accepted": true }))
         }
         "python.completed" => {
@@ -219,6 +224,11 @@ pub async fn dispatch_host_request_with_bridge(bridge: &HostBridge, data: Value)
                     "params": params,
                 }),
             );
+            if let Some(runtime) = bridge.runtime() {
+                runtime
+                    .drain_async_tool_completion_notices(bridge.session_id)
+                    .await;
+            }
             ok_result(json!({ "accepted": true }))
         }
         "bash.consumed" => {

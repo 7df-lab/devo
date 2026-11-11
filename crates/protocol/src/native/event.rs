@@ -238,6 +238,8 @@ pub enum ServerNotification {
     /// External/A2A handles bind atomically.
     #[serde(rename = "queue/updated")]
     QueueUpdated {
+        #[serde(default)]
+        revision: u64,
         session_id: SessionId,
         change: QueueChange,
         queue_item_id: QueueItemId,

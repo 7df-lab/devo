@@ -54,6 +54,25 @@ impl ServerRuntime {
             );
         }
         let legacy_session_id = params.session_id;
+        let client_identity = params
+            .client_user_message_id
+            .clone()
+            .unwrap_or_else(|| format!("queue:{}", params.idempotency_key));
+        let event_key =
+            serde_json::to_string(&("human", &client_identity)).expect("key serializes");
+        match self.deps.db.inbox_receipt(&legacy_session_id, &event_key) {
+            Ok(Some((queue_item_id, turn_id))) => {
+                return serde_json::json!({"id":request_id,"result":SessionQueuePushResult::AlreadyAccepted { queue_item_id, turn_id }});
+            }
+            Ok(None) => {}
+            Err(error) => {
+                return self.error_response(
+                    request_id,
+                    ProtocolErrorCode::InternalError,
+                    error.to_string(),
+                );
+            }
+        }
 
         // Idle vs busy is decided by the shared admission path: it starts a
         // new turn when the session is idle and queues otherwise. The
@@ -76,7 +95,12 @@ impl ServerRuntime {
                     execution_mode: TurnExecutionMode::default(),
                 },
                 TurnStartQueuePolicy::Queue,
-                params.client_user_message_id.clone(),
+                Some(
+                    params
+                        .client_user_message_id
+                        .clone()
+                        .unwrap_or_else(|| format!("queue:{}", params.idempotency_key)),
+                ),
             )
             .await;
         if response.get("error").is_some() {
@@ -121,6 +145,7 @@ impl ServerRuntime {
                 // queue truth immediately after). `enqueued_at` is
                 // approximate.
                 let entry = QueueEntry {
+                    delivery: devo_protocol::native::host_message::HostMessageDelivery::FollowUp,
                     origin: None,
                     queue_item_id: QueueItemId::from_string(queued_id.clone()),
                     position,
@@ -193,15 +218,21 @@ impl ServerRuntime {
                 "session does not exist",
             );
         };
-        let entries = native_queue_entries(
-            &reservation
+        let (entries, revision) = {
+            let queue = reservation
                 .pending_turn_queue
                 .lock()
-                .expect("pending turn queue mutex should not be poisoned"),
-        );
+                .expect("pending queue mutex poisoned");
+            let entries = native_queue_entries(&queue);
+            let revision = self
+                .queue_snapshot_revision
+                .fetch_add(1, std::sync::atomic::Ordering::Relaxed)
+                + 1;
+            (entries, revision)
+        };
         serde_json::to_value(SuccessResponse {
             id: request_id,
-            result: SessionQueueListResult { entries },
+            result: SessionQueueListResult { entries, revision },
         })
         .expect("serialize session/queue/list response")
     }
@@ -324,13 +355,14 @@ impl ServerRuntime {
                     "review recovered input before retrying or discarding it",
                 );
             }
-            if params.position.is_some()
-                && queue.iter().any(super::queue_steer::requires_queue_review)
+            if params
+                .position
+                .is_some_and(|position| position != (index + 1) as u32)
             {
                 return self.error_response(
                     request_id,
                     ProtocolErrorCode::InvalidParams,
-                    "review recovered input before reordering the queue",
+                    "strict FIFO does not permit queue reordering",
                 );
             }
             let mut candidate = queue.clone();
@@ -539,7 +571,7 @@ impl ServerRuntime {
 
     pub(crate) async fn handle_turn_steer_with_client_user_message_id(
         self: &Arc<Self>,
-        connection_id: u64,
+        _connection_id: u64,
         request_id: serde_json::Value,
         params: serde_json::Value,
         client_user_message_id: Option<String>,
@@ -581,6 +613,14 @@ impl ServerRuntime {
             );
         };
         let legacy_session_id = params.session_id;
+        let Some(handle) = self.session(legacy_session_id).await else {
+            return self.error_response(
+                request_id,
+                ProtocolErrorCode::SessionNotFound,
+                "session does not exist",
+            );
+        };
+        let _gate = handle.lock_state_change().await;
         let Some(reservation) = self
             .session_turn_reservation_snapshot(legacy_session_id)
             .await
@@ -626,7 +666,7 @@ impl ServerRuntime {
         };
 
         let now = chrono::Utc::now();
-        let item = PendingInputItem::new(
+        let mut item = PendingInputItem::new(
             PendingInputKind::UserInput {
                 input: input_items.clone(),
                 display_text: display_input.clone(),
@@ -640,158 +680,46 @@ impl ServerRuntime {
             now,
         );
 
-        let Some(active_turn) = reservation.active_turn.as_ref() else {
-            return self
-                .degrade_steer_to_queue(
+        item.assign_client_identity();
+        item.set_delivery(devo_protocol::native::host_message::HostMessageDelivery::Steer);
+        match self
+            .deps
+            .db
+            .inbox_receipt(&legacy_session_id, &item.admission_key())
+        {
+            Ok(Some((queue_item_id, turn_id))) => {
+                return serde_json::json!({"id":request_id,"result":TurnSteerResult::AlreadyAccepted { queue_item_id, turn_id }});
+            }
+            Ok(None) => {}
+            Err(error) => {
+                return self.error_response(
                     request_id,
-                    legacy_session_id,
-                    &reservation,
-                    item,
-                    reservation.ephemeral,
-                )
-                .await;
-        };
-        if active_turn.turn_id() != params.expected_turn_id {
-            // The client's expectedTurnId may name a turn that already reached
-            // a terminal state: either the session went idle and a follow-up
-            // turn is now running (post-turn queue drain), or that turn's
-            // completion is mid-finalize and the actor still books it as
-            // active. Native semantics keep the message either way — degrade
-            // into the queue instead of erroring. The hard mismatch error is
-            // reserved for a genuinely different live turn.
-            let expected_terminal = self
+                    ProtocolErrorCode::InternalError,
+                    error.to_string(),
+                );
+            }
+        }
+        if let Some(active) = &reservation.active_turn
+            && active.turn_id() != params.expected_turn_id
+            && self
                 .recent_terminal_turn_status(params.expected_turn_id)
                 .await
-                .is_some();
-            let active_terminal = self
-                .recent_terminal_turn_status(active_turn.turn_id())
-                .await
-                .is_some();
-            if expected_terminal || active_terminal {
-                return self
-                    .degrade_steer_to_queue(
-                        request_id,
-                        legacy_session_id,
-                        &reservation,
-                        item,
-                        reservation.ephemeral,
-                    )
-                    .await;
-            }
+                .is_none()
+        {
             return self.error_response(
                 request_id,
                 ProtocolErrorCode::ExpectedTurnMismatch,
                 "active turn did not match expectedTurnId",
             );
         }
-        if active_turn.native.kind != devo_protocol::native::turn::TurnKind::Regular {
-            // Goal continuations are autonomous and unbounded: degrading the
-            // steer into the queue AND preempting the turn guarantees the
-            // user's message runs next instead of waiting for a turn boundary
-            // that never comes. Compaction turns stay rejected (bounded work;
-            // the queue drains naturally after compaction).
-            if active_turn.native.kind == devo_protocol::native::turn::TurnKind::GoalContinuation {
-                self.preempt_goal_continuation_for_user_input(
-                    legacy_session_id,
-                    active_turn.turn_id(),
-                );
-                return self
-                    .degrade_steer_to_queue(
-                        request_id,
-                        legacy_session_id,
-                        &reservation,
-                        item,
-                        reservation.ephemeral,
-                    )
-                    .await;
-            }
-            return self.error_response(
-                request_id,
-                ProtocolErrorCode::ActiveTurnNotSteerable,
-                "cannot steer a non-regular turn",
-            );
-        }
-        // A turn parked at an approval checkpoint never consumes steered
-        // input — it is blocked awaiting the permission decision, which can
-        // outlive any client — so injecting into `steer_input_queue` would
-        // strand the message. Preempt the parked turn and degrade into the
-        // pending queue instead: the post-turn drain runs the message as a
-        // fresh turn (same starvation rule as goal-continuation above).
-        if self
-            .session_interactive
-            .has_pending_approval_for_host(legacy_session_id)
-            .await
-        {
-            self.preempt_approval_parked_turn(legacy_session_id, active_turn.turn_id())
-                .await;
-            return self
-                .degrade_steer_to_queue(
-                    request_id,
-                    legacy_session_id,
-                    &reservation,
-                    item,
-                    reservation.ephemeral,
-                )
-                .await;
-        }
-        let native_session_id = reservation.summary.native.id;
-        let native_turn_id = *active_turn.native_turn_id();
-
-        if !reservation.ephemeral
-            && let Err(error) =
-                self.deps
-                    .db
-                    .push_pending(&legacy_session_id, QueueType::Steer, &item)
-        {
-            tracing::warn!(
-                session_id = %legacy_session_id,
-                error = %error,
-                "failed to persist steer input to database"
-            );
-            return self.error_response(
-                request_id,
-                ProtocolErrorCode::InternalError,
-                format!("failed to persist steer input: {error}"),
-            );
-        }
-        reservation
-            .steer_input_queue
-            .lock()
-            .expect("steer input queue mutex should not be poisoned")
-            .push_back(item.clone());
-
-        let native_item = crate::runtime::items::native_user_message_item_with_client_message_id(
-            display_input,
-            &[],
-            devo_protocol::native::item::UserMessageEntry::Steer,
-            client_user_message_id,
-        );
-        let (item_id, item_seq) = self
-            .start_native_item(native_session_id, native_turn_id, native_item.clone())
-            .await;
-        self.complete_native_item(
-            native_session_id,
-            native_turn_id,
-            item_id,
-            item_seq,
-            native_item,
+        self.degrade_steer_to_queue(
+            request_id,
+            legacy_session_id,
+            &reservation,
+            item,
+            reservation.ephemeral,
         )
-        .await;
-
-        self.emit_notification_to_connection(
-            connection_id,
-            ServerNotification::ServerRequestResolved {
-                session_id: legacy_session_id,
-                request_id: "turn-steer-accepted".to_string(),
-                turn_id: Some(native_turn_id),
-            },
-        )
-        .await;
-        serde_json::to_value(SuccessResponse {
-            id: request_id,
-            result: TurnSteerResult::Injected { item_id },
-        })
-        .expect("serialize turn/steer response")
+        .await
     }
 
     async fn degrade_steer_to_queue(
@@ -802,28 +730,18 @@ impl ServerRuntime {
         item: PendingInputItem,
         ephemeral: bool,
     ) -> serde_json::Value {
-        if !ephemeral
-            && let Err(error) =
-                self.deps
-                    .db
-                    .push_pending(&legacy_session_id, QueueType::Turn, &item)
-        {
-            tracing::warn!(
-                session_id = %legacy_session_id,
-                error = %error,
-                "failed to persist degraded steer to database"
-            );
+        if let Err(error) = self.persist_inbox_item(
+            legacy_session_id,
+            ephemeral,
+            &reservation.pending_turn_queue,
+            &item,
+        ) {
             return self.error_response(
                 request_id,
                 ProtocolErrorCode::InternalError,
-                format!("failed to persist degraded steer: {error}"),
+                format!("failed to persist inbox input: {error}"),
             );
         }
-        reservation
-            .pending_turn_queue
-            .lock()
-            .expect("pending turn queue mutex should not be poisoned")
-            .push_back(item.clone());
         let entries = native_queue_entries(
             &reservation
                 .pending_turn_queue
@@ -835,6 +753,7 @@ impl ServerRuntime {
             .find(|entry| entry.queue_item_id == item.id)
             .cloned()
             .unwrap_or_else(|| QueueEntry {
+                delivery: item.delivery(),
                 origin: item.host_message_origin(),
                 queue_item_id: item.id,
                 position: entries.len().max(1) as u32,
@@ -898,19 +817,24 @@ impl ServerRuntime {
         started_turn_id: Option<NativeTurnId>,
     ) {
         let session_id_string = session_id.to_string();
-        let entries = self
+        let (entries, revision) = self
             .session_turn_reservation_snapshot(session_id)
             .await
             .map(|reservation| {
-                native_queue_entries(
-                    &reservation
-                        .pending_turn_queue
-                        .lock()
-                        .expect("pending turn queue mutex should not be poisoned"),
-                )
+                let queue = reservation
+                    .pending_turn_queue
+                    .lock()
+                    .expect("pending queue mutex poisoned");
+                let entries = native_queue_entries(&queue);
+                let revision = self
+                    .queue_snapshot_revision
+                    .fetch_add(1, std::sync::atomic::Ordering::Relaxed)
+                    + 1;
+                (entries, revision)
             })
             .unwrap_or_default();
         let notification = ServerNotification::QueueUpdated {
+            revision,
             session_id: NativeSessionId::from_string(session_id_string.clone()),
             change,
             queue_item_id,
@@ -1006,6 +930,7 @@ pub(crate) fn native_queue_entries(queue: &VecDeque<PendingInputItem>) -> Vec<Qu
                 _ => "",
             };
             QueueEntry {
+                delivery: item.delivery(),
                 origin: item.host_message_origin(),
                 queue_item_id: item.id,
                 position: (index + 1) as u32,

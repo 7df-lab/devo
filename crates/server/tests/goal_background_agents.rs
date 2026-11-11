@@ -1,13 +1,14 @@
 use std::pin::Pin;
 use std::sync::{Arc, Mutex};
 
-use anyhow::Result;
+use anyhow::{Context, Result};
 use async_trait::async_trait;
 use devo_core::tools::AgentToolCoordinator;
 use devo_protocol::{ModelRequest, ModelResponse, StreamEvent};
 use devo_provider::ModelProviderSDK;
-use futures::Stream;
+use futures::{Stream, StreamExt};
 use pretty_assertions::assert_eq;
+use std::time::Duration;
 use tempfile::TempDir;
 use tokio::sync::Notify;
 
@@ -18,11 +19,36 @@ mod support;
 struct ControlledProvider {
     requests: Mutex<Vec<ModelRequest>>,
     releases: Mutex<Vec<Arc<Notify>>>,
+    started: Notify,
 }
 
 impl ControlledProvider {
     fn release(&self, index: usize) {
         self.releases.lock().unwrap()[index].notify_one();
+    }
+
+    async fn wait_for_request_after(&self, start: usize, text: &str) -> Result<usize> {
+        tokio::time::timeout(Duration::from_secs(/*secs*/ 10), async {
+            loop {
+                let started = self.started.notified();
+                if let Some(index) = self
+                    .requests
+                    .lock()
+                    .expect("requests")
+                    .iter()
+                    .enumerate()
+                    .skip(start)
+                    .find_map(|(index, request)| {
+                        support::request_last_message_contains_text(request, text).then_some(index)
+                    })
+                {
+                    return index;
+                }
+                started.await;
+            }
+        })
+        .await
+        .with_context(|| format!("provider did not receive {text}"))
     }
 }
 
@@ -38,15 +64,41 @@ impl ModelProviderSDK for ControlledProvider {
         &self,
         request: ModelRequest,
     ) -> Result<Pin<Box<dyn Stream<Item = Result<StreamEvent>> + Send>>> {
+        let result = if support::request_contains_text(&request, "first child task") {
+            if support::request_contains_text(&request, "busy child follow-up") {
+                "followup-review-result-marker"
+            } else {
+                "initial-review-result-marker"
+            }
+        } else {
+            "parent-result-marker"
+        };
         let release = Arc::new(Notify::new());
-        self.releases.lock().unwrap().push(Arc::clone(&release));
-        self.requests.lock().unwrap().push(request);
-        Ok(Box::pin(futures::stream::once(async move {
-            release.notified().await;
-            Ok(StreamEvent::MessageDone {
-                response: support::title_response(),
+        // Keep release handles and request indices paired across concurrent
+        // parent and child calls instead of assuming a global call order.
+        {
+            let mut requests = self.requests.lock().expect("requests");
+            self.releases
+                .lock()
+                .expect("releases")
+                .push(release.clone());
+            requests.push(request);
+        }
+        self.started.notify_one();
+        let mut response = support::title_response();
+        response.content = vec![devo_protocol::ResponseContent::Text(result.into())];
+        Ok(Box::pin(
+            futures::stream::once(async move {
+                release.notified().await;
+                Ok(StreamEvent::TextDelta {
+                    index: 0,
+                    text: result.into(),
+                })
             })
-        })))
+            .chain(futures::stream::iter([Ok(StreamEvent::MessageDone {
+                response,
+            })])),
+        ))
     }
 }
 
@@ -92,25 +144,78 @@ async fn busy_child_mailbox_keeps_goal_waiting_through_followup() -> Result<()> 
     provider.release(0);
     support::collect_until_turn_completed(&mut notifications).await?;
     provider.release(1);
-    support::wait_for_captured_request_count(&provider.requests, /*expected*/ 3).await?;
+    let followup = provider
+        .wait_for_request_after(/*start*/ 2, "busy child follow-up")
+        .await?;
+    let completion = provider
+        .wait_for_request_after(/*start*/ 2, "initial-review-result-marker")
+        .await?;
+    assert_ne!(followup, completion);
+    support::wait_for_captured_request_count(&provider.requests, /*expected*/ 4).await?;
+
+    // The parent may process a completion between child turns. That regular
+    // inbox turn must not resume its autonomous goal while the follow-up runs.
+    provider.release(completion);
+    tokio::time::timeout(Duration::from_secs(/*secs*/ 10), async {
+        loop {
+            let completed =
+                support::wait_for_notification(&mut notifications, "turn/completed").await?;
+            if completed["params"]["turn"]["sessionId"] == parent.to_string() {
+                return Ok::<_, anyhow::Error>(());
+            }
+        }
+    })
+    .await??;
+    let unexpected = tokio::time::timeout(Duration::from_millis(/*millis*/ 150), async {
+        loop {
+            let started =
+                support::wait_for_notification(&mut notifications, "turn/started").await?;
+            if started["params"]["turn"]["sessionId"] == parent.to_string()
+                && started["params"]["turn"]["kind"] == "goalContinuation"
+            {
+                return Ok::<_, anyhow::Error>(started);
+            }
+        }
+    })
+    .await;
+    assert!(
+        unexpected.is_err(),
+        "goal resumed before child finished: {unexpected:?}"
+    );
+    assert_eq!(provider.requests.lock().expect("requests").len(), 4);
+
+    provider.release(followup);
+    let final_completion = provider
+        .wait_for_request_after(/*start*/ 4, "followup-review-result-marker")
+        .await?;
+    assert_eq!(final_completion, 4);
     {
         let requests = provider.requests.lock().unwrap();
         assert!(support::request_contains_text(
-            &requests[2],
-            "busy child follow-up"
+            &requests[final_completion],
+            "initial-review-result-marker"
+        ));
+        assert!(support::request_last_message_contains_text(
+            &requests[final_completion],
+            "followup-review-result-marker"
         ));
     }
-    // If the parent woke between child turns, the third request above would
-    // have been a hidden goal continuation instead of the queued child task.
-    provider.release(2);
-    support::wait_for_captured_request_count(&provider.requests, /*expected*/ 4).await?;
+    provider.release(final_completion);
+    let continuation = provider
+        .wait_for_request_after(/*start*/ 5, "Wait for delegated review")
+        .await?;
+    assert_eq!(continuation, 5);
     {
         let requests = provider.requests.lock().unwrap();
         assert!(support::request_contains_text(
-            &requests[3],
+            &requests[continuation],
             "Wait for delegated review"
         ));
-        assert_eq!(requests.len(), 4);
+        assert!(support::request_contains_text(
+            &requests[continuation],
+            "followup-review-result-marker"
+        ));
+        assert_eq!(requests.len(), 6);
     }
     support::pause_goal_and_interrupt_session(&runtime, connection, parent).await
 }

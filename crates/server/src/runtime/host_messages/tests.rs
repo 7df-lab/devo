@@ -122,6 +122,14 @@ async fn host_followups_keep_origin_in_queue_live_model_and_replay() -> Result<(
     runtime
         .deliver_host_message(session, agent, /*queued_metadata*/ None)
         .await?;
+    // A retried producer event retains one durable inbox entry, even while busy.
+    runtime
+        .deliver_host_message(
+            session,
+            HostMessage::agent(sender, "agent-event".into(), AGENT_BODY.into()),
+            /*queued_metadata*/ None,
+        )
+        .await?;
     let background = HostMessage::background(
         session,
         &json!({"kind":"async_bash_completion", "params":{"handle_id":"bash-1"}}),
@@ -187,7 +195,8 @@ async fn host_followups_keep_origin_in_queue_live_model_and_replay() -> Result<(
             .deps
             .db
             .list_pending(&session, QueueType::Steer)?
-            .is_empty()
+            .iter()
+            .all(|item| item.host_message_origin().is_none())
     );
     let after_steer = runtime
         .load_canonical_history(&json!(52), session)
@@ -250,6 +259,22 @@ async fn host_followups_keep_origin_in_queue_live_model_and_replay() -> Result<(
     })
     .await
     .context("follow-up turns did not complete")??;
+    // A producer retry after consumption must not schedule another model turn.
+    runtime
+        .deliver_host_message(
+            session,
+            HostMessage::agent(sender, "agent-event".into(), AGENT_BODY.into()),
+            /*queued_metadata*/ None,
+        )
+        .await?;
+    assert!(
+        runtime
+            .deps
+            .db
+            .list_pending(&session, QueueType::Turn)?
+            .is_empty()
+    );
+    assert_eq!(provider.requests.lock().expect("requests").len(), 3);
     let history = runtime
         .load_canonical_history(&json!(6), session)
         .await
@@ -806,5 +831,176 @@ async fn active_parent_spawn_records_one_named_item_on_its_real_turn() -> Result
         );
     }
     provider.release.add_permits(2);
+    Ok(())
+}
+
+#[test]
+fn legacy_and_managed_completion_share_durable_identity() {
+    let owner = SessionId::new();
+    let notice = json!({"kind": "async_bash_completion", "params": {"handle_id": "shell-42"}});
+    let legacy = HostMessage::background(owner, &notice, "legacy output".into());
+    let managed = HostMessage::managed_completion(owner, "bash:shell-42".into(), "output".into());
+    assert_eq!(legacy.origin, managed.origin);
+    let python = json!({"kind": "async_python_completion", "params": {"workId": "python:cell-7"}});
+    assert_eq!(
+        HostMessage::background(owner, &python, "legacy".into()).origin,
+        HostMessage::managed_completion(owner, "python:cell-7".into(), "output".into()).origin,
+    );
+}
+
+#[tokio::test]
+async fn completed_child_at_turn_limit_keeps_result_held_without_restart() -> Result<()> {
+    use devo_core::tools::AgentToolCoordinator;
+    let home = tempfile::TempDir::new()?;
+    let provider = Arc::new(GatedProvider {
+        requests: StdMutex::new(Vec::new()),
+        started: Semaphore::new(0),
+        release: Semaphore::new(0),
+    });
+    let runtime = crate::test_support::TestRuntime::new(provider.clone())
+        .with_test_model()
+        .runtime(home.path());
+    let (tx, _rx) = crate::test_outbound_channel(1024);
+    let connection = runtime
+        .register_connection(ClientTransportKind::Stdio, tx)
+        .await;
+    runtime
+        .handle_incoming(
+            connection,
+            json!({"id":1,"method":"initialize","params":{
+        "protocolVersion":1,"clientCapabilities":{},"_meta":{"devo":{"protocol":"native"}},
+        "clientInfo":{"name":"limit-test","title":"test","version":"1"}}}),
+        )
+        .await;
+    let created = runtime
+        .handle_incoming(
+            connection,
+            json!({"id":2,"method":"session/new",
+        "params":{"cwd":home.path(),"idempotencyKey":"limit-root"}}),
+        )
+        .await
+        .context("root")?;
+    let root = SessionId::from(created["result"]["session"]["id"].as_str().context("id")?);
+    let child = runtime
+        .clone()
+        .spawn_agent(devo_protocol::SpawnAgentParams {
+            session_id: root,
+            message: "one turn only".into(),
+            model: None,
+            thinking: None,
+            fork_turns: Some("none".into()),
+            max_turns: Some(1),
+            tool_policy: Default::default(),
+            ephemeral: false,
+            nickname: Some("limited".into()),
+        })
+        .await?
+        .child_session_id;
+    tokio::time::timeout(Duration::from_secs(10), provider.started.acquire())
+        .await??
+        .forget();
+    // Completion can arrive while the owner's last allowed turn is still running.
+    let receipt = runtime
+        .deliver_host_message(
+            child,
+            HostMessage::managed_completion(child, "bash:late".into(), "late result".into()),
+            None,
+        )
+        .await?;
+    let snapshot = runtime
+        .session(child)
+        .await
+        .context("child")?
+        .turn_reservation_snapshot()
+        .await
+        .context("reservation")?;
+    let queued = snapshot.pending_turn_queue.lock().expect("queue");
+    let item = queued
+        .iter()
+        .find(|item| item.id == receipt.queue_item_id)
+        .context("durable result")?;
+    assert!(crate::runtime::handlers::queue_steer::requires_queue_review(item));
+    assert_eq!(
+        item.metadata
+            .as_ref()
+            .and_then(|m| m.get("maxTurnsReached")),
+        Some(&json!(true))
+    );
+    drop(queued);
+    let retry = runtime
+        .handle_incoming(
+            connection,
+            json!({"id":3,"method":"session/queue/retry",
+        "params":{"sessionId":child,"queueItemId":receipt.queue_item_id}}),
+        )
+        .await
+        .context("retry")?;
+    assert!(
+        retry.get("error").is_some(),
+        "turn limit must not be bypassed: {retry}"
+    );
+    let second = runtime
+        .clone()
+        .spawn_agent(devo_protocol::SpawnAgentParams {
+            session_id: root,
+            message: "two turns only".into(),
+            model: None,
+            thinking: None,
+            fork_turns: Some("none".into()),
+            max_turns: Some(2),
+            tool_policy: Default::default(),
+            ephemeral: false,
+            nickname: Some("preaccepted".into()),
+        })
+        .await?
+        .child_session_id;
+    tokio::time::timeout(Duration::from_secs(10), provider.started.acquire())
+        .await??
+        .forget();
+    for index in 0..2 {
+        runtime
+            .deliver_host_message(
+                second,
+                HostMessage::agent(
+                    root,
+                    format!("preaccepted-{index}"),
+                    format!("queued-{index}"),
+                ),
+                None,
+            )
+            .await?;
+    }
+    provider.release.add_permits(32);
+    tokio::time::timeout(Duration::from_secs(15), async {
+        loop {
+            let snapshot = runtime
+                .session(second)
+                .await
+                .unwrap()
+                .turn_reservation_snapshot()
+                .await
+                .unwrap();
+            let stopped = snapshot
+                .latest_turn
+                .as_ref()
+                .is_some_and(|turn| turn.native.sequence == 2)
+                && snapshot.active_turn.is_none()
+                && snapshot
+                    .pending_turn_queue
+                    .lock()
+                    .unwrap()
+                    .front()
+                    .is_some_and(|item| {
+                        crate::runtime::handlers::queue_steer::requires_queue_review(item)
+                    });
+            if stopped && !runtime.has_pending_subagent_work(second) {
+                break;
+            }
+            tokio::time::sleep(Duration::from_millis(10)).await;
+        }
+    })
+    .await
+    .context("preaccepted input must stop at dequeue turn limit")?;
+    runtime.shutdown().await;
     Ok(())
 }

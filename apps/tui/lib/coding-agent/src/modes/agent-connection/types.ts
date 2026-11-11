@@ -532,6 +532,7 @@ export interface AgentConnectionUserMessage {
 }
 
 export interface AgentConnectionQueueState {
+	ordered?: readonly import("../../core/session-action-store.js").OrderedQueuedMessage[];
 	steering: string[];
 	followUp: string[];
 }

@@ -17,13 +17,13 @@ function isLabeledQueuedPreview(message: string): boolean {
 	);
 }
 
-export function formatQueuedMessagePreview(message: string, label: "Steering" | "Follow-up"): string {
+export function formatQueuedMessagePreview(message: string, label: string): string {
 	return isLabeledQueuedPreview(message) ? message : `${label}: ${message}`;
 }
 
 export function styleQueuedMessagePreview(
 	message: string,
-	label: "Steering" | "Follow-up",
+	label: string,
 	isRecognizedSlashCommand: (name: string) => boolean,
 ): string {
 	const preview = formatQueuedMessagePreview(message, label);

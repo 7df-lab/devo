@@ -171,6 +171,7 @@ pub(super) async fn run_session_actor(
                 };
                 let _ = reply.send(popped);
             }
+            #[cfg(test)]
             SessionCommand::EnqueuePendingTurnInput { item } => {
                 state
                     .pending_turn_queue

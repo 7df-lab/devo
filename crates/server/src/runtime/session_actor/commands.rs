@@ -4,6 +4,7 @@ use devo_core::SessionTitleState;
 use devo_core::TurnId;
 use devo_protocol::ApprovalScopeValue;
 use devo_protocol::CollaborationMode;
+#[cfg(test)]
 use devo_protocol::PendingInputItem;
 use devo_protocol::ThreadGoal;
 use tokio::sync::oneshot;
@@ -89,6 +90,7 @@ pub(crate) enum SessionCommand {
         require_idle_session: bool,
         reply: oneshot::Sender<Option<QueuedTurnInputData>>,
     },
+    #[cfg(test)]
     EnqueuePendingTurnInput {
         item: PendingInputItem,
     },
