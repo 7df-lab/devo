@@ -35,6 +35,11 @@ interface WorktreeEntry {
 	projectName: string
 }
 
+interface WorktreeConfirmation {
+	worktree: WorktreeEntry
+	action: WorktreeAction
+}
+
 // ============================================================
 // Helpers
 // ============================================================
@@ -54,8 +59,17 @@ export function WorktreeSettings() {
 	const [loading, setLoading] = useState(true)
 	const [activeActions, setActiveActions] = useState(new Map<string, WorktreeAction>())
 	const activeActionsRef = useRef(activeActions)
-	const [error, setError] = useState<string | null>(null)
-	const [pending, setPending] = useState<{ worktree: WorktreeEntry; action: WorktreeAction } | null>(null)
+	const [loadError, setLoadError] = useState<string | null>(null)
+	const [actionError, setActionError] = useState<{
+		confirmation: WorktreeConfirmation
+		message: string
+	} | null>(null)
+	const [pending, setPending] = useState<WorktreeConfirmation | null>(null)
+	const pendingRef = useRef(pending)
+	pendingRef.current = pending
+	const error = pending
+		? actionError?.confirmation === pending ? actionError.message : null
+		: loadError
 
 	// Keep a ref so the stable callback always reads the latest project list
 	// without needing it as a dependency.
@@ -90,7 +104,7 @@ export function WorktreeSettings() {
 			mountedRef.current && scopeRef.current === requestScope && loadVersionRef.current === version
 		const currentProjects = projectsRef.current
 		setLoading(true)
-		setError(null)
+		setLoadError(null)
 		try {
 			const results = await Promise.allSettled(
 				currentProjects.map(async (project) => {
@@ -116,9 +130,9 @@ export function WorktreeSettings() {
 				}
 			}
 			setWorktrees([...new Map(entries.map((entry) => [entry.directory, entry])).values()])
-			if (failures.length) setError(failures.join("; "))
+			if (failures.length) setLoadError(failures.join("; "))
 		} catch (error) {
-			if (isCurrent()) setError(error instanceof Error ? error.message : "Failed to load worktrees")
+			if (isCurrent()) setLoadError(error instanceof Error ? error.message : "Failed to load worktrees")
 		} finally {
 			if (isCurrent()) setLoading(false)
 		}
@@ -132,21 +146,38 @@ export function WorktreeSettings() {
 	}, [projectDirKey, loadWorktrees])
 
 	const handleAction = useCallback(
-		async (wt: WorktreeEntry, action: WorktreeAction) => {
-			if (!mountedRef.current || activeActionsRef.current.has(wt.directory)) return
+		async (confirmation: WorktreeConfirmation) => {
+			const { worktree: wt, action } = confirmation
+			if (
+				!mountedRef.current || pendingRef.current !== confirmation ||
+				activeActionsRef.current.has(wt.directory) ||
+				!projectsRef.current.some((project) => project.directory === wt.projectDir)
+			) return
 			const actionScope = scopeRef.current
-			const isCurrent = () => mountedRef.current && scopeRef.current === actionScope
+			const ownsConfirmation = () =>
+				mountedRef.current && scopeRef.current === actionScope && pendingRef.current === confirmation
 			activeActionsRef.current = new Map(activeActionsRef.current).set(wt.directory, action)
 			setActiveActions(activeActionsRef.current)
-			setError(null)
+			setActionError(null)
 			try {
 				if (action === "remove") await removeWorktree(wt.projectDir, wt.directory)
 				else await resetWorktree(wt.projectDir, wt.directory)
-				if (!isCurrent()) return
-				await loadWorktrees()
-				if (isCurrent()) setPending(null)
+				// Data still needs reconciliation if the affected project remains or returns.
+				// This must not take ownership of a newer confirmation or its error.
+				if (
+					mountedRef.current &&
+					projectsRef.current.some((project) => project.directory === wt.projectDir)
+				) {
+					await loadWorktrees()
+				}
+				if (ownsConfirmation()) setPending(null)
 			} catch (error) {
-				if (isCurrent()) setError(error instanceof Error ? error.message : `Failed to ${action} worktree`)
+				if (ownsConfirmation()) {
+					setActionError({
+						confirmation,
+						message: error instanceof Error ? error.message : `Failed to ${action} worktree`,
+					})
+				}
 			} finally {
 				const remaining = new Map(activeActionsRef.current)
 				remaining.delete(wt.directory)
@@ -207,8 +238,8 @@ export function WorktreeSettings() {
 							worktree={wt}
 							isRemoving={activeActions.get(wt.directory) === "remove"}
 							isResetting={activeActions.get(wt.directory) === "reset"}
-							onRemove={() => { setError(null); setPending({ worktree: wt, action: "remove" }) }}
-							onReset={() => { setError(null); setPending({ worktree: wt, action: "reset" }) }}
+							onRemove={() => { setActionError(null); setPending({ worktree: wt, action: "remove" }) }}
+							onReset={() => { setActionError(null); setPending({ worktree: wt, action: "reset" }) }}
 						/>
 					))}
 				</SettingsSection>
@@ -223,7 +254,7 @@ export function WorktreeSettings() {
 						<Button variant="outline" disabled={!!pendingAction} onClick={() => { if (!activeActionsRef.current.has(pending?.worktree.directory ?? "")) setPending(null) }}>Cancel</Button>
 						<Button variant="destructive" disabled={!!pendingAction} onClick={() => {
 							if (!pending) return
-							void handleAction(pending.worktree, pending.action)
+							void handleAction(pending)
 						}}>{pendingAction ? "Working…" : pending?.action === "remove" ? "Remove" : "Reset"}</Button>
 					</DialogFooter>
 				</DialogContent>

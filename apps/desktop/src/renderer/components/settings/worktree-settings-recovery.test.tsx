@@ -160,8 +160,12 @@ for (const action of ["Remove", "Reset"]) {
 		expect(controls.map((control) => control.disabled)).toEqual([true, true])
 		const reads = listWorktrees.mock.calls.length
 		await act(async () => mutation.resolve())
-		expect(controls.map((control) => control.disabled)).toEqual([false, false])
-		expect(listWorktrees.mock.calls.length).toBe(reads)
+		expect(
+			[...mount.querySelectorAll<HTMLButtonElement>("button[title]")].map(
+				(control) => control.disabled,
+			),
+		).toEqual([false, false])
+		expect(listWorktrees.mock.calls.length).toBe(reads + 1)
 	})
 
 	test(`${action} errors after a project change cannot contaminate a new dialog`, async () => {
@@ -281,4 +285,102 @@ test("current failure stays in its confirmation and explicit retry succeeds", as
 			["/a", "/a/tree"],
 		],
 	})
+})
+
+for (const revisit of [false, true]) {
+	test(`successful removal reconciles a ${revisit ? "revisited" : "retained"} project`, async () => {
+		const removal = deferred<void>()
+		let exists = true
+		listWorktrees.mockImplementation(async (directory) =>
+			directory === "/a" && !exists ? [] : [`${directory}/tree`],
+		)
+		removeWorktree.mockImplementationOnce(async () => {
+			await removal.promise
+			exists = false
+		})
+		await render()
+		await openRemove()
+		await act(async () => button("Remove").click())
+		if (revisit) {
+			await project("/b")
+			await project("/a")
+		} else {
+			await act(async () =>
+				store.set(projects, [
+					{ directory: "/a", name: "A" },
+					{ directory: "/b", name: "B" },
+				]),
+			)
+		}
+		expect(mount.textContent?.includes("/a/tree")).toBe(true)
+		await act(async () => removal.resolve())
+		expect({ exists, visible: mount.textContent?.includes("/a/tree") }).toEqual({
+			exists: false,
+			visible: false,
+		})
+	})
+}
+
+test("a listing already in flight cannot restore a successfully removed worktree", async () => {
+	const removal = deferred<void>()
+	const oldListing = deferred<string[]>()
+	let exists = true
+	removeWorktree.mockImplementationOnce(async () => {
+		await removal.promise
+		exists = false
+	})
+	await render()
+	await openRemove()
+	await act(async () => button("Remove").click())
+	listWorktrees.mockImplementationOnce(() => oldListing.promise)
+	listWorktrees.mockImplementation(async (directory) =>
+		directory === "/a" && !exists ? [] : [`${directory}/tree`],
+	)
+	await act(async () =>
+		store.set(projects, [
+			{ directory: "/a", name: "A" },
+			{ directory: "/b", name: "B" },
+		]),
+	)
+	await act(async () => removal.resolve())
+	expect(mount.textContent?.includes("/a/tree")).toBe(false)
+	await act(async () => oldListing.resolve(["/a/tree"]))
+	expect({
+		removed: mount.textContent?.includes("/a/tree"),
+		retained: mount.textContent?.includes("/b/tree"),
+	}).toEqual({ removed: false, retained: true })
+})
+
+test("reconciliation preserves a newer confirmation and its mutation error", async () => {
+	const removal = deferred<void>()
+	let exists = true
+	listWorktrees.mockImplementation(async (directory) =>
+		directory === "/a" && !exists ? [] : [`${directory}/tree`],
+	)
+	removeWorktree.mockImplementation(async (directory) => {
+		if (directory === "/a") {
+			await removal.promise
+			exists = false
+		} else throw new Error("B has uncommitted changes")
+	})
+	await render()
+	await openRemove()
+	await act(async () => button("Remove").click())
+	await act(async () =>
+		store.set(projects, [
+			{ directory: "/a", name: "A" },
+			{ directory: "/b", name: "B" },
+		]),
+	)
+	await act(async () =>
+		mount.querySelectorAll<HTMLButtonElement>('[title="Remove worktree"]')[1]?.click(),
+	)
+	await act(async () => button("Remove").click())
+	expect(document.querySelector('[role="alert"]')?.textContent).toBe("B has uncommitted changes")
+	await act(async () => removal.resolve())
+	expect({
+		removed: mount.textContent?.includes("/a/tree"),
+		dialog: document.querySelector('[role="dialog"]')?.textContent?.includes("/b/tree"),
+		error: document.querySelector('[role="alert"]')?.textContent,
+	}).toEqual({ removed: false, dialog: true, error: "B has uncommitted changes" })
 })
