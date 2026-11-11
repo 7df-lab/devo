@@ -24,6 +24,8 @@ import { SettingsSection } from "./settings-section"
 // Types
 // ============================================================
 
+type WorktreeAction = "remove" | "reset"
+
 interface WorktreeEntry {
 	/** The worktree directory path */
 	directory: string
@@ -50,10 +52,10 @@ export function WorktreeSettings() {
 	const projects = useProjectList()
 	const [worktrees, setWorktrees] = useState<WorktreeEntry[]>([])
 	const [loading, setLoading] = useState(true)
-	const [removing, setRemoving] = useState<string | null>(null)
-	const [resetting, setResetting] = useState<string | null>(null)
+	const [activeActions, setActiveActions] = useState(new Map<string, WorktreeAction>())
+	const activeActionsRef = useRef(activeActions)
 	const [error, setError] = useState<string | null>(null)
-	const [pending, setPending] = useState<{ worktree: WorktreeEntry; action: "remove" | "reset" } | null>(null)
+	const [pending, setPending] = useState<{ worktree: WorktreeEntry; action: WorktreeAction } | null>(null)
 
 	// Keep a ref so the stable callback always reads the latest project list
 	// without needing it as a dependency.
@@ -66,8 +68,26 @@ export function WorktreeSettings() {
 		() => projects.map((p) => p.directory).sort().join("\0"),
 		[projects],
 	)
+	// Each visit to a project set owns its requests, including A → B → A changes.
+	const scope = useMemo(() => ({ projectDirKey }), [projectDirKey])
+	const scopeRef = useRef(scope)
+	scopeRef.current = scope
+	const mountedRef = useRef(false)
+	const loadVersionRef = useRef(0)
+	useEffect(() => {
+		mountedRef.current = true
+		return () => {
+			mountedRef.current = false
+			loadVersionRef.current++
+		}
+	}, [])
 
 	const loadWorktrees = useCallback(async () => {
+		if (!mountedRef.current) return
+		const requestScope = scopeRef.current
+		const version = ++loadVersionRef.current
+		const isCurrent = () =>
+			mountedRef.current && scopeRef.current === requestScope && loadVersionRef.current === version
 		const currentProjects = projectsRef.current
 		setLoading(true)
 		setError(null)
@@ -84,6 +104,7 @@ export function WorktreeSettings() {
 					)
 				}),
 			)
+			if (!isCurrent()) return
 
 			const entries: WorktreeEntry[] = []
 			const failures: string[] = []
@@ -97,50 +118,45 @@ export function WorktreeSettings() {
 			setWorktrees([...new Map(entries.map((entry) => [entry.directory, entry])).values()])
 			if (failures.length) setError(failures.join("; "))
 		} catch (error) {
-			setError(error instanceof Error ? error.message : "Failed to load worktrees")
+			if (isCurrent()) setError(error instanceof Error ? error.message : "Failed to load worktrees")
 		} finally {
-			setLoading(false)
+			if (isCurrent()) setLoading(false)
 		}
 	}, [])
 
 	// Only refetch when the set of project directories actually changes (or on mount).
 	useEffect(() => {
-		loadWorktrees()
+		setWorktrees([])
+		setPending(null)
+		void loadWorktrees()
 	}, [projectDirKey, loadWorktrees])
 
-	const handleRemove = useCallback(
-		async (wt: WorktreeEntry) => {
-			setRemoving(wt.directory)
+	const handleAction = useCallback(
+		async (wt: WorktreeEntry, action: WorktreeAction) => {
+			if (!mountedRef.current || activeActionsRef.current.has(wt.directory)) return
+			const actionScope = scopeRef.current
+			const isCurrent = () => mountedRef.current && scopeRef.current === actionScope
+			activeActionsRef.current = new Map(activeActionsRef.current).set(wt.directory, action)
+			setActiveActions(activeActionsRef.current)
 			setError(null)
 			try {
-				await removeWorktree(wt.projectDir, wt.directory)
+				if (action === "remove") await removeWorktree(wt.projectDir, wt.directory)
+				else await resetWorktree(wt.projectDir, wt.directory)
+				if (!isCurrent()) return
 				await loadWorktrees()
-				setPending(null)
+				if (isCurrent()) setPending(null)
 			} catch (error) {
-				setError(error instanceof Error ? error.message : "Failed to remove worktree")
+				if (isCurrent()) setError(error instanceof Error ? error.message : `Failed to ${action} worktree`)
 			} finally {
-				setRemoving(null)
+				const remaining = new Map(activeActionsRef.current)
+				remaining.delete(wt.directory)
+				activeActionsRef.current = remaining
+				if (mountedRef.current) setActiveActions(remaining)
 			}
 		},
 		[loadWorktrees],
 	)
-
-	const handleReset = useCallback(
-		async (wt: WorktreeEntry) => {
-			setResetting(wt.directory)
-			setError(null)
-			try {
-				await resetWorktree(wt.projectDir, wt.directory)
-				await loadWorktrees()
-				setPending(null)
-			} catch (error) {
-				setError(error instanceof Error ? error.message : "Failed to reset worktree")
-			} finally {
-				setResetting(null)
-			}
-		},
-		[loadWorktrees],
-	)
+	const pendingAction = pending ? activeActions.get(pending.worktree.directory) : undefined
 
 	// Use the project count from the stable ref for the summary display,
 	// so we don't need the volatile `projects` array in the render path.
@@ -189,26 +205,26 @@ export function WorktreeSettings() {
 						<WorktreeRow
 							key={wt.directory}
 							worktree={wt}
-							isRemoving={removing === wt.directory}
-							isResetting={resetting === wt.directory}
+							isRemoving={activeActions.get(wt.directory) === "remove"}
+							isResetting={activeActions.get(wt.directory) === "reset"}
 							onRemove={() => { setError(null); setPending({ worktree: wt, action: "remove" }) }}
 							onReset={() => { setError(null); setPending({ worktree: wt, action: "reset" }) }}
 						/>
 					))}
 				</SettingsSection>
 			)}
-			<Dialog open={!!pending} onOpenChange={(open) => { if (!open && !removing && !resetting) setPending(null) }}>
+			<Dialog open={!!pending} onOpenChange={(open) => { if (!open && !activeActionsRef.current.has(pending?.worktree.directory ?? "")) setPending(null) }}>
 				<DialogContent>
 					<DialogHeader><DialogTitle>{pending?.action === "remove" ? "Remove worktree?" : "Reset worktree?"}</DialogTitle>
 						<DialogDescription>{pending?.worktree.directory}. {pending?.action === "remove" ? "Remove this checkout from disk. Its Git branch remains available." : "Reset this checkout to the repository default branch."} Uncommitted changes must be saved first.</DialogDescription>
 					</DialogHeader>
 					{error && <p role="alert" className="text-sm text-destructive">{error}</p>}
 					<DialogFooter>
-						<Button variant="outline" disabled={!!removing || !!resetting} onClick={() => setPending(null)}>Cancel</Button>
-						<Button variant="destructive" disabled={!!removing || !!resetting} onClick={() => {
+						<Button variant="outline" disabled={!!pendingAction} onClick={() => { if (!activeActionsRef.current.has(pending?.worktree.directory ?? "")) setPending(null) }}>Cancel</Button>
+						<Button variant="destructive" disabled={!!pendingAction} onClick={() => {
 							if (!pending) return
-							void (pending.action === "remove" ? handleRemove(pending.worktree) : handleReset(pending.worktree))
-						}}>{removing || resetting ? "Working…" : pending?.action === "remove" ? "Remove" : "Reset"}</Button>
+							void handleAction(pending.worktree, pending.action)
+						}}>{pendingAction ? "Working…" : pending?.action === "remove" ? "Remove" : "Reset"}</Button>
 					</DialogFooter>
 				</DialogContent>
 			</Dialog>
