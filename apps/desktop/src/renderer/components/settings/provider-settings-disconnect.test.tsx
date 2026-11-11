@@ -15,6 +15,7 @@ Object.assign(globalThis, {
 	ShadowRoot: dom.ShadowRoot,
 	Event: dom.Event,
 	MouseEvent: dom.MouseEvent,
+	PointerEvent: dom.PointerEvent,
 	KeyboardEvent: dom.KeyboardEvent,
 	MutationObserver: dom.MutationObserver,
 	ResizeObserver: dom.ResizeObserver,
@@ -172,7 +173,7 @@ test("outside press dismisses idle confirmation but not a pending disconnect", a
 		if (!backdrop) throw new Error("Missing dialog backdrop");
 		await act(async () => {
 			backdrop.dispatchEvent(
-				new dom.PointerEvent("pointerdown", {
+				new PointerEvent("pointerdown", {
 					bubbles: true,
 					pointerType: "mouse",
 					button: 0,
