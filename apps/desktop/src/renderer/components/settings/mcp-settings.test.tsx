@@ -310,3 +310,37 @@ test("a starting server can still be disabled", async () => {
 	await click(control())
 	expect(write.mock.calls).toEqual([[{ name: "docs", enabled: false }]])
 })
+
+test("failed disable waits for the status refresh triggered by refreshed tools", async () => {
+	await render()
+	const toolsButton = [...document.querySelectorAll("button")].find((button) => button.textContent === "Tools")
+	if (!toolsButton) throw new Error("Missing Tools button")
+	await click(toolsButton)
+	const firstStatus = deferred()
+	const finalStatus = deferred()
+	list.mockImplementationOnce(async () => {
+		await firstStatus.promise
+		return { data: [{ name: "docs", status: "connected", toolCount: 1 }] }
+	}).mockImplementationOnce(async () => {
+		await finalStatus.promise
+		return { data: [{ name: "docs", status: "connected", toolCount: 1 }] }
+	})
+	write.mockImplementationOnce(async () => {
+		throw new Error("Configuration is read-only")
+	})
+	try {
+		await click(control())
+		expect(control().hasAttribute("data-disabled")).toBe(true)
+		await act(async () => {
+			firstStatus.resolve()
+			finalStatus.resolve()
+		})
+		await flush()
+		expect(control().hasAttribute("data-disabled")).toBe(false)
+		expect(document.querySelector('[role="alert"]')?.textContent).toContain("Configuration is read-only")
+	} finally {
+		firstStatus.resolve()
+		finalStatus.resolve()
+		await flush()
+	}
+})
