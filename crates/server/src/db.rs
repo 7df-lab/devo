@@ -11,6 +11,7 @@ use devo_protocol::native::ids::{SessionId, TurnId};
 use devo_protocol::native::item::ContextOccupancy;
 use devo_protocol::{PendingInputItem, PendingInputKind, QueueItemId, SessionTitleState};
 
+mod inbox;
 mod queue_steer;
 
 /// Queue type for pending messages.
@@ -871,6 +872,13 @@ impl Database {
     /// Deletes a session and its related data.
     pub fn delete_session(&self, id: &SessionId) -> Result<()> {
         let conn = self.conn.lock().expect("database mutex poisoned");
+        let has_receipts: bool = conn.query_row("SELECT EXISTS(SELECT 1 FROM sqlite_master WHERE type='table' AND name='inbox_receipts')", [], |row| row.get(0))?;
+        if has_receipts {
+            conn.execute(
+                "DELETE FROM inbox_receipts WHERE session_id=?1",
+                params![id.as_str()],
+            )?;
+        }
         conn.execute("DELETE FROM sessions WHERE id = ?1", params![id.as_str()])
             .context("failed to delete session")?;
         Ok(())

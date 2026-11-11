@@ -30,6 +30,7 @@ function createFakeServer(
   extraHandlers: RpcHandler[] = [],
 ) {
   const lines: string[] = [];
+  const pendingEntries: Record<string, unknown>[] = [];
   const requests: Array<{ method: string; params: Record<string, unknown> }> = [];
   const writeLine = (line: string) => {
     lines.push(line);
@@ -174,23 +175,19 @@ function createFakeServer(
       return;
     }
     if (method === "session/queue/list") {
-      respond({ entries: [] });
+      respond({ entries: pendingEntries });
       return;
     }
     if (method === "session/queue/push") {
-      respond({
-        outcome: "queued",
-        entry: {
-          queueItemId: "q_steer_1",
-          position: 1,
-          preview: String(
-            (Array.isArray(params.input) &&
-              (params.input[0] as { text?: string } | undefined)?.text) ||
-              "queued",
-          ),
-          input: params.input ?? [],
-        },
-      });
+      const entry = {
+        queueItemId: `q_${pendingEntries.length + 1}`,
+        position: pendingEntries.length,
+        delivery: "followUp",
+        preview: String((params.input as Array<{text?: string}>)?.[0]?.text ?? "queued"),
+        input: params.input ?? [],
+      };
+      pendingEntries.push(entry);
+      respond({ outcome: "queued", entry });
       return;
     }
     if (method === "turn/steer") {
@@ -542,7 +539,7 @@ function createFakeServer(
     respond({});
   };
 
-  return { lines, writeLine, requests };
+  return { lines, writeLine, requests, pendingEntries };
 }
 
 async function bootConnection(
@@ -948,6 +945,7 @@ test("turn/completed refreshes follow-up queue from session/queue/list", async (
   assert.deepEqual((await conn.getQueue()).followUp, ["stay queued"]);
 
   // Server queue is empty after drain — turn/completed must clear the banner.
+  fake.pendingEntries.length = 0;
   conn.pushChunk(
     `${JSON.stringify({
       jsonrpc: "2.0",
@@ -1533,11 +1531,11 @@ test("late queue refresh from a prior deferred switch cannot overwrite the activ
       if (method !== "session/queue/list") return false;
       const sessionId = String(params.sessionId ?? "");
       if (sessionId === "sess_queue_a") {
-        finishSessionA = () => respond({ entries: [{ preview: "stale session A" }] });
+        finishSessionA = () => respond({ entries: [{ queueItemId: "a", preview: "stale session A", position: 0 }] });
         return true;
       }
       if (sessionId === "sess_queue_b") {
-        finishSessionB = () => respond({ entries: [{ preview: "current session B" }] });
+        finishSessionB = () => respond({ entries: [{ queueItemId: "b", preview: "current session B", position: 0 }] });
         return true;
       }
       return false;
@@ -1551,11 +1549,11 @@ test("late queue refresh from a prior deferred switch cannot overwrite the activ
 
   finishSessionB();
   await new Promise<void>((resolve) => setImmediate(resolve));
-  assert.deepEqual(await conn.getQueue(), { steering: [], followUp: ["current session B"] });
+  assert.deepEqual(await conn.getQueue(), { steering: [], followUp: ["current session B"], ordered: [{ id: "b", text: "current session B", delivery: "followUp", blocked: false, editable: false }] });
 
   finishSessionA();
   await new Promise<void>((resolve) => setImmediate(resolve));
-  assert.deepEqual(await conn.getQueue(), { steering: [], followUp: ["current session B"] });
+  assert.deepEqual(await conn.getQueue(), { steering: [], followUp: ["current session B"], ordered: [{ id: "b", text: "current session B", delivery: "followUp", blocked: false, editable: false }] });
   await conn.dispose();
 });
 

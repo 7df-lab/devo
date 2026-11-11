@@ -3433,6 +3433,7 @@ impl ModelProviderSDK for TitleCompletionStreamGatedProvider {
 }
 
 async fn title_gated_runtime() -> Result<(
+    TempDir,
     Arc<ServerRuntime>,
     u64,
     SessionId,
@@ -3479,6 +3480,7 @@ async fn title_gated_runtime() -> Result<(
     }
     assert!(stream_started.load(std::sync::atomic::Ordering::SeqCst));
     Ok((
+        data_root,
         runtime,
         connection_id,
         session_id,
@@ -3489,7 +3491,7 @@ async fn title_gated_runtime() -> Result<(
 
 #[tokio::test]
 async fn title_generation_gate_keeps_admission_responsive() -> Result<()> {
-    let (runtime, connection_id, session_id, stream_open, _stream_started) =
+    let (_data_root, runtime, connection_id, session_id, stream_open, _stream_started) =
         title_gated_runtime().await?;
 
     let push = tokio::spawn({
@@ -3868,28 +3870,23 @@ async fn queue_push_idle_starts_turn_and_busy_queues_then_update_remove() -> Res
         }),
     )
     .await;
-    let reordered: SessionQueueUpdateResult = json_result(&reordered, "rpc");
-    assert_eq!(reordered.entry.position, 1);
+    assert_eq!(reordered["error"]["code"], "InvalidParams");
     let entries = queue_list(&runtime, connection_id, session_id).await;
     assert_eq!(
         entries
             .iter()
-            .map(|entry| entry.queue_item_id.as_str().to_owned())
+            .map(|entry| entry.queue_item_id)
             .collect::<Vec<_>>(),
-        vec![
-            third_entry.queue_item_id.as_str().to_owned(),
-            entry.queue_item_id.as_str().to_owned()
-        ]
+        vec![entry.queue_item_id, third_entry.queue_item_id],
+        "strict FIFO preserves original admission order",
     );
-    // The reorder survives in SQLite too.
     let db_entries = runtime
         .deps
         .db
         .list_pending(&session_id, crate::db::QueueType::Turn)?;
-    assert_eq!(db_entries.len(), 2);
     assert_eq!(
-        db_entries[0].id.to_string(),
-        third_entry.queue_item_id.as_str()
+        db_entries.iter().map(|item| item.id).collect::<Vec<_>>(),
+        vec![entry.queue_item_id, third_entry.queue_item_id]
     );
 
     // Remove works; removing again reports the entry is gone.
@@ -3951,7 +3948,7 @@ async fn queue_push_idle_starts_turn_and_busy_queues_then_update_remove() -> Res
                         "params": {
                             "sessionId": session_id.to_string(),
                             "input": [{ "type": "text", "text": format!("queued {index}") }],
-                            "idempotencyKey": format!("push-{index}"),
+                            "idempotencyKey": format!("burst-push-{index}"),
                         },
                     }),
                 )
@@ -4020,10 +4017,10 @@ async fn turn_steer_injects_and_late_unconsumed_degrades_back_to_queue() -> Resu
         )
         .await;
     let steered: TurnSteerResult = json_result(&steered, "rpc");
-    let TurnSteerResult::Injected { item_id } = steered else {
-        panic!("expected Injected, got {steered:?}");
+    let TurnSteerResult::DegradedToQueue { entry } = steered else {
+        panic!("expected queued steering until the next model boundary, got {steered:?}");
     };
-    assert!(!item_id.as_str().is_empty());
+    assert!(!entry.queue_item_id.as_str().is_empty());
     let items: devo_protocol::native::page::Page<devo_protocol::native::item::ItemEnvelope> =
         json_result(
             &env.rpc(
@@ -4034,18 +4031,15 @@ async fn turn_steer_injects_and_late_unconsumed_degrades_back_to_queue() -> Resu
             .await,
             "rpc",
         );
-    assert!(items.data.iter().any(|item| {
-        item.id == item_id
-            && matches!(
-                &item.item,
-                devo_protocol::native::item::Item::UserMessage {
-                    origin: None,
-                    client_user_message_id: Some(id),
-                    entry: devo_protocol::native::item::UserMessageEntry::Steer,
-                    ..
-                } if id == "steer-direct-client-id"
-            )
-    }));
+    assert!(
+        !items.data.iter().any(|item| matches!(
+            &item.item,
+            devo_protocol::native::item::Item::UserMessage {
+                client_user_message_id: Some(id), ..
+            } if id == "steer-direct-client-id"
+        )),
+        "queued steering is not model-consumed history before its boundary"
+    );
 
     // Interrupt the turn before the next injection boundary: the
     // admitted steer is never consumed; it degrades back into the
@@ -4226,8 +4220,12 @@ async fn queue_persistence_restart_and_steer_restore() -> Result<()> {
             .deps
             .db
             .list_pending(&session_id, crate::db::QueueType::Steer)?
-            .is_empty()
+            .iter()
+            .all(|item| item.id != steer_item.id)
     );
+    // Wait for the recovered legacy input to settle before dropping this
+    // runtime; interrupting an admitted claim must correctly recover as held.
+    wait_turn_idle(&rebuilt, session_id).await;
     drop(rebuilt);
     let restarted = build_runtime(&cwd);
     restarted.load_persisted_sessions().await?;
@@ -4284,6 +4282,27 @@ async fn queue_persistence_restart_and_steer_restore() -> Result<()> {
     );
     rebuilt.load_persisted_sessions().await?;
     let rebuilt_connection = initialized_connection(&rebuilt).await;
+    // Shutdown interrupted an admitted request. Its uncertainty must block
+    // the later follow-up until the caller explicitly discards the held input.
+    let recovered = queue_list(&rebuilt, rebuilt_connection, session_id).await;
+    assert!(
+        recovered
+            .first()
+            .is_some_and(|entry| entry.recovery_required)
+    );
+    let held = recovered[0].queue_item_id;
+    let removed = history_request(
+        &rebuilt,
+        rebuilt_connection,
+        7,
+        "session/queue/remove",
+        serde_json::json!({"sessionId": session_id, "queueItemId": held}),
+    )
+    .await;
+    assert!(
+        removed.get("error").is_none(),
+        "remove held input: {removed}"
+    );
     tokio::time::timeout(Duration::from_secs(5), async {
         loop {
             let entries = queue_list(&rebuilt, rebuilt_connection, session_id).await;
@@ -4336,10 +4355,10 @@ async fn queue_persistence_restart_and_steer_restore() -> Result<()> {
         .await,
         "rpc",
     );
-    let TurnSteerResult::Injected { item_id } = steered else {
-        panic!("expected Injected, got {steered:?}");
+    let TurnSteerResult::DegradedToQueue { entry } = steered else {
+        panic!("expected queued steering until the next model boundary, got {steered:?}");
     };
-    assert!(!item_id.as_str().is_empty());
+    assert!(!entry.queue_item_id.as_str().is_empty());
     open.store(true, std::sync::atomic::Ordering::SeqCst);
     wait_turn_idle(&env.runtime, session_id).await;
     env.runtime.deps.db.push_pending(
@@ -6531,7 +6550,7 @@ async fn child_agent_message_to_idle_parent_starts_wake_turn() -> Result<()> {
     let mut wake_seen = false;
     for _ in 0..100 {
         let journal = std::fs::read_to_string(&rollout_path)?;
-        if journal.contains("Agent message received") {
+        if journal.contains("wake probe from child") {
             wake_seen = true;
             break;
         }
@@ -7011,7 +7030,7 @@ async fn schedule_dispatch_retires_job_for_missing_session() -> Result<()> {
 }
 
 #[tokio::test]
-async fn schedule_dispatch_skips_fire_when_identical_prompt_already_queued() -> Result<()> {
+async fn schedule_dispatch_keeps_distinct_occurrence_with_identical_queued_text() -> Result<()> {
     // Regression: a heartbeat interval shorter than the turn duration piles
     // identical fires onto the pending queue without bound (each drained
     // fire is itself a turn). A fire whose prompt is already queued is a
@@ -7070,15 +7089,15 @@ async fn schedule_dispatch_skips_fire_when_identical_prompt_already_queued() -> 
         .expect("pending turn queue mutex should not be poisoned")
         .len();
     assert_eq!(
-        queue_len, 1,
-        "duplicate fire must not enqueue a second entry"
+        queue_len, 2,
+        "a distinct scheduled occurrence must not coalesce by human prompt text"
     );
     assert!(
         env.runtime
             .runtime_active_turn_id(session_id)
             .await
             .is_none(),
-        "skipped fire must not start a turn either"
+        "held queue head must still prevent a new turn"
     );
     open.store(true, std::sync::atomic::Ordering::SeqCst);
     Ok(())

@@ -3,6 +3,7 @@ import type { AgentConnectionQueueState } from "../agent-connection/index.js";
 export type QueueLane = "steering" | "followUp";
 
 export interface QueueSelectionItem {
+	id?: string;
 	lane: QueueLane;
 	index: number;
 	text: string;
@@ -11,9 +12,9 @@ export interface QueueSelectionItem {
 /**
  * Tracks which queued message the user is browsing/editing with alt+up/alt+down.
  *
- * Items are addressed by (lane, index, text): the text is the authoritative
- * check when a mutation is applied, so no ids or revisions are needed. Browsing
- * order is newest-first: draft -> last followUp -> ... -> first steering.
+ * Native entries retain stable IDs and admission order. Lane/index/text are
+ * compatibility selectors only. Browsing is newest-first within that order;
+ * older backends without ordered entries retain their legacy lane projection.
  */
 export class QueueSelection {
 	private items: QueueSelectionItem[] = [];
@@ -66,10 +67,11 @@ export class QueueSelection {
 		index: number,
 		expectedText: string,
 	): string | undefined {
+		const selectedId = this.selected?.id;
 		this.items = flatten(queue);
-		const cursor = lane === "steering" ? index : queue.steering.length + index;
+		const cursor = this.items.findIndex((item) => item.lane === lane && item.index === index);
 		const selected = this.items[cursor];
-		if (selected?.lane !== lane || selected.index !== index || selected.text !== expectedText) return this.reset();
+		if (selected?.lane !== lane || selected.index !== index || selected.text !== expectedText || (selectedId && selected.id !== selectedId)) return this.reset();
 		this.cursor = cursor;
 	}
 
@@ -84,6 +86,13 @@ export class QueueSelection {
 }
 
 function flatten(queue: AgentConnectionQueueState): QueueSelectionItem[] {
+	if (queue.ordered) {
+		const indices = { steering: 0, followUp: 0 };
+		return queue.ordered.map((item) => {
+			const lane = item.delivery === "steer" ? "steering" : "followUp";
+			return { id: item.id, lane, index: indices[lane]++, text: item.text };
+		});
+	}
 	return [
 		...queue.steering.map((text, index) => ({ lane: "steering" as const, index, text })),
 		...queue.followUp.map((text, index) => ({ lane: "followUp" as const, index, text })),

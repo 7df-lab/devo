@@ -14,8 +14,8 @@ impl ServerRuntime {
     ///
     /// Reach is limited to the nuclear family (parent / sibling / child).
     /// `target: "all"` broadcasts to every family member except self.
-    /// Child→parent injects a wake turn on the parent; peer delivery uses the
-    /// agent mailbox (drains immediately when the target is idle).
+    /// Every family message is admitted to the destination's ordered inbox.
+    /// Acceptance does not imply that the model has consumed the message.
     pub(crate) async fn host_agent_message_send(
         self: &Arc<Self>,
         from_session_id: &str,
@@ -108,7 +108,7 @@ impl ServerRuntime {
         let Some(role) = role else {
             return json!({
                 "status": "error",
-                "error": "agent_message.send requires receiver_role (parent|sibling|child) or target=\"all\""
+                "error": "agent_message.send requires receiver_role (parent|sibling|child|self) or target=\"all\""
             });
         };
         let receiver_name = params
@@ -121,15 +121,15 @@ impl ServerRuntime {
             .map(str::to_string);
 
         match role.as_str() {
-            "parent" => {
+            "parent" | "self" => {
                 if receiver_name.is_some() {
                     return json!({
                         "status": "error",
-                        "error": "receiver_name must be omitted for parent messages"
+                        "error": "receiver_name must be omitted for parent or self messages"
                     });
                 }
                 match self
-                    .deliver_family_agent_message(from_sid, from_sid, "parent", &message)
+                    .deliver_family_agent_message(from_sid, from_sid, role.as_str(), &message)
                     .await
                 {
                     Ok(receipt) => {
@@ -212,7 +212,7 @@ impl ServerRuntime {
             other => json!({
                 "status": "error",
                 "error": format!(
-                    "receiver_role must be parent|sibling|child, got '{other}'"
+                    "receiver_role must be parent|sibling|child|self, got '{other}'"
                 )
             }),
         }
@@ -227,95 +227,49 @@ impl ServerRuntime {
         role: &str,
         message: &str,
     ) -> Result<serde_json::Value, String> {
-        let now = Utc::now().to_rfc3339();
-        if role == "parent" {
-            let Some((parent_id, from_path)) = self.child_parent_and_path(from_session_id).await
-            else {
-                return Err("agent_message.send to parent: no parent for this session".into());
-            };
-            let wake = format!("Agent message received\nFrom: {from_path}\n\n{message}");
-            let busy = self.active_turn_id_for_session(parent_id).await.is_some();
-            return match Arc::clone(self)
-                .deliver_host_message(
-                    parent_id,
-                    super::host_messages::HostMessage::agent(
-                        from_session_id,
-                        uuid::Uuid::new_v4().to_string(),
-                        wake,
-                    ),
-                    Some(json!({
-                        "source": "agent_message",
-                        "fromSessionId": from_session_id.to_string(),
-                    })),
-                )
+        let target = if role == "parent" {
+            self.child_parent_and_path(from_session_id)
                 .await
-            {
-                Ok(runtime_turn) => {
-                    let mut receipt = json!({
-                        "status": "ok",
-                        "delivered": true,
-                        "receiverRole": "parent",
-                        "parentSessionId": parent_id.to_string(),
-                        "targetSessionId": parent_id.to_string(),
-                        "turnId": runtime_turn.turn_id().to_string(),
-                    });
-                    if busy {
-                        receipt["deliveryStatus"] = "queued".into();
-                        receipt["queued"] = true.into();
-                        receipt["queuedAt"] = now.into();
-                    } else {
-                        receipt["deliveryStatus"] = "delivered".into();
-                        receipt["deliveredAt"] = now.into();
-                    }
-                    Ok(receipt)
-                }
-                Err(err) => Err(err.to_string()),
-            };
-        }
-
-        let from_path = self.session_agent_path(from_session_id).await;
-        let to_path = self.session_agent_path(to_session_id).await;
-        let mailbox_message = devo_protocol::AgentMailboxMessage {
-            message_id: String::new(),
-            from_session_id,
-            to_session_id,
-            from_agent_path: from_path,
-            to_agent_path: to_path,
-            content: message.to_string(),
-            sequence: 0,
-            created_at: Utc::now(),
+                .map(|(parent, _)| parent)
+                .ok_or_else(|| {
+                    "agent_message.send to parent: no parent for this session".to_string()
+                })?
+        } else {
+            to_session_id
         };
-        self.mailbox(to_session_id)
-            .await
-            .send(mailbox_message)
+        let metadata = if role == "child" {
+            Some(super::subagent_usage_owner_pending_metadata(
+                from_session_id,
+                self.active_turn_id_for_session(from_session_id).await,
+            ))
+        } else {
+            None
+        };
+        let accepted = self
+            .deliver_host_message(
+                target,
+                super::host_messages::HostMessage::agent(
+                    from_session_id,
+                    uuid::Uuid::new_v4().to_string(),
+                    message.to_string(),
+                ),
+                metadata,
+            )
             .await
             .map_err(|error| error.to_string())?;
-
-        let busy = self
-            .active_turn_id_for_session(to_session_id)
-            .await
-            .is_some();
-        if !busy {
-            Arc::clone(self)
-                .drain_child_mailbox_into_user_turns(to_session_id)
-                .await
-                .map_err(|error| error.to_string())?;
-        }
-
         let mut receipt = json!({
             "status": "ok",
             "delivered": true,
-            "taskId": to_session_id.to_string(),
+            "deliveryStatus": "queued",
+            "queued": true,
+            "queuedAt": Utc::now().to_rfc3339(),
+            "taskId": target.to_string(),
             "receiverRole": role,
-            "targetSessionId": to_session_id.to_string(),
+            "targetSessionId": target.to_string(),
+            "queueItemId": accepted.queue_item_id.to_string(),
         });
-        if busy {
-            receipt["deliveryStatus"] = "queued".into();
-            receipt["queued"] = true.into();
-            receipt["queuedAt"] = now.into();
-        } else {
-            receipt["deliveryStatus"] = "delivered".into();
-            receipt["deliveredAt"] = now.into();
+        if role == "parent" {
+            receipt["parentSessionId"] = target.to_string().into();
         }
         Ok(receipt)
     }

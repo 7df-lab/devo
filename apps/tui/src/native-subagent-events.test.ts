@@ -66,7 +66,7 @@ test("named incoming sender keeps stable identity in live, replay and queue labe
   ]);
   assert.equal(hostMessagePrefix(origin), "[Agent message · reviewer] ");
   assert.deepEqual(nativeNotificationToPiEvents("queue/updated", { queue: [{ origin, preview: "Result" }] }, createStreamState()), [
-    { type: "session_action_update", actions: { queuedCount: 1, steering: [], followUps: ["[Agent message · reviewer] Result"] } },
+    { type: "session_action_update", actions: { queuedCount: 1, steering: [], followUps: ["[Agent message · reviewer] Result"], ordered: [{ id: "", text: "[Agent message · reviewer] Result", delivery: "followUp", blocked: false, editable: false }] } },
   ]);
 });
 

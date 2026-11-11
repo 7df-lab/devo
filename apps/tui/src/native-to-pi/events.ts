@@ -3,6 +3,7 @@
  * Projection stays inside the adapter — InteractiveMode never sees Native method names.
  */
 
+import { queueEditableText, queueSelectionText, queuePreviewText as queueEntryPreview, type QueueWireEntry } from "../native-connection-ops.js";
 import { shapeHostedToolResult } from "./tool-results.js";
 import { nativeCumulativeUsage } from "./usage.js";
 import {
@@ -223,7 +224,7 @@ function sessionActionsFromQueue(params: Record<string, unknown>): Record<string
       ? params.steering.map((x) => String((x as { text?: string })?.text ?? x))
       : [];
     const followUps = Array.isArray(params.followUp ?? params.followUps)
-      ? (params.followUp ?? params.followUps as unknown[]).map((x) =>
+      ? ((params.followUp ?? params.followUps) as unknown[]).map((x) =>
           String((x as { text?: string })?.text ?? x),
         )
       : [];
@@ -234,19 +235,24 @@ function sessionActionsFromQueue(params: Record<string, unknown>): Record<string
     };
   }
   const queue = Array.isArray(params.queue) ? params.queue : [];
-  const followUps: string[] = [];
-  for (const entry of queue) {
-    if (!entry || typeof entry !== "object") continue;
-    const text = queuePreviewText(entry as Record<string, unknown>);
-    const origin = (entry as Record<string, unknown>).origin as Record<string, unknown> | undefined;
-    const labels: Record<string, string> = { agent: "Agent message", backgroundTask: "Background notification", schedule: "Scheduled notification" };
-    const label = origin ? `[${labels[String(origin.source)] ?? "Host notification"} · ${String(origin.senderName ?? origin.sender_name ?? origin.sender ?? "Host")}] ` : "";
-    if (text) followUps.push(label + text);
-  }
+  let blocked = false;
+  const ordered = queue
+    .filter((entry): entry is Record<string, unknown> => !!entry && typeof entry === "object")
+    .sort((a, b) => Number(a.position ?? 0) - Number(b.position ?? 0))
+    .map((entry) => {
+      const wireEntry = entry as QueueWireEntry;
+      const delivery = entry.delivery === "steer" ? "steer" : "followUp";
+      const text = queueSelectionText(wireEntry);
+      const preview = queueEntryPreview(wireEntry);
+      const item = { id: String(entry.queueItemId ?? entry.queue_item_id ?? ""), text, ...(text !== preview ? { preview } : {}), ...(queueEditableText(wireEntry) === undefined ? { editable: false } : {}), delivery, blocked: blocked && delivery === "steer", ...(entry.recoveryRequired === true ? { recoveryRequired: true } : {}) };
+      blocked ||= delivery === "followUp" || entry.recoveryRequired === true;
+      return item;
+    });
   return {
-    queuedCount: followUps.length,
-    steering: [] as string[],
-    followUps,
+    queuedCount: ordered.length,
+    steering: ordered.filter((item) => item.delivery === "steer").map((item) => item.text),
+    followUps: ordered.filter((item) => item.delivery === "followUp").map((item) => item.text),
+    ordered,
   };
 }
 

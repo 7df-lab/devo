@@ -1,13 +1,17 @@
+use std::pin::Pin;
 use std::sync::Arc;
 use std::sync::Mutex;
 use std::time::Duration;
 
 use anyhow::Context;
 use anyhow::Result;
+use async_trait::async_trait;
 use devo_core::tools::AgentToolCoordinator;
 use devo_protocol::SessionId;
 use devo_protocol::native::goal::Goal;
 use devo_protocol::native::rpc_session::GoalIfExists;
+use devo_protocol::{ModelRequest, ModelResponse, StreamEvent};
+use devo_provider::ModelProviderSDK;
 use devo_server::ServerRuntime;
 use pretty_assertions::assert_eq;
 use tempfile::TempDir;
@@ -18,10 +22,51 @@ use tokio::time::timeout;
 #[path = "support/goal_continuation.rs"]
 mod support;
 
+#[derive(Default)]
+struct ControlledProvider {
+    requests: Mutex<Vec<ModelRequest>>,
+    releases: Mutex<Vec<Arc<Notify>>>,
+}
+
+impl ControlledProvider {
+    fn release(&self, index: usize) {
+        self.releases.lock().expect("releases")[index].notify_one();
+    }
+}
+
+#[async_trait]
+impl ModelProviderSDK for ControlledProvider {
+    fn name(&self) -> &str {
+        "controlled-background-inbox"
+    }
+
+    async fn completion(&self, _: ModelRequest) -> Result<ModelResponse> {
+        Ok(support::title_response())
+    }
+
+    async fn completion_stream(
+        &self,
+        request: ModelRequest,
+    ) -> Result<Pin<Box<dyn futures::Stream<Item = Result<StreamEvent>> + Send>>> {
+        let release = Arc::new(Notify::new());
+        self.releases
+            .lock()
+            .expect("releases")
+            .push(release.clone());
+        self.requests.lock().expect("requests").push(request);
+        Ok(Box::pin(futures::stream::once(async move {
+            release.notified().await;
+            Ok(StreamEvent::MessageDone {
+                response: support::title_response(),
+            })
+        })))
+    }
+}
+
 struct WaitingGoal {
     _data_root: TempDir,
     runtime: Arc<ServerRuntime>,
-    provider: Arc<support::QueuedPriorityProvider>,
+    provider: Arc<ControlledProvider>,
     notifications: mpsc::Receiver<serde_json::Value>,
     connection_id: u64,
     session_id: SessionId,
@@ -31,10 +76,7 @@ struct WaitingGoal {
 impl WaitingGoal {
     async fn new() -> Result<Self> {
         let data_root = TempDir::new()?;
-        let provider = Arc::new(support::QueuedPriorityProvider {
-            requests: Mutex::new(Vec::new()),
-            release_first: Arc::new(Notify::new()),
-        });
+        let provider = Arc::new(ControlledProvider::default());
         let runtime = support::build_runtime(data_root.path(), provider.clone())?;
         let (connection_id, mut notifications) = support::initialize_connection(&runtime).await?;
         let session_id = support::start_session(&runtime, connection_id, data_root.path()).await?;
@@ -72,7 +114,11 @@ impl WaitingGoal {
     }
 
     async fn finish_first_turn(&mut self) -> Result<()> {
-        self.provider.release_first.notify_one();
+        self.finish_turn(/*index*/ 0).await
+    }
+
+    async fn finish_turn(&mut self, index: usize) -> Result<()> {
+        self.provider.release(index);
         support::collect_until_turn_completed(&mut self.notifications).await?;
         Ok(())
     }
@@ -96,8 +142,14 @@ impl WaitingGoal {
     }
 
     async fn wait_for_second_turn(&mut self) -> Result<()> {
-        support::wait_for_notification(&mut self.notifications, "turn/started").await?;
-        support::wait_for_captured_request_count(&self.provider.requests, /*expected*/ 2).await
+        self.wait_for_turn(/*expected_requests*/ 2, "regular").await
+    }
+
+    async fn wait_for_turn(&mut self, expected_requests: usize, kind: &str) -> Result<()> {
+        let started =
+            support::wait_for_notification(&mut self.notifications, "turn/started").await?;
+        assert_eq!(started["params"]["turn"]["kind"], kind);
+        support::wait_for_captured_request_count(&self.provider.requests, expected_requests).await
     }
 
     async fn stop(&self) -> Result<()> {
@@ -119,17 +171,33 @@ async fn goal_waits_for_every_background_task_and_receives_terminal_results() ->
     test.assert_no_new_turn(/*expected_requests*/ 1).await?;
 
     test.finish_work("slow-command", "command terminal output: build succeeded");
-    test.assert_no_new_turn(/*expected_requests*/ 1).await?;
-    test.finish_work("child-agent", "child terminal output: review complete");
     test.wait_for_second_turn().await?;
     {
         let requests = test.provider.requests.lock().expect("lock requests");
-        assert!(support::request_contains_text(
+        assert!(support::request_last_message_contains_text(
             &requests[1],
             "command terminal output: build succeeded"
         ));
-        assert!(support::request_contains_text(
+        assert!(!support::request_contains_text(
             &requests[1],
+            "child terminal output: review complete"
+        ));
+    }
+    test.finish_turn(/*index*/ 1).await?;
+    // Completion output is delivered immediately, but the autonomous goal
+    // must still wait for the remaining producer rather than start early.
+    test.assert_no_new_turn(/*expected_requests*/ 2).await?;
+    test.finish_work("child-agent", "child terminal output: review complete");
+    test.wait_for_turn(/*expected_requests*/ 3, "regular")
+        .await?;
+    {
+        let requests = test.provider.requests.lock().expect("lock requests");
+        assert!(support::request_contains_text(
+            &requests[2],
+            "command terminal output: build succeeded"
+        ));
+        assert!(support::request_last_message_contains_text(
+            &requests[2],
             "child terminal output: review complete"
         ));
     }
@@ -137,7 +205,21 @@ async fn goal_waits_for_every_background_task_and_receives_terminal_results() ->
     // Duplicate delivery must not admit an additional continuation.
     test.finish_work("child-agent", "child terminal output: review complete");
     test.finish_work("slow-command", "command terminal output: build succeeded");
-    test.assert_no_new_turn(/*expected_requests*/ 2).await?;
+    test.assert_no_new_turn(/*expected_requests*/ 3).await?;
+    test.finish_turn(/*index*/ 2).await?;
+    test.wait_for_turn(/*expected_requests*/ 4, "goalContinuation")
+        .await?;
+    {
+        let requests = test.provider.requests.lock().expect("lock requests");
+        assert!(support::request_contains_text(
+            &requests[3],
+            "command terminal output: build succeeded"
+        ));
+        assert!(support::request_contains_text(
+            &requests[3],
+            "child terminal output: review complete"
+        ));
+    }
     test.stop().await
 }
 
@@ -206,7 +288,16 @@ async fn paused_or_cleared_goal_does_not_restart_on_background_completion() -> R
             .context("goal mutation response")?;
         assert!(response.get("error").is_none(), "{response}");
         test.finish_work("late-command", "late output must not revive old goal");
-        test.assert_no_new_turn(/*expected_requests*/ 1).await?;
+        test.wait_for_second_turn().await?;
+        {
+            let requests = test.provider.requests.lock().expect("lock requests");
+            assert!(support::request_last_message_contains_text(
+                &requests[1],
+                "late output must not revive old goal"
+            ));
+        }
+        test.finish_turn(/*index*/ 1).await?;
+        test.assert_no_new_turn(/*expected_requests*/ 2).await?;
     }
     Ok(())
 }
@@ -302,10 +393,20 @@ async fn replaced_goal_does_not_restore_old_continuation_after_background_comple
         let requests = test.provider.requests.lock().expect("lock requests");
         assert!(support::request_last_message_contains_text(
             &requests[1],
+            "old task finished after replacement"
+        ));
+    }
+    test.finish_turn(/*index*/ 1).await?;
+    test.wait_for_turn(/*expected_requests*/ 3, "goalContinuation")
+        .await?;
+    {
+        let requests = test.provider.requests.lock().expect("lock requests");
+        assert!(support::request_last_message_contains_text(
+            &requests[2],
             "Only pursue the replacement objective"
         ));
         assert!(!support::request_last_message_contains_text(
-            &requests[1],
+            &requests[2],
             "Finish the objective after all managed background work settles"
         ));
     }
@@ -316,7 +417,7 @@ async fn replaced_goal_does_not_restore_old_continuation_after_background_comple
             .id,
         replacement.id
     );
-    test.assert_no_new_turn(/*expected_requests*/ 2).await?;
+    test.assert_no_new_turn(/*expected_requests*/ 3).await?;
     test.stop().await
 }
 
@@ -350,7 +451,7 @@ async fn idle_interrupt_cancels_wait_without_reserving_a_turn() -> Result<()> {
 }
 
 #[tokio::test]
-async fn simultaneous_completions_start_only_one_continuation() -> Result<()> {
+async fn simultaneous_completions_start_only_one_inbox_turn_at_a_time() -> Result<()> {
     let mut test = WaitingGoal::new().await?;
     for index in 0..12 {
         test.start_work(&format!("parallel-{index}"));

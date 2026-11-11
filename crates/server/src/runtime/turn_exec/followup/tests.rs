@@ -134,6 +134,10 @@ async fn invalid_queued_child_binding_does_not_strand_next_valid_input() -> Resu
         Utc::now(),
     );
     let invalid_id = invalid.id;
+    runtime.register_background_work(
+        root,
+        format!("agent:{}:queued:{invalid_id}", child.child_session_id),
+    );
     let valid = PendingInputItem::new(
         PendingInputKind::UserText {
             text: "valid queued input".into(),
@@ -188,9 +192,47 @@ async fn invalid_queued_child_binding_does_not_strand_next_valid_input() -> Resu
             .expect("queue")
             .is_empty()
     );
+    // The rejected child input is actively delivered to the parent without a
+    // goal or a polling tool. Wait for the actual parent provider request.
+    tokio::time::timeout(Duration::from_secs(/*secs*/ 15), async {
+        loop {
+            let delivered = provider
+                .requests
+                .lock()
+                .expect("requests")
+                .iter()
+                .any(|request| {
+                    let text = serde_json::to_string(request).expect("request JSON");
+                    text.contains(
+                        "Queued child turn could not start: child provider is not configured",
+                    ) && text.contains(&format!(
+                        "agent:{}:queued:{invalid_id}",
+                        child.child_session_id
+                    ))
+                });
+            if delivered {
+                break;
+            }
+            tokio::time::sleep(Duration::from_millis(/*millis*/ 10)).await;
+        }
+    })
+    .await
+    .with_context(|| {
+        format!(
+            "parent did not receive queued child failure: {:?}",
+            provider
+                .requests
+                .lock()
+                .unwrap()
+                .iter()
+                .map(|r| serde_json::to_value(r).unwrap()["messages"].clone())
+                .collect::<Vec<_>>()
+        )
+    })?;
     let requests = provider.requests.lock().expect("requests");
-    assert_eq!(requests.len(), 2);
-    assert!(serde_json::to_string(&requests[1])?.contains("valid queued input"));
-    assert!(!serde_json::to_string(&requests[1])?.contains("invalid queued input"));
+    assert!(requests.iter().any(|request| {
+        let text = serde_json::to_string(request).expect("request JSON");
+        text.contains("valid queued input") && !text.contains("invalid queued input")
+    }));
     Ok(())
 }

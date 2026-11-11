@@ -134,14 +134,6 @@ impl ScheduleStore {
         Ok(true)
     }
 
-    pub(crate) fn mark_occurrence_inflight(&self, occurrence_id: &str, admitted_at: DateTime<Utc>) {
-        self.inflight_occurrences
-            .lock()
-            .expect("schedule in-flight mutex poisoned")
-            .entry(occurrence_id.to_string())
-            .or_insert(admitted_at);
-    }
-
     pub(crate) fn try_reserve_occurrence(
         &self,
         occurrence_id: &str,

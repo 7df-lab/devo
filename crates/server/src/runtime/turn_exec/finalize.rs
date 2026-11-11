@@ -305,8 +305,8 @@ impl ServerRuntime {
                 .pending_turn_queue
                 .lock()
                 .expect("pending turn queue mutex should not be poisoned");
-            for item in &leftover {
-                queue.push_back(item.clone());
+            for item in leftover.iter().rev() {
+                queue.push_front(item.clone());
             }
         }
         let mut held_ids = Vec::new();

@@ -182,17 +182,6 @@ impl SessionInteractiveLanes {
             })
     }
 
-    /// Whether any approval wait is registered under this host session, for
-    /// any owner — the host's own turn or a sub-agent routing its permission
-    /// request through the host.
-    pub(crate) async fn has_pending_approval_for_host(&self, host_session_id: SessionId) -> bool {
-        self.inner
-            .lock()
-            .await
-            .get(&host_session_id)
-            .is_some_and(|state| !state.pending_approvals.is_empty())
-    }
-
     pub(crate) async fn approval_controller(
         &self,
         approval_id: &str,

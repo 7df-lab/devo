@@ -39,10 +39,9 @@ pub struct TurnStartResult {
 
 // ── turn/steer ──
 
-/// Injects input into the running main turn: the item is persisted immediately
-/// (`entry = steer`) and takes effect at the next injection boundary. If the
-/// turn ended before injection, the input degrades back into the queue
-/// (message is never lost) — the result says which happened. This is distinct
+/// Admits steer input to the session FIFO. The eligible head prefix takes
+/// effect at the next model-request boundary; a preceding follow-up blocks it
+/// until a later turn. Admission is not proof of model consumption. This is distinct
 /// from the TUI `/btw` side question, which does not modify the main turn.
 #[derive(Debug, Clone, PartialEq, Serialize, Deserialize, JsonSchema, TS)]
 #[serde(rename_all = "camelCase")]
@@ -63,12 +62,17 @@ pub struct TurnSteerParams {
     rename_all_fields = "camelCase"
 )]
 pub enum TurnSteerResult {
+    AlreadyAccepted {
+        queue_item_id: QueueItemId,
+        turn_id: Option<TurnId>,
+    },
     Injected {
         #[schemars(rename = "itemId")]
         #[ts(rename = "itemId")]
         item_id: ItemId,
     },
-    /// Turn ended before the injection boundary; input was queued instead.
+    /// Accepted into the FIFO, pending a safe boundary. The legacy outcome name
+    /// is retained; entry.delivery still identifies steer versus follow-up.
     DegradedToQueue { entry: QueueEntry },
 }
 
@@ -125,8 +129,8 @@ pub struct TurnResumeResult {
 
 // ── session/queue/* ──
 
-/// Transfer an existing queue identity, never a reconstructed display preview.
-/// Retries return the durable admission receipt for the same session and item.
+/// Legacy promotion request retained for wire compatibility.
+/// Strict FIFO servers reject it: delivery mode is fixed at admission.
 #[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize, JsonSchema, TS)]
 #[serde(rename_all = "camelCase")]
 pub struct SessionQueueSteerParams {
@@ -135,7 +139,7 @@ pub struct SessionQueueSteerParams {
     pub expected_turn_id: TurnId,
 }
 
-/// Admission does not prove consumption or exactly-once external effects.
+/// Legacy promotion outcomes; current strict FIFO servers return InvalidParams.
 #[derive(Debug, Clone, PartialEq, Serialize, Deserialize, JsonSchema, TS)]
 #[serde(
     tag = "outcome",
@@ -187,8 +191,16 @@ pub struct SessionQueuePushParams {
     rename_all_fields = "camelCase"
 )]
 pub enum SessionQueuePushResult {
-    Started { turn: Box<Turn> },
-    Queued { entry: Box<QueueEntry> },
+    AlreadyAccepted {
+        queue_item_id: QueueItemId,
+        turn_id: Option<TurnId>,
+    },
+    Started {
+        turn: Box<Turn>,
+    },
+    Queued {
+        entry: Box<QueueEntry>,
+    },
 }
 
 #[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize, JsonSchema, TS)]
@@ -200,6 +212,8 @@ pub struct SessionQueueListParams {
 #[derive(Debug, Clone, PartialEq, Serialize, Deserialize, JsonSchema, TS)]
 #[serde(rename_all = "camelCase")]
 pub struct SessionQueueListResult {
+    #[serde(default)]
+    pub revision: u64,
     pub entries: Vec<QueueEntry>,
 }
 

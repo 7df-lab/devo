@@ -25,6 +25,7 @@ impl ServerRuntime {
         // A newly admitted user/queued turn establishes a fresh continuation
         // boundary. Old post-turn schedulers must not undo an idle interrupt.
         self.enable_background_goal_wait(session_id);
+        self.resume_background_input(session_id);
         let cancel_token = CancellationToken::new();
         self.active_turns
             .insert_cancel_token(session_id, cancel_token.clone())

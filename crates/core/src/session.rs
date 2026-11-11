@@ -491,8 +491,8 @@ impl SessionState {
         // Steer inputs that arrived before the injection boundary but
         // were not consumed before turn end degrade back into the session turn
         // queue. This preserves the message; a later follow-up drain may start
-        // it as its own turn. They append behind already-queued inputs, while
-        // preserving arrival order among themselves.
+        // it as its own turn. The claimed prefix precedes all inputs still
+        // waiting in the inbox, so restore it at the head in arrival order.
         let late_steer: Vec<PendingInputItem> = {
             let mut steer = self
                 .steer_input_queue
@@ -505,8 +505,8 @@ impl SessionState {
                 .pending_turn_queue
                 .lock()
                 .expect("pending turn queue mutex should not be poisoned");
-            for item in late_steer {
-                queue.push_back(item);
+            for item in late_steer.into_iter().rev() {
+                queue.push_front(item);
             }
         }
     }

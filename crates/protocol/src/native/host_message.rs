@@ -28,9 +28,10 @@ pub enum HostMessageSource {
     Schedule,
 }
 
-#[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize, Deserialize, JsonSchema, TS)]
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize, Deserialize, JsonSchema, TS, Default)]
 #[serde(rename_all = "camelCase")]
 pub enum HostMessageDelivery {
+    #[default]
     FollowUp,
     Steer,
 }

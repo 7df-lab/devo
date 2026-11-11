@@ -133,7 +133,6 @@ async fn scheduled_message_count(
                 matches!(
                     &envelope.item,
                     devo_protocol::native::item::Item::UserMessage {
-                        origin: None,
                         client_user_message_id: Some(id),
                         ..
                     } if id == client_user_message_id
@@ -145,7 +144,7 @@ async fn scheduled_message_count(
 }
 
 #[tokio::test]
-async fn active_schedule_steer_injects_while_follow_up_queues() -> Result<()> {
+async fn active_schedules_share_fifo_until_safe_boundary() -> Result<()> {
     let open = Arc::new(AtomicBool::new(false));
     let started = Arc::new(AtomicBool::new(false));
     let data_root = TempDir::new()?;
@@ -267,15 +266,26 @@ async fn active_schedule_steer_injects_while_follow_up_queues() -> Result<()> {
         &reservation.steer_input_queue,
         "hold this turn"
     ));
-    assert!(!queue_has_prompt(
+    assert!(queue_has_prompt(
         &reservation.pending_turn_queue,
         "hold this turn"
     ));
-    assert!(queue_has_prompt(
+    assert_eq!(
+        reservation.pending_turn_queue.lock().expect("queue").len(),
+        4,
+        "equal text from two distinct occurrences must not coalesce with human input"
+    );
+    runtime.dispatch_due_schedule_jobs().await?;
+    assert_eq!(
+        reservation.pending_turn_queue.lock().expect("queue").len(),
+        4,
+        "retrying the same occurrences must not duplicate admission"
+    );
+    assert!(!queue_has_prompt(
         &reservation.steer_input_queue,
         "scheduled steer"
     ));
-    assert!(!queue_has_prompt(
+    assert!(queue_has_prompt(
         &reservation.pending_turn_queue,
         "scheduled steer"
     ));
@@ -287,6 +297,19 @@ async fn active_schedule_steer_injects_while_follow_up_queues() -> Result<()> {
         &reservation.steer_input_queue,
         "scheduled follow-up"
     ));
+
+    assert_eq!(
+        runtime
+            .schedule_store
+            .list(Some(&session_id), None)?
+            .iter()
+            .map(|job| job.run_count)
+            .collect::<Vec<_>>(),
+        vec![1, 1, 1, 1]
+    );
+    for job_id in initial_job_ids {
+        runtime.schedule_store.delete(&job_id)?;
+    }
 
     open.store(true, Ordering::SeqCst);
     // Workspace tests run concurrently; allow queued turns to drain under CI load.
@@ -316,19 +339,6 @@ async fn active_schedule_steer_injects_while_follow_up_queues() -> Result<()> {
     })
     .await
     .context("scheduled turns did not drain after releasing the provider")?;
-
-    assert_eq!(
-        runtime
-            .schedule_store
-            .list(Some(&session_id), None)?
-            .iter()
-            .map(|job| job.run_count)
-            .collect::<Vec<_>>(),
-        vec![1, 1, 1, 1]
-    );
-    for job_id in initial_job_ids {
-        runtime.schedule_store.delete(&job_id)?;
-    }
 
     open.store(false, Ordering::SeqCst);
     let repeat_job = runtime.schedule_store.upsert(
@@ -376,13 +386,52 @@ async fn active_schedule_steer_injects_while_follow_up_queues() -> Result<()> {
             .run_count,
         1
     );
+    // A later occurrence is queued behind the gated request. Discarding it
+    // must not wedge the recurring schedule's outbox.
+    tokio::time::sleep(Duration::from_millis(1_050)).await;
+    runtime.dispatch_due_schedule_jobs().await?;
+    let snapshot = runtime
+        .session_turn_reservation_snapshot(session_id)
+        .await
+        .context("queued repeat")?;
+    let discarded = snapshot
+        .pending_turn_queue
+        .lock()
+        .expect("queue")
+        .front()
+        .context("repeat queued")?
+        .id;
+    let removed = runtime
+        .handle_incoming(
+            connection_id,
+            serde_json::json!({"id":900,
+        "method":"session/queue/remove","params":{"sessionId":session_id,"queueItemId":discarded}}),
+        )
+        .await
+        .context("discard repeat")?;
+    assert!(removed.get("error").is_none(), "{removed}");
+    tokio::time::sleep(Duration::from_millis(1_050)).await;
+    runtime.dispatch_due_schedule_jobs().await?;
+    let snapshot = runtime
+        .session_turn_reservation_snapshot(session_id)
+        .await
+        .context("next repeat")?;
+    assert!(
+        snapshot
+            .pending_turn_queue
+            .lock()
+            .expect("queue")
+            .iter()
+            .any(|item| item.id != discarded),
+        "discarded occurrence must not prevent the next occurrence"
+    );
     runtime.schedule_store.delete(&repeat_job.job_id)?;
     open.store(true, Ordering::SeqCst);
     Ok(())
 }
 
 #[tokio::test]
-async fn schedule_outbox_recovers_dequeue_gap_after_restart_without_duplicate() -> Result<()> {
+async fn schedule_outbox_preserves_uncertain_claim_after_restart_without_duplicate() -> Result<()> {
     let open = Arc::new(AtomicBool::new(false));
     let started = Arc::new(AtomicBool::new(false));
     let data_root = TempDir::new()?;
@@ -443,7 +492,7 @@ async fn schedule_outbox_recovers_dequeue_gap_after_restart_without_duplicate() 
         .context("turn/start response")?;
     wait_for_provider_start(&started).await?;
 
-    let job = runtime.schedule_store.upsert(
+    let _job = runtime.schedule_store.upsert(
         devo_protocol::native::rpc_schedule::SessionScheduleUpsertParams {
             kind: devo_protocol::native::rpc_schedule::ScheduleJobKind::Heartbeat,
             session_id,
@@ -459,13 +508,27 @@ async fn schedule_outbox_recovers_dequeue_gap_after_restart_without_duplicate() 
     )?;
     tokio::time::sleep(Duration::from_millis(1_050)).await;
     runtime.dispatch_due_schedule_jobs().await?;
-    let occurrence = runtime
-        .schedule_store
-        .pending_occurrences(chrono::Utc::now())?
-        .into_iter()
-        .find(|occurrence| occurrence.job.job_id == job.job_id)
-        .context("schedule occurrence should remain until transcript materialization")?;
-    let client_user_message_id = occurrence.occurrence_id;
+    assert!(
+        runtime
+            .schedule_store
+            .pending_occurrences(chrono::Utc::now())?
+            .is_empty(),
+        "durable admission transfers ownership to the inbox"
+    );
+    let client_user_message_id = runtime
+        .deps
+        .db
+        .list_pending(&session_id, crate::db::QueueType::Turn)?
+        .iter()
+        .find_map(|item| {
+            item.host_message_origin()
+                .filter(|origin| {
+                    origin.source
+                        == devo_protocol::native::host_message::HostMessageSource::Schedule
+                })
+                .map(|origin| origin.event_id)
+        })
+        .context("scheduled inbox receipt")?;
     assert_eq!(
         scheduled_message_count(&runtime, session_id, &client_user_message_id).await?,
         1
@@ -500,15 +563,15 @@ async fn schedule_outbox_recovers_dequeue_gap_after_restart_without_duplicate() 
         "kernel teardown must discard notices tied to its in-memory Bash handles"
     );
     assert!(runtime.schedule_wake_cancel.is_cancelled());
-    assert!(runtime.deps.db.remove_pending_by_id(
+    assert!(runtime.deps.db.claim_queue_steer(
         &session_id,
-        crate::db::QueueType::Turn,
-        &queued_item.id,
+        &queued_item,
+        &devo_protocol::TurnId::new(),
     )?);
     assert_eq!(
         scheduled_message_count(&runtime, session_id, &client_user_message_id).await?,
-        0,
-        "sabotage removes the queue row before Native transcript materialization"
+        1,
+        "claim retains the original durable row until consumption is resolved"
     );
     drop(runtime);
 
@@ -518,12 +581,22 @@ async fn schedule_outbox_recovers_dequeue_gap_after_restart_without_duplicate() 
     }))
     .db_file("schedule-outbox-restart.db")
     .runtime(data_root.path());
+    restarted.load_persisted_sessions().await?;
     restarted.dispatch_due_schedule_jobs().await?;
     assert_eq!(
         scheduled_message_count(&restarted, session_id, &client_user_message_id).await?,
         1,
-        "durable outbox must re-admit the occurrence after the queue row is lost"
+        "restart recovers the same uncertain claim instead of re-admitting it"
     );
+    let recovered = restarted
+        .deps
+        .db
+        .list_pending(&session_id, crate::db::QueueType::Turn)?;
+    let held = recovered
+        .iter()
+        .find(|item| item.id == queued_item.id)
+        .context("original claim recovered")?;
+    assert!(crate::runtime::handlers::queue_steer::requires_queue_review(held));
     restarted.dispatch_due_schedule_jobs().await?;
     assert_eq!(
         scheduled_message_count(&restarted, session_id, &client_user_message_id).await?,

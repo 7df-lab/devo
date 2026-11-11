@@ -4,6 +4,7 @@ use std::sync::Arc;
 use anyhow::Context;
 use devo_protocol::ApprovalScopeValue;
 use devo_protocol::CollaborationMode;
+#[cfg(test)]
 use devo_protocol::PendingInputItem;
 use devo_protocol::ThreadGoal;
 use devo_protocol::native::ids::SessionId;
@@ -38,8 +39,6 @@ pub(crate) struct SessionHandle {
     max_turns: Option<u32>,
     state_change_gate: Arc<tokio::sync::Mutex<()>>,
     closed_queue_steer_turn: Arc<std::sync::Mutex<Option<TurnId>>>,
-    ephemeral_queue_steer_receipts:
-        Arc<std::sync::Mutex<std::collections::HashMap<devo_core::QueueItemId, TurnId>>>,
 }
 
 impl SessionHandle {
@@ -51,6 +50,7 @@ impl SessionHandle {
         self.max_turns
     }
 
+    #[cfg(test)]
     pub(crate) async fn enqueue_pending_turn_input(&self, item: PendingInputItem) {
         let _ = self
             .send(SessionCommand::EnqueuePendingTurnInput { item })
@@ -70,7 +70,6 @@ impl SessionHandle {
             max_turns,
             state_change_gate: Arc::new(tokio::sync::Mutex::new(())),
             closed_queue_steer_turn: Arc::default(),
-            ephemeral_queue_steer_receipts: Arc::default(),
         };
         tokio::spawn(super::actor_loop::run_session_actor(state, rx, runtime));
         handle
@@ -111,28 +110,6 @@ impl SessionHandle {
             .lock()
             .expect("queue steer mutex poisoned")
             == Some(turn_id)
-    }
-
-    pub(crate) fn ephemeral_queue_steer_receipt(
-        &self,
-        id: devo_core::QueueItemId,
-    ) -> Option<TurnId> {
-        self.ephemeral_queue_steer_receipts
-            .lock()
-            .expect("queue receipt mutex poisoned")
-            .get(&id)
-            .copied()
-    }
-
-    pub(crate) fn remember_ephemeral_queue_steer(
-        &self,
-        id: devo_core::QueueItemId,
-        turn_id: TurnId,
-    ) {
-        self.ephemeral_queue_steer_receipts
-            .lock()
-            .expect("queue receipt mutex poisoned")
-            .insert(id, turn_id);
     }
 
     /// Non-blocking enqueue for fire-and-forget updates from turn streams.

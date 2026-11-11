@@ -544,6 +544,10 @@ impl ServerRuntime {
         let mut deleted_session_ids = Vec::new();
         for plan in plans {
             let session_id = plan.session_id;
+            self.ephemeral_inbox_receipts
+                .lock()
+                .expect("ephemeral inbox receipts poisoned")
+                .retain(|(id, _)| *id != session_id);
             let removed = removed_by_id.get(&session_id).copied().unwrap_or(false);
             let persisted = self
                 .deps

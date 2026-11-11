@@ -200,6 +200,60 @@ pub struct PendingInputItem {
 }
 
 impl PendingInputItem {
+    /// Delivery policy within the single ordered session inbox. Legacy entries
+    /// are follow-ups; host provenance retains its independently recorded policy.
+    pub fn delivery(&self) -> crate::native::host_message::HostMessageDelivery {
+        self.metadata
+            .as_ref()
+            .and_then(|m| m.get("inboxDelivery"))
+            .cloned()
+            .and_then(|v| serde_json::from_value(v).ok())
+            .or_else(|| self.host_message_origin().map(|origin| origin.delivery))
+            .unwrap_or(crate::native::host_message::HostMessageDelivery::FollowUp)
+    }
+
+    pub fn set_delivery(&mut self, delivery: crate::native::host_message::HostMessageDelivery) {
+        let metadata = self.metadata.get_or_insert_with(|| serde_json::json!({}));
+        if let Some(object) = metadata.as_object_mut() {
+            object.insert(
+                "inboxDelivery".into(),
+                serde_json::to_value(delivery).expect("delivery serializes"),
+            );
+        }
+    }
+
+    pub fn assign_client_identity(&mut self) {
+        if let Some(id) = self
+            .metadata
+            .as_ref()
+            .and_then(|m| m.get("clientUserMessageId"))
+            .and_then(serde_json::Value::as_str)
+        {
+            self.id = QueueItemId::from_string(
+                serde_json::to_string(&("human", id)).expect("input identity serializes"),
+            );
+        }
+    }
+
+    pub fn admission_key(&self) -> String {
+        self.host_message_origin().map_or_else(
+            || {
+                self.metadata
+                    .as_ref()
+                    .and_then(|m| m.get("clientUserMessageId"))
+                    .and_then(serde_json::Value::as_str)
+                    .map_or_else(
+                        || format!("input:{}", self.id),
+                        |id| serde_json::to_string(&("human", id)).expect("key serializes"),
+                    )
+            },
+            |origin| {
+                serde_json::to_string(&("host", origin.sender, origin.event_id))
+                    .expect("key serializes")
+            },
+        )
+    }
+
     /// Read host-owned provenance from a durable pending entry. Native input RPCs
     /// build metadata themselves and cannot set this field from client payloads.
     pub fn host_message_origin(&self) -> Option<crate::native::host_message::HostMessageOrigin> {

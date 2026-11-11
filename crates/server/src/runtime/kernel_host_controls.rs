@@ -107,7 +107,7 @@ impl ServerRuntime {
             .session(child)
             .await
             .ok_or("child session is unavailable")?;
-        let (snapshot, queued, active) = {
+        let (snapshot, queued, active, held) = {
             // Queue drain pops an input before registering its next turn. A
             // short admission-consistent snapshot must not mistake that gap
             // for completion. Release the gate before transcript/recovery I/O
@@ -117,14 +117,21 @@ impl ServerRuntime {
                 .turn_reservation_snapshot()
                 .await
                 .ok_or("child snapshot is unavailable")?;
-            let queued = !snapshot
-                .pending_turn_queue
-                .lock()
-                .map_err(|_| "child queue is unavailable")?
-                .is_empty()
-                || self.has_pending_subagent_work(child);
+            let (pending, held) = {
+                let queue = snapshot
+                    .pending_turn_queue
+                    .lock()
+                    .map_err(|_| "child queue is unavailable")?;
+                (
+                    !queue.is_empty(),
+                    queue
+                        .front()
+                        .is_some_and(crate::runtime::handlers::queue_steer::requires_queue_review),
+                )
+            };
+            let queued = pending || self.has_pending_subagent_work(child);
             let active = self.active_turns.active_turn_id(child).await.is_some();
-            (snapshot, queued, active)
+            (snapshot, queued, active, held)
         };
         // Terminal registry status is published before MergeTurn. Keep it running
         // until the working set is installed and the execution reservation clears.
@@ -133,7 +140,8 @@ impl ServerRuntime {
         // Queued follow-ups must not mask an abandoned current turn.
         let requires_resume = if !meta.close_requested && !active && snapshot.active_turn.is_none()
         {
-            self.turn_recovery(child)
+            held || self
+                .turn_recovery(child)
                 .await
                 .map_err(|error| format!("read child recovery: {error}"))?
                 .is_some()
@@ -203,11 +211,11 @@ impl ServerRuntime {
             .map(|(_, note)| note.clone());
         Ok(json!({
             "rlm_child_id": child.to_string(), "session_name": meta.nickname,
-            "session_dir": meta.session_dir, "status": if requires_resume { "waiting_for_resume" } else if settled { meta.status.as_str() } else { "running" },
+            "session_dir": meta.session_dir, "status": if held && !active && snapshot.active_turn.is_none() { "waiting_for_review" } else if requires_resume { "waiting_for_resume" } else if settled { meta.status.as_str() } else { "running" },
             "settled": settled, "answer_preview": if answer.is_empty() { None } else { Some(answer.chars().take(512).collect::<String>()) },
             "answer_text": if answer.is_empty() { None } else { Some(answer) },
             "answer_truncated": truncated, "error": error, "progress_note": note,
-            "requires_resume": requires_resume,
+            "requires_resume": requires_resume, "requires_review": held,
         }))
     }
 }

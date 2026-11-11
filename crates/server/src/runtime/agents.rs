@@ -690,14 +690,6 @@ impl ServerRuntime {
         session_id: SessionId,
     ) {
         let sid = session_id.to_string();
-        if let Some(handle) = self.session(session_id).await
-            && handle
-                .pending_queue_snapshot()
-                .await
-                .is_some_and(|queue| queue.pending_count > 0)
-        {
-            return;
-        }
         let notices = crate::runtime::kernel_host::take_bash_notices(&sid);
         if notices.is_empty() {
             return;
@@ -725,18 +717,6 @@ impl ServerRuntime {
             return;
         }
 
-        let busy = self
-            .session_turn_reservation_snapshot(session_id)
-            .await
-            .is_some_and(|r| r.active_turn.is_some())
-            || self.active_stream_state(session_id).await.is_some();
-        if busy {
-            for notice in completion_notices {
-                crate::runtime::kernel_host::push_bash_notice(&sid, notice);
-            }
-            return;
-        }
-
         for (index, notice) in completion_notices.iter().enumerate() {
             let text = match notice.get("kind").and_then(|kind| kind.as_str()) {
                 Some("async_python_completion") => format_python_completion_notice(notice),
@@ -755,70 +735,36 @@ impl ServerRuntime {
         }
     }
 
-    pub(super) async fn append_turn_start(
-        self: &Arc<Self>,
-        session_id: SessionId,
-        turn: &crate::turn::RuntimeTurn,
-    ) -> Result<(), ToolCallError> {
-        let session_handle = self.session(session_id).await.ok_or_else(|| {
-            ToolCallError::InvalidInput(format!("session not found: {session_id}"))
-        })?;
-        let persistence_snapshot = session_handle
-            .turn_persistence_snapshot()
-            .await
-            .ok_or_else(|| {
-                ToolCallError::InvalidInput(format!(
-                    "failed to snapshot turn persistence: {session_id}"
-                ))
-            })?;
-        // Child agents can be the first durable write for their rollout; route through
-        // actor-owned dedupe so SessionContextUpdated is recorded even if the process
-        // crashes before terminal turn finalization.
-        if persistence_snapshot.rollout_path.is_some() {
-            self.persist_turn_line_deduped(session_id, turn)
-                .await
-                .map_err(|error| ToolCallError::InternalError(error.to_string()))?;
-        }
-        Ok(())
-    }
-
     async fn queue_agent_message(
-        &self,
+        self: &Arc<Self>,
         from_session_id: SessionId,
         target: &str,
         content: String,
     ) -> Result<AgentRoute, ToolCallError> {
         let route = self.resolve_agent_route(from_session_id, target).await?;
-        let handle = self.session(route.to_session_id).await.ok_or_else(|| {
-            ToolCallError::InvalidInput("child session no longer exists".to_string())
-        })?;
-        let _guard = handle.lock_state_change().await;
-        if self
-            .agent_close_requested(from_session_id, route.to_session_id)
-            .await
-        {
-            return Err(ToolCallError::InvalidInput(
-                "child agent is closed".to_string(),
-            ));
-        }
-        let message_id = uuid::Uuid::new_v4().to_string();
-        let work_id = format!("agent:{}:mail:{message_id}", route.to_session_id);
-        self.register_background_work(from_session_id, work_id.clone());
-        let message = devo_protocol::AgentMailboxMessage {
-            message_id,
+        let parent_turn_id = self.active_turn_id_for_session(from_session_id).await;
+        // Admission happens now, including while the child is busy. Deferring
+        // through a separate mailbox would reorder this behind later sources.
+        self.deliver_host_message(
+            route.to_session_id,
+            super::host_messages::HostMessage::agent(
+                from_session_id,
+                uuid::Uuid::new_v4().to_string(),
+                content,
+            ),
+            Some(subagent_usage_owner_pending_metadata(
+                from_session_id,
+                parent_turn_id,
+            )),
+        )
+        .await?;
+        self.set_agent_status(
             from_session_id,
-            to_session_id: route.to_session_id,
-            from_agent_path: route.from_agent_path.clone(),
-            to_agent_path: route.to_agent_path.clone(),
-            content,
-            sequence: 0,
-            created_at: Utc::now(),
-        };
-        if let Err(error) = self.mailbox(route.to_session_id).await.send(message).await {
-            self.complete_background_work(from_session_id, work_id, error.to_string());
-            return Err(ToolCallError::InternalError(error.to_string()));
-        }
-        Ok(route.clone())
+            route.to_session_id,
+            SubagentStatus::Running,
+        )
+        .await;
+        Ok(route)
     }
 
     pub(in crate::runtime) async fn drain_child_mailbox_into_user_turns(
@@ -921,11 +867,8 @@ impl ServerRuntime {
         target: &str,
     ) -> Result<AgentRoute, ToolCallError> {
         if let Ok(child) = self.resolve_child_agent(from_session_id, target).await {
-            let from_path = self.session_agent_path(from_session_id).await;
             return Ok(AgentRoute {
                 to_session_id: child.session_id,
-                from_agent_path: from_path,
-                to_agent_path: child.agent_path,
             });
         }
         Err(ToolCallError::InvalidInput(format!(
@@ -1014,11 +957,30 @@ impl ServerRuntime {
             self.agent_close_requested(parent_session_id, child_session_id)
                 .await,
         );
-        let detail = subagent_terminal_status_detail_from_stable_items(
-            &state.persisted_turn_items,
-            turn.native.id,
-            status,
-        );
+        // Finalization runs before the stream's inline items merge into the
+        // working state. Read the current turn there first, without a mailbox
+        // round-trip or holding the stream lock while publishing completion.
+        let detail = {
+            let stream = state.stream.lock().await;
+            stream
+                .turn_inline
+                .as_ref()
+                .filter(|inline| inline.turn_id == turn.native.id)
+                .and_then(|inline| {
+                    subagent_terminal_status_detail_from_stable_items(
+                        &inline.persisted_turn_items,
+                        turn.native.id,
+                        status,
+                    )
+                })
+        }
+        .or_else(|| {
+            subagent_terminal_status_detail_from_stable_items(
+                &state.persisted_turn_items,
+                turn.native.id,
+                status,
+            )
+        });
         self.set_agent_status(parent_session_id, child_session_id, status)
             .await;
         self.record_subagent_status_event_with_text(
@@ -1191,10 +1153,16 @@ impl ServerRuntime {
             .await;
         if let Some(completion) = completion {
             // A late completion from a previous turn must not release a reused child.
-            self.complete_background_work(
+            let message = super::host_messages::HostMessage::child_completion(
+                child_session_id,
+                turn_id,
+                status.as_str(),
+                completion,
+            );
+            self.publish_background_completion(
                 parent_session_id,
                 format!("agent:{child_session_id}:{turn_id}"),
-                completion,
+                message,
             );
         }
     }
@@ -1719,8 +1687,6 @@ pub(super) fn observe_target_matches_for_host(agent: &serde_json::Value, target:
 #[derive(Clone)]
 struct AgentRoute {
     to_session_id: SessionId,
-    from_agent_path: String,
-    to_agent_path: String,
 }
 
 fn terminal_subagent_status_from_turn(

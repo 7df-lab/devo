@@ -48,14 +48,6 @@ impl ServerRuntime {
         {
             metadata.last_task_message = Some(message);
         }
-        if self
-            .active_turn_id_for_session(route.to_session_id)
-            .await
-            .is_none()
-        {
-            self.drain_child_mailbox_into_user_turns(route.to_session_id)
-                .await?;
-        }
         Ok(devo_protocol::AgentMessageResult {
             delivered: true,
             task_id: devo_protocol::TaskId::from(route.to_session_id),
@@ -261,7 +253,12 @@ impl AgentToolCoordinator for ServerRuntime {
     }
 
     fn background_work_completed(&self, session_id: SessionId, work_id: String, result: String) {
-        self.complete_background_work(session_id, work_id, result);
+        let message = super::super::host_messages::HostMessage::managed_completion(
+            session_id,
+            work_id.clone(),
+            result,
+        );
+        self.publish_background_completion(session_id, work_id, message);
     }
 
     async fn spawn_agent(

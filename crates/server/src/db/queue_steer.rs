@@ -169,9 +169,7 @@ impl Database {
         let changed = tx.execute(
             "UPDATE pending_messages
              SET queue_type = 'steer', kind = ?3, content = ?4, metadata = ?5,
-                 created_at = ?6,
-                 position = (SELECT COALESCE(MAX(position), 0) + 1
-                             FROM pending_messages WHERE session_id = ?1 AND queue_type = 'steer')
+                 created_at = ?6
              WHERE session_id = ?1 AND pending_input_id = ?2 AND queue_type = 'turn'
                AND NOT EXISTS (SELECT 1 FROM queue_steer_receipts
                                WHERE session_id = ?1 AND pending_input_id = ?2)",
@@ -229,12 +227,13 @@ impl Database {
             metadata.insert("queueSteerRecoveryRequired".into(), true.into());
             tx.execute(
                 "UPDATE pending_messages
-                 SET queue_type = 'turn', metadata = ?3,
-                     position = (SELECT COALESCE(MAX(position), 0) + 1
-                                 FROM pending_messages WHERE session_id = ?1 AND queue_type = 'turn')
+                 SET queue_type = 'turn', metadata = ?3
                  WHERE session_id = ?1 AND pending_input_id = ?2 AND queue_type = 'steer'",
-                params![session_id.as_str(), item.id.to_string(),
-                    serde_json::Value::Object(metadata).to_string()],
+                params![
+                    session_id.as_str(),
+                    item.id.to_string(),
+                    serde_json::Value::Object(metadata).to_string()
+                ],
             )?;
         }
         tx.commit().context("failed to commit queue steer recovery")
@@ -258,6 +257,22 @@ impl Database {
         );
         let mut conn = self.conn.lock().expect("database mutex poisoned");
         let tx = conn.transaction_with_behavior(TransactionBehavior::Immediate)?;
+        // Entries still present in the live queue were never consumed. Release
+        // only their execution claims; immutable inbox admission receipts remain.
+        // Held/uncertain entries retain claims and require explicit retry.
+        for item in pending {
+            if !item
+                .metadata
+                .as_ref()
+                .and_then(|m| m.get("queueSteerRecoveryRequired"))
+                .and_then(serde_json::Value::as_bool)
+                .unwrap_or(false)
+            {
+                tx.execute("DELETE FROM queue_steer_receipts WHERE session_id=?1 AND pending_input_id=?2
+                    AND EXISTS(SELECT 1 FROM pending_messages WHERE session_id=?1 AND pending_input_id=?2 AND queue_type='steer')",
+                    params![session_id.as_str(), item.id.to_string()])?;
+            }
+        }
         tx.execute(
             "DELETE FROM pending_messages WHERE session_id = ?1 AND queue_type = 'steer'",
             params![session_id.as_str()],
@@ -327,17 +342,24 @@ fn reorder_pending_turn_rows(
         })
         .collect::<Vec<_>>()
     };
+    // In-flight steer claims still precede every pending turn. Keep their
+    // durable positions ahead of edits/retries so crash recovery cannot invert
+    // the queue after pending positions are compacted.
+    let base: i64 = tx.query_row(
+        "SELECT COALESCE(MAX(position), -1) + 1 FROM pending_messages WHERE session_id=?1 AND queue_type='steer'",
+        params![session_id.as_str()], |row| row.get(0),
+    )?;
     for (position, id) in ordered_ids.iter().enumerate() {
         tx.execute(
             "UPDATE pending_messages SET position = ?3
              WHERE session_id = ?1 AND queue_type = 'turn' AND pending_input_id = ?2",
-            params![session_id.as_str(), id.to_string(), position as i64],
+            params![session_id.as_str(), id.to_string(), base + position as i64],
         )?;
     }
     for (offset, (row_id, _)) in extras.iter().enumerate() {
         tx.execute(
             "UPDATE pending_messages SET position = ?2 WHERE id = ?1",
-            params![row_id, (ordered_ids.len() + offset) as i64],
+            params![row_id, base + (ordered_ids.len() + offset) as i64],
         )?;
     }
     Ok(())
@@ -510,16 +532,22 @@ mod tests {
         let db = Database::open(dir.path().join("queue.db")).unwrap();
         db.recover_interrupted_queue_steers(&session).unwrap();
         assert_eq!(snapshot(&db, &session, QueueType::Turn), json!(pending));
-        for input in [&consumed, &remaining] {
-            assert_eq!(
-                db.queue_steer_receipt(&session, &input.id).unwrap(),
-                Some(turn)
-            );
-            assert!(
-                !db.claim_queue_steer(&session, input, &TurnId::new())
-                    .unwrap()
-            );
-        }
+        assert_eq!(
+            db.queue_steer_receipt(&session, &consumed.id).unwrap(),
+            Some(turn)
+        );
+        assert!(
+            !db.claim_queue_steer(&session, &consumed, &TurnId::new())
+                .unwrap()
+        );
+        assert_eq!(
+            db.queue_steer_receipt(&session, &remaining.id).unwrap(),
+            None
+        );
+        assert!(
+            db.claim_queue_steer(&session, &remaining, &TurnId::new())
+                .unwrap()
+        );
         db.delete_session(&session).unwrap();
         assert_eq!(
             db.queue_steer_receipt(&session, &consumed.id).unwrap(),

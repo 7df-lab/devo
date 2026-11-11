@@ -439,18 +439,11 @@ impl ServerRuntime {
                 .await
             {
                 Ok(true) => {
-                    let observed_at = Utc::now();
-                    self.schedule_store
-                        .mark_occurrence_inflight(occurrence_id, observed_at);
-                    if let Err(error) = self
-                        .schedule_store
-                        .mark_occurrence_delivery_attempted(occurrence_id, observed_at)
-                    {
-                        tracing::warn!(
-                            job_id = job.job_id.as_str(),
-                            %error,
-                            "failed to persist observed schedule delivery"
-                        );
+                    // Inbox ownership is sufficient. Removing that entry later
+                    // is an explicit discard, not an unfulfilled schedule.
+                    if let Err(error) = self.schedule_store.acknowledge_occurrence(occurrence_id) {
+                        tracing::warn!(%session_id, %error, "failed to acknowledge queued schedule");
+                        self.retry_schedule_occurrence(occurrence_id);
                     }
                     continue;
                 }
@@ -486,79 +479,8 @@ impl ServerRuntime {
                 self.schedule_store.clear_occurrence_inflight(occurrence_id);
             }
 
-            let active_user_texts = match active_turn_id {
-                Some(turn_id) => self.active_turn_user_texts(session_id, turn_id).await,
-                None => Vec::new(),
-            };
-            let already_active = active_user_texts.iter().any(|text| text == &prompt);
-            let matches_prompt = |item: &devo_core::PendingInputItem| match &item.kind {
-                devo_core::PendingInputKind::UserText { text } => text == &prompt,
-                devo_core::PendingInputKind::UserInput { display_text, .. } => {
-                    display_text == &prompt
-                }
-                _ => false,
-            };
-            let already_pending = {
-                let queued = {
-                    let queue = reservation
-                        .pending_turn_queue
-                        .lock()
-                        .expect("pending turn queue mutex should not be poisoned");
-                    queue.iter().any(&matches_prompt)
-                };
-                let steered = {
-                    let queue = reservation
-                        .steer_input_queue
-                        .lock()
-                        .expect("steer input queue mutex should not be poisoned");
-                    queue.iter().any(&matches_prompt)
-                };
-                queued || steered
-            };
-            if already_active || already_pending {
-                if occurrence.delivery_attempted_at.is_some() {
-                    if self
-                        .schedule_store
-                        .occurrence_inflight_since(occurrence_id)
-                        .is_none()
-                    {
-                        self.schedule_store
-                            .mark_occurrence_inflight(occurrence_id, Utc::now());
-                    }
-                    continue;
-                }
-                tracing::debug!(
-                    job_id = job.job_id.as_str(),
-                    session_id = %session_id,
-                    "schedule fire skipped; identical prompt already active or pending"
-                );
-                if let Err(error) = self.schedule_store.acknowledge_occurrence(occurrence_id) {
-                    tracing::warn!(
-                        job_id = job.job_id.as_str(),
-                        %error,
-                        "failed to acknowledge coalesced schedule occurrence"
-                    );
-                }
-                continue;
-            }
-
-            let steer_turn_id = if job.delivery_mode
-                == devo_protocol::native::rpc_schedule::ScheduleDeliveryMode::Steer
-            {
-                active_turn_id
-            } else {
-                None
-            };
-            let active_prompt = prompt.clone();
-            let input = vec![devo_protocol::native::item::UserInput::Text { text: prompt }];
-            let queue_params = || {
-                serde_json::json!({
-                    "sessionId": session_id,
-                    "input": input.clone(),
-                    "idempotencyKey": occurrence_id,
-                    "clientUserMessageId": occurrence_id,
-                })
-            };
+            // Content equality is not event identity. Distinct occurrences,
+            // even with identical prompts, must each enter the shared inbox.
             if !self
                 .schedule_store
                 .try_reserve_occurrence(occurrence_id, Utc::now())
@@ -584,77 +506,27 @@ impl ServerRuntime {
                     continue;
                 }
             }
-            let response = match job.delivery_mode {
+            let delivery = match job.delivery_mode {
                 devo_protocol::native::rpc_schedule::ScheduleDeliveryMode::FollowUp => {
-                    self.handle_session_queue_push(
-                        /*connection_id*/ 0,
-                        serde_json::json!(null),
-                        queue_params(),
-                    )
-                    .await
+                    devo_protocol::native::host_message::HostMessageDelivery::FollowUp
                 }
                 devo_protocol::native::rpc_schedule::ScheduleDeliveryMode::Steer => {
-                    if let Some(expected_turn_id) = steer_turn_id {
-                        let steer_response = self
-                            .handle_turn_steer_with_client_user_message_id(
-                                /*connection_id*/ 0,
-                                serde_json::json!(null),
-                                serde_json::json!({
-                                    "sessionId": session_id,
-                                    "expectedTurnId": expected_turn_id,
-                                    "input": input.clone(),
-                                    "clientUserMessageId": occurrence_id,
-                                    "idempotencyKey": occurrence_id,
-                                }),
-                                Some(occurrence_id.to_string()),
-                            )
-                            .await;
-                        let outcome = steer_response
-                            .get("result")
-                            .and_then(|result| result.get("outcome"))
-                            .and_then(serde_json::Value::as_str);
-                        if outcome == Some("injected") {
-                            self.add_active_turn_user_text(
-                                session_id,
-                                expected_turn_id,
-                                active_prompt.clone(),
-                            )
-                            .await;
-                        }
-                        let error_code = steer_response
-                            .get("error")
-                            .and_then(|error| error.get("code"))
-                            .and_then(serde_json::Value::as_str);
-                        if matches!(
-                            error_code,
-                            Some("ActiveTurnNotSteerable") | Some("ExpectedTurnMismatch")
-                        ) {
-                            tracing::debug!(
-                                job_id = job.job_id.as_str(),
-                                session_id = %session_id,
-                                ?error_code,
-                                "schedule steer fell back to queue"
-                            );
-                            self.handle_session_queue_push(
-                                /*connection_id*/ 0,
-                                serde_json::json!(null),
-                                queue_params(),
-                            )
-                            .await
-                        } else {
-                            steer_response
-                        }
-                    } else {
-                        self.handle_session_queue_push(
-                            /*connection_id*/ 0,
-                            serde_json::json!(null),
-                            queue_params(),
-                        )
-                        .await
-                    }
+                    devo_protocol::native::host_message::HostMessageDelivery::Steer
                 }
             };
-            if let Some(error) = response.get("error") {
+            let response = self
+                .deliver_host_message(
+                    session_id,
+                    super::super::host_messages::HostMessage::schedule(
+                        session_id,
+                        occurrence_id.to_string(),
+                        prompt,
+                        delivery,
+                    ),
+                    Some(serde_json::json!({ "clientUserMessageId": occurrence_id })),
+                )
+                .await;
+            if let Err(error) = response {
                 tracing::warn!(
                     job_id = job.job_id.as_str(),
                     session_id = %session_id,
@@ -666,8 +538,12 @@ impl ServerRuntime {
                 tracing::debug!(
                     job_id = job.job_id.as_str(),
                     session_id = %session_id,
-                    "schedule occurrence accepted; awaiting transcript materialization"
+                    "schedule occurrence durably admitted to owner inbox"
                 );
+                if let Err(error) = self.schedule_store.acknowledge_occurrence(occurrence_id) {
+                    tracing::warn!(%session_id, %error, "failed to acknowledge durable schedule admission");
+                    self.retry_schedule_occurrence(occurrence_id);
+                }
             }
         }
         Ok(())
@@ -688,9 +564,11 @@ impl ServerRuntime {
             matches!(
                 &envelope.item,
                 devo_protocol::native::item::Item::UserMessage {
-                    client_user_message_id: Some(id),
+                    client_user_message_id: id,
+                    origin,
                     ..
-                } if id == client_user_message_id
+                } if id.as_deref() == Some(client_user_message_id)
+                    || origin.as_ref().is_some_and(|origin| origin.event_id == client_user_message_id)
             )
         }))
     }

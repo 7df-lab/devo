@@ -8,12 +8,19 @@ import { DEFAULT_PREVIEW_LIMIT, MAX_PREVIEW_LIMIT } from "./native-traffic-log.j
 
 export type QueueWireEntry = {
   origin?: Record<string, unknown>;
+  delivery?: "steer" | "followUp";
+  recoveryRequired?: boolean;
   queueItemId: string;
   position: number;
   preview: string;
   enqueuedAt?: string;
   input?: Array<{ type: string; text?: string }>;
 };
+
+/** Server revisions order snapshots independently of async response arrival. */
+export function queueWireRevision(value: unknown): number | undefined {
+  return typeof value === "number" && Number.isSafeInteger(value) && value >= 0 ? value : undefined;
+}
 
 export function parseQueueWireEntries(value: unknown): QueueWireEntry[] {
   if (!Array.isArray(value)) return [];
@@ -22,6 +29,8 @@ export function parseQueueWireEntries(value: unknown): QueueWireEntry[] {
     .filter((entry): entry is Record<string, unknown> => entry != null)
     .map((entry) => ({
       ...(entry.origin && typeof entry.origin === "object" ? { origin: entry.origin as Record<string, unknown> } : {}),
+      recoveryRequired: entry.recoveryRequired === true,
+      delivery: entry.delivery === "steer" ? "steer" as const : "followUp" as const,
       queueItemId: String(entry.queueItemId ?? entry.queue_item_id ?? ""),
       position: Number(entry.position ?? 0),
       preview: String(entry.preview ?? ""),
@@ -60,6 +69,17 @@ export function queuePreviewText(entry: QueueWireEntry): string {
     .filter((p) => p.type === "text" && p.text)
     .map((p) => String(p.text));
   return label + texts.join("\n");
+}
+
+/** Full text is editable only when every payload part can be represented losslessly. */
+export function queueEditableText(entry: QueueWireEntry): string | undefined {
+  if (entry.origin || !Array.isArray(entry.input) || entry.input.length === 0) return undefined;
+  if (entry.input.some((part) => part.type !== "text" || typeof part.text !== "string")) return undefined;
+  return entry.input.map((part) => part.text).join("\n");
+}
+
+export function queueSelectionText(entry: QueueWireEntry): string {
+  return queueEditableText(entry) ?? queuePreviewText(entry);
 }
 
 export type GoalSlashAction =

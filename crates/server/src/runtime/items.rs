@@ -206,6 +206,22 @@ impl ServerRuntime {
         item_seq: u64,
         native_item: NativeItem,
     ) {
+        if let Err(error) = self
+            .complete_native_item_checked(session_id, turn_id, item_id, item_seq, native_item)
+            .await
+        {
+            tracing::warn!(%session_id, %error, "failed to complete native item");
+        }
+    }
+
+    pub(super) async fn complete_native_item_checked(
+        &self,
+        session_id: NativeSessionId,
+        turn_id: NativeTurnId,
+        item_id: NativeItemId,
+        item_seq: u64,
+        native_item: NativeItem,
+    ) -> anyhow::Result<()> {
         let started_at = self.take_item_started_at(&session_id, &item_id).await;
         self.persist_item(
             session_id,
@@ -215,7 +231,7 @@ impl ServerRuntime {
             native_item.clone(),
             started_at,
         )
-        .await;
+        .await?;
         let envelope = typed_item_envelope(
             session_id,
             turn_id,
@@ -228,6 +244,7 @@ impl ServerRuntime {
         );
         self.broadcast_item_lifecycle(envelope, /*completed*/ true)
             .await;
+        Ok(())
     }
 
     pub(super) async fn persist_item(
@@ -238,7 +255,7 @@ impl ServerRuntime {
         item_seq: u64,
         native_item: NativeItem,
         started_at: Option<chrono::DateTime<chrono::Utc>>,
-    ) {
+    ) -> anyhow::Result<()> {
         use crate::persisted_native_item::PersistedNativeItem;
         use crate::persisted_native_item::history_entry_from_native_item;
 
@@ -288,30 +305,22 @@ impl ServerRuntime {
                         started_at,
                     );
                     envelope.parent_id = parent_id;
-                    if let Err(error) = self.rollout_store.append_tree_edge_at(
+                    self.rollout_store.append_tree_edge_at(
                         &rollout_path,
                         persist_session_id,
                         item_id,
                         parent_id,
-                    ) {
-                        tracing::warn!(session_id = %session_id, error = %error, "failed to persist tree edge");
-                    }
-                    if let Err(error) = self
-                        .rollout_store
-                        .append_canonical_item_at(&rollout_path, envelope)
-                    {
-                        tracing::warn!(session_id = %session_id, error = %error, "failed to persist item line");
-                    }
-                    if let Err(error) = self.rollout_store.append_session_leaf_at(
+                    )?;
+                    self.rollout_store
+                        .append_canonical_item_at(&rollout_path, envelope)?;
+                    self.rollout_store.append_session_leaf_at(
                         &rollout_path,
                         persist_session_id,
                         Some(item_id),
                         leaf_epoch,
-                    ) {
-                        tracing::warn!(session_id = %session_id, error = %error, "failed to persist session leaf");
-                    }
+                    )?;
                 }
-                return;
+                return Ok(());
             }
             // Active stream is registered but inline state is missing. The session
             // actor is not polling its mailbox until the stream finishes, so we
@@ -321,16 +330,16 @@ impl ServerRuntime {
                 turn_id = %turn_id,
                 "persist_item skipped: active turn stream has no inline state"
             );
-            return;
+            anyhow::bail!("active stream has no inline state");
         }
         let Some(session_handle) = self.session(session_id).await else {
-            return;
+            anyhow::bail!("session disappeared before item persistence");
         };
         if let Some(history_entry) = history_entry {
             session_handle.append_history_item(history_entry).await;
         }
         let Some(prep) = session_handle.prepare_persist_item(turn_id).await else {
-            return;
+            anyhow::bail!("turn unavailable before item persistence");
         };
         session_handle
             .append_persisted_item(PersistedNativeItem::new(
@@ -354,28 +363,20 @@ impl ServerRuntime {
                 started_at,
             );
             envelope.parent_id = parent_id;
-            if let Err(error) = self.rollout_store.append_tree_edge_at(
+            self.rollout_store.append_tree_edge_at(
                 &rollout_path,
                 session_id,
                 item_id,
                 parent_id,
-            ) {
-                tracing::warn!(session_id = %session_id, error = %error, "failed to persist tree edge");
-            }
-            if let Err(error) = self
-                .rollout_store
-                .append_canonical_item_at(&rollout_path, envelope)
-            {
-                tracing::warn!(session_id = %session_id, error = %error, "failed to persist item line");
-            }
-            if let Err(error) = self.rollout_store.append_session_leaf_at(
+            )?;
+            self.rollout_store
+                .append_canonical_item_at(&rollout_path, envelope)?;
+            self.rollout_store.append_session_leaf_at(
                 &rollout_path,
                 session_id,
                 Some(item_id),
                 leaf_epoch,
-            ) {
-                tracing::warn!(session_id = %session_id, error = %error, "failed to persist session leaf");
-            }
+            )?;
             session_handle
                 .set_transcript_leaf(
                     Some(item_id),
@@ -385,6 +386,7 @@ impl ServerRuntime {
                 )
                 .await;
         }
+        Ok(())
     }
 
     pub(super) async fn allocate_item_sequence(&self, session_id: &NativeSessionId) -> u64 {

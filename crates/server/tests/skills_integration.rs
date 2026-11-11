@@ -1339,12 +1339,12 @@ async fn turn_steer_injects_resolved_skill_into_next_model_request() -> Result<(
         .context("turn/steer response")?;
     let steer_result: SuccessResponse<devo_protocol::native::rpc_turn::TurnSteerResult> =
         serde_json::from_value(steer_response)?;
-    let devo_protocol::native::rpc_turn::TurnSteerResult::Injected { item_id } =
+    let devo_protocol::native::rpc_turn::TurnSteerResult::DegradedToQueue { entry } =
         steer_result.result
     else {
-        panic!("expected Injected steer");
+        panic!("expected queued steer pending the next request boundary");
     };
-    assert!(!item_id.as_str().is_empty());
+    assert!(!entry.queue_item_id.as_str().is_empty());
 
     release.notify_one();
     wait_for_turn_completed(&mut notifications_rx).await?;

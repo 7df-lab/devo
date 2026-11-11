@@ -118,6 +118,9 @@ mod handlers;
 mod history_cache;
 mod hooks;
 mod host_messages;
+mod inbox;
+#[cfg(test)]
+mod inbox_tests;
 mod interaction_items;
 mod items;
 mod kernel_host;
@@ -238,6 +241,8 @@ pub struct ServerRuntime {
     recovery_idempotency:
         Mutex<HashMap<(SessionId, String), devo_protocol::native::rpc_turn::TurnResumeResult>>,
     recovery_gates: Mutex<HashMap<SessionId, Arc<Mutex<()>>>>,
+    queue_snapshot_revision: std::sync::atomic::AtomicU64,
+    ephemeral_inbox_receipts: std::sync::Mutex<std::collections::HashSet<(SessionId, String)>>,
     turn_start_idempotency: Mutex<HashMap<(SessionId, String), devo_protocol::native::turn::Turn>>,
     /// In-process idempotency for canonical `session/new`
     /// (`idempotencyKey -> session`). Same process-scope caveat as
@@ -477,6 +482,8 @@ impl ServerRuntime {
             active_workspace_baselines: Mutex::new(HashMap::new()),
             recovery_idempotency: Mutex::new(HashMap::new()),
             recovery_gates: Mutex::new(HashMap::new()),
+            queue_snapshot_revision: std::sync::atomic::AtomicU64::new(0),
+            ephemeral_inbox_receipts: std::sync::Mutex::default(),
             turn_start_idempotency: Mutex::new(HashMap::new()),
             session_new_idempotency: Mutex::new(HashMap::new()),
             goal_set_idempotency: Mutex::new(HashMap::new()),

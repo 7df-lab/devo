@@ -36,7 +36,7 @@ for (const [source, label] of Object.entries({ agent: "Agent message", backgroun
   test(`${source} pending notification keeps a sender label`, () => {
     const origin = { source, sender: "worker-1", eventId: "event-1", delivery: "followUp" };
     assert.deepEqual(nativeNotificationToPiEvents("queue/updated", { queue: [{ preview: "Result ready", origin }] }, createStreamState()), [{
-      type: "session_action_update", actions: { queuedCount: 1, steering: [], followUps: [`[${label} · worker-1] Result ready`] },
+      type: "session_action_update", actions: { queuedCount: 1, steering: [], followUps: [`[${label} · worker-1] Result ready`], ordered: [{ id: "", text: `[${label} · worker-1] Result ready`, delivery: "followUp", blocked: false, editable: false }] },
     }]);
   });
 }

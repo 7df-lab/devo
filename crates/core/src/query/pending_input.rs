@@ -9,6 +9,15 @@ use crate::SessionState;
 
 pub(super) fn push_pending_input(session: &mut SessionState, pending: &[PendingInputItem]) {
     for item in pending {
+        if let Some(origin) = item.host_message_origin() {
+            let text = match &item.kind {
+                devo_protocol::PendingInputKind::UserText { text } => text,
+                devo_protocol::PendingInputKind::UserInput { prompt_text, .. } => prompt_text,
+                _ => continue,
+            };
+            session.push_message(Message::user(crate::render_host_message(&origin, text)));
+            continue;
+        }
         match &item.kind {
             devo_protocol::PendingInputKind::UserText { text } => {
                 session.push_message(Message::user(text.clone()));

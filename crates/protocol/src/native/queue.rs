@@ -24,6 +24,8 @@ pub struct QueueEntry {
     #[ts(optional)]
     pub origin: Option<super::host_message::HostMessageOrigin>,
     pub position: u32,
+    #[serde(default)]
+    pub delivery: super::host_message::HostMessageDelivery,
     /// Full editable content; `session/queue/update` replaces it wholesale.
     pub input: Vec<UserInput>,
     /// Short single-line preview for list rendering.

@@ -337,7 +337,8 @@ mod tests {
             assert!(take_bash_notices(&session_key).is_empty());
         }
         runtime.register_background_work(session_id, "bash:new-chat-handle".to_string());
-        runtime.complete_background_work(
+        devo_core::tools::AgentToolCoordinator::background_work_completed(
+            runtime.as_ref(),
             session_id,
             "bash:new-chat-handle".to_string(),
             "new ordinary chat result".to_string(),
@@ -372,7 +373,7 @@ mod tests {
                 .active_turn_user_texts(session_id, turn_id)
                 .await
                 .iter()
-                .any(|text| text.contains("Inspect the saved handle and continue."))
+                .any(|text| text.contains("new ordinary chat result"))
         );
         assert!(take_bash_notices(&session_key).is_empty());
         open.store(true, Ordering::SeqCst);

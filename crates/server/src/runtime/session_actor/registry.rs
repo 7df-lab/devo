@@ -71,6 +71,7 @@ impl ServerRuntime {
     /// Finalization clears `runtime_active_turn_id` before `MergeTurn`
     /// returns; falling through to the mailbox in that window is safe because
     /// the actor no longer runs unbounded turn I/O.
+    #[cfg(test)]
     pub(crate) async fn active_turn_user_texts(
         &self,
         session_id: SessionId,
