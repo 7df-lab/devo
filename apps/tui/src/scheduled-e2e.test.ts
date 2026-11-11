@@ -78,15 +78,15 @@ test("real stdio server: heartbeat fires, delivers, and clears", { timeout: OVER
         assert.ok((await conn.getState()).sessionId);
 
         const instruction = `e2e heartbeat fire probe ${Date.now()}`;
-        const hb = await conn.setHeartbeat("every 1s", instruction, "follow_up");
+        const hb = await conn.setScheduledTask("every 1s", instruction, "follow_up");
         assert.ok(hb.id);
         assert.equal(hb.runCount, 0);
 
         // Wait for the wake loop to claim the job: runCount advances on claim.
-        let firedJob: Awaited<ReturnType<typeof conn.getHeartbeat>> | undefined;
+        let firedJob: Awaited<ReturnType<typeof conn.getScheduledTask>> | undefined;
         const deadline = Date.now() + FIRE_TIMEOUT_MS;
         while (Date.now() < deadline) {
-          firedJob = await conn.getHeartbeat();
+          firedJob = await conn.getScheduledTask();
           if ((firedJob?.runCount ?? 0) >= 1) break;
           await sleep(POLL_INTERVAL_MS);
         }
@@ -107,9 +107,9 @@ test("real stdio server: heartbeat fires, delivers, and clears", { timeout: OVER
         );
 
         // Clear removes the unlabeled heartbeat for this session.
-        await conn.updateHeartbeat("clear");
+        await conn.updateScheduledTask("clear");
         assert.equal(
-          await conn.getHeartbeat(),
+          await conn.getScheduledTask(),
           undefined,
           `cleared heartbeat must no longer be listed stderr=${stderr.join("")}`,
         );

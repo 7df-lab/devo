@@ -1829,7 +1829,9 @@ export class NativeAgentConnection implements AgentConnection {
     return nativeShellTasks(result, sessionId);
   }
 
-  async listHeartbeats() {
+  // Keep legacy wire job kinds and command names compatible with existing servers.
+  // The TUI presents these jobs as Scheduled; no on-disk or RPC migration is implied.
+  async listScheduledTasks() {
     const result = (await this.rpc.request("session/schedule/list", {
       cwd: this.cwd,
     })) as { jobs?: ScheduleJobWire[] };
@@ -1837,7 +1839,7 @@ export class NativeAgentConnection implements AgentConnection {
       .filter((j) => j.kind === "heartbeat" && j.status !== "stopped")
       .map((j) => ({ job: toAgentCronJob(j) }));
   }
-  async manageHeartbeat(_activeSessionId: string, jobId: string, action: "pause" | "resume" | "stop") {
+  async manageScheduledTask(_activeSessionId: string, jobId: string, action: "pause" | "resume" | "stop") {
     const result = (await this.rpc.request("session/schedule/update", {
       jobId,
       action,
@@ -1874,16 +1876,16 @@ export class NativeAgentConnection implements AgentConnection {
       runCount: 0,
     };
   }
-  async getHeartbeat() {
-    const heartbeats = await this.listHeartbeats();
-    const mine = heartbeats.find(
+  async getScheduledTask() {
+    const scheduledTasks = await this.listScheduledTasks();
+    const mine = scheduledTasks.find(
       (h) =>
         (h.job.sessionId === this.sessionId || h.job.activeSessionId === this.sessionId) &&
         !h.job.label,
     );
     return mine?.job;
   }
-  async runHeartbeatCommand(args: string) {
+  async runScheduledCommand(args: string) {
     const result = (await this.rpc.request("session/heartbeat/command", {
       sessionId: this.requireSessionId(),
       cwd: this.cwd,
@@ -1894,12 +1896,12 @@ export class NativeAgentConnection implements AgentConnection {
       job: result.job ? toAgentCronJob(result.job) : undefined,
     };
   }
-  async setHeartbeat(
+  async setScheduledTask(
     schedule: string,
     instruction: string,
     deliveryMode?: "steer" | "follow_up",
   ) {
-    const result = await this.runHeartbeatCommand(
+    const result = await this.runScheduledCommand(
       [
         deliveryMode === "follow_up" ? "--follow-up" : "",
         schedule,
@@ -1913,8 +1915,8 @@ export class NativeAgentConnection implements AgentConnection {
     }
     return result.job;
   }
-  async updateHeartbeat(action: "pause" | "resume" | "clear") {
-    const result = await this.runHeartbeatCommand(action === "clear" ? "clear" : action);
+  async updateScheduledTask(action: "pause" | "resume" | "clear") {
+    const result = await this.runScheduledCommand(action === "clear" ? "clear" : action);
     return result.job;
   }
   async sendAgentMessage(targetActiveSessionId: string, message: string) {

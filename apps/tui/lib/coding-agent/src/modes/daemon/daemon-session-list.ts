@@ -4,7 +4,7 @@ import type { AgentMessage, ThinkingLevel } from "@earendil-works/pi-agent-core"
 import type { Api, Model } from "@earendil-works/pi-ai";
 import { compactRlmText } from "../../core/agent-session.js";
 import type { AgentSessionRuntimeDiagnostic } from "../../core/agent-session-services.js";
-import { type AgentCronJob, isHeartbeatCronJob } from "../../core/cron-jobs.js";
+import { type AgentCronJob, isScheduledCronJob } from "../../core/cron-jobs.js";
 import type { SessionActionSnapshot } from "../../core/session-action-store.js";
 import type { AgentTaskState, SessionInfo } from "../../core/session-manager.js";
 import type { SessionUsageSummary } from "../../core/usage.js";
@@ -35,6 +35,7 @@ export interface SessionSummary {
 	lifecycle: SessionLifecycle;
 	activity: SessionActivity;
 	isSessionActive: boolean;
+	/** Legacy daemon snapshot wire fields; retain alongside Scheduled UI naming. */
 	hasActiveHeartbeat?: boolean;
 	/** Any active heartbeat registered for this session. Paused heartbeats do not pin residency. */
 	hasRegisteredHeartbeat?: boolean;
@@ -112,28 +113,28 @@ export function resolveAttachModelFallbackMessage(
 }
 
 export function scheduledJobRegistrations(scheduledJobs: readonly AgentCronJob[]): {
-	activeHeartbeatSessionIds: Set<string>;
-	heartbeatSessionIds: Set<string>;
+	activeScheduledSessionIds: Set<string>;
+	scheduledSessionIds: Set<string>;
 	cronSessionIds: Set<string>;
-	heartbeatSessionFiles: Set<string>;
+	scheduledSessionFiles: Set<string>;
 	cronSessionFiles: Set<string>;
 } {
-	const activeHeartbeatSessionIds = new Set<string>();
-	const heartbeatSessionIds = new Set<string>();
+	const activeScheduledSessionIds = new Set<string>();
+	const scheduledSessionIds = new Set<string>();
 	const cronSessionIds = new Set<string>();
-	const heartbeatSessionFiles = new Set<string>();
+	const scheduledSessionFiles = new Set<string>();
 	const cronSessionFiles = new Set<string>();
 	for (const job of scheduledJobs) {
-		const heartbeat = isHeartbeatCronJob(job);
-		if (heartbeat && job.status === "active") activeHeartbeatSessionIds.add(job.activeSessionId);
+		const scheduled = isScheduledCronJob(job);
+		if (scheduled && job.status === "active") activeScheduledSessionIds.add(job.activeSessionId);
 		// A paused heartbeat cannot fire, so unlike a live heartbeat (or a registered
 		// cron job) it must not silently pin a worker forever.
-		const registered = heartbeat ? job.status === "active" : job.status === "active" || job.status === "paused";
+		const registered = scheduled ? job.status === "active" : job.status === "active" || job.status === "paused";
 		if (!registered) continue;
-		(heartbeat ? heartbeatSessionIds : cronSessionIds).add(job.activeSessionId);
-		(heartbeat ? heartbeatSessionFiles : cronSessionFiles).add(resolve(job.sessionFile));
+		(scheduled ? scheduledSessionIds : cronSessionIds).add(job.activeSessionId);
+		(scheduled ? scheduledSessionFiles : cronSessionFiles).add(resolve(job.sessionFile));
 	}
-	return { activeHeartbeatSessionIds, heartbeatSessionIds, cronSessionIds, heartbeatSessionFiles, cronSessionFiles };
+	return { activeScheduledSessionIds, scheduledSessionIds, cronSessionIds, scheduledSessionFiles, cronSessionFiles };
 }
 
 /** Naming signals intent to return, so named sessions are exempt even when empty. */
@@ -153,10 +154,10 @@ export function buildSessionList(
 ): SessionSummary[] {
 	const activeBySessionFile = new Map<string, ActiveSessionState>();
 	const {
-		activeHeartbeatSessionIds: heartbeatSessionIds,
-		heartbeatSessionIds: registeredHeartbeatSessionIds,
+		activeScheduledSessionIds: scheduledSessionIds,
+		scheduledSessionIds: registeredScheduledSessionIds,
 		cronSessionIds: registeredCronSessionIds,
-		heartbeatSessionFiles: registeredHeartbeatSessionFiles,
+		scheduledSessionFiles: registeredScheduledSessionFiles,
 		cronSessionFiles: registeredCronSessionFiles,
 	} = scheduledJobRegistrations(scheduledJobs);
 
@@ -177,9 +178,9 @@ export function buildSessionList(
 				summaryForActiveSession(
 					activeSession,
 					savedSession,
-					heartbeatSessionIds.has(activeSession.activeSessionId),
-					registeredHeartbeatSessionIds.has(activeSession.activeSessionId) ||
-						registeredHeartbeatSessionFiles.has(sessionFile),
+					scheduledSessionIds.has(activeSession.activeSessionId),
+					registeredScheduledSessionIds.has(activeSession.activeSessionId) ||
+						registeredScheduledSessionFiles.has(sessionFile),
 					registeredCronSessionIds.has(activeSession.activeSessionId) ||
 						registeredCronSessionFiles.has(sessionFile),
 				),
@@ -190,7 +191,7 @@ export function buildSessionList(
 		entries.push(
 			summaryForInactiveSession(
 				savedSession,
-				registeredHeartbeatSessionFiles.has(sessionFile),
+				registeredScheduledSessionFiles.has(sessionFile),
 				registeredCronSessionFiles.has(sessionFile),
 			),
 		);
@@ -204,9 +205,9 @@ export function buildSessionList(
 				summaryForActiveSession(
 					activeSession,
 					undefined,
-					heartbeatSessionIds.has(activeSession.activeSessionId),
-					registeredHeartbeatSessionIds.has(activeSession.activeSessionId) ||
-						(resolvedSessionFile !== undefined && registeredHeartbeatSessionFiles.has(resolvedSessionFile)),
+					scheduledSessionIds.has(activeSession.activeSessionId),
+					registeredScheduledSessionIds.has(activeSession.activeSessionId) ||
+						(resolvedSessionFile !== undefined && registeredScheduledSessionFiles.has(resolvedSessionFile)),
 					registeredCronSessionIds.has(activeSession.activeSessionId) ||
 						(resolvedSessionFile !== undefined && registeredCronSessionFiles.has(resolvedSessionFile)),
 				),

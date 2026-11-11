@@ -35,8 +35,9 @@ The following is a summary of a branch that this conversation came back from:
 
 export const BRANCH_SUMMARY_SUFFIX = `</summary>`;
 
-export const HEARTBEAT_PROMPT_CUSTOM_TYPE = "heartbeat_prompt";
-export const HEARTBEAT_PROMPT_PREVIEW_LABEL = "Heartbeat prompt";
+// Persisted customType stays unchanged so historical messages remain replayable.
+export const SCHEDULED_PROMPT_CUSTOM_TYPE = "heartbeat_prompt";
+export const SCHEDULED_PROMPT_PREVIEW_LABEL = "Scheduled prompt";
 export const IPYTHON_STATE_RESTORED_CUSTOM_TYPE = "ipython_state_restored";
 export const SESSION_SLASH_COMMAND_CUSTOM_TYPE = "session_slash_command";
 export const SESSION_SLASH_COMMAND_RESULT_CUSTOM_TYPE = "session_slash_command_result";
@@ -263,7 +264,7 @@ export interface CustomMessage<T = unknown> {
 	timestamp: number;
 }
 
-export interface HeartbeatPromptDetails {
+export interface ScheduledPromptDetails {
 	jobId: string;
 	schedule: string;
 	status: AgentCronJob["status"];
@@ -580,15 +581,15 @@ export function isRefinementOutcomeMessage(message: unknown): message is Refinem
 	);
 }
 
-export interface HeartbeatPromptMessage extends CustomMessage<HeartbeatPromptDetails> {
-	customType: typeof HEARTBEAT_PROMPT_CUSTOM_TYPE;
+export interface ScheduledPromptMessage extends CustomMessage<ScheduledPromptDetails> {
+	customType: typeof SCHEDULED_PROMPT_CUSTOM_TYPE;
 	content: string;
 }
 
-export function createHeartbeatPromptMessage(job: AgentCronJob, timestamp = Date.now()): HeartbeatPromptMessage {
+export function createScheduledPromptMessage(job: AgentCronJob, timestamp = Date.now()): ScheduledPromptMessage {
 	return {
 		role: "custom",
-		customType: HEARTBEAT_PROMPT_CUSTOM_TYPE,
+		customType: SCHEDULED_PROMPT_CUSTOM_TYPE,
 		content: `[heartbeat: ${sanitizeMessageHeaderValue(job.schedule.expression)} run#${job.runCount}]\n\n${job.prompt}`,
 		display: true,
 		details: {

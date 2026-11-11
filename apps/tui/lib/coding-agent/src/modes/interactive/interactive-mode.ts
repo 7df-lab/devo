@@ -87,8 +87,8 @@ import {
 import { isNoModelsAvailableMessage } from "../../core/auth-guidance.js";
 import {
 	type AgentCronJob,
-	type AgentHeartbeatManagementAction,
-	DEFAULT_HEARTBEAT_DELIVERY_MODE,
+	type AgentScheduledManagementAction,
+	DEFAULT_SCHEDULED_DELIVERY_MODE,
 } from "../../core/cron-jobs.js";
 import { DEFAULT_THINKING_LEVEL } from "../../core/defaults.js";
 import type {
@@ -111,8 +111,8 @@ import {
 	bashOutputToText,
 	COMPACTION_OUTCOME_CUSTOM_TYPE,
 	type CustomMessage,
-	createHeartbeatPromptMessage,
-	HEARTBEAT_PROMPT_PREVIEW_LABEL,
+	createScheduledPromptMessage,
+	SCHEDULED_PROMPT_PREVIEW_LABEL,
 	isCompactionOutcomeMessage,
 	isRefinementOutcomeMessage,
 	isSessionSlashCommandMessage,
@@ -159,7 +159,7 @@ import type {
 	AgentConnectionEvent,
 	AgentConnectionExtensionUiRequest,
 	AgentConnectionExtensionUiResponse,
-	AgentConnectionHeartbeat,
+	AgentConnectionScheduledTask,
 	AgentConnectionModel,
 	AgentConnectionModelCatalog,
 	AgentConnectionQueuedMessageMutationStatus,
@@ -219,7 +219,7 @@ import { ExtensionEditorComponent } from "./components/extension-editor.js";
 import { ExtensionInputComponent } from "./components/extension-input.js";
 import { ExtensionSelectorComponent } from "./components/extension-selector.js";
 import { FooterComponent } from "./components/footer.js";
-import { HeartbeatManagerComponent } from "./components/heartbeat-manager.js";
+import { ScheduledManagerComponent } from "./components/scheduled-manager.js";
 import { InjectedPromptMessageComponent, isInjectedPromptMessage } from "./components/injected-prompt-message.js";
 import {
 	formatConversationDetailStatus,
@@ -267,7 +267,7 @@ import {
 import { TreeSelectorComponent } from "./components/tree-selector.js";
 import { UserMessageComponent } from "./components/user-message.js";
 import { UserMessageSelectorComponent } from "./components/user-message-selector.js";
-import { scopeHeartbeatsToSession } from "./heartbeat-scope.js";
+import { scopeScheduledTasksToSession } from "./scheduled-scope.js";
 import {
 	collectMarkedImages,
 	evictImagesToBudget,
@@ -318,8 +318,8 @@ interface PendingToolCallRenderInput {
 	arguments: ToolCall["arguments"];
 }
 
-const HEARTBEAT_LEGACY_PROMPT_MIN_TOLERANCE_MS = 15_000;
-const HEARTBEAT_LEGACY_PROMPT_MAX_TOLERANCE_MS = 120_000;
+const SCHEDULED_LEGACY_PROMPT_MIN_TOLERANCE_MS = 15_000;
+const SCHEDULED_LEGACY_PROMPT_MAX_TOLERANCE_MS = 120_000;
 const MODEL_CATALOG_REFRESH_TTL_MS = 60_000;
 
 export {
@@ -359,7 +359,7 @@ const THINKING_LEVEL_DESCRIPTIONS: Record<ThinkingLevel, string> = {
 	max: "Maximum reasoning",
 };
 
-const HEARTBEAT_ARGUMENT_COMPLETIONS: AutocompleteItem[] = [
+const SCHEDULED_ARGUMENT_COMPLETIONS: AutocompleteItem[] = [
 	{
 		value: "every ",
 		label: "every <duration> <instruction>",
@@ -784,8 +784,8 @@ export class InteractiveMode {
 	private activityMonitor: ActivityMonitor;
 	private activityStopped = false;
 	private activityInvalidated = false;
-	private heartbeatActivityState: ActivityLoadState = "loading";
-	private heartbeatMutationRevision = 0;
+	private scheduledActivityState: ActivityLoadState = "loading";
+	private scheduledMutationRevision = 0;
 	private shellActivityHandle: OverlayHandle | undefined;
 	private shellActivity: ActivitySnapshot<AgentConnectionShellTask> = { status: "loading" };
 	private subagentSnapshots = new Map<string, AgentConnectionRlmChildAgentSnapshot>();
@@ -814,14 +814,14 @@ export class InteractiveMode {
 	private configurationModelSelection: Promise<void> | undefined;
 	private connectionState: AgentConnectionState | undefined;
 	private connectionResourceSnapshot: AgentConnectionResourceSnapshot | undefined;
-	private heartbeatCatalog: AgentConnectionHeartbeat[] = [];
-	private heartbeatRefreshPromise: Promise<void> | undefined;
-	private heartbeatRefreshGeneration: number | undefined;
-	private heartbeatRefreshRequested = false;
-	private heartbeatManager: HeartbeatManagerComponent | undefined;
-	private heartbeatManagerHandle: OverlayHandle | undefined;
-	private heartbeatManagerRefreshTimer: ReturnType<typeof setTimeout> | undefined;
-	private heartbeatManagerRefreshAt: number | undefined;
+	private scheduledCatalog: AgentConnectionScheduledTask[] = [];
+	private scheduledRefreshPromise: Promise<void> | undefined;
+	private scheduledRefreshGeneration: number | undefined;
+	private scheduledRefreshRequested = false;
+	private scheduledManager: ScheduledManagerComponent | undefined;
+	private scheduledManagerHandle: OverlayHandle | undefined;
+	private scheduledManagerRefreshTimer: ReturnType<typeof setTimeout> | undefined;
+	private scheduledManagerRefreshAt: number | undefined;
 
 	// Registry of images pasted this session, keyed by the `[image #N]` marker
 	// shown to the user. Insertion-ordered; the bytes persist (bounded by
@@ -917,13 +917,13 @@ export class InteractiveMode {
 		}
 		this.agentConnection.onBeforeSessionInvalidate(() => {
 			this.activityInvalidated = true;
-			this.heartbeatMutationRevision += 1;
+			this.scheduledMutationRevision += 1;
 			this.activityMonitor?.stop();
 			this.closeShellActivity();
-			this.heartbeatActivityState = "loading";
+			this.scheduledActivityState = "loading";
 			this.shellActivity = { status: "loading" };
 			this.subagentSummaryLine?.setShellState("loading");
-			this.subagentSummaryLine?.setHeartbeatState("loading");
+			this.subagentSummaryLine?.setScheduledState("loading");
 			this.resetExtensionUI();
 			this.resetSideQuestion();
 		});
@@ -973,17 +973,17 @@ export class InteractiveMode {
 		);
 		this.subagentSummaryLine.setOpenable(this.options.returnToAgentsView === true);
 		this.subagentSummaryLine.onOpen = () => void this.openScopedAgentsView();
-		this.subagentSummaryLine.onOpenHeartbeats = () => void this.showHeartbeatManager();
+		this.subagentSummaryLine.onOpenScheduledTasks = () => void this.showScheduledManager();
 		this.subagentSummaryLine.onOpenShells = () => this.showShellActivity();
 		this.activityMonitor = new ActivityMonitor({
 			getConnection: () => this.agentConnection,
-			loadHeartbeats: async () => {
-				await this.refreshHeartbeatCatalog();
-				return this.heartbeatCatalog;
+			loadScheduledTasks: async () => {
+				await this.refreshScheduledCatalog();
+				return this.scheduledCatalog;
 			},
-			onHeartbeats: (snapshot) => {
-				this.heartbeatActivityState = snapshot.status;
-				this.subagentSummaryLine.setHeartbeatState(snapshot.status);
+			onScheduledTasks: (snapshot) => {
+				this.scheduledActivityState = snapshot.status;
+				this.subagentSummaryLine.setScheduledState(snapshot.status);
 				if (snapshot.status === "ready") this.updateSubagentSummaryLine();
 				this.ui.requestRender();
 			},
@@ -1199,10 +1199,10 @@ export class InteractiveMode {
 				this.getThemeCompletions(prefix);
 		}
 
-		const heartbeatCommand = slashCommands.find((command) => command.name === "heartbeat");
-		if (heartbeatCommand) {
-			heartbeatCommand.getArgumentCompletions = (prefix: string): AutocompleteItem[] | null =>
-				this.getHeartbeatArgumentCompletions(prefix);
+		const scheduledCommand = slashCommands.find((command) => command.name === "heartbeat");
+		if (scheduledCommand) {
+			scheduledCommand.getArgumentCompletions = (prefix: string): AutocompleteItem[] | null =>
+				this.getScheduledArgumentCompletions(prefix);
 		}
 
 		const tracesCommand = slashCommands.find((command) => command.name === "traces");
@@ -2506,56 +2506,56 @@ export class InteractiveMode {
 		this.applyAutoRefineDefaults(connection, generation);
 	}
 
-	private refreshHeartbeatCatalog(): Promise<void> {
+	private refreshScheduledCatalog(): Promise<void> {
 		const connection = this.agentConnection;
 		const generation = this.sessionEventGeneration;
 		// A new session must not reuse an in-flight snapshot from its predecessor.
-		if (this.heartbeatRefreshPromise && this.heartbeatRefreshGeneration === generation) {
-			this.heartbeatRefreshRequested = true;
-			return this.heartbeatRefreshPromise;
+		if (this.scheduledRefreshPromise && this.scheduledRefreshGeneration === generation) {
+			this.scheduledRefreshRequested = true;
+			return this.scheduledRefreshPromise;
 		}
-		this.heartbeatRefreshRequested = false;
+		this.scheduledRefreshRequested = false;
 		const refresh = (async () => {
 			do {
-				this.heartbeatRefreshRequested = false;
-				const mutationRevision = this.heartbeatMutationRevision;
-				const heartbeats = await connection.listHeartbeats();
+				this.scheduledRefreshRequested = false;
+				const mutationRevision = this.scheduledMutationRevision;
+				const scheduledTasks = await connection.listScheduledTasks();
 				if (!this.isCurrentConnectionGeneration(connection, generation)) return;
-				if (!this.activityStopped && !this.activityInvalidated && mutationRevision === this.heartbeatMutationRevision) {
-					this.applyHeartbeatCatalog(heartbeats);
+				if (!this.activityStopped && !this.activityInvalidated && mutationRevision === this.scheduledMutationRevision) {
+					this.applyScheduledCatalog(scheduledTasks);
 				}
 			} while (
-				this.heartbeatRefreshRequested &&
+				this.scheduledRefreshRequested &&
 				this.isCurrentConnectionGeneration(connection, generation)
 			);
 		})().finally(() => {
-			if (this.heartbeatRefreshPromise === refresh) {
-				this.heartbeatRefreshPromise = undefined;
-				this.heartbeatRefreshGeneration = undefined;
+			if (this.scheduledRefreshPromise === refresh) {
+				this.scheduledRefreshPromise = undefined;
+				this.scheduledRefreshGeneration = undefined;
 			}
 		});
-		this.heartbeatRefreshPromise = refresh;
-		this.heartbeatRefreshGeneration = generation;
+		this.scheduledRefreshPromise = refresh;
+		this.scheduledRefreshGeneration = generation;
 		return refresh;
 	}
 
-	private applyHeartbeatCatalog(heartbeats: AgentConnectionHeartbeat[]): void {
-		this.heartbeatCatalog = heartbeats;
-		this.heartbeatActivityState = "ready";
-		this.subagentSummaryLine.setHeartbeatState("ready");
-		this.scheduleHeartbeatManagerRefresh();
+	private applyScheduledCatalog(scheduledTasks: AgentConnectionScheduledTask[]): void {
+		this.scheduledCatalog = scheduledTasks;
+		this.scheduledActivityState = "ready";
+		this.subagentSummaryLine.setScheduledState("ready");
+		this.scheduleScheduledManagerRefresh();
 		this.updateSubagentSummaryLine();
 		this.ui.requestRender();
 	}
 
-	private getScopedHeartbeats(): AgentConnectionHeartbeat[] {
-		return scopeHeartbeatsToSession(this.heartbeatCatalog, this.connectionState, this.subagentSnapshots.values());
+	private getScopedScheduledTasks(): AgentConnectionScheduledTask[] {
+		return scopeScheduledTasksToSession(this.scheduledCatalog, this.connectionState, this.subagentSnapshots.values());
 	}
 
 	private applyConnectionStateSnapshot(state: AgentConnectionState): void {
 		this.bindPromptStashSession(state.sessionId);
 		this.connectionState = state;
-		this.scheduleHeartbeatManagerRefresh();
+		this.scheduleScheduledManagerRefresh();
 		this.footer.setAutoCompactEnabled(state.autoCompactionEnabled);
 		this.sessionRecap = state.recap;
 		this.renderRecap();
@@ -3457,7 +3457,7 @@ export class InteractiveMode {
 	private resetExtensionUI(): void {
 		this.closeConfigurationMenu?.();
 		this.cancelActiveConnectionExtensionUiRequests();
-		this.closeHeartbeatManager();
+		this.closeScheduledManager();
 		this.closeShellActivity();
 		if (this.extensionSelector) {
 			this.hideExtensionSelector();
@@ -4126,7 +4126,7 @@ export class InteractiveMode {
 		this.defaultEditor.onAction("app.tools.expand", () => this.toggleToolOutputExpansion());
 		this.defaultEditor.onAction("app.subagents.focus", () => this.focusSubagentSummary());
 		this.defaultEditor.onAction("app.heartbeats.open", () => {
-			void this.showHeartbeatManager();
+			void this.showScheduledManager();
 		});
 		this.defaultEditor.onAction("app.editor.external", () => this.openExternalEditor());
 		this.defaultEditor.onAction("app.prompt.stash", () => this.handlePromptStash());
@@ -4805,13 +4805,13 @@ export class InteractiveMode {
 					return;
 				}
 				if (commandName === "heartbeat") {
-					await this.handleHeartbeatCommand(canonicalCommandText);
+					await this.handleScheduledCommand(canonicalCommandText);
 					this.editor.setText("");
 					return;
 				}
 				if (commandName === "heartbeats") {
 					this.editor.setText("");
-					await this.showHeartbeatManager();
+					await this.showScheduledManager();
 					return;
 				}
 				if (commandName === "hotkeys" && !commandArgs) {
@@ -5220,10 +5220,10 @@ export class InteractiveMode {
 						event.status === "reconnecting" ? "warning" : "dim",
 					);
 					if (event.status === "connected") {
-						await this.refreshHeartbeatCatalog();
+						await this.refreshScheduledCatalog();
 					}
 				} else if (event.type === "heartbeats_changed") {
-					await this.refreshHeartbeatCatalog();
+					await this.refreshScheduledCatalog();
 				} else if (event.type === "closed") {
 					this.showError(event.error ?? "Agent connection closed");
 				}
@@ -6163,7 +6163,7 @@ export class InteractiveMode {
 	}
 
 	private refreshSubagentSummary(): void {
-		this.scheduleHeartbeatManagerRefresh();
+		this.scheduleScheduledManagerRefresh();
 		this.updateSubagentSummaryLine();
 		this.updateWorkingPulse();
 		this.syncWorkingLoader();
@@ -6172,18 +6172,18 @@ export class InteractiveMode {
 	}
 
 	private updateSubagentSummaryLine(): void {
-		const heartbeats = this.getScopedHeartbeats();
-		const nextRunAt = heartbeats
-			.filter((heartbeat) => heartbeat.job.status === "active")
-			.map((heartbeat) => Date.parse(heartbeat.job.nextRunAt ?? ""))
+		const scheduledTasks = this.getScopedScheduledTasks();
+		const nextRunAt = scheduledTasks
+			.filter((scheduled) => scheduled.job.status === "active")
+			.map((scheduled) => Date.parse(scheduled.job.nextRunAt ?? ""))
 			.filter(Number.isFinite);
-		this.subagentSummaryLine.setHeartbeatCounts({
-			total: heartbeats.length,
-			active: heartbeats.filter((heartbeat) => heartbeat.job.status === "active").length,
-			paused: heartbeats.filter((heartbeat) => heartbeat.job.status === "paused").length,
+		this.subagentSummaryLine.setScheduledCounts({
+			total: scheduledTasks.length,
+			active: scheduledTasks.filter((scheduled) => scheduled.job.status === "active").length,
+			paused: scheduledTasks.filter((scheduled) => scheduled.job.status === "paused").length,
 			...(nextRunAt.length ? { nextRunAt: Math.min(...nextRunAt) } : {}),
 		});
-		this.subagentSummaryLine.setHeartbeatState(this.heartbeatActivityState);
+		this.subagentSummaryLine.setScheduledState(this.scheduledActivityState);
 		const rosterSummaries = this.rosterBar?.summaries();
 		// A client-owned session has no row on the public roster; only then do the
 		// snapshots carry the bar. A public parent with zero roster children shows zero.
@@ -6212,7 +6212,7 @@ export class InteractiveMode {
 		this.subagentSnapshots.clear();
 		this.rlmNodeId = undefined;
 		this.updateSubagentSummaryLine();
-		this.scheduleHeartbeatManagerRefresh();
+		this.scheduleScheduledManagerRefresh();
 		// Clearing snapshots can drop the last running subagent; reconcile the
 		// pulse and loader so neither lingers when nothing is in flight.
 		this.updateWorkingPulse();
@@ -6378,22 +6378,22 @@ export class InteractiveMode {
 			.join(" ");
 	}
 
-	private createLegacyHeartbeatPromptMessage(
+	private createLegacyScheduledPromptMessage(
 		message: Message,
 		textContent: string,
-	): ReturnType<typeof createHeartbeatPromptMessage> | undefined {
-		const heartbeat = this.connectionState?.heartbeat;
+	): ReturnType<typeof createScheduledPromptMessage> | undefined {
+		const scheduled = this.connectionState?.heartbeat;
 		if (
 			message.role !== "user" ||
-			!heartbeat ||
+			!scheduled ||
 			!this.isTextOnlyUserMessage(message) ||
-			textContent.trim() !== heartbeat.prompt.trim() ||
-			!this.isLikelyHeartbeatPromptTimestamp(heartbeat, message.timestamp)
+			textContent.trim() !== scheduled.prompt.trim() ||
+			!this.isLikelyScheduledPromptTimestamp(scheduled, message.timestamp)
 		) {
 			return undefined;
 		}
 
-		return createHeartbeatPromptMessage(heartbeat, message.timestamp);
+		return createScheduledPromptMessage(scheduled, message.timestamp);
 	}
 
 	private isTextOnlyUserMessage(message: Message): boolean {
@@ -6406,25 +6406,25 @@ export class InteractiveMode {
 		return message.content.every((content) => content.type === "text");
 	}
 
-	private isLikelyHeartbeatPromptTimestamp(job: AgentCronJob, timestamp: number): boolean {
+	private isLikelyScheduledPromptTimestamp(job: AgentCronJob, timestamp: number): boolean {
 		const directRunTimes = [job.lastRunAt, job.nextRunAt]
 			.map((value) => (value ? Date.parse(value) : Number.NaN))
 			.filter((value) => Number.isFinite(value));
-		const tolerance = this.heartbeatLegacyPromptToleranceMs(job);
+		const tolerance = this.scheduledLegacyPromptToleranceMs(job);
 		if (directRunTimes.some((runAt) => Math.abs(timestamp - runAt) <= tolerance)) {
 			return true;
 		}
 		return false;
 	}
 
-	private heartbeatLegacyPromptToleranceMs(job: AgentCronJob): number {
+	private scheduledLegacyPromptToleranceMs(job: AgentCronJob): number {
 		const intervalMs = job.schedule.intervalMs;
 		if (!intervalMs || intervalMs <= 0) {
-			return HEARTBEAT_LEGACY_PROMPT_MAX_TOLERANCE_MS;
+			return SCHEDULED_LEGACY_PROMPT_MAX_TOLERANCE_MS;
 		}
 		return Math.min(
-			HEARTBEAT_LEGACY_PROMPT_MAX_TOLERANCE_MS,
-			Math.max(HEARTBEAT_LEGACY_PROMPT_MIN_TOLERANCE_MS, intervalMs / 3),
+			SCHEDULED_LEGACY_PROMPT_MAX_TOLERANCE_MS,
+			Math.max(SCHEDULED_LEGACY_PROMPT_MIN_TOLERANCE_MS, intervalMs / 3),
 		);
 	}
 
@@ -6483,7 +6483,7 @@ export class InteractiveMode {
 			return;
 		}
 		const textContent = this.getUserMessageText(message);
-		if (textContent && !this.createLegacyHeartbeatPromptMessage(message, textContent)) {
+		if (textContent && !this.createLegacyScheduledPromptMessage(message, textContent)) {
 			this.editor.addToHistory?.(textContent);
 		}
 	}
@@ -6576,13 +6576,13 @@ export class InteractiveMode {
 			case "user": {
 				const textContent = this.getUserMessageText(message);
 				if (textContent) {
-					const heartbeatMessage = this.createLegacyHeartbeatPromptMessage(message, textContent);
-					if (heartbeatMessage) {
+					const scheduledMessage = this.createLegacyScheduledPromptMessage(message, textContent);
+					if (scheduledMessage) {
 						if (this.chatContainer.children.length > 0) {
 							this.chatContainer.addChild(new Spacer(1));
 						}
 						const component = new InjectedPromptMessageComponent(
-							heartbeatMessage,
+							scheduledMessage,
 							this.getMarkdownThemeWithSettings(),
 						);
 						component.setExpanded(this.toolOutputExpanded);
@@ -8231,13 +8231,13 @@ export class InteractiveMode {
 		}));
 	}
 
-	private getHeartbeatArgumentCompletions(prefix: string): AutocompleteItem[] | null {
+	private getScheduledArgumentCompletions(prefix: string): AutocompleteItem[] | null {
 		const term = prefix.trim().toLowerCase();
 		const filtered = term
-			? HEARTBEAT_ARGUMENT_COMPLETIONS.filter(
+			? SCHEDULED_ARGUMENT_COMPLETIONS.filter(
 					(item) => item.value.toLowerCase().startsWith(term) || item.label.toLowerCase().startsWith(term),
 				)
-			: HEARTBEAT_ARGUMENT_COMPLETIONS;
+			: SCHEDULED_ARGUMENT_COMPLETIONS;
 		return filtered.length === 0 ? null : filtered;
 	}
 
@@ -9916,58 +9916,58 @@ export class InteractiveMode {
 		this.ui.requestRender();
 	}
 
-	private async handleHeartbeatCommand(text: string): Promise<void> {
+	private async handleScheduledCommand(text: string): Promise<void> {
 		try {
 			const args = text.replace(/^\/heartbeat\b/i, "").trim();
-			const result = await this.agentConnection.runHeartbeatCommand(args);
-			const heartbeat = result.job;
+			const result = await this.agentConnection.runScheduledCommand(args);
+			const scheduled = result.job;
 			switch (result.action) {
 				case "status": {
-					this.patchConnectionState({ heartbeat: heartbeat ?? null });
-					await this.refreshHeartbeatCatalog();
-					this.showHeartbeat(heartbeat);
+					this.patchConnectionState({ heartbeat: scheduled ?? null });
+					await this.refreshScheduledCatalog();
+					this.showScheduled(scheduled);
 					return;
 				}
 				case "set": {
-					if (!heartbeat) {
-						this.showError("Heartbeat was not set");
+					if (!scheduled) {
+						this.showError("Scheduled task was not set");
 						return;
 					}
-					this.patchConnectionState({ heartbeat });
-					await this.refreshHeartbeatCatalog();
+					this.patchConnectionState({ heartbeat: scheduled });
+					await this.refreshScheduledCatalog();
 					this.showStatus(
-						`Heartbeat set\nDelivery: ${heartbeat.deliveryMode ?? DEFAULT_HEARTBEAT_DELIVERY_MODE}\nNext run: ${heartbeat.nextRunAt ?? "-"}`,
+						`Scheduled task set\nDelivery: ${scheduled.deliveryMode ?? DEFAULT_SCHEDULED_DELIVERY_MODE}\nNext run: ${scheduled.nextRunAt ?? "-"}`,
 					);
 					return;
 				}
 				case "pause": {
-					if (!heartbeat) {
-						this.showStatus("No active heartbeat");
+					if (!scheduled) {
+						this.showStatus("No active scheduled task");
 						return;
 					}
-					this.patchConnectionState({ heartbeat });
-					await this.refreshHeartbeatCatalog();
-					this.showStatus("Heartbeat paused");
+					this.patchConnectionState({ heartbeat: scheduled });
+					await this.refreshScheduledCatalog();
+					this.showStatus("Scheduled task paused");
 					return;
 				}
 				case "resume": {
-					if (!heartbeat) {
-						this.showStatus("No active heartbeat");
+					if (!scheduled) {
+						this.showStatus("No active scheduled task");
 						return;
 					}
-					this.patchConnectionState({ heartbeat });
-					await this.refreshHeartbeatCatalog();
-					this.showStatus(`Heartbeat resumed\nNext run: ${heartbeat.nextRunAt ?? "-"}`);
+					this.patchConnectionState({ heartbeat: scheduled });
+					await this.refreshScheduledCatalog();
+					this.showStatus(`Scheduled task resumed\nNext run: ${scheduled.nextRunAt ?? "-"}`);
 					return;
 				}
 				case "clear": {
-					if (!heartbeat) {
-						this.showStatus("No active heartbeat");
+					if (!scheduled) {
+						this.showStatus("No active scheduled task");
 						return;
 					}
 					this.patchConnectionState({ heartbeat: null });
-					await this.refreshHeartbeatCatalog();
-					this.showStatus("Heartbeat cleared");
+					await this.refreshScheduledCatalog();
+					this.showStatus("Scheduled task cleared");
 					return;
 				}
 			}
@@ -10001,52 +10001,52 @@ export class InteractiveMode {
 		this.ui.requestRender();
 	}
 
-	private async showHeartbeatManager(): Promise<void> {
-		if (this.heartbeatManagerHandle) {
-			this.heartbeatManagerHandle.focus();
+	private async showScheduledManager(): Promise<void> {
+		if (this.scheduledManagerHandle) {
+			this.scheduledManagerHandle.focus();
 			return;
 		}
 		try {
-			await this.refreshHeartbeatCatalog();
+			await this.refreshScheduledCatalog();
 		} catch (error) {
 			this.showError(error instanceof Error ? error.message : String(error));
 			return;
 		}
-		const manager = new HeartbeatManagerComponent({
-			getHeartbeats: () => this.getScopedHeartbeats(),
+		const manager = new ScheduledManagerComponent({
+			getScheduledTasks: () => this.getScopedScheduledTasks(),
 			getRows: () => this.ui.terminal.rows,
-			onAction: (heartbeat, action) => this.manageHeartbeat(heartbeat, action),
-			onClose: () => this.closeHeartbeatManager(),
+			onAction: (scheduled, action) => this.manageScheduledTask(scheduled, action),
+			onClose: () => this.closeScheduledManager(),
 			requestRender: () => this.ui.requestRender(),
 		});
-		this.heartbeatManager = manager;
-		this.heartbeatManagerHandle = this.showFullPaneOverlay(manager, {
+		this.scheduledManager = manager;
+		this.scheduledManagerHandle = this.showFullPaneOverlay(manager, {
 			fullWidth: true,
 			suspendFullscreenMouse: true,
 		});
-		this.scheduleHeartbeatManagerRefresh();
+		this.scheduleScheduledManagerRefresh();
 	}
 
-	private closeHeartbeatManager(): void {
-		this.clearHeartbeatManagerRefreshTimer();
-		this.heartbeatManagerHandle?.hide();
-		this.heartbeatManagerHandle = undefined;
-		this.heartbeatManager = undefined;
+	private closeScheduledManager(): void {
+		this.clearScheduledManagerRefreshTimer();
+		this.scheduledManagerHandle?.hide();
+		this.scheduledManagerHandle = undefined;
+		this.scheduledManager = undefined;
 		this.ui.requestRender();
 	}
 
-	private scheduleHeartbeatManagerRefresh(): void {
-		if (!this.heartbeatManager) {
-			this.clearHeartbeatManagerRefreshTimer();
+	private scheduleScheduledManagerRefresh(): void {
+		if (!this.scheduledManager) {
+			this.clearScheduledManagerRefreshTimer();
 			return;
 		}
-		const nextRunAt = this.getScopedHeartbeats()
-			.filter((heartbeat) => heartbeat.job.status === "active" && heartbeat.job.nextRunAt)
-			.map((heartbeat) => Date.parse(heartbeat.job.nextRunAt!))
+		const nextRunAt = this.getScopedScheduledTasks()
+			.filter((scheduled) => scheduled.job.status === "active" && scheduled.job.nextRunAt)
+			.map((scheduled) => Date.parse(scheduled.job.nextRunAt!))
 			.filter(Number.isFinite)
 			.sort((left, right) => left - right)[0];
 		if (nextRunAt === undefined) {
-			this.clearHeartbeatManagerRefreshTimer();
+			this.clearScheduledManagerRefreshTimer();
 			return;
 		}
 		const untilNextRun = nextRunAt - Date.now();
@@ -10056,68 +10056,68 @@ export class InteractiveMode {
 		// pending refresh instead of re-arming, or an overdue heartbeat's 5s
 		// fallback would be postponed for as long as children stay busy.
 		if (
-			this.heartbeatManagerRefreshTimer &&
-			this.heartbeatManagerRefreshAt !== undefined &&
-			this.heartbeatManagerRefreshAt <= refreshAt
+			this.scheduledManagerRefreshTimer &&
+			this.scheduledManagerRefreshAt !== undefined &&
+			this.scheduledManagerRefreshAt <= refreshAt
 		) {
 			return;
 		}
-		this.clearHeartbeatManagerRefreshTimer();
-		this.heartbeatManagerRefreshAt = refreshAt;
-		this.heartbeatManagerRefreshTimer = setTimeout(() => {
-			this.heartbeatManagerRefreshTimer = undefined;
-			this.heartbeatManagerRefreshAt = undefined;
-			if (!this.heartbeatManager) {
+		this.clearScheduledManagerRefreshTimer();
+		this.scheduledManagerRefreshAt = refreshAt;
+		this.scheduledManagerRefreshTimer = setTimeout(() => {
+			this.scheduledManagerRefreshTimer = undefined;
+			this.scheduledManagerRefreshAt = undefined;
+			if (!this.scheduledManager) {
 				return;
 			}
-			void this.refreshHeartbeatCatalog().catch(() => this.scheduleHeartbeatManagerRefresh());
+			void this.refreshScheduledCatalog().catch(() => this.scheduleScheduledManagerRefresh());
 		}, delay);
-		this.heartbeatManagerRefreshTimer.unref?.();
+		this.scheduledManagerRefreshTimer.unref?.();
 	}
 
-	private clearHeartbeatManagerRefreshTimer(): void {
-		if (this.heartbeatManagerRefreshTimer) {
-			clearTimeout(this.heartbeatManagerRefreshTimer);
-			this.heartbeatManagerRefreshTimer = undefined;
+	private clearScheduledManagerRefreshTimer(): void {
+		if (this.scheduledManagerRefreshTimer) {
+			clearTimeout(this.scheduledManagerRefreshTimer);
+			this.scheduledManagerRefreshTimer = undefined;
 		}
-		this.heartbeatManagerRefreshAt = undefined;
+		this.scheduledManagerRefreshAt = undefined;
 	}
 
-	private async manageHeartbeat(
-		heartbeat: AgentConnectionHeartbeat,
-		action: AgentHeartbeatManagementAction,
+	private async manageScheduledTask(
+		scheduled: AgentConnectionScheduledTask,
+		action: AgentScheduledManagementAction,
 	): Promise<void> {
-		const updated = await this.agentConnection.manageHeartbeat(
-			heartbeat.job.activeSessionId,
-			heartbeat.job.id,
+		const updated = await this.agentConnection.manageScheduledTask(
+			scheduled.job.activeSessionId,
+			scheduled.job.id,
 			action,
 		);
 		if (updated.source === "heartbeat" && updated.activeSessionId === this.connectionState?.activeSessionId) {
 			this.patchConnectionState({ heartbeat: action === "stop" ? null : updated });
 		}
-		this.heartbeatMutationRevision += 1;
-		const remaining = this.heartbeatCatalog.filter((entry) => entry.job.id !== updated.id);
-		this.applyHeartbeatCatalog(
+		this.scheduledMutationRevision += 1;
+		const remaining = this.scheduledCatalog.filter((entry) => entry.job.id !== updated.id);
+		this.applyScheduledCatalog(
 			updated.status === "active" || updated.status === "paused"
-				? [...remaining, { ...heartbeat, job: updated }]
+				? [...remaining, { ...scheduled, job: updated }]
 				: remaining,
 		);
-		void this.refreshHeartbeatCatalog().catch(() => undefined);
+		void this.refreshScheduledCatalog().catch(() => undefined);
 	}
 
-	private showHeartbeat(job: AgentCronJob | undefined): void {
+	private showScheduled(job: AgentCronJob | undefined): void {
 		if (!job) {
-			this.showStatus("No active heartbeat");
+			this.showStatus("No active scheduled task");
 			return;
 		}
 		const next = job.nextRunAt ? new Date(job.nextRunAt).toLocaleString() : "-";
 		const last = job.lastRunAt ? new Date(job.lastRunAt).toLocaleString() : "-";
 		const lines = [
-			"Heartbeat",
+			"Scheduled task",
 			"",
 			`${theme.fg("dim", "Status:")} ${job.status}`,
 			`${theme.fg("dim", "Every:")} ${job.schedule.expression}`,
-			`${theme.fg("dim", "Delivery:")} ${job.deliveryMode ?? DEFAULT_HEARTBEAT_DELIVERY_MODE}`,
+			`${theme.fg("dim", "Delivery:")} ${job.deliveryMode ?? DEFAULT_SCHEDULED_DELIVERY_MODE}`,
 			`${theme.fg("dim", "Instruction:")} ${job.prompt}`,
 			`${theme.fg("dim", "Next:")} ${next}`,
 			`${theme.fg("dim", "Last:")} ${last}`,
@@ -10209,7 +10209,7 @@ ${shortcutsKey ? `\`${shortcutsKey}\` quick shortcuts · ` : ""}\`/hotkeys\` ful
 		const selectModel = this.getAppKeyDisplay("app.model.select");
 		const expandTools = this.getAppKeyDisplay("app.tools.expand");
 		const focusSubagents = this.getAppKeyDisplay("app.subagents.focus");
-		const manageHeartbeats = this.getAppKeyDisplay("app.heartbeats.open");
+		const manageScheduledTasks = this.getAppKeyDisplay("app.heartbeats.open");
 		const externalEditor = this.getAppKeyDisplay("app.editor.external");
 		const promptStash = this.getAppKeyDisplay("app.prompt.stash");
 		const followUp = this.getAppKeyDisplay("app.message.followUp");
@@ -10256,7 +10256,7 @@ ${interrupt ? `| \`${interrupt}\` | Interrupt current operation |\n` : ""}${shor
 | \`${selectModel}\` | Open model selector |
 | \`${expandTools}\` | Cycle overview → thinking + diffs → all output |
 | \`${focusSubagents}\` | Focus the subagent summary / open the scoped agents view |
-| \`${manageHeartbeats}\` | Manage heartbeats |
+| \`${manageScheduledTasks}\` | Manage scheduled tasks |
 | \`${externalEditor}\` | Edit message in external editor |
 | \`${promptStash}\` | Stash or restore draft prompt |
 | \`${followUp}\` | Queue follow-up message |
@@ -10431,7 +10431,7 @@ ${interrupt ? `| \`${interrupt}\` | Interrupt current operation |\n` : ""}${shor
 		this.discardRefineLoader();
 		this.stopWorkingPulse();
 		this.stopGoalTrayTimer();
-		this.closeHeartbeatManager();
+		this.closeScheduledManager();
 		this.closeShellActivity();
 		this.clearExtensionTerminalInputListeners();
 		this.footer.dispose();

@@ -4,7 +4,7 @@ import type { HostRequestHandler } from "./kernel/index.js";
 import type { CustomMessage } from "./messages.js";
 import {
 	ASYNC_BASH_COMPLETION_CUSTOM_TYPE,
-	HEARTBEAT_PROMPT_CUSTOM_TYPE,
+	SCHEDULED_PROMPT_CUSTOM_TYPE,
 	sanitizeMessageHeaderValue,
 } from "./messages.js";
 import { canonicalSessionPath } from "./session-lease.js";
@@ -445,7 +445,7 @@ export function startsAgentRun(message: AgentMessage): boolean {
 		isAgentSessionMessage(message) ||
 		isHostFollowUpMessage(message) ||
 		(message.role === "custom" &&
-			(message.customType === HEARTBEAT_PROMPT_CUSTOM_TYPE ||
+			(message.customType === SCHEDULED_PROMPT_CUSTOM_TYPE ||
 				message.customType === ASYNC_BASH_COMPLETION_CUSTOM_TYPE))
 	);
 }

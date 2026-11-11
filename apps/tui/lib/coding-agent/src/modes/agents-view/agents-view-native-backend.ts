@@ -6,7 +6,7 @@
  * adapter over Native `session/*` + `agent/list` + a shared AgentConnection.
  */
 
-import type { AgentConnection, AgentConnectionHeartbeat } from "../agent-connection/types.js";
+import type { AgentConnection, AgentConnectionScheduledTask } from "../agent-connection/types.js";
 import type { SessionSummary } from "../daemon/daemon-session-list.js";
 
 /** Live roster feed with the same consumer shape AgentsViewMode expects from RosterStore. */
@@ -38,7 +38,7 @@ export interface AgentsViewNativeBackend {
 	deleteSession?(summary: SessionSummary): Promise<void>;
 	cancelSubagent?(rootActiveSessionId: string, childId: string): Promise<void>;
 	getLastAssistantText?(activeSessionId: string): Promise<string | undefined>;
-	listHeartbeats?(): Promise<AgentConnectionHeartbeat[]>;
+	listScheduledTasks?(): Promise<AgentConnectionScheduledTask[]>;
 	prompt?(
 		sessionId: string,
 		message: string,

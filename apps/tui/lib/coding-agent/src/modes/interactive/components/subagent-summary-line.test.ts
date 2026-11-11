@@ -9,7 +9,7 @@ const plain = (lines: string[]) => lines.join("\n").replace(/\u001b\[[0-?]*[ -/]
 function dock() {
 	initTheme();
 	const component = new SubagentSummaryLine();
-	component.setHeartbeatCounts({ total: 0, active: 0, paused: 0 });
+	component.setScheduledCounts({ total: 0, active: 0, paused: 0 });
 	component.setShellCounts({ total: 0, running: 0 });
 	return component;
 }
@@ -26,7 +26,7 @@ test("all three empty groups remain selectable including unavailable subagent de
 	component.focused = true;
 	const opened: string[] = [];
 	component.onOpen = () => opened.push("agents");
-	component.onOpenHeartbeats = () => opened.push("heartbeats");
+	component.onOpenScheduledTasks = () => opened.push("heartbeats");
 	component.onOpenShells = () => opened.push("shells");
 	component.handleInput("\r");
 	component.handleInput("\u001b[B");
@@ -42,7 +42,7 @@ test("focus expands details, up and escape return to editor, ordinary text is fo
 	const component = dock();
 	component.setOpenable(true);
 	component.setSubagentCounts({ total: 6, running: 1, idle: 2, inactive: 3 });
-	component.setHeartbeatCounts({ total: 3, active: 1, paused: 2 });
+	component.setScheduledCounts({ total: 3, active: 1, paused: 2 });
 	component.setShellCounts({ total: 5, running: 2, persistent: 1 });
 	component.focused = true;
 	const output = plain(component.render(120));
@@ -65,7 +65,7 @@ test("unknown or failed sources are not presented as zero or stale successful co
 	const component = dock();
 	component.setShellCounts({ total: 5, running: 2 });
 	component.setShellState("error");
-	component.setHeartbeatState("unavailable");
+	component.setScheduledState("unavailable");
 	assert.match(plain(component.render(100)), /Subagents 0 · Scheduled unavailable · Shells error/);
 	component.focused = true;
 	assert.doesNotMatch(plain(component.render(100)), /persistent|2 running|0 active/);

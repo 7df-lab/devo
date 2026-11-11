@@ -15,7 +15,7 @@ export type {
 	AgentConnectionExtensionUiRequest,
 	AgentConnectionExtensionUiResponse,
 	AgentConnectionForkOptions,
-	AgentConnectionHeartbeat,
+	AgentConnectionScheduledTask,
 	AgentConnectionShellTask,
 	AgentConnectionLabelEntry,
 	AgentConnectionModel,

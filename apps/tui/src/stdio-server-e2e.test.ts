@@ -68,7 +68,7 @@ test("real stdio server: boot, subscribe kind, schedule, export", async (t) => {
         assert.ok(state.sessionId);
 
         await conn.setSessionName("stdio-e2e");
-        const hb = await conn.setHeartbeat("every 1h", "e2e heartbeat", "steer");
+        const hb = await conn.setScheduledTask("every 1h", "e2e heartbeat", "steer");
         assert.ok(hb?.id);
 
         const path = await conn.exportToJsonl();

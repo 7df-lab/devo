@@ -26,7 +26,7 @@ import {
 } from "../../core/slash-commands.js";
 import { canonicalizePath } from "../../utils/paths.js";
 import { ensureTool } from "../../utils/tools-manager.js";
-import type { AgentConnection, AgentConnectionHeartbeat, AgentConnectionSavedSessionInfo } from "../agent-connection/types.js";
+import type { AgentConnection, AgentConnectionScheduledTask, AgentConnectionSavedSessionInfo } from "../agent-connection/types.js";
 import type { DaemonClosingReason, DaemonCommand } from "../daemon/daemon-protocol.js";
 import type { DaemonSavedSessionCatalogContext } from "../daemon/saved-session-catalog.js";
 import { resolveAttachModelFallbackMessage, type SessionSummary } from "../daemon/daemon-session-list.js";
@@ -63,7 +63,7 @@ import {
 	createUnattachableChildOpenResult,
 	filterEmptyAgentsViewSessions,
 	filterUnifiedSessions,
-	formatHeartbeatBadge,
+	formatScheduledBadge,
 	getAgentsViewSelectionKey,
 	getAgentsViewSessionTitle,
 	getAgentsViewSummaryIdentity as getSummaryIdentity,
@@ -92,7 +92,7 @@ export type { AgentsViewNativeBackend, AgentsViewNativeRoster, AgentsViewNativeO
 export type { SessionSummary } from "../daemon/daemon-session-list.js";
 import { matchesSearchText } from "./session-view-search.js";
 
-const HEARTBEAT_POLL_INTERVAL_MS = 15000;
+const SCHEDULED_POLL_INTERVAL_MS = 15000;
 const RECONNECT_TIMEOUT_MS = 120000;
 const RECONNECT_RETRY_MS = 1000;
 const EXIT_HINT_DURATION_MS = 2000;
@@ -172,7 +172,7 @@ export type AgentsViewPersistentState = {
 	savedCatalogLoaded?: boolean;
 	lastSuccessfulLiveSummaries?: SessionSummary[];
 	savedCatalogGeneration?: number;
-	heartbeats?: AgentConnectionHeartbeat[];
+	scheduledTasks?: AgentConnectionScheduledTask[];
 };
 
 type PendingDeleteAgent = {
@@ -609,7 +609,7 @@ export class AgentsViewMode implements Component, Focusable {
 	private reconnectTimedOut = false;
 	private daemonShutdownReceived = false;
 	private resolveRun: ((result: AgentsViewRunResult) => void) | undefined;
-	private heartbeatPollTimer: NodeJS.Timeout | undefined;
+	private scheduledPollTimer: NodeJS.Timeout | undefined;
 	private animationTimer: NodeJS.Timeout | undefined;
 	private ctrlCExitHintExpiresAt = 0;
 	private ctrlCExitHintTimer: ReturnType<typeof setTimeout> | undefined;
@@ -621,7 +621,7 @@ export class AgentsViewMode implements Component, Focusable {
 	private lastVisibleSummaries: SessionSummary[] = [];
 	private savedSessions: AgentConnectionSavedSessionInfo[] = [];
 	private lastSuccessfulSavedSessions: AgentConnectionSavedSessionInfo[] = [];
-	private heartbeats: AgentConnectionHeartbeat[] = [];
+	private scheduledTasks: AgentConnectionScheduledTask[] = [];
 	private unifiedRecords: UnifiedSessionRecord[] = [];
 	private unifiedIndex: UnifiedSessionIndex = buildUnifiedSessionIndex([]);
 	private scopedRecords: UnifiedSessionRecord[] = [];
@@ -629,7 +629,7 @@ export class AgentsViewMode implements Component, Focusable {
 	private scopeRootSummary: SessionSummary | undefined;
 	private savedCatalogReady = false;
 	private savedCatalogGeneration = 0;
-	private heartbeatCatalogGeneration = 0;
+	private scheduledCatalogGeneration = 0;
 	private savedCatalogRefreshPending = false;
 	private expandedSubagentParents = new Set<string>();
 	// Agent row identities whose full spawn program is currently shown.
@@ -689,7 +689,7 @@ export class AgentsViewMode implements Component, Focusable {
 		this.savedSessions = persistentState.savedSessions ?? [];
 		this.lastSuccessfulSavedSessions = persistentState.lastSuccessfulSavedSessions ?? this.savedSessions;
 		this.savedCatalogReady = persistentState.savedCatalogLoaded === true;
-		this.heartbeats = persistentState.heartbeats ?? [];
+		this.scheduledTasks = persistentState.scheduledTasks ?? [];
 		this.savedCatalogGeneration = persistentState.savedCatalogGeneration ?? 0;
 		this.expandedSubagentParents = persistentState.expandedSubagentParents ?? new Set();
 		persistentState.expandedSubagentParents = this.expandedSubagentParents;
@@ -844,10 +844,10 @@ export class AgentsViewMode implements Component, Focusable {
 		this.applySessionList(liveRoster.summaries(), true);
 		this.armSavedSearchFetch();
 		this.resolveMissingSelectionAnchor();
-		void this.refreshHeartbeats();
+		void this.refreshScheduledTasks();
 		this.loadStartupNotices();
-		this.heartbeatPollTimer = setInterval(() => void this.refreshHeartbeats(), HEARTBEAT_POLL_INTERVAL_MS);
-		this.heartbeatPollTimer.unref?.();
+		this.scheduledPollTimer = setInterval(() => void this.refreshScheduledTasks(), SCHEDULED_POLL_INTERVAL_MS);
+		this.scheduledPollTimer.unref?.();
 		this.animationTimer = setInterval(() => {
 			const hasRunning = this.rows.some((row) => row.section === "running");
 			const hasStaleAge = this.rows.some((row) => row.summary.lastHeardFromAt !== undefined);
@@ -1291,7 +1291,7 @@ export class AgentsViewMode implements Component, Focusable {
 		const preservedSessionIds = new Set([
 			...(this.anchorSessionId ? [this.anchorSessionId] : []),
 			...(this.scopeKey ? [this.scopeKey.sessionId] : []),
-			...this.heartbeats.map((heartbeat) => heartbeat.job.sessionId),
+			...this.scheduledTasks.map((scheduled) => scheduled.job.sessionId),
 		]);
 		const records = filterEmptyAgentsViewSessions(this.scopedRecords, preservedSessionIds);
 		return query.trim()
@@ -2013,7 +2013,7 @@ export class AgentsViewMode implements Component, Focusable {
 			shouldShowAgentsViewSession(summary, this.inactiveAgentIdentities.has(getSummaryIdentity(summary))),
 		);
 		this.lastVisibleSummaries = this.withPendingDeleteSession(visibleSessions);
-		this.unifiedRecords = reconcileUnifiedSessions(this.lastVisibleSummaries, this.savedSessions, this.heartbeats);
+		this.unifiedRecords = reconcileUnifiedSessions(this.lastVisibleSummaries, this.savedSessions, this.scheduledTasks);
 		this.unifiedIndex = buildUnifiedSessionIndex(this.unifiedRecords);
 		migrateAgentsViewIdentitySet(this.expandedSubagentParents, this.unifiedIndex.byKey);
 		migrateAgentsViewIdentitySet(this.programShownParents, this.unifiedIndex.byKey);
@@ -2056,10 +2056,10 @@ export class AgentsViewMode implements Component, Focusable {
 		return true;
 	}
 
-	private async refreshHeartbeats(_options: { duringReconnect?: boolean } = {}): Promise<boolean> {
+	private async refreshScheduledTasks(_options: { duringReconnect?: boolean } = {}): Promise<boolean> {
 		try {
-			this.heartbeats = (await this.options.nativeBackend.listHeartbeats?.()) ?? [];
-			this.persistentState.heartbeats = this.heartbeats;
+			this.scheduledTasks = (await this.options.nativeBackend.listScheduledTasks?.()) ?? [];
+			this.persistentState.scheduledTasks = this.scheduledTasks;
 			this.rebuildRows();
 			return true;
 		} catch {
@@ -2150,10 +2150,10 @@ export class AgentsViewMode implements Component, Focusable {
 		}
 		this.stopped = true;
 		this.savedCatalogGeneration += 1;
-		this.heartbeatCatalogGeneration += 1;
-		if (this.heartbeatPollTimer) {
-			clearInterval(this.heartbeatPollTimer);
-			this.heartbeatPollTimer = undefined;
+		this.scheduledCatalogGeneration += 1;
+		if (this.scheduledPollTimer) {
+			clearInterval(this.scheduledPollTimer);
+			this.scheduledPollTimer = undefined;
 		}
 		if (this.animationTimer) {
 			clearInterval(this.animationTimer);
@@ -2256,7 +2256,7 @@ export class AgentsViewMode implements Component, Focusable {
 		const pendingKill = row.kind === "subagent" && this.isPendingKillSubagentRow(row);
 		const details = layout.details.get(row.identity) ?? "";
 		if (pendingDelete || pendingKill) {
-			const armed = row.summary.hasActiveHeartbeat === true || (row.heartbeat?.activeCount ?? 0) > 0;
+			const armed = row.summary.hasActiveHeartbeat === true || (row.scheduled?.activeCount ?? 0) > 0;
 			const title =
 				(armed ? "has an armed heartbeat — " : "") +
 				(pendingDelete
@@ -2265,9 +2265,9 @@ export class AgentsViewMode implements Component, Focusable {
 			return markRow(formatTableCell(theme.fg("error", title), width));
 		}
 		const icon = this.formatRowIcon(row.section, this.getRowIcon(row.section));
-		const badge = formatHeartbeatBadge(row.heartbeat);
-		const heartbeat = badge ? `${theme.fg((row.heartbeat?.activeCount ?? 0) > 0 ? "error" : "dim", badge)} ` : "";
-		const title = `${"  ".repeat(row.depth)}${icon} ${heartbeat}${styleRowTitle(row)}`;
+		const badge = formatScheduledBadge(row.scheduled);
+		const scheduled = badge ? `${theme.fg((row.scheduled?.activeCount ?? 0) > 0 ? "error" : "dim", badge)} ` : "";
+		const title = `${"  ".repeat(row.depth)}${icon} ${scheduled}${styleRowTitle(row)}`;
 		const status =
 			row.summary.statusLabel !== undefined || row.summary.lastHeardFromAt !== undefined
 				? row.statusLabel

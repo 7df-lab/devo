@@ -13,8 +13,8 @@ import {
 	ASYNC_BASH_COMPLETION_CUSTOM_TYPE,
 	type AsyncBashCompletionDetails,
 	type CustomMessage,
-	HEARTBEAT_PROMPT_CUSTOM_TYPE,
-	type HeartbeatPromptDetails,
+	SCHEDULED_PROMPT_CUSTOM_TYPE,
+	type ScheduledPromptDetails,
 	IPYTHON_STATE_RESTORED_CUSTOM_TYPE,
 	type IpythonStateRestoredDetails,
 	RLM_CHILD_FAILURE_CUSTOM_TYPE,
@@ -29,7 +29,7 @@ import { ShellCompletionComponent } from "./shell-completion.js";
 type InjectedPromptDetails =
 	| AsyncBashCompletionDetails
 	| GoalContextDetails
-	| HeartbeatPromptDetails
+	| ScheduledPromptDetails
 	| IpythonStateRestoredDetails
 	| RlmChildFailureDetails
 	| RlmChildTerminalNoticeDetails;
@@ -39,7 +39,7 @@ export function isInjectedPromptMessage(message: AgentMessage): message is Injec
 	return (
 		message.role === "custom" &&
 		(message.customType === ASYNC_BASH_COMPLETION_CUSTOM_TYPE ||
-			message.customType === HEARTBEAT_PROMPT_CUSTOM_TYPE ||
+			message.customType === SCHEDULED_PROMPT_CUSTOM_TYPE ||
 			message.customType === GOAL_CONTEXT_CUSTOM_TYPE ||
 			message.customType === IPYTHON_STATE_RESTORED_CUSTOM_TYPE ||
 			message.customType === RLM_CHILD_FAILURE_CUSTOM_TYPE ||
@@ -71,7 +71,7 @@ function goalLabel(details: GoalContextDetails | undefined): string {
 	}
 }
 
-function compactHeartbeatSchedule(schedule: string | undefined): string {
+function compactScheduledSchedule(schedule: string | undefined): string {
 	const trimmed = schedule?.trim();
 	if (!trimmed) {
 		return "prompt";
@@ -79,8 +79,8 @@ function compactHeartbeatSchedule(schedule: string | undefined): string {
 	return trimmed.replace(/^every\s+/i, "");
 }
 
-function heartbeatPromptSchedule(schedule: string | undefined): string {
-	const compact = compactHeartbeatSchedule(schedule);
+function scheduledPromptSchedule(schedule: string | undefined): string {
+	const compact = compactScheduledSchedule(schedule);
 	return compact === "prompt" ? "scheduled" : `every ${compact}`;
 }
 
@@ -133,8 +133,8 @@ export class InjectedPromptMessageComponent extends Container {
 	}
 
 	private headerText(): string {
-		if (this.message.customType === HEARTBEAT_PROMPT_CUSTOM_TYPE) {
-			return this.heartbeatHeaderText();
+		if (this.message.customType === SCHEDULED_PROMPT_CUSTOM_TYPE) {
+			return this.scheduledHeaderText();
 		}
 		if (this.message.customType === IPYTHON_STATE_RESTORED_CUSTOM_TYPE) {
 			const details = this.message.details as IpythonStateRestoredDetails | undefined;
@@ -156,12 +156,12 @@ export class InjectedPromptMessageComponent extends Container {
 		return theme.fg("muted", title) + meta + theme.fg("dim", hint);
 	}
 
-	private heartbeatHeaderText(): string {
-		const details = this.message.details as HeartbeatPromptDetails | undefined;
+	private scheduledHeaderText(): string {
+		const details = this.message.details as ScheduledPromptDetails | undefined;
 		const pulse = theme.fg("error", "♥");
-		const schedule = theme.fg("muted", heartbeatPromptSchedule(details?.schedule));
+		const schedule = theme.fg("muted", scheduledPromptSchedule(details?.schedule));
 		const hint = this.expanded ? "" : ` ${expandCollapseHint("app.tools.expand", false)}`;
-		return `${pulse} ${theme.fg("muted", "Heartbeat prompt")}${theme.fg("dim", " · ")}${schedule}${theme.fg("dim", hint)}`;
+		return `${pulse} ${theme.fg("muted", "Scheduled prompt")}${theme.fg("dim", " · ")}${schedule}${theme.fg("dim", hint)}`;
 	}
 
 	private metaText(): string {

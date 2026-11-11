@@ -1,4 +1,4 @@
-import type { AgentConnection, AgentConnectionHeartbeat, AgentConnectionShellTask } from "../agent-connection/types.js";
+import type { AgentConnection, AgentConnectionScheduledTask, AgentConnectionShellTask } from "../agent-connection/types.js";
 
 export type ActivitySnapshot<T> =
   | { status: "loading" | "unavailable" }
@@ -11,8 +11,8 @@ export class ActivityMonitor {
   private timers = new Set<ReturnType<typeof setTimeout>>();
   constructor(private readonly options: {
     getConnection: () => AgentConnection;
-    loadHeartbeats?: () => Promise<AgentConnectionHeartbeat[]>;
-    onHeartbeats: (snapshot: ActivitySnapshot<AgentConnectionHeartbeat>) => void;
+    loadScheduledTasks?: () => Promise<AgentConnectionScheduledTask[]>;
+    onScheduledTasks: (snapshot: ActivitySnapshot<AgentConnectionScheduledTask>) => void;
     onShells: (snapshot: ActivitySnapshot<AgentConnectionShellTask>) => void;
     intervalMs?: number;
   }) {}
@@ -21,9 +21,9 @@ export class ActivityMonitor {
     this.stop();
     const generation = this.generation;
     const connection = this.options.getConnection();
-    this.options.onHeartbeats({ status: "loading" });
+    this.options.onScheduledTasks({ status: "loading" });
     this.options.onShells({ status: connection.listShellTasks ? "loading" : "unavailable" });
-    void this.refresh(connection, generation, () => this.options.loadHeartbeats?.() ?? connection.listHeartbeats(), this.options.onHeartbeats);
+    void this.refresh(connection, generation, () => this.options.loadScheduledTasks?.() ?? connection.listScheduledTasks(), this.options.onScheduledTasks);
     if (connection.listShellTasks) {
       void this.refresh(connection, generation, () => connection.listShellTasks!(), this.options.onShells);
     }

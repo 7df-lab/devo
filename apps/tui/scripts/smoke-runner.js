@@ -5,7 +5,7 @@ import { homedir, tmpdir } from "node:os";
 import { dirname, join, resolve } from "node:path";
 import { fileURLToPath } from "node:url";
 import { setTimeout as sleep } from "node:timers/promises";
-import { heartbeatDelivered, rpcSucceeded, turnOutcome } from "./smoke-outcomes.js";
+import { scheduledDelivered, rpcSucceeded, turnOutcome } from "./smoke-outcomes.js";
 
 const repo = resolve(dirname(fileURLToPath(import.meta.url)), "../../..");
 const scenario = process.argv[2] || "T1";
@@ -119,7 +119,7 @@ async function run() {
         await send(`/heartbeat every 1s ${marker}`);
         // A slash-command echo also contains the marker. Require a delivered
         // Native user item rather than matching the echoed command.
-        await waitFor("delivered heartbeat", (events) => heartbeatDelivered(events, marker));
+        await waitFor("delivered heartbeat", (events) => scheduledDelivered(events, marker));
         await send("/heartbeat clear");
         await waitFor("heartbeat clear", (_events, text) => /Heartbeat cleared/i.test(text));
         break;

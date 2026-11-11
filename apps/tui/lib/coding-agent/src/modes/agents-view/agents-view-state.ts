@@ -1,12 +1,12 @@
 import { basename, resolve } from "node:path";
 import { canonicalizePath } from "../../utils/paths.js";
-import type { AgentConnectionHeartbeat, AgentConnectionSavedSessionInfo } from "../agent-connection/index.js";
+import type { AgentConnectionScheduledTask, AgentConnectionSavedSessionInfo } from "../agent-connection/index.js";
 import { rosterAgentIdForSummary } from "../daemon/agent-roster.js";
 import { classifySessionRosterStatus, type SessionSummary } from "../daemon/daemon-session-list.js";
 
 export type AgentsViewSection = "running" | "idle" | "inactive";
 
-export interface UnifiedSessionHeartbeat {
+export interface UnifiedSessionScheduled {
 	activeCount: number;
 	pausedCount?: number;
 	nextRunAt?: string;
@@ -30,7 +30,7 @@ export interface UnifiedSessionRecord {
 	 * Identity fields stay exact-match only.
 	 */
 	searchableFuzzyText: string;
-	heartbeat?: UnifiedSessionHeartbeat;
+	scheduled?: UnifiedSessionScheduled;
 }
 
 export interface AgentsViewScopeKey {
@@ -100,7 +100,7 @@ export interface AgentsViewRow {
 	code?: string;
 	/** Merged durable/live source data for unified rows. */
 	record?: UnifiedSessionRecord;
-	heartbeat?: UnifiedSessionHeartbeat;
+	scheduled?: UnifiedSessionScheduled;
 }
 
 export function classifyAgentsViewSession(summary: SessionSummary): AgentsViewSection {
@@ -217,20 +217,20 @@ function createUnifiedSearchableText(
 export function reconcileUnifiedSessions(
 	daemonSummaries: readonly SessionSummary[],
 	savedSessions: readonly AgentConnectionSavedSessionInfo[],
-	heartbeats: readonly AgentConnectionHeartbeat[] = [],
+	scheduledTasks: readonly AgentConnectionScheduledTask[] = [],
 ): UnifiedSessionRecord[] {
-	const heartbeatByActiveId = aggregateSessionHeartbeats(daemonSummaries, heartbeats);
+	const scheduledByActiveId = aggregateSessionScheduledTasks(daemonSummaries, scheduledTasks);
 	const records: UnifiedSessionRecord[] = [];
 	const recordByAlias = new Map<string, UnifiedSessionRecord>();
 
 	for (const daemon of daemonSummaries) {
 		const aliases = summaryIdentityAliases(daemon);
-		const heartbeat =
-			heartbeatByActiveId.get(daemon.activeSessionId ?? daemon.id) ??
+		const scheduled =
+			scheduledByActiveId.get(daemon.activeSessionId ?? daemon.id) ??
 			(daemon.hasActiveHeartbeat ? { activeCount: 1 } : undefined);
 		const record: UnifiedSessionRecord = {
 			daemon:
-				heartbeat && heartbeat.activeCount > 0 && !daemon.hasActiveHeartbeat
+				scheduled && scheduled.activeCount > 0 && !daemon.hasActiveHeartbeat
 					? { ...daemon, hasActiveHeartbeat: true }
 					: daemon,
 			identity: aliases[0]!,
@@ -238,7 +238,7 @@ export function reconcileUnifiedSessions(
 			section: "idle",
 			searchableText: "",
 			searchableFuzzyText: "",
-			...(heartbeat ? { heartbeat } : {}),
+			...(scheduled ? { scheduled } : {}),
 		};
 		record.section = classifyUnifiedSession(record);
 		({ text: record.searchableText, fuzzyText: record.searchableFuzzyText } =
@@ -467,7 +467,7 @@ export function filterEmptyAgentsViewSessions(
 			summary.hasActiveHeartbeat ||
 			summary.hasRegisteredHeartbeat ||
 			summary.hasRegisteredCronJob ||
-			(record.heartbeat?.activeCount ?? 0) + (record.heartbeat?.pausedCount ?? 0) > 0 ||
+			(record.scheduled?.activeCount ?? 0) + (record.scheduled?.pausedCount ?? 0) > 0 ||
 			!isEmptyAgentsViewSession(summary) ||
 			(record.saved?.messageCount ?? 0) > 0 ||
 			Boolean(summary.sessionName?.trim()) ||
@@ -602,10 +602,10 @@ function findParentRecord(
 	return undefined;
 }
 
-export function aggregateSessionHeartbeats(
+export function aggregateSessionScheduledTasks(
 	summaries: readonly SessionSummary[],
-	heartbeats: readonly AgentConnectionHeartbeat[],
-): ReadonlyMap<string, UnifiedSessionHeartbeat> {
+	scheduledTasks: readonly AgentConnectionScheduledTask[],
+): ReadonlyMap<string, UnifiedSessionScheduled> {
 	const summaryByKey = new Map<string, SessionSummary>();
 	for (const summary of summaries) {
 		for (const key of getSummaryKeys(summary)) summaryByKey.set(key, summary);
@@ -618,8 +618,8 @@ export function aggregateSessionHeartbeats(
 		ids.add(jobId);
 		byOwner.set(owner, ids);
 	};
-	for (const heartbeat of heartbeats) {
-		const job = heartbeat.job;
+	for (const scheduled of scheduledTasks) {
+		const job = scheduled.job;
 		if (job.status !== "active" && job.status !== "paused") continue;
 		const byOwner = job.status === "active" ? activeJobIdsByOwner : pausedJobIdsByOwner;
 		if (job.status === "active" && job.nextRunAt && Number.isFinite(Date.parse(job.nextRunAt))) {
@@ -641,7 +641,7 @@ export function aggregateSessionHeartbeats(
 			summary = findParentSummary(summary, summaryByKey);
 		}
 	}
-	const result = new Map<string, UnifiedSessionHeartbeat>();
+	const result = new Map<string, UnifiedSessionScheduled>();
 	for (const owner of new Set([...activeJobIdsByOwner.keys(), ...pausedJobIdsByOwner.keys()])) {
 		const jobIds = activeJobIdsByOwner.get(owner) ?? new Set<string>();
 		const pausedCount = pausedJobIdsByOwner.get(owner)?.size ?? 0;
@@ -658,17 +658,17 @@ export function aggregateSessionHeartbeats(
 	return result;
 }
 
-export function formatHeartbeatBadge(heartbeat: UnifiedSessionHeartbeat | undefined, now = Date.now()): string {
-	if (!heartbeat) return "";
-	if (heartbeat.activeCount < 1) {
-		return (heartbeat.pausedCount ?? 0) > 0 ? `♥ ${heartbeat.pausedCount}` : "";
+export function formatScheduledBadge(scheduled: UnifiedSessionScheduled | undefined, now = Date.now()): string {
+	if (!scheduled) return "";
+	if (scheduled.activeCount < 1) {
+		return (scheduled.pausedCount ?? 0) > 0 ? `♥ ${scheduled.pausedCount}` : "";
 	}
-	const next = heartbeat.nextRunAt ? Date.parse(heartbeat.nextRunAt) : Number.NaN;
-	const countdown = Number.isFinite(next) ? formatHeartbeatCountdown(next - now) : undefined;
-	return `♥ ${heartbeat.activeCount}${countdown ? `·${countdown}` : ""}`;
+	const next = scheduled.nextRunAt ? Date.parse(scheduled.nextRunAt) : Number.NaN;
+	const countdown = Number.isFinite(next) ? formatScheduledCountdown(next - now) : undefined;
+	return `♥ ${scheduled.activeCount}${countdown ? `·${countdown}` : ""}`;
 }
 
-function formatHeartbeatCountdown(durationMs: number): string {
+function formatScheduledCountdown(durationMs: number): string {
 	const seconds = Math.max(1, Math.round(Math.max(0, durationMs) / 1000));
 	if (seconds < 60) return `${seconds}s`;
 	const minutes = Math.round(seconds / 60);
@@ -857,14 +857,14 @@ export function buildAgentsViewRows(
 			summary,
 			title: getAgentsViewSessionTitle(summary),
 			subtitle: getSessionSubtitle(summary),
-			statusLabel: getSessionStatusLabel(summary, record?.heartbeat),
+			statusLabel: getSessionStatusLabel(summary, record?.scheduled),
 			depth: 0,
 			selectable: true,
 			runningSubagentCount: 0,
 			recursiveCost: summary.usage?.cost ?? 0,
 			descendantCount: 0,
 			identity: record?.identity ?? getAgentsViewSummaryIdentity(summary),
-			...(record ? { record, heartbeat: record.heartbeat } : {}),
+			...(record ? { record, scheduled: record.scheduled } : {}),
 		}),
 	);
 	const rowsByKey = buildRowKeyMap(baseRows);
@@ -970,8 +970,8 @@ function createSubagentSummaryRow(
 ): AgentsViewRow {
 	const totalCount = children.length;
 	const running = parent.runningSubagentCount;
-	const heartbeatCount = children.filter(
-		(child) => child.summary.hasActiveHeartbeat || (child.heartbeat?.activeCount ?? 0) > 0,
+	const scheduledCount = children.filter(
+		(child) => child.summary.hasActiveHeartbeat || (child.scheduled?.activeCount ?? 0) > 0,
 	).length;
 	// Finished subagents stay reachable through the summary row even when
 	// nothing is running anymore.
@@ -980,8 +980,8 @@ function createSubagentSummaryRow(
 			? `${running} ${running === 1 ? "subagent" : "subagents"} running`
 			: `${totalCount} ${totalCount === 1 ? "subagent" : "subagents"}`;
 	const title =
-		heartbeatCount > 0
-			? `${subagentTitle} · ${heartbeatCount} ${heartbeatCount === 1 ? "heartbeat" : "heartbeats"} active`
+		scheduledCount > 0
+			? `${subagentTitle} · ${scheduledCount} ${scheduledCount === 1 ? "scheduled task" : "scheduled tasks"} active`
 			: subagentTitle;
 	return {
 		kind: "subagent-summary",
@@ -1076,10 +1076,10 @@ function compareAgentsViewRows(a: AgentsViewRow, b: AgentsViewRow, anchorSession
 		return emptyDiff;
 	}
 	if (a.section === "inactive") {
-		const heartbeatDiff =
+		const scheduledDiff =
 			Number(b.summary.hasActiveHeartbeat ?? false) - Number(a.summary.hasActiveHeartbeat ?? false);
-		if (heartbeatDiff !== 0) {
-			return heartbeatDiff;
+		if (scheduledDiff !== 0) {
+			return scheduledDiff;
 		}
 	}
 	if (a.section !== "running") {
@@ -1200,7 +1200,7 @@ function getSessionSubtitle(summary: SessionSummary): string {
 	return parts.join("  ");
 }
 
-function getSessionStatusLabel(summary: SessionSummary, heartbeat?: UnifiedSessionHeartbeat): string {
+function getSessionStatusLabel(summary: SessionSummary, scheduled?: UnifiedSessionScheduled): string {
 	if (summary.statusLabel !== undefined) {
 		return summary.statusLabel;
 	}
@@ -1235,10 +1235,10 @@ function getSessionStatusLabel(summary: SessionSummary, heartbeat?: UnifiedSessi
 		return "archived";
 	}
 	if (summary.hasActiveHeartbeat) {
-		const next = heartbeat?.nextRunAt ? Date.parse(heartbeat.nextRunAt) : Number.NaN;
+		const next = scheduled?.nextRunAt ? Date.parse(scheduled.nextRunAt) : Number.NaN;
 		return Number.isFinite(next)
-			? `heartbeat · next ${formatHeartbeatCountdown(next - Date.now())}`
-			: "heartbeat active";
+			? `scheduled · next ${formatScheduledCountdown(next - Date.now())}`
+			: "scheduled task active";
 	}
 	if (summary.runtimeKind === "subagent" && summary.repliedSinceTask) {
 		return "replied";

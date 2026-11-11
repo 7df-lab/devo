@@ -1,12 +1,12 @@
-import type { AgentConnectionHeartbeat } from "../agent-connection/types.js";
+import type { AgentConnectionScheduledTask } from "../agent-connection/types.js";
 import type { DaemonTransportClient } from "./daemon-client.js";
 import { deserializeDaemonError } from "./daemon-errors.js";
 import { isUnknownDaemonCommandError } from "./daemon-protocol.js";
 
-export async function listDaemonHeartbeats(
+export async function listDaemonScheduledTasks(
 	client: DaemonTransportClient,
 	activeSessionId?: string,
-): Promise<AgentConnectionHeartbeat[]> {
+): Promise<AgentConnectionScheduledTask[]> {
 	if (!client.hello) await client.waitForHello();
 	if (!client.supportsServerCapability("heartbeat_catalog")) return [];
 	try {
@@ -15,7 +15,8 @@ export async function listDaemonHeartbeats(
 		if (!response.success) {
 			throw deserializeDaemonError(response);
 		}
-		return (response.data as { heartbeats: AgentConnectionHeartbeat[] }).heartbeats;
+		// Legacy daemon payload key is a wire contract, not the TUI display name.
+		return (response.data as { heartbeats: AgentConnectionScheduledTask[] }).heartbeats;
 	} catch (error) {
 		if (isUnknownDaemonCommandError(error, "heartbeats_list")) {
 			return [];

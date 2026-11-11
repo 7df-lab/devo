@@ -9,9 +9,9 @@ import type { CompactionResult } from "../../core/compaction/index.js";
 import type { ContextTreeNode } from "../../core/context-tree.js";
 import type {
 	AgentCronJob,
-	AgentHeartbeatDeliveryMode,
-	AgentHeartbeatManagementAction,
-	AgentHeartbeatUpdateAction,
+	AgentScheduledDeliveryMode,
+	AgentScheduledManagementAction,
+	AgentScheduledUpdateAction,
 } from "../../core/cron-jobs.js";
 import type { ReplayBuiltInToolName } from "../../core/extensions/index.js";
 import type { InputSource } from "../../core/extensions/types.js";
@@ -357,6 +357,7 @@ export interface AgentConnectionState {
 	sessionActions: SessionActionSnapshot;
 	compactionCount: number;
 	goal: GoalState;
+	/** Legacy state snapshot wire field; retain for daemon/client compatibility. */
 	heartbeat?: AgentCronJob | null;
 	scopedModels: AgentConnectionScopedModel[];
 	activeToolNames: string[];
@@ -558,7 +559,7 @@ export interface AgentConnectionShellTask {
 	output?: string;
 }
 
-export interface AgentConnectionHeartbeat {
+export interface AgentConnectionScheduledTask {
 	job: AgentCronJob;
 	sessionName?: string;
 	firstMessage?: string;
@@ -722,24 +723,24 @@ export interface AgentConnection {
 	abortAndClearQueue(): Promise<AgentConnectionQueueState>;
 	acquireSessionInputPause(leaseKey: string): Promise<AgentConnectionSessionInputPause>;
 	listCronJobs(options?: { includeInactive?: boolean }): Promise<AgentCronJob[]>;
-	listHeartbeats(): Promise<AgentConnectionHeartbeat[]>;
+	listScheduledTasks(): Promise<AgentConnectionScheduledTask[]>;
 	/** Absent when the transport does not expose authoritative background process activity. */
 	listShellTasks?(): Promise<AgentConnectionShellTask[]>;
-	manageHeartbeat(
+	manageScheduledTask(
 		activeSessionId: string,
 		jobId: string,
-		action: AgentHeartbeatManagementAction,
+		action: AgentScheduledManagementAction,
 	): Promise<AgentCronJob>;
 	addCronJob(schedule: string, prompt: string): Promise<AgentCronJob>;
 	cancelCronJob(jobId: string): Promise<AgentCronJob>;
-	getHeartbeat(): Promise<AgentCronJob | undefined>;
-	runHeartbeatCommand(args: string): Promise<import("../../core/cron-jobs.js").HeartbeatCommandResult>;
-	setHeartbeat(
+	getScheduledTask(): Promise<AgentCronJob | undefined>;
+	runScheduledCommand(args: string): Promise<import("../../core/cron-jobs.js").ScheduledCommandResult>;
+	setScheduledTask(
 		schedule: string,
 		instruction: string,
-		deliveryMode?: AgentHeartbeatDeliveryMode,
+		deliveryMode?: AgentScheduledDeliveryMode,
 	): Promise<AgentCronJob>;
-	updateHeartbeat(action: AgentHeartbeatUpdateAction): Promise<AgentCronJob | undefined>;
+	updateScheduledTask(action: AgentScheduledUpdateAction): Promise<AgentCronJob | undefined>;
 	sendAgentMessage(targetActiveSessionId: string, message: string): Promise<AgentSessionMessageReceipt>;
 	getAgentMessageStatus(): Promise<AgentSessionMessageSafetyStatus>;
 	pauseAgentMessages(): Promise<AgentSessionMessageSafetyStatus>;

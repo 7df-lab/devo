@@ -12,9 +12,9 @@ import type { AgentAutonomousStatus } from "../../core/autonomous.js";
 import type { BashResult } from "../../core/bash-executor.js";
 import type {
 	AgentCronJob,
-	AgentHeartbeatDeliveryMode,
-	AgentHeartbeatManagementAction,
-	AgentHeartbeatUpdateAction,
+	AgentScheduledDeliveryMode,
+	AgentScheduledManagementAction,
+	AgentScheduledUpdateAction,
 } from "../../core/cron-jobs.js";
 import type { InputSource } from "../../core/extensions/types.js";
 import type { AcpMcpServerConfig } from "../../core/mcp/acp-mcp-types.js";
@@ -25,7 +25,7 @@ import type { DeleteSessionFileResult } from "../../core/session-file-actions.js
 import type { SessionUsageSummary } from "../../core/usage.js";
 import type {
 	AgentConnectionAgentStatus,
-	AgentConnectionHeartbeat,
+	AgentConnectionScheduledTask,
 	AgentConnectionQueueMode,
 	AgentConnectionResourceSnapshot,
 	AgentConnectionRlmChildAgentSnapshot,
@@ -595,7 +595,7 @@ export type DaemonCommand =
 			type: "heartbeat_manage";
 			activeSessionId: string;
 			jobId: string;
-			action: AgentHeartbeatManagementAction;
+			action: AgentScheduledManagementAction;
 	  }
 	| {
 			id?: string;
@@ -613,10 +613,10 @@ export type DaemonCommand =
 			activeSessionId: string;
 			schedule: string;
 			prompt: string;
-			deliveryMode?: AgentHeartbeatDeliveryMode;
+			deliveryMode?: AgentScheduledDeliveryMode;
 			promoteOwnedSession?: boolean;
 	  }
-	| { id?: string; type: "heartbeat_update"; activeSessionId: string; action: AgentHeartbeatUpdateAction }
+	| { id?: string; type: "heartbeat_update"; activeSessionId: string; action: AgentScheduledUpdateAction }
 	| { id?: string; type: "set_model"; activeSessionId: string; provider: string; modelId: string }
 	| { id?: string; type: "cycle_model"; activeSessionId: string; direction?: "forward" | "backward" }
 	| { id?: string; type: "set_scoped_models"; activeSessionId: string; scopedModels: AgentConnectionScopedModel[] }
@@ -745,6 +745,7 @@ const DIRECT_PEER_TRANSPORT_COMMAND = {
 	capability: "direct_peer_transport",
 } as const;
 
+// Wire command/capability keys remain stable for existing daemon clients.
 export const DAEMON_COMMAND_COMPATIBILITY = {
 	ack_result: LEGACY_DAEMON_COMMAND,
 	list: LEGACY_DAEMON_COMMAND,
@@ -1092,7 +1093,7 @@ export type DaemonSessionHeader = AgentConnectionSessionHeader;
 export type DaemonResourceSnapshot = AgentConnectionResourceSnapshot;
 
 export type DaemonCronJob = AgentCronJob;
-export type DaemonHeartbeat = AgentConnectionHeartbeat;
+export type DaemonScheduled = AgentConnectionScheduledTask;
 export type DaemonAgentSessionMessageReceipt = AgentSessionMessageReceipt;
 export type DaemonAgentSessionMessageSafetyStatus = AgentSessionMessageSafetyStatus;
 

@@ -64,7 +64,7 @@ export function countRosterSubagentStatuses(
 
 export type ActivityLoadState = "ready" | "loading" | "unavailable" | "error";
 
-export interface HeartbeatSummaryCounts {
+export interface ScheduledSummaryCounts {
 	total: number;
 	active: number;
 	paused: number;
@@ -83,15 +83,15 @@ export interface ShellSummaryCounts {
 export class SubagentSummaryLine implements Component, Focusable {
 	focused = false;
 	private counts: SubagentSummaryCounts = { total: 0, running: 0, idle: 0, inactive: 0 };
-	private heartbeats: HeartbeatSummaryCounts = { total: 0, active: 0, paused: 0 };
+	private scheduledTasks: ScheduledSummaryCounts = { total: 0, active: 0, paused: 0 };
 	private shells: ShellSummaryCounts = { total: 0, running: 0 };
-	private heartbeatState: ActivityLoadState = "loading";
+	private scheduledState: ActivityLoadState = "loading";
 	private shellState: ActivityLoadState = "loading";
 	private openable = false;
 	private selected = 0;
 
 	onOpen?: () => void;
-	onOpenHeartbeats?: () => void;
+	onOpenScheduledTasks?: () => void;
 	onOpenShells?: () => void;
 	onCancel?: () => void;
 	onChatAction?: (data: string) => void;
@@ -108,9 +108,9 @@ export class SubagentSummaryLine implements Component, Focusable {
 		this.counts = { ...counts };
 	}
 
-	setHeartbeatCounts(counts: HeartbeatSummaryCounts): void {
-		this.heartbeats = { ...counts };
-		this.heartbeatState = "ready";
+	setScheduledCounts(counts: ScheduledSummaryCounts): void {
+		this.scheduledTasks = { ...counts };
+		this.scheduledState = "ready";
 	}
 
 	setShellCounts(counts: ShellSummaryCounts): void {
@@ -118,8 +118,8 @@ export class SubagentSummaryLine implements Component, Focusable {
 		this.shellState = "ready";
 	}
 
-	setHeartbeatState(state: ActivityLoadState): void {
-		this.heartbeatState = state;
+	setScheduledState(state: ActivityLoadState): void {
+		this.scheduledState = state;
 	}
 
 	setShellState(state: ActivityLoadState): void {
@@ -142,7 +142,7 @@ export class SubagentSummaryLine implements Component, Focusable {
 			return;
 		}
 		if (keybindings.matches(data, "tui.select.confirm")) {
-			[this.onOpen, this.onOpenHeartbeats, this.onOpenShells][this.selected]?.();
+			[this.onOpen, this.onOpenScheduledTasks, this.onOpenShells][this.selected]?.();
 			return;
 		}
 		if (keybindings.matches(data, "tui.select.cancel") || keybindings.matches(data, "app.agents.back")) {
@@ -172,11 +172,11 @@ export class SubagentSummaryLine implements Component, Focusable {
 		const innerWidth = Math.max(1, width - 4);
 		const goal = this.getGoalLabel()?.trim();
 		const colors = ["accent", "warning", "success"] as const;
-		const heartbeatCount = this.heartbeatState === "ready" ? String(this.heartbeats.total) : this.heartbeatState;
+		const scheduledCount = this.scheduledState === "ready" ? String(this.scheduledTasks.total) : this.scheduledState;
 		const shellCount = this.shellState === "ready" ? String(this.shells.running) : this.shellState;
 		const groups = [
 			`Subagents ${this.counts.running}`,
-			`Scheduled ${heartbeatCount}`,
+			`Scheduled ${scheduledCount}`,
 			`Shells ${shellCount}`,
 		];
 		if (!this.focused) {
@@ -187,16 +187,16 @@ export class SubagentSummaryLine implements Component, Focusable {
 			const rows = visibleWidth(compact) <= innerWidth ? [compact] : coloredGroups;
 			return [...info, ...this.frame(rows, width)];
 		}
-		let nextHeartbeat = "";
-		if (this.heartbeats.nextRunAt !== undefined && Number.isFinite(this.heartbeats.nextRunAt)) {
-			const seconds = Math.max(0, Math.ceil((this.heartbeats.nextRunAt - Date.now()) / 1000));
-			nextHeartbeat = ` · next ${seconds}s`;
+		let nextScheduled = "";
+		if (this.scheduledTasks.nextRunAt !== undefined && Number.isFinite(this.scheduledTasks.nextRunAt)) {
+			const seconds = Math.max(0, Math.ceil((this.scheduledTasks.nextRunAt - Date.now()) / 1000));
+			nextScheduled = ` · next ${seconds}s`;
 		}
 		const details = [
 			`Subagents · ${this.counts.running} running · ${this.counts.idle} idle · ${this.counts.inactive} inactive${this.openable ? "" : " · details unavailable"}`,
-			this.heartbeatState === "ready"
-				? `Scheduled · ${this.heartbeats.active} active · ${this.heartbeats.paused} paused${nextHeartbeat}`
-				: `Scheduled · ${this.heartbeatState}`,
+			this.scheduledState === "ready"
+				? `Scheduled · ${this.scheduledTasks.active} active · ${this.scheduledTasks.paused} paused${nextScheduled}`
+				: `Scheduled · ${this.scheduledState}`,
 			this.shellState === "ready"
 				? `Shells · ${this.shells.running} running · ${this.shells.total} total${this.shells.persistent === undefined ? "" : ` · ${this.shells.persistent} persistent`}`
 				: `Shells · ${this.shellState}`,
