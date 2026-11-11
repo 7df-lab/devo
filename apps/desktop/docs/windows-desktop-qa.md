@@ -88,7 +88,7 @@ Historical note: the Python-turn sentences above (the `DevoSandboxOffline`
 token, the fenced kernel, and the no-new-unfenced-warning result) describe the
 pre-cleanup build, where the Python kernel itself ran in the Windows sandbox.
 Current builds run the Python kernel as a trusted, user-privileged process with
-no OS sandbox (`docs/trusted-kernel-host-shell.md`); only host shell execution
+no OS sandbox; only host shell execution
 follows the configured sandbox profile. The earlier write/network probe is
 historical evidence, not validation of the current host-shell path; that path
 requires a fresh Windows runtime check. A current Python turn should not be
