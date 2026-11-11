@@ -42,8 +42,7 @@ if chosen is not None:
 ```
 
 Omitted options inherit the immediate parent. Invalid selections fail without
-fallback. Discovery reflects configuration, not live health or credits. See the
-[child model API](docs/rlm-child-models.md).
+fallback. Discovery reflects configuration, not live health or credits.
 
 ## Quick start
 
@@ -77,8 +76,7 @@ the one-time sandbox setup prompt.
 
 > Shell and terminal execution follow the configured sandbox profile; there is
 > no global sandbox-disable switch. Python kernels are trusted user-privileged
-> processes, not OS-isolated environments. See
-> [the execution boundary](docs/trusted-kernel-host-shell.md).
+> processes, not OS-isolated environments.
 > Permission-picker UI flags and new-session permission defaults are separate
 > settings; removing the global switch does not change them.
 
@@ -89,12 +87,8 @@ Responses**, or **Anthropic Messages** APIs. The bundled catalog includes
 DeepSeek, Qwen, Kimi, GLM, and MiniMax. Use `/model` to switch models or
 `devo onboard` to revisit provider setup.
 
-For manual configuration, credentials, MCP, offline installation, and release
-mirrors, see the [user guide](./docs/user-guide.md).
-
 ## Docs and contributing
 
-- [User guide](./docs/user-guide.md) — installation, providers, configuration, and offline use.
 - [TUI guide](./apps/tui/README.md) — terminal controls and commands.
 - [Contributing](./CONTRIBUTING.md) — issues, documentation, and focused fixes welcome.
 

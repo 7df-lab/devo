@@ -116,9 +116,6 @@ they can be preserved through `ResponseExtra::ProviderSpecific`.
 This keeps the common interface small while still allowing adapters to retain
 important vendor-specific information.
 
-Usage presence, provider-specific totals, and stream timing are documented in
-[Provider token usage normalization](../../docs/provider-token-usage.md).
-
 ## Capabilities
 
 `ProviderCapabilities` describes differences between providers and transports,
