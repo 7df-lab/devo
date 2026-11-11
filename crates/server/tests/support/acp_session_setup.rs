@@ -406,9 +406,18 @@ pub(crate) fn assert_no_history_replay_before_response(messages: &[Value]) -> Re
         .split_last()
         .context("session/resume produced at least one message")?;
     let replayed_update = before_response.iter().find(|message| {
+        let update = message["params"]["update"]["sessionUpdate"].as_str();
+        let meta = &message["params"]["_meta"];
+        // Title/usage publications may arrive after the preceding prompt reply.
+        // Other Native events (including item completion) can use this same ACP
+        // variant, so inspect the preserved method instead of allowing it all.
+        let metadata_only = update == Some("session_info_update")
+            && ((meta.get("devo/originalMethod").is_none()
+                && meta.get("devo/originalEvent").is_none())
+                || meta["devo/originalMethod"] == "session/usage/updated");
         message["method"] == serde_json::json!("session/update")
-            && message["params"]["update"]["sessionUpdate"].as_str()
-                != Some("available_commands_update")
+            && update != Some("available_commands_update")
+            && !metadata_only
     });
     anyhow::ensure!(
         replayed_update.is_none(),

@@ -470,3 +470,76 @@ async fn stdio_proxy_acp_prompt_streams_each_agent_chunk_once() -> Result<()> {
     shutdown_stdio_acp_process(first).await;
     Ok(())
 }
+
+#[test]
+fn resume_replay_assertion_allows_only_non_transcript_updates() -> Result<()> {
+    for update in ["available_commands_update", "session_info_update"] {
+        assert_no_history_replay_before_response(&[
+            json!({"method": "session/update", "params": {
+                "sessionId": "session-test", "update": {"sessionUpdate": update}
+            }}),
+            json!({"jsonrpc": "2.0", "id": 5, "result": {}}),
+        ])?;
+    }
+    for update in [
+        "user_message_chunk",
+        "agent_message_chunk",
+        "agent_thought_chunk",
+        "tool_call",
+        "tool_call_update",
+        "plan",
+        "unknown_update",
+    ] {
+        let result = assert_no_history_replay_before_response(&[
+            json!({"method": "session/update", "params": {
+                "sessionId": "session-test", "update": {"sessionUpdate": update}
+            }}),
+            json!({"jsonrpc": "2.0", "id": 5, "result": {}}),
+        ]);
+        assert!(
+            result.is_err(),
+            "must still reject transcript/unknown update {update}"
+        );
+    }
+    Ok(())
+}
+
+#[test]
+fn resume_replay_assertion_checks_native_session_info_provenance() -> Result<()> {
+    let response = json!({"jsonrpc": "2.0", "id": 5, "result": {}});
+    let notification = |meta| {
+        json!({"method": "session/update", "params": {
+            "sessionId": "session-test", "update": {"sessionUpdate": "session_info_update"},
+            "_meta": meta
+        }})
+    };
+    assert_no_history_replay_before_response(&[
+        notification(json!({"devo/originalMethod": "session/usage/updated",
+            "devo/originalEvent": {"sessionId": "session-test", "usage": {}}})),
+        response.clone(),
+    ])?;
+    for method in [
+        "item/started",
+        "item/completed",
+        "item/updated",
+        "unknown/method",
+    ] {
+        let result = assert_no_history_replay_before_response(&[
+            notification(json!({"devo/originalMethod": method,
+                "devo/originalEvent": {"item": {"type": "assistantMessage", "text": "history"}}})),
+            response.clone(),
+        ]);
+        assert!(result.is_err(), "must reject wrapped Native event {method}");
+    }
+    for malformed in [
+        json!({"devo/originalEvent": {"item": {"type": "assistantMessage"}}}),
+        json!({"devo/originalMethod": null}),
+        json!({"devo/originalMethod": 123}),
+    ] {
+        assert!(
+            assert_no_history_replay_before_response(&[notification(malformed), response.clone()])
+                .is_err()
+        );
+    }
+    Ok(())
+}
