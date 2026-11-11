@@ -44,7 +44,7 @@ use support::start_turn_with_approval_policy;
 use support::wait_for_child_turn_started;
 use support::wait_for_parent_turn_completed;
 use support::wait_for_session_notification;
-use support::wait_for_stream_calls;
+use support::wait_for_task_stream_calls;
 
 const ADJECTIVES: &[&str] = &[
     "brave", "clever", "silent", "happy", "gentle", "swift", "bright", "lazy", "wild", "calm",
@@ -58,7 +58,7 @@ const NOUNS: &[&str] = &[
 #[tokio::test]
 async fn spawn_agent_generates_unique_child_name() -> Result<()> {
     let data_root = TempDir::new()?;
-    let provider = Arc::new(ScriptedProvider::new([
+    let provider = Arc::new(ScriptedProvider::for_agent_tasks([
         StreamScript::Pending,
         StreamScript::Pending,
     ]));
@@ -120,7 +120,7 @@ async fn spawn_agent_generates_unique_child_name() -> Result<()> {
 #[tokio::test]
 async fn spawn_agent_honors_requested_nickname_and_rejects_duplicates() -> Result<()> {
     let data_root = TempDir::new()?;
-    let provider = Arc::new(ScriptedProvider::new([StreamScript::Pending]));
+    let provider = Arc::new(ScriptedProvider::for_agent_tasks([StreamScript::Pending]));
     let runtime = build_runtime(data_root.path(), Arc::clone(&provider) as _)?;
     let (connection_id, mut notifications_rx) = initialize_connection(&runtime).await?;
     let parent_session_id = start_parent_session(&runtime, connection_id, data_root.path()).await?;
@@ -183,7 +183,7 @@ async fn spawn_agent_honors_requested_nickname_and_rejects_duplicates() -> Resul
 #[tokio::test]
 async fn rlm_spawn_via_ipython_returns_without_waiting_for_child_completion() -> Result<()> {
     let data_root = TempDir::new()?;
-    let provider = Arc::new(ScriptedProvider::new([
+    let provider = Arc::new(ScriptedProvider::for_agent_tasks([
         ScriptedProvider::ipython_code_tool_call(
             "child = await rlm.spawn('verify parent spawn returns', name='spawn-worker')\nprint(child.name, child.model)",
         ),
@@ -204,9 +204,9 @@ async fn rlm_spawn_via_ipython_returns_without_waiting_for_child_completion() ->
     .await?;
 
     wait_for_parent_turn_completed(&mut notifications_rx, parent_session_id).await?;
-    wait_for_stream_calls(&provider, 3).await?;
+    wait_for_task_stream_calls(&provider, 3).await?;
 
-    let requests = provider.requests();
+    let requests = provider.task_requests();
     assert_model_request_exposes_only_ipython(&requests[0]);
     assert_spawn_models_and_output(&requests, "spawn-worker test-model\n")?;
     let agents = request_agent_list(&runtime, connection_id, parent_session_id).await?;
@@ -223,7 +223,7 @@ async fn rlm_spawn_via_ipython_returns_without_waiting_for_child_completion() ->
 #[tokio::test]
 async fn two_rlm_spawns_in_one_ipython_cell_do_not_deadlock_parent_turn() -> Result<()> {
     let data_root = TempDir::new()?;
-    let provider = Arc::new(ScriptedProvider::new([
+    let provider = Arc::new(ScriptedProvider::for_agent_tasks([
         ScriptedProvider::ipython_code_tool_call(
             "first = await rlm.spawn('first delegated worker task', name='worker-one')\nsecond = await rlm.spawn('second delegated worker task', name='worker-two')\nprint(first.name, first.model, second.name, second.model)",
         ),
@@ -245,9 +245,9 @@ async fn two_rlm_spawns_in_one_ipython_cell_do_not_deadlock_parent_turn() -> Res
     .await?;
 
     wait_for_parent_turn_completed(&mut notifications_rx, parent_session_id).await?;
-    wait_for_stream_calls(&provider, 4).await?;
+    wait_for_task_stream_calls(&provider, 4).await?;
 
-    let requests = provider.requests();
+    let requests = provider.task_requests();
     assert_model_request_exposes_only_ipython(&requests[0]);
     assert_spawn_models_and_output(&requests, "worker-one test-model worker-two test-model\n")?;
     let agents = request_agent_list(&runtime, connection_id, parent_session_id).await?;
@@ -271,10 +271,10 @@ async fn two_rlm_spawns_in_one_ipython_cell_do_not_deadlock_parent_turn() -> Res
 #[tokio::test]
 async fn wait_agent_reports_child_output_and_terminal_status() -> Result<()> {
     let data_root = TempDir::new()?;
-    let provider = Arc::new(ScriptedProvider::new([ScriptedProvider::completed(
-        "child finished review",
-    )]));
-    let runtime = build_runtime(data_root.path(), provider as _)?;
+    let provider = Arc::new(ScriptedProvider::for_agent_tasks([
+        ScriptedProvider::completed("child finished review"),
+    ]));
+    let runtime = build_runtime(data_root.path(), provider.clone() as _)?;
     let (connection_id, mut notifications_rx) = initialize_connection(&runtime).await?;
     let parent_session_id = start_parent_session(&runtime, connection_id, data_root.path()).await?;
     let spawn_result = spawn_child(&runtime, connection_id, parent_session_id).await?;
@@ -311,6 +311,15 @@ async fn wait_agent_reports_child_output_and_terminal_status() -> Result<()> {
         ]
     );
 
+    support::wait_for_completion_requests(&provider, /*expected*/ 1).await?;
+    support::wait_for_session_idle(&runtime, connection_id, parent_session_id).await?;
+    let completions = provider.completion_requests();
+    assert_eq!(completions.len(), 1);
+    assert!(message_texts(&completions[0]).iter().any(|text| {
+        text.contains("child finished review")
+            && text.contains(spawn_result.child_session_id.as_str())
+    }));
+
     let agents = request_agent_list(&runtime, connection_id, parent_session_id).await?;
     assert_eq!(
         agents
@@ -327,9 +336,9 @@ async fn wait_agent_reports_child_output_and_terminal_status() -> Result<()> {
 #[tokio::test]
 async fn task_tools_include_agent_metadata_and_cancel_closes_agent() -> Result<()> {
     let data_root = TempDir::new()?;
-    let provider = Arc::new(ScriptedProvider::new([ScriptedProvider::completed(
-        "child task result",
-    )]));
+    let provider = Arc::new(ScriptedProvider::for_agent_tasks([
+        ScriptedProvider::completed("child task result"),
+    ]));
     let runtime = build_runtime(data_root.path(), provider as _)?;
     let (connection_id, mut notifications_rx) = initialize_connection(&runtime).await?;
     let parent_session_id = start_parent_session(&runtime, connection_id, data_root.path()).await?;
@@ -396,7 +405,7 @@ async fn task_tools_include_agent_metadata_and_cancel_closes_agent() -> Result<(
 #[tokio::test]
 async fn wait_agent_returns_accumulated_output_with_terminal_status() -> Result<()> {
     let data_root = TempDir::new()?;
-    let provider = Arc::new(ScriptedProvider::new([
+    let provider = Arc::new(ScriptedProvider::for_agent_tasks([
         ScriptedProvider::completed_with_deltas(&["alpha ", "beta"]),
     ]));
     let runtime = build_runtime(data_root.path(), provider as _)?;
@@ -458,9 +467,9 @@ async fn wait_agent_returns_accumulated_output_with_terminal_status() -> Result<
 async fn agent_wait_rpc_preserves_full_child_report() -> Result<()> {
     let data_root = TempDir::new()?;
     let full_report = format!("{}END_OF_LONG_SURVEY_REPORT", "survey finding ".repeat(900));
-    let provider = Arc::new(ScriptedProvider::new([ScriptedProvider::completed(
-        &full_report,
-    )]));
+    let provider = Arc::new(ScriptedProvider::for_agent_tasks([
+        ScriptedProvider::completed(&full_report),
+    ]));
     let runtime = build_runtime(data_root.path(), provider as _)?;
     let (connection_id, mut notifications_rx) = initialize_connection(&runtime).await?;
     let parent_session_id = start_parent_session(&runtime, connection_id, data_root.path()).await?;
@@ -490,7 +499,7 @@ async fn agent_wait_rpc_preserves_full_child_report() -> Result<()> {
 #[tokio::test]
 async fn send_message_to_idle_child_starts_user_turn() -> Result<()> {
     let data_root = TempDir::new()?;
-    let provider = Arc::new(ScriptedProvider::new([
+    let provider = Arc::new(ScriptedProvider::for_agent_tasks([
         ScriptedProvider::completed("initial child result"),
         StreamScript::Pending,
     ]));
@@ -516,9 +525,9 @@ async fn send_message_to_idle_child_starts_user_turn() -> Result<()> {
     assert_eq!(delivered.task_id, child.task_id);
     assert!(delivered.delivered);
     wait_for_child_turn_started(&mut notifications_rx, child.child_session_id).await?;
-    wait_for_stream_calls(&provider, 2).await?;
+    wait_for_task_stream_calls(&provider, 2).await?;
 
-    let requests = provider.requests();
+    let requests = provider.task_requests();
     let followup_texts = message_texts(&requests[1]);
     assert!(
         followup_texts
@@ -541,7 +550,7 @@ async fn send_message_to_idle_child_starts_user_turn() -> Result<()> {
 #[tokio::test]
 async fn send_message_to_active_child_drains_after_turn() -> Result<()> {
     let data_root = TempDir::new()?;
-    let provider = Arc::new(ScriptedProvider::new([
+    let provider = Arc::new(ScriptedProvider::for_agent_tasks([
         ScriptedProvider::completed_after(Duration::from_millis(200), "initial child result"),
         StreamScript::Pending,
     ]));
@@ -550,7 +559,7 @@ async fn send_message_to_active_child_drains_after_turn() -> Result<()> {
     let parent_session_id = start_parent_session(&runtime, connection_id, data_root.path()).await?;
     let child = spawn_child(&runtime, connection_id, parent_session_id).await?;
     wait_for_child_turn_started(&mut notifications_rx, child.child_session_id).await?;
-    wait_for_stream_calls(&provider, 1).await?;
+    wait_for_task_stream_calls(&provider, 1).await?;
 
     let delivered = request_agent_send_message(
         &runtime,
@@ -563,7 +572,7 @@ async fn send_message_to_active_child_drains_after_turn() -> Result<()> {
     assert_eq!(delivered.task_id, child.task_id);
     assert!(delivered.delivered);
     tokio::time::sleep(Duration::from_millis(50)).await;
-    assert_eq!(provider.stream_calls(), 1);
+    assert_eq!(provider.task_stream_calls(), 1);
 
     wait_for_session_notification(
         &mut notifications_rx,
@@ -572,9 +581,9 @@ async fn send_message_to_active_child_drains_after_turn() -> Result<()> {
     )
     .await?;
     wait_for_child_turn_started(&mut notifications_rx, child.child_session_id).await?;
-    wait_for_stream_calls(&provider, 2).await?;
+    wait_for_task_stream_calls(&provider, 2).await?;
 
-    let requests = provider.requests();
+    let requests = provider.task_requests();
     let queued_texts = message_texts(&requests[1]);
     assert!(
         queued_texts
@@ -597,9 +606,9 @@ async fn send_message_to_active_child_drains_after_turn() -> Result<()> {
 #[tokio::test]
 async fn child_to_parent_message_is_rejected() -> Result<()> {
     let data_root = TempDir::new()?;
-    let provider = Arc::new(ScriptedProvider::new([ScriptedProvider::completed(
-        "child done",
-    )]));
+    let provider = Arc::new(ScriptedProvider::for_agent_tasks([
+        ScriptedProvider::completed("child done"),
+    ]));
     let runtime = build_runtime(data_root.path(), provider as _)?;
     let (connection_id, mut notifications_rx) = initialize_connection(&runtime).await?;
     let parent_session_id = start_parent_session(&runtime, connection_id, data_root.path()).await?;
@@ -637,7 +646,7 @@ async fn close_agent_records_closed_output_event_once() -> Result<()> {
         .with_test_writer()
         .try_init();
     let data_root = TempDir::new()?;
-    let provider = Arc::new(ScriptedProvider::pending());
+    let provider = Arc::new(ScriptedProvider::pending_agent_tasks());
     let runtime = build_runtime(data_root.path(), provider as _)?;
     let (connection_id, mut notifications_rx) = initialize_connection(&runtime).await?;
     let parent_session_id = start_parent_session(&runtime, connection_id, data_root.path()).await?;
@@ -688,7 +697,7 @@ async fn close_agent_records_closed_output_event_once() -> Result<()> {
 #[tokio::test]
 async fn invalid_agent_requests_return_invalid_params() -> Result<()> {
     let data_root = TempDir::new()?;
-    let provider = Arc::new(ScriptedProvider::new([]));
+    let provider = Arc::new(ScriptedProvider::for_agent_tasks([]));
     let runtime = build_runtime(data_root.path(), provider as _)?;
     let (connection_id, _) = initialize_connection(&runtime).await?;
     let parent_session_id = start_parent_session(&runtime, connection_id, data_root.path()).await?;
@@ -768,7 +777,7 @@ async fn invalid_agent_requests_return_invalid_params() -> Result<()> {
 #[tokio::test]
 async fn ephemeral_deny_all_child_agent_has_no_tools_and_one_turn() -> Result<()> {
     let data_root = TempDir::new()?;
-    let provider = Arc::new(ScriptedProvider::new([
+    let provider = Arc::new(ScriptedProvider::for_agent_tasks([
         ScriptedProvider::completed("side answer"),
         ScriptedProvider::completed("should not run"),
     ]));
@@ -790,7 +799,7 @@ async fn ephemeral_deny_all_child_agent_has_no_tools_and_one_turn() -> Result<()
         })
         .await?;
     wait_for_child_turn_started(&mut notifications_rx, child.child_session_id).await?;
-    wait_for_stream_calls(&provider, 1).await?;
+    wait_for_task_stream_calls(&provider, 1).await?;
     wait_for_session_notification(
         &mut notifications_rx,
         "turn/completed",
@@ -798,27 +807,54 @@ async fn ephemeral_deny_all_child_agent_has_no_tools_and_one_turn() -> Result<()
     )
     .await?;
 
-    let requests = provider.requests();
+    let requests = provider.task_requests();
     assert_eq!(requests.len(), 1);
     assert!(
         requests[0].tools.as_deref().unwrap_or_default().is_empty(),
         "DenyAll child must receive no wire tools"
     );
 
-    let error = Arc::clone(&runtime)
+    let delivered = Arc::clone(&runtime)
         .send_message(devo_protocol::AgentMessageParams {
             session_id: parent_session_id,
             target: child.child_session_id.to_string(),
             message: "try a second turn".to_string(),
         })
+        .await?;
+    assert!(delivered.delivered);
+    let queue = runtime
+        .handle_incoming(
+            connection_id,
+            serde_json::json!({
+                "id":"held-child-input", "method":"session/queue/list",
+                "params":{"sessionId":child.child_session_id}
+            }),
+        )
         .await
-        .expect_err("second turn should be rejected");
-    assert!(
-        error
-            .to_string()
-            .contains("agent maximum turn count reached")
+        .context("read held child input")?;
+    let entries = queue["result"]["entries"]
+        .as_array()
+        .context("child inbox entries")?;
+    assert_eq!(entries.len(), 1);
+    assert_eq!(entries[0]["recoveryRequired"], true);
+    assert_eq!(
+        entries[0]["input"],
+        serde_json::json!([{"type":"text","text":"try a second turn"}])
     );
-    assert_eq!(provider.stream_calls(), 1);
+    support::wait_for_completion_requests(&provider, /*expected*/ 1).await?;
+    support::wait_for_session_idle(&runtime, connection_id, parent_session_id).await?;
+    let read = runtime
+        .handle_incoming(
+            connection_id,
+            serde_json::json!({
+                "id":"single-child-turn", "method":"session/read",
+                "params":{"sessionId":child.child_session_id}
+            }),
+        )
+        .await
+        .context("read capped child")?;
+    assert_eq!(read["result"]["session"]["status"], "idle");
+    assert_eq!(provider.task_stream_calls(), 1);
 
     Ok(())
 }
@@ -826,7 +862,7 @@ async fn ephemeral_deny_all_child_agent_has_no_tools_and_one_turn() -> Result<()
 #[tokio::test]
 async fn fork_all_inherits_stable_parent_context() -> Result<()> {
     let data_root = TempDir::new()?;
-    let provider = Arc::new(ScriptedProvider::new([
+    let provider = Arc::new(ScriptedProvider::for_agent_tasks([
         ScriptedProvider::completed("stable assistant answer"),
         ScriptedProvider::completed("child saw inherited context"),
         StreamScript::Pending,
@@ -860,6 +896,9 @@ async fn fork_all_inherits_stable_parent_context() -> Result<()> {
     )
     .await?;
 
+    support::wait_for_completion_requests(&provider, /*expected*/ 1).await?;
+    support::wait_for_session_idle(&runtime, connection_id, parent_session_id).await?;
+
     let _ = start_turn(
         &runtime,
         connection_id,
@@ -877,9 +916,9 @@ async fn fork_all_inherits_stable_parent_context() -> Result<()> {
     )
     .await?;
     wait_for_child_turn_started(&mut notifications_rx, active_child.child_session_id).await?;
-    wait_for_stream_calls(&provider, 4).await?;
+    wait_for_task_stream_calls(&provider, 4).await?;
 
-    let requests = provider.requests();
+    let requests = provider.task_requests();
     assert_eq!(requests.len(), 4);
     // Parent turn 2 and the active-fork child start concurrently, so provider
     // request order is not stable; locate each turn by its task text.
@@ -957,7 +996,7 @@ async fn fork_all_inherits_stable_parent_context() -> Result<()> {
 #[tokio::test]
 async fn fork_none_omits_parent_context_and_places_reminder_before_task() -> Result<()> {
     let data_root = TempDir::new()?;
-    let provider = Arc::new(ScriptedProvider::new([
+    let provider = Arc::new(ScriptedProvider::for_agent_tasks([
         ScriptedProvider::completed("stable assistant answer"),
         StreamScript::Pending,
     ]));
@@ -983,9 +1022,9 @@ async fn fork_none_omits_parent_context_and_places_reminder_before_task() -> Res
     )
     .await?;
     wait_for_child_turn_started(&mut notifications_rx, child.child_session_id).await?;
-    wait_for_stream_calls(&provider, 2).await?;
+    wait_for_task_stream_calls(&provider, 2).await?;
 
-    let requests = provider.requests();
+    let requests = provider.task_requests();
     assert_eq!(requests.len(), 2);
     let child_texts = message_texts(&requests[1]);
     assert_subagent_request_hides_agent_tools(&requests[1]);

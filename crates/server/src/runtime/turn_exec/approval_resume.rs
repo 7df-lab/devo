@@ -67,6 +67,7 @@ fn admit_restored_scope(
 
 impl ServerRuntime {
     /// Handles a native approval response on a restored lane (no live turn task).
+    #[allow(clippy::too_many_arguments)]
     pub(crate) async fn resolve_approval_from_control_response(
         self: &Arc<Self>,
         host_session_id: SessionId,
@@ -75,6 +76,7 @@ impl ServerRuntime {
         approval_id: &str,
         decision: ApprovalDecisionValue,
         scope: devo_protocol::ApprovalScopeValue,
+        interrupt_generation: u64,
     ) {
         let checkpoint = self
             .checkpoint_for_approval(owner_session_id, approval_id)
@@ -133,6 +135,7 @@ impl ServerRuntime {
             &available_scopes,
             &persisted,
             checkpoint,
+            interrupt_generation,
         )
         .await;
     }
@@ -211,6 +214,7 @@ impl ServerRuntime {
         available_scopes: &[String],
         persisted: &PersistedLivingItem,
         checkpoint: Option<TurnApprovalCheckpointRecordedRecord>,
+        interrupt_generation: u64,
     ) {
         use devo_protocol::native::item::{ApprovalDecision, ApprovalDecisionSource};
         let (decision, scope, unsupported_reason) = admit_restored_scope(
@@ -372,6 +376,7 @@ impl ServerRuntime {
                     checkpoint,
                     &request,
                     &approval_id,
+                    interrupt_generation,
                 )
                 .await
             {
@@ -392,6 +397,7 @@ impl ServerRuntime {
         checkpoint: TurnApprovalCheckpointRecordedRecord,
         request: &devo_core::tools::ToolPermissionRequest,
         approval_id: &str,
+        interrupt_generation: u64,
     ) -> Result<(), String> {
         let session_id = owner_session_id;
         let handle = self
@@ -420,24 +426,15 @@ impl ServerRuntime {
         let turn_config = self
             .turn_config_from_checkpoint(&checkpoint, &handle)
             .await?;
-        if !self
-            .active_turns
-            .try_claim_session(session_id, turn.native.clone())
-            .await
-        {
-            return Err("turn already active".to_string());
-        }
         let cancel_token = self
-            .register_active_runtime_turn_execution(session_id, turn.clone(), None)
-            .await;
-        let began = handle
-            .try_begin_runtime_turn(turn.clone(), turn_config.clone())
-            .await
-            .unwrap_or(false);
-        if !began {
-            self.clear_active_turn_runtime_handles(session_id).await;
-            return Err("failed to begin active turn".to_string());
-        }
+            .admit_approval_continuation(
+                session_id,
+                &handle,
+                &turn,
+                &turn_config,
+                interrupt_generation,
+            )
+            .await?;
         let turn_id = checkpoint.turn_id;
         let continuation_result = self
             .run_approval_continuation(
@@ -470,6 +467,43 @@ impl ServerRuntime {
             );
         }
         continuation_result.map(|_| ())
+    }
+
+    async fn admit_approval_continuation(
+        &self,
+        session_id: SessionId,
+        handle: &super::super::session_actor::SessionHandle,
+        turn: &crate::turn::RuntimeTurn,
+        turn_config: &TurnConfig,
+        interrupt_generation: u64,
+    ) -> Result<CancellationToken, String> {
+        // Serialize control resumption with interrupt and ordinary admission.
+        // Actor validation below rejects a checkpoint superseded or terminated
+        // while its configuration was being resolved.
+        let admission = handle.lock_state_change().await;
+        if self.input_interrupt_generation(session_id) != interrupt_generation {
+            return Err("approval continuation superseded by interrupt".to_string());
+        }
+        if !self
+            .active_turns
+            .try_claim_session(session_id, turn.native.clone())
+            .await
+        {
+            return Err("turn already active".to_string());
+        }
+        let began = handle
+            .try_resume_runtime_turn(turn.clone(), turn_config.clone())
+            .await
+            .unwrap_or(false);
+        if !began {
+            self.clear_active_turn_runtime_handles(session_id).await;
+            return Err("failed to begin active turn".to_string());
+        }
+        let cancel_token = self
+            .register_active_runtime_turn_execution(session_id, turn.clone(), None)
+            .await;
+        drop(admission);
+        Ok(cancel_token)
     }
 
     #[allow(clippy::too_many_arguments)]
@@ -893,6 +927,13 @@ impl ServerRuntime {
         session_id: SessionId,
         history: &devo_core::CanonicalHistory,
     ) {
+        // Re-reading an old persisted decision is not a new explicit approval.
+        // Read the generation first: an interrupt between these reads must
+        // either be observed as suspended or invalidate admission's comparison.
+        let interrupt_generation = self.input_interrupt_generation(session_id);
+        if self.background_input_suspended(session_id) {
+            return;
+        }
         let checkpoints = &history.approval_checkpoints;
         let Some(latest_turn) = history.turns.last() else {
             return;
@@ -933,6 +974,7 @@ impl ServerRuntime {
                     &recovered.available_scopes,
                     &recovered.persisted,
                     Some(checkpoint),
+                    interrupt_generation,
                 )
                 .await;
             }
@@ -1031,6 +1073,117 @@ impl ServerRuntime {
 #[cfg(test)]
 mod admission_tests {
     use super::*;
+
+    #[tokio::test]
+    async fn delayed_approval_resume_cannot_undo_a_newer_interrupt() -> anyhow::Result<()> {
+        use anyhow::Context;
+        use serde_json::json;
+        let home = tempfile::tempdir()?;
+        let runtime = crate::test_support::TestRuntime::noop_empty()
+            .with_test_model()
+            .runtime(home.path());
+        let (tx, mut rx) = crate::test_outbound_channel(256);
+        let connection = runtime
+            .register_connection(crate::ClientTransportKind::Stdio, tx)
+            .await;
+        let drain = tokio::spawn(async move { while rx.recv().await.is_some() {} });
+        runtime.handle_incoming(connection, json!({"id":1,"method":"initialize","params":{
+            "protocolVersion":1,"clientCapabilities":{},"_meta":{"devo":{"protocol":"native"}},
+            "clientInfo":{"name":"approval-race","title":"test","version":"1"}
+        }})).await;
+        let created = runtime
+            .handle_incoming(
+                connection,
+                json!({"id":2,"method":"session/new","params":{
+                    "cwd":home.path(),"idempotencyKey":"approval-race-session"
+                }}),
+            )
+            .await
+            .context("session")?;
+        let session = SessionId::from(created["result"]["session"]["id"].as_str().context("id")?);
+        let started = runtime.handle_incoming(connection, json!({"id":3,"method":"turn/start","params":{
+            "sessionId":session,"input":[{"type":"text","text":"seed turn"}],"idempotencyKey":"approval-race-turn"
+        }})).await.context("turn")?;
+        assert!(started.get("error").is_none(), "{started}");
+        tokio::time::timeout(std::time::Duration::from_secs(10), async {
+            while runtime.active_turns.has_session(session).await {
+                tokio::task::yield_now().await;
+            }
+        })
+        .await?;
+        let handle = runtime.session(session).await.context("actor")?;
+        let snapshot = handle
+            .turn_reservation_snapshot()
+            .await
+            .context("snapshot")?;
+        let config =
+            snapshot
+                .runtime_context
+                .resolve_session_turn_config(&snapshot.summary, None, None)?;
+        let mut turn = snapshot.latest_turn.context("latest")?;
+        turn.native.status = devo_protocol::native::turn::TurnStatus::WaitingApproval;
+        handle.set_runtime_session_idle(Some(turn.clone())).await;
+
+        // The approval was accepted before an asynchronous configuration read.
+        let old_generation = runtime.input_interrupt_generation(session);
+        let interrupted = runtime
+            .handle_incoming(
+                connection,
+                json!({"id":4,"method":"session/interrupt",
+                    "params":{"scope":{"scope":"session","sessionId":session}}
+                }),
+            )
+            .await
+            .context("interrupt")?;
+        assert!(interrupted.get("error").is_none(), "{interrupted}");
+        assert!(runtime.background_input_suspended(session));
+        let failed = runtime
+            .admit_approval_continuation(session, &handle, &turn, &config, old_generation)
+            .await;
+        assert!(failed.unwrap_err().contains("superseded by interrupt"));
+        assert!(!runtime.active_turns.has_session(session).await);
+        assert!(
+            handle
+                .turn_reservation_snapshot()
+                .await
+                .unwrap()
+                .active_turn
+                .is_none()
+        );
+        assert!(runtime.background_input_suspended(session));
+
+        // LRU work cleanup must not reset the epoch and resurrect an old
+        // callback if that session actor is later reloaded in this process.
+        runtime.evict_parent_session_cascade(session).await;
+        assert!(runtime.session(session).await.is_none());
+        let handle = runtime
+            .get_or_load_parent_session(session)
+            .await
+            .map_err(|error| anyhow::anyhow!("reload failed: {error:?}"))?;
+        // Recreate the same waiting checkpoint state in the new actor. The
+        // epoch, unlike actor memory, must still reject the old callback.
+        handle.set_runtime_session_idle(Some(turn.clone())).await;
+        assert_ne!(runtime.input_interrupt_generation(session), old_generation);
+        let failed = runtime
+            .admit_approval_continuation(session, &handle, &turn, &config, old_generation)
+            .await;
+        assert!(failed.unwrap_err().contains("superseded by interrupt"));
+        assert!(!runtime.active_turns.has_session(session).await);
+
+        // A genuinely newer explicit approval may resume the same checkpoint.
+        let new_generation = runtime.input_interrupt_generation(session);
+        let token = runtime
+            .admit_approval_continuation(session, &handle, &turn, &config, new_generation)
+            .await
+            .map_err(anyhow::Error::msg)?;
+        assert!(runtime.active_turns.has_session(session).await);
+        assert!(!runtime.background_input_suspended(session));
+        token.cancel();
+        runtime.clear_active_turn_runtime_handles(session).await;
+        handle.clear_active_turn_if_matches(turn.turn_id()).await;
+        drain.abort();
+        Ok(())
+    }
 
     #[test]
     fn restored_windows_path_prefix_never_records_approved_decision() {

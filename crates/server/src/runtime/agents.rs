@@ -962,25 +962,19 @@ impl ServerRuntime {
         // round-trip or holding the stream lock while publishing completion.
         let detail = {
             let stream = state.stream.lock().await;
-            stream
+            let inline_items = stream
                 .turn_inline
                 .as_ref()
                 .filter(|inline| inline.turn_id == turn.native.id)
-                .and_then(|inline| {
-                    subagent_terminal_status_detail_from_stable_items(
-                        &inline.persisted_turn_items,
-                        turn.native.id,
-                        status,
-                    )
-                })
-        }
-        .or_else(|| {
-            subagent_terminal_status_detail_from_stable_items(
+                .map(|inline| inline.persisted_turn_items.as_slice())
+                .unwrap_or_default();
+            subagent_terminal_status_detail_from_items(
                 &state.persisted_turn_items,
+                inline_items,
                 turn.native.id,
                 status,
             )
-        });
+        };
         self.set_agent_status(parent_session_id, child_session_id, status)
             .await;
         self.record_subagent_status_event_with_text(
@@ -1039,7 +1033,7 @@ impl ServerRuntime {
     ) -> Option<String> {
         let session_handle = self.sessions.lock().await.get(&child_session_id).cloned()?;
         let snapshot = session_handle.spawn_snapshot().await?;
-        subagent_terminal_status_detail_from_stable_items(&snapshot.stable_items, turn_id, status)
+        subagent_terminal_status_detail_from_items(&snapshot.stable_items, &[], turn_id, status)
     }
 
     pub(super) async fn child_parent_and_path(
@@ -1077,7 +1071,7 @@ impl ServerRuntime {
             sequence: 0,
             child_session_id,
             agent_path,
-            turn_id: None,
+            turn_id: self.runtime_active_turn_id(child_session_id).await,
             kind: devo_protocol::AgentOutputEventKind::AssistantMessage,
             text: Some(delta.delta.clone()),
             status: None,
@@ -1146,6 +1140,8 @@ impl ServerRuntime {
                 agent_path,
                 turn_id: Some(turn_id),
                 kind: devo_protocol::AgentOutputEventKind::Status,
+                // The buffer reconciles the full successful snapshot with any
+                // streamed fragments before appending a text-free status event.
                 text,
                 status: Some(status.as_str().to_string()),
                 created_at: Utc::now(),
@@ -1775,27 +1771,47 @@ fn subagent_stop_hook_applies(status: SubagentStatus) -> bool {
     )
 }
 
-fn subagent_terminal_status_detail_from_stable_items(
+fn subagent_terminal_status_detail_from_items(
     stable_items: &[crate::execution::PersistedTurnItem],
+    inline_items: &[crate::execution::PersistedTurnItem],
     turn_id: devo_protocol::native::ids::TurnId,
     status: SubagentStatus,
 ) -> Option<String> {
     if matches!(status, SubagentStatus::Spawning | SubagentStatus::Running) {
         return None;
     }
-    stable_items.iter().rev().find_map(|item| {
-        if item.turn_id != turn_id {
-            return None;
+    // wait_agent accumulates all assistant output from the turn, including
+    // earlier tool rounds. The terminal snapshot must repair that whole text,
+    // not replace it with only the last assistant message.
+    // Approval resume can preserve this turn's early messages in actor state
+    // while later messages are still inline. Prefer the live revision for a
+    // shared item id, retaining the original message order across the boundary.
+    let mut positions = std::collections::HashMap::new();
+    let mut items = Vec::new();
+    for item in stable_items
+        .iter()
+        .chain(inline_items)
+        .filter(|item| item.turn_id == turn_id)
+    {
+        if let Some(index) = positions.get(&item.item_id) {
+            items[*index] = item;
+        } else {
+            positions.insert(item.item_id, items.len());
+            items.push(item);
         }
-        match &item.item {
+    }
+    let text: String = items
+        .into_iter()
+        .filter_map(|item| match &item.item {
             devo_protocol::native::item::Item::AssistantMessage { text, .. }
                 if !text.trim().is_empty() =>
             {
-                Some(text.trim().to_string())
+                Some(text.as_str())
             }
             _ => None,
-        }
-    })
+        })
+        .collect();
+    (!text.is_empty()).then_some(text)
 }
 
 fn generated_name_start_index(child_session_id: SessionId, max_count: usize) -> usize {
@@ -1807,3 +1823,7 @@ fn generated_name_start_index(child_session_id: SessionId, max_count: usize) -> 
         })
         % max_count
 }
+
+#[cfg(test)]
+#[path = "agents/completion_snapshot_tests.rs"]
+mod completion_snapshot_tests;

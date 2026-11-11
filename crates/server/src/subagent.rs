@@ -295,6 +295,7 @@ pub struct SubagentOutputBuffer {
 #[derive(Debug, Default)]
 struct OutputBufferInner {
     next_sequence: u64,
+    observed_through: u64,
     events: VecDeque<AgentOutputEvent>,
 }
 
@@ -309,6 +310,7 @@ impl SubagentOutputBuffer {
         Self {
             inner: Arc::new(Mutex::new(OutputBufferInner {
                 next_sequence: 1,
+                observed_through: 0,
                 events: VecDeque::new(),
             })),
             notify: Arc::new(Notify::new()),
@@ -317,6 +319,49 @@ impl SubagentOutputBuffer {
 
     pub async fn push(&self, mut event: AgentOutputEvent) -> AgentOutputEvent {
         let mut inner = self.inner.lock().await;
+        if event.kind == AgentOutputEventKind::Status
+            && event.status.as_deref() == Some("completed")
+            && let Some(text) = event.text.take()
+        {
+            // Deltas are lossy and different children may interleave. Replace
+            // this turn's fragments with its authoritative final snapshot.
+            let matching = inner.events.iter().filter(|existing| {
+                existing.kind == AgentOutputEventKind::AssistantMessage
+                    && existing.child_session_id == event.child_session_id
+                    && existing.turn_id == event.turn_id
+            });
+            let first_sequence = matching.clone().map(|existing| existing.sequence).min();
+            let already_observed = matching
+                .clone()
+                .any(|existing| existing.sequence <= inner.observed_through);
+            inner.events.retain(|existing| {
+                !(existing.kind == AgentOutputEventKind::AssistantMessage
+                    && existing.child_session_id == event.child_session_id
+                    && existing.turn_id == event.turn_id)
+            });
+            let sequence = if let Some(sequence) = first_sequence.filter(|_| !already_observed) {
+                sequence
+            } else {
+                let sequence = inner.next_sequence;
+                inner.next_sequence = inner.next_sequence.saturating_add(1);
+                sequence
+            };
+            let snapshot = AgentOutputEvent {
+                sequence,
+                kind: AgentOutputEventKind::AssistantMessage,
+                text: Some(text),
+                status: None,
+                ..event.clone()
+            };
+            // An unobserved fragment keeps its sequence. An already observed
+            // fragment needs a new sequence so cursor readers see the repair.
+            let position = inner
+                .events
+                .iter()
+                .position(|existing| existing.sequence > sequence)
+                .unwrap_or(inner.events.len());
+            inner.events.insert(position, snapshot);
+        }
         if event.kind.is_assistant_text() {
             event.kind = AgentOutputEventKind::AssistantMessage;
             if let Some(last) = inner.events.back_mut()
@@ -434,14 +479,19 @@ impl SubagentOutputBuffer {
         after_sequence: u64,
         target_session_ids: &HashSet<SessionId>,
     ) -> (Vec<AgentOutputEvent>, u64) {
-        let inner = self.inner.lock().await;
-        let events = inner
+        let mut inner = self.inner.lock().await;
+        let events: Vec<_> = inner
             .events
             .iter()
             .filter(|event| event.sequence > after_sequence)
             .filter(|event| target_session_ids.contains(&event.child_session_id))
             .cloned()
             .collect();
+        if events.iter().any(is_terminal_agent_output_event)
+            && let Some(sequence) = events.last().map(|event| event.sequence)
+        {
+            inner.observed_through = inner.observed_through.max(sequence);
+        }
         (events, inner.next_sequence)
     }
 }
@@ -473,6 +523,10 @@ pub enum SubagentError {
 }
 
 // ── Tests ───────────────────────────────────────────────────────────
+
+#[cfg(test)]
+#[path = "subagent/completion_tests.rs"]
+mod completion_tests;
 
 #[cfg(test)]
 mod tests {

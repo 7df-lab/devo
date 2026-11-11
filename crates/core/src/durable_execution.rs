@@ -5,6 +5,12 @@ use serde::{Deserialize, Serialize};
 
 use crate::ResponseItem;
 
+/// Local accounting/journal failure after a model call. Retrying the remote
+/// provider cannot repair local storage and may duplicate a successful call.
+#[derive(Debug, thiserror::Error)]
+#[error("failed to persist model-call accounting: {0:#}")]
+pub struct ModelCallPersistenceError(#[source] pub anyhow::Error);
+
 /// One atomic execution fact. Calls are accepted only after complete model assembly.
 #[derive(Debug, Clone, PartialEq, Serialize, Deserialize)]
 #[serde(tag = "type", rename_all = "camelCase")]
