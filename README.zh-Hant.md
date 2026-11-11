@@ -61,11 +61,8 @@ devo
 **Anthropic Messages** API。內建目錄包含 DeepSeek、Qwen、Kimi、GLM 和 MiniMax。
 用 `/model` 切換模型，用 `devo onboard` 重新設定供應商。
 
-手動設定、憑證、MCP、離線安裝和發行鏡像請見[使用指南（英文）](./docs/user-guide.md)。
-
 ## 文件與貢獻
 
-- [使用指南（英文）](./docs/user-guide.md) — 安裝、供應商、設定與離線使用。
 - [TUI 指南（英文）](./apps/tui/README.md) — 終端操作與命令。
 - [貢獻指南（英文）](./CONTRIBUTING.md) — 歡迎問題回報、文件改進和小範圍修正。
 
