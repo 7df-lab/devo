@@ -7,11 +7,11 @@ import { Badge } from "@devo/ui/components/badge"
 import { Button } from "@devo/ui/components/button"
 import { Switch } from "@devo/ui/components/switch"
 import { useMutation, useQuery, useQueryClient } from "@tanstack/react-query"
-import { useAtomValue } from "jotai"
+import { useAtomValue, useStore } from "jotai"
 import { PlugIcon, PlusIcon, RefreshCwIcon } from "lucide-react"
-import { useState } from "react"
+import { useRef, useState } from "react"
 import { toast } from "sonner"
-import { serverConnectedAtom } from "../../atoms/connection"
+import { activeServerIdAtom, serverConnectedAtom } from "../../atoms/connection"
 import { discoveryAtom } from "../../atoms/discovery"
 import { openMcpConfigFile } from "../../services/backend"
 import { getBaseClient, getProjectClient } from "../../services/connection-manager"
@@ -37,28 +37,43 @@ function mcpServerEnabled(status: string): boolean {
 	return status !== "disabled"
 }
 
-function useMcpClient() {
-	const connected = useAtomValue(serverConnectedAtom)
-	const discovery = useAtomValue(discoveryAtom)
-	const directory = discovery.projects[0]?.worktree ?? null
-	const client = (directory ? getProjectClient(directory) : null) ?? getBaseClient()
-	return { client, connected, directory }
-}
-
-export function McpSettings({
-	embedded = false,
-	searchQuery = "",
-}: {
+interface McpSettingsProps {
 	embedded?: boolean
 	searchQuery?: string
-}) {
-	const { client, connected, directory } = useMcpClient()
+}
+
+export function McpSettings(props: McpSettingsProps) {
+	const discovery = useAtomValue(discoveryAtom)
+	const directory = discovery.projects[0]?.worktree ?? null
+	const serverId = useAtomValue(activeServerIdAtom)
+	return (
+		<McpSettingsContent
+			key={JSON.stringify([serverId, directory])}
+			{...props}
+			directory={directory}
+			serverId={serverId}
+		/>
+	)
+}
+
+function McpSettingsContent({
+	embedded = false,
+	searchQuery = "",
+	directory,
+	serverId,
+}: McpSettingsProps & { directory: string | null; serverId: string }) {
+	const connected = useAtomValue(serverConnectedAtom)
+	const store = useStore()
+	const client = connected
+		? ((directory ? getProjectClient(directory) : null) ?? getBaseClient())
+		: null
+	const submitting = useRef(false)
 	const queryClient = useQueryClient()
 	const [expanded, setExpanded] = useState<string | null>(null)
 	const [openingConfig, setOpeningConfig] = useState(false)
 
 	const { data: servers = [], isLoading, error, refetch } = useQuery({
-		queryKey: ["mcp-servers", directory],
+		queryKey: ["mcp-servers", directory, serverId],
 		queryFn: async (): Promise<McpServerRow[]> => {
 			if (!client) return []
 			const result = await client.mcp.list()
@@ -76,7 +91,7 @@ export function McpSettings({
 		isLoading: toolsLoading,
 		error: toolsError,
 	} = useQuery({
-		queryKey: ["mcp-tools", directory, expanded],
+		queryKey: ["mcp-tools", directory, expanded, serverId],
 		queryFn: async (): Promise<McpToolRow[]> => {
 			if (!client || !expanded) return []
 			const result = await client.mcp.tools({ name: expanded })
@@ -85,7 +100,7 @@ export function McpSettings({
 				name: String(tool.name ?? ""),
 				description: String(tool.description ?? ""),
 			}))
-			void queryClient.invalidateQueries({ queryKey: ["mcp-servers"] })
+			void queryClient.invalidateQueries({ queryKey: ["mcp-servers", directory, serverId] })
 			return mapped
 		},
 		enabled: connected && !!client && !!expanded,
@@ -93,14 +108,43 @@ export function McpSettings({
 
 	const toggle = useMutation({
 		mutationFn: async (params: { name: string; enabled: boolean }) => {
-			if (!client) throw new Error("Not connected")
-			await client.mcp.setEnabled(params)
+			if (!store.get(serverConnectedAtom)) throw new Error("Reconnect to change MCP servers.")
+			if (
+				store.get(activeServerIdAtom) !== serverId ||
+				(store.get(discoveryAtom).projects[0]?.worktree ?? null) !== directory
+			) {
+				throw new Error("The active workspace changed. Try again from the current workspace.")
+			}
+			const currentClient = (directory ? getProjectClient(directory) : null) ?? getBaseClient()
+			if (!currentClient) throw new Error("Reconnect to change MCP servers.")
+			await currentClient.mcp.setEnabled(params)
 		},
-		onSuccess: () => {
-			void queryClient.invalidateQueries({ queryKey: ["mcp-servers"] })
-			void queryClient.invalidateQueries({ queryKey: ["mcp-tools"] })
+		retry: false,
+		onSuccess: (_, params) => {
+			if (!params.enabled) {
+				setExpanded((current) => (current === params.name ? null : current))
+			}
+		},
+		onSettled: async (_, __, params) => {
+			await Promise.all([
+				queryClient.invalidateQueries({ queryKey: ["mcp-servers", directory, serverId] }),
+				queryClient.invalidateQueries({ queryKey: ["mcp-tools", directory, params.name, serverId] }),
+			])
 		},
 	})
+
+	function submit(params: { name: string; enabled: boolean }) {
+		if (submitting.current || !store.get(serverConnectedAtom)) return
+		submitting.current = true
+		void toggle
+			.mutateAsync(params)
+			.catch(() => {
+				// Keep the original intent available in the inline retry message.
+			})
+			.finally(() => {
+				submitting.current = false
+			})
+	}
 
 	const openMcpConfig = async () => {
 		if (!isElectron) {
@@ -157,6 +201,32 @@ export function McpSettings({
 			)}
 
 			<SettingsSection title="Servers" action={embedded ? addButton : undefined}>
+				{!connected && (
+					<SettingsRow label="Runtime disconnected" description="Reconnect to change MCP servers.">
+						<output className="text-xs text-muted-foreground">Offline</output>
+					</SettingsRow>
+				)}
+				{toggle.isError && toggle.variables && (
+					<div role="alert">
+						<SettingsRow
+							label={`Failed to ${toggle.variables.enabled ? "enable" : "disable"} ${toggle.variables.name}`}
+							description={
+								toggle.error instanceof Error
+									? toggle.error.message
+									: "Could not update the MCP server. Try again."
+							}
+						>
+							<Button
+								size="sm"
+								variant="outline"
+								disabled={!connected || !client}
+								onClick={() => toggle.variables && submit(toggle.variables)}
+							>
+								Retry
+							</Button>
+						</SettingsRow>
+					</div>
+				)}
 				{isLoading && (
 					<SettingsRow label="Loading" description="Fetching MCP server status">
 						<RefreshCwIcon className="size-4 animate-spin text-muted-foreground" />
@@ -164,12 +234,17 @@ export function McpSettings({
 				)}
 				{error && (
 					<SettingsRow label="Failed to load servers" description={String(error)}>
-						<Button size="sm" variant="outline" onClick={() => void refetch()}>
+						<Button
+							size="sm"
+							variant="outline"
+							disabled={!connected || !client}
+							onClick={() => void refetch()}
+						>
 							Retry
 						</Button>
 					</SettingsRow>
 				)}
-				{!isLoading && !error && visibleServers.length === 0 && (
+				{connected && !isLoading && !error && visibleServers.length === 0 && (
 					<SettingsRow
 						label={servers.length === 0 ? "No MCP servers" : "No matching servers"}
 						description={
@@ -216,13 +291,11 @@ export function McpSettings({
 									<Switch
 										checked={enabled}
 										aria-label={`${enabled ? "Disable" : "Enable"} ${server.name}`}
-										onCheckedChange={(checked) => {
-											const nextEnabled = checked === true
-											if (!nextEnabled) {
-												setExpanded((current) => (current === server.name ? null : current))
-											}
-											toggle.mutate({ name: server.name, enabled: nextEnabled })
-										}}
+										disabled={!connected || !client || toggle.isPending}
+										aria-busy={toggle.isPending && toggle.variables?.name === server.name}
+										onCheckedChange={(checked) =>
+											submit({ name: server.name, enabled: checked === true })
+										}
 									/>
 								</div>
 							</SettingsRow>
