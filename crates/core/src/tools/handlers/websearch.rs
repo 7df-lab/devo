@@ -400,7 +400,8 @@ mod tests {
     fn web_search_handler_description_uses_sources_prompt() {
         let handler = WebSearchHandler::new();
 
-        assert!(handler.spec().description.contains("Sources:"));
+        assert!(handler.spec().description.contains("Source attribution:"));
+        assert!(!handler.spec().description.contains("Sources:"));
         assert!(handler.spec().description.contains("The current month is "));
     }
 

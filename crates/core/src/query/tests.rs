@@ -1844,7 +1844,9 @@ async fn provider_hosted_tools_emit_events_without_local_execution() {
         if matches!(kind, HostedToolKind::WebSearch) {
             let system = request.system.as_deref().expect("system prompt");
             assert!(system.contains("base system"));
-            assert!(system.contains("Sources:"));
+            assert!(system.contains("Source attribution:"));
+            assert!(system.contains("If your answer does not use retrieved information"));
+            assert!(!system.contains("Sources:"));
             assert!(system.contains("The current month is "));
         }
         assert!(

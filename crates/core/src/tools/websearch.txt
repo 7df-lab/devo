@@ -4,17 +4,11 @@
 - Use this tool for accessing information beyond Devo's knowledge cutoff
 - Searches are performed automatically within a single API call
 
-CRITICAL REQUIREMENT - You MUST follow this:
-  - After answering the user's question, you MUST include a "Sources:" section at the end of your response
-  - In the Sources section, list all relevant URLs from the search results as markdown hyperlinks: [Title](URL)
-  - This is MANDATORY - never skip including sources in your response
-  - Example format:
-
-    [Your answer here]
-
-    Sources:
-    - [Source Title 1](https://example.com/1)
-    - [Source Title 2](https://example.com/2)
+Source attribution:
+  - When your answer relies on information retrieved from the web, include relevant source links as markdown hyperlinks: [Title](URL).
+  - Place links next to the claims they support when practical; do not append a fixed sources section to every answer.
+  - If your answer does not use retrieved information, omit source links and source headings.
+  - Cite only sources actually retrieved and used. Never invent URLs or imply that a search was performed when it was not.
 
 Usage notes:
   - Domain filtering is supported to include or block specific websites
