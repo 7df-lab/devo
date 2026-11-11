@@ -2626,6 +2626,13 @@ pub(super) fn filter_items_to_active_path(
     history: &CanonicalHistory,
     tip: ActivePathTip,
 ) -> Option<Vec<crate::execution::PersistedTurnItem>> {
+    if matches!(tip, ActivePathTip::Root)
+        || (matches!(tip, ActivePathTip::JournalTip)
+            && history.leaf_epoch > 0
+            && history.leaf_id.is_none())
+    {
+        return Some(Vec::new());
+    }
     let parents = devo_core::resolve_parent_map(history);
     let leaf = match tip {
         ActivePathTip::JournalTip => devo_core::resolve_leaf_id(history, &parents),
@@ -3034,6 +3041,19 @@ mod tests {
         assert!(
             filter_items_to_active_path(&persisted, &history, ActivePathTip::JournalTip).is_none(),
             "a stale journal must not silently drop live turns"
+        );
+        assert_eq!(
+            filter_items_to_active_path(&persisted, &history, ActivePathTip::Root),
+            Some(Vec::new())
+        );
+        let root_history = CanonicalHistory {
+            leaf_epoch: 1,
+            leaf_id: None,
+            ..history
+        };
+        assert_eq!(
+            filter_items_to_active_path(&persisted, &root_history, ActivePathTip::JournalTip),
+            Some(Vec::new())
         );
     }
 

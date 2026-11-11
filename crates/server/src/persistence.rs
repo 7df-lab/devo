@@ -1467,9 +1467,12 @@ impl RolloutStore {
         };
         if let Some(history) = scoped_history {
             let path_ids = devo_core::active_path_item_ids(history);
-            if !path_ids.is_empty() {
+            let explicit_root = history.leaf_epoch > 0 && history.leaf_id.is_none();
+            if explicit_root || !path_ids.is_empty() {
                 recovered.persisted_turn_items.retain(|item| {
-                    path_ids.contains(&item.item_id) || !devo_core::is_tree_visible_item(&item.item)
+                    !explicit_root
+                        && (path_ids.contains(&item.item_id)
+                            || !devo_core::is_tree_visible_item(&item.item))
                 });
                 let mut rebuilt_messages = Vec::new();
                 let mut rebuilt_history = Vec::new();
