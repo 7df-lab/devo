@@ -42,7 +42,7 @@ test("live completion and recreated/switching connections load the same paginate
   const pages = [[item("a"), user], [item("b")]];
   const make = () => {
     const connection = Object.create(NativeAgentConnection.prototype) as any;
-    Object.assign(connection, { sessionId: "one", sessionHistoryRevision: 0, messages: [], rpc: {
+    Object.assign(connection, { sessionId: "one", sessionHistoryRevision: 0, messages: [], historySnapshotItems: new WeakMap(), historySnapshotTurns: new WeakMap(), rpc: {
       request: async (method: string, params: any) => {
         if (method === "session/turns/list") return { data: [] };
         if (params.sessionId === "two") return { data: [user] };

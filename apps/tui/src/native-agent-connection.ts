@@ -1,3 +1,5 @@
+import { textHydrationState } from "./native-to-pi/stream-hydration-state.js";
+import { completedItemRevisions, notificationItemIdentity, runningAssistantItems, normalizeHistoryItems, hydrateRunningText } from "./native-history-hydration.js";
 import { nativeShellTasks } from "./native-to-pi/shell-activity.js";
 /**
  * Native AgentConnection — Devo server transport for InteractiveMode.
@@ -50,6 +52,7 @@ import {
   createStreamState,
   approvalResolutionFromNotification,
   nativeNotificationToPiEvents,
+  nativeMessageItemIds,
   type StreamState,
 } from "./native-to-pi/events.js";
 import { fileChangeSummariesFromWorkspaceViews } from "./native-to-pi/tools.js";
@@ -235,6 +238,8 @@ export class NativeAgentConnection implements AgentConnection {
   /** >0 while applying subscription/create replay (not live events). */
   private subscriptionReplayDepth = 0;
   private messages: unknown[] = [];
+  private historySnapshotItems = new WeakMap<unknown[], unknown[]>();
+  private historySnapshotTurns = new WeakMap<unknown[], unknown[]>();
   private sessionHistoryRevision = 0;
   private transcriptNavigationGeneration = 0;
   private pendingInitialMessages?: { sessionId: string; revision: number; promise: Promise<never[]> };
@@ -352,8 +357,8 @@ export class NativeAgentConnection implements AgentConnection {
     }
   }
 
-  private emitSessionEvent(event: Record<string, unknown>): void {
-    this.emit({ type: "session_event", event: event as never });
+  private emitSessionEvent(event: Record<string, unknown>, sourceItem?: { id: string; revision?: number; missingTextBaseIds?: string[] }): void {
+    this.emit({ type: "session_event", event: event as never, ...(sourceItem ? { sourceItem } : {}) });
   }
 
   /** After workspace/changes/updated, re-read summary and feed the workspace-level recap. */
@@ -565,6 +570,7 @@ export class NativeAgentConnection implements AgentConnection {
       }
     }
 
+    const sourceItem = notificationItemIdentity(method, params);
     for (const ev of nativeNotificationToPiEvents(method, params, this.streamState)) {
       if (ev.type === "compaction_start") {
         this.isCompacting = true;
@@ -642,7 +648,13 @@ export class NativeAgentConnection implements AgentConnection {
         );
         ev.contextUsage = this.contextUsage;
       }
-      this.emitSessionEvent(ev);
+      const projectedIds = nativeMessageItemIds(ev.message);
+      const projectedSource = projectedIds[0] && projectedIds[0] !== sourceItem?.id ? { id: projectedIds[0] } : sourceItem;
+      const eventSource = projectedSource ? {
+        ...projectedSource,
+        ...(projectedIds.length ? { missingTextBaseIds: projectedIds.filter(id => !textHydrationState(this.streamState).baseKnown.has(id)) } : {}),
+      } : undefined;
+      this.emitSessionEvent(ev, eventSource);
       if (ev.type === "auto_retry_start") {
         this.retryAttempt = Number((ev as { attempt?: unknown }).attempt ?? 0);
       }
@@ -1166,11 +1178,25 @@ export class NativeAgentConnection implements AgentConnection {
     ]);
     if (this.sessionId !== sessionId || this.transcriptNavigationGeneration !== navigationGeneration) return this.getInitialSnapshot();
     void this.seedWorkspaceFileChangesRecap();
+    const items = this.historySnapshotItems.get(messages) ?? [];
+    const running = runningAssistantItems(items);
+    const streamingPrefixes = hydrateRunningText(this.streamState, running);
+    const runningIds = running.map(item => String(item.id));
+    const runningMessages = nativeItemsToAgentMessages(running);
+    const streamingMessage = runningMessages.length ? {
+      ...runningMessages[runningMessages.length - 1],
+      content: runningMessages.flatMap(message => Array.isArray(message.content) ? message.content : []),
+    } : undefined;
+    const transcript = running.length
+      ? applyFailedTurnsToAgentMessages(nativeItemsToAgentMessages(items.filter(item => !running.includes(item as Record<string, unknown>))), this.historySnapshotTurns.get(messages) ?? [])
+      : messages;
     return {
       state: this.buildState(),
-      messages: messages as never,
+      messages: transcript as never,
+      ...(streamingMessage ? { streamingMessage: streamingMessage as never, streamingItemIds: runningIds, streamingPrefixes } : {}),
       children: children as never,
       replay: { status: "complete", toSequence: 0 },
+      completedItemRevisions: completedItemRevisions(this.historySnapshotItems.get(messages) ?? []),
     };
   }
   async getMessages(): Promise<never[]> {
@@ -1179,7 +1205,7 @@ export class NativeAgentConnection implements AgentConnection {
     const historyRevision = this.sessionHistoryRevision;
     let loadedMessages: unknown[] | undefined;
     try {
-      const items: unknown[] = [];
+      let items: unknown[] = [];
       let cursor: string | undefined;
       do {
         const page = (await this.rpc.request("session/items/list", {
@@ -1190,7 +1216,9 @@ export class NativeAgentConnection implements AgentConnection {
         if (Array.isArray(page?.data)) items.push(...page.data);
         cursor = page?.nextCursor ?? undefined;
       } while (cursor);
+      items = normalizeHistoryItems(items);
       let messages = nativeItemsToAgentMessages(items);
+      let historyTurns: unknown[] = [];
       // Warning items may be missing from items/list; turn.error is durable on
       // session/turns/list and restores the live failure chrome after resume.
       try {
@@ -1205,11 +1233,14 @@ export class NativeAgentConnection implements AgentConnection {
           if (Array.isArray(page?.data)) turns.push(...page.data);
           turnCursor = page?.nextCursor ?? undefined;
         } while (turnCursor);
+        historyTurns = turns;
         messages = applyFailedTurnsToAgentMessages(messages, turns);
       } catch {
         // best-effort — items alone still restore chat text
       }
       loadedMessages = messages;
+      this.historySnapshotItems.set(messages, items);
+      this.historySnapshotTurns.set(messages, historyTurns);
       if (this.sessionId === sessionId && this.sessionHistoryRevision === historyRevision) {
         this.messages = messages;
       }
@@ -1217,7 +1248,13 @@ export class NativeAgentConnection implements AgentConnection {
       // keep cache
     }
     if (this.sessionId !== sessionId) return [...this.messages] as never[];
-    return [...(loadedMessages ?? this.messages)] as never[];
+    const source = loadedMessages ?? this.messages;
+    const result = [...source];
+    const snapshotItems = this.historySnapshotItems.get(source);
+    if (snapshotItems) this.historySnapshotItems.set(result, snapshotItems);
+    const snapshotTurns = this.historySnapshotTurns.get(source);
+    if (snapshotTurns) this.historySnapshotTurns.set(result, snapshotTurns);
+    return result as never[];
   }
 
   async getRlmChildSnapshots() {
