@@ -101,6 +101,7 @@ export class SubagentSummaryLine implements Component, Focusable {
 		private readonly getContextLabel: () => string | undefined = () => undefined,
 		private readonly getOverrideLabel: () => string | undefined = () => undefined,
 		private readonly getPickerOpen: () => boolean = () => false,
+		private readonly getGoalLabel: () => string | undefined = () => undefined,
 	) {}
 
 	setSubagentCounts(counts: SubagentSummaryCounts): void {
@@ -166,19 +167,25 @@ export class SubagentSummaryLine implements Component, Focusable {
 
 	render(width: number): string[] {
 		if (this.getPickerOpen() || width < 1) return [];
-		const lines = this.renderInfoLine(width);
+		const info = this.renderInfoLine(width);
+		const lines: string[] = [];
+		const innerWidth = Math.max(1, width - 4);
+		const goal = this.getGoalLabel()?.trim();
+		const colors = ["accent", "warning", "success"] as const;
 		const heartbeatCount = this.heartbeatState === "ready" ? String(this.heartbeats.total) : this.heartbeatState;
 		const shellCount = this.shellState === "ready" ? String(this.shells.running) : this.shellState;
 		const groups = [
 			`Subagents ${this.counts.running}`,
-			`Heartbeats ${heartbeatCount}`,
+			`Scheduled ${heartbeatCount}`,
 			`Shells ${shellCount}`,
 		];
 		if (!this.focused) {
-			const compact = groups.join(" · ");
+			const coloredGroups = groups.map((group, index) => theme.fg(colors[index]!, group));
+			if (goal) coloredGroups.push(theme.fg("mdHeading", goal));
+			const compact = coloredGroups.join(theme.fg("dim", " · "));
 			// Narrow terminals retain each group instead of silently clipping the last group.
-			const rows = visibleWidth(compact) <= width ? [compact] : groups;
-			return [...lines, ...rows.map((row) => theme.fg("muted", truncateToWidth(row, width, "…")))];
+			const rows = visibleWidth(compact) <= innerWidth ? [compact] : coloredGroups;
+			return [...info, ...this.frame(rows, width)];
 		}
 		let nextHeartbeat = "";
 		if (this.heartbeats.nextRunAt !== undefined && Number.isFinite(this.heartbeats.nextRunAt)) {
@@ -188,18 +195,32 @@ export class SubagentSummaryLine implements Component, Focusable {
 		const details = [
 			`Subagents · ${this.counts.running} running · ${this.counts.idle} idle · ${this.counts.inactive} inactive${this.openable ? "" : " · details unavailable"}`,
 			this.heartbeatState === "ready"
-				? `Heartbeats · ${this.heartbeats.active} active · ${this.heartbeats.paused} paused${nextHeartbeat}`
-				: `Heartbeats · ${this.heartbeatState}`,
+				? `Scheduled · ${this.heartbeats.active} active · ${this.heartbeats.paused} paused${nextHeartbeat}`
+				: `Scheduled · ${this.heartbeatState}`,
 			this.shellState === "ready"
 				? `Shells · ${this.shells.running} running · ${this.shells.total} total${this.shells.persistent === undefined ? "" : ` · ${this.shells.persistent} persistent`}`
 				: `Shells · ${this.shellState}`,
 		];
 		for (const [index, detail] of details.entries()) {
-			const row = truncateToWidth(`${index === this.selected ? "›" : " "} ${detail}`, width, "…");
-			lines.push(index === this.selected ? theme.bg("selectedBg", row) : theme.fg("muted", row));
+			const row = theme.fg(colors[index]!, truncateToWidth(`${index === this.selected ? "›" : " "} ${detail}`, innerWidth, "…"));
+			lines.push(index === this.selected ? theme.bg("selectedBg", row) : row);
 		}
-		lines.push(theme.fg("dim", truncateToWidth(`↑/↓/tab select · ${keyText("tui.select.confirm")} open · ${keyText("tui.select.cancel")} back`, width, "…")));
-		return lines;
+		if (goal) lines.push(theme.fg("mdHeading", goal));
+		lines.push(theme.fg("dim", truncateToWidth(`↑/↓/tab select · ${keyText("tui.select.confirm")} open · ${keyText("tui.select.cancel")} back`, innerWidth, "…")));
+		return [...info, ...this.frame(lines, width)];
+	}
+
+	private frame(rows: string[], width: number): string[] {
+		if (width < 5) return rows.map((row) => truncateToWidth(row, width, "…"));
+		const inner = width - 4;
+		return [
+			theme.fg("border", `╭${"─".repeat(width - 2)}╮`),
+			...rows.map((row) => {
+				const content = truncateToWidth(row, inner, "…");
+				return `${theme.fg("border", "│ ")}${content}${" ".repeat(Math.max(0, inner - visibleWidth(content)))}${theme.fg("border", " │")}`;
+			}),
+			theme.fg("border", `╰${"─".repeat(width - 2)}╯`),
+		];
 	}
 
 	private renderInfoLine(width: number): string[] {

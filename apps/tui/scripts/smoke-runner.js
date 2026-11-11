@@ -70,7 +70,7 @@ async function run() {
       mux(["send-keys", "-t", session, "Enter"]);
     }
 
-    await waitFor("ready chat chrome", (events, text) => rpcSucceeded(events, "session/new") && text.includes("Subagents") && text.includes("Heartbeats") && text.includes("Shells"));
+    await waitFor("ready chat chrome", (events, text) => rpcSucceeded(events, "session/new") && text.includes("Subagents") && text.includes("Scheduled") && text.includes("Shells"));
     console.log("=== boot ===\n" + pane);
     switch (scenario) {
       case "T1": break;
@@ -79,7 +79,7 @@ async function run() {
         // must paint the dock without a keyboard event.
         await waitFor("authoritative zero activity without input", (events, text) =>
           rpcSucceeded(events, "task/list") && /Subagents 0/.test(text)
-          && /Heartbeats 0/.test(text) && /Shells 0/.test(text));
+          && /Scheduled 0/.test(text) && /Shells 0/.test(text));
         const initialReads = records().filter((r) => r.method === "task/list").length;
         await waitFor("automatic activity polling without input", (events) =>
           events.filter((r) => r.method === "task/list").length > initialReads);

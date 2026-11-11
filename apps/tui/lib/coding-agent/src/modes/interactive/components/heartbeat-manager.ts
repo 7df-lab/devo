@@ -103,10 +103,10 @@ export class HeartbeatManagerComponent implements Component, Focusable {
 	private createHeartbeatListPanel(): MenuPanel {
 		const active = this.heartbeats.filter((heartbeat) => heartbeat.job.status === "active").length;
 		const paused = this.heartbeats.length - active;
-		const countLabel = `${this.heartbeats.length} heartbeat${this.heartbeats.length === 1 ? "" : "s"}${paused ? ` · ${paused} paused` : ""}`;
+		const countLabel = `${this.heartbeats.length} scheduled task${this.heartbeats.length === 1 ? "" : "s"}${paused ? ` · ${paused} paused` : ""}`;
 		const panel = new MenuPanel({
-			title: "Heartbeats",
-			subtitle: `${countLabel}. Select a heartbeat to manage.`,
+			title: "Scheduled",
+			subtitle: `${countLabel}. Select a scheduled task to manage.`,
 		});
 		const list = new MenuList({ compact: this.getListLayout().compact });
 		this.populateHeartbeatList(list);
@@ -123,7 +123,7 @@ export class HeartbeatManagerComponent implements Component, Focusable {
 	private populateHeartbeatList(list: MenuList): void {
 		const heartbeats = this.heartbeats;
 		if (heartbeats.length === 0) {
-			list.addChild(new TruncatedText(theme.fg("muted", "No running or paused heartbeats"), 1, 0));
+			list.addChild(new TruncatedText(theme.fg("muted", "No running or paused scheduled tasks"), 1, 0));
 			return;
 		}
 		const selectedIndex = this.getSelectedIndex(heartbeats);
@@ -161,7 +161,7 @@ export class HeartbeatManagerComponent implements Component, Focusable {
 	private createActionPanel(mode: Exclude<HeartbeatManagerMode, { type: "list" }>): MenuPanel {
 		const heartbeat = this.findHeartbeat(mode.heartbeatId);
 		if (!heartbeat) {
-			return new MenuPanel({ title: "Heartbeats", subtitle: "This heartbeat is no longer available." });
+			return new MenuPanel({ title: "Scheduled", subtitle: "This scheduled task is no longer available." });
 		}
 		const name = heartbeat.job.label?.trim() || this.defaultHeartbeatName(heartbeat);
 		const panel = new MenuPanel({
@@ -246,9 +246,9 @@ export class HeartbeatManagerComponent implements Component, Focusable {
 		if (!heartbeat) return [];
 		return [
 			heartbeat.job.status === "paused"
-				? { label: "Resume heartbeat", action: "resume" }
-				: { label: "Pause heartbeat", action: "pause" },
-			{ label: "Stop heartbeat", action: "stop" },
+				? { label: "Resume scheduled task", action: "resume" }
+				: { label: "Pause scheduled task", action: "pause" },
+			{ label: "Stop scheduled task", action: "stop" },
 		];
 	}
 
@@ -292,7 +292,7 @@ export class HeartbeatManagerComponent implements Component, Focusable {
 	}
 
 	private defaultHeartbeatName(heartbeat: AgentConnectionHeartbeat): string {
-		return heartbeat.job.source === "heartbeat" ? "Your heartbeat" : "Agent-created heartbeat";
+		return heartbeat.job.source === "heartbeat" ? "Your scheduled task" : "Agent-created scheduled task";
 	}
 
 	private closeHint(): string {
@@ -310,7 +310,7 @@ export class HeartbeatManagerComponent implements Component, Focusable {
 			case "resume":
 				return "Continue scheduled deliveries";
 			case "stop":
-				return "Permanently remove this heartbeat";
+				return "Permanently remove this scheduled task";
 		}
 	}
 

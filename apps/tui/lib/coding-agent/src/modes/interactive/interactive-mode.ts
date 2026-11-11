@@ -969,6 +969,7 @@ export class InteractiveMode {
 			() => this.getTrayContextLabel(),
 			() => this.getTrayOverrideLabel(),
 			() => this.isInlinePickerOpen(),
+			() => this.getTrayGoalLabel(),
 		);
 		this.subagentSummaryLine.setOpenable(this.options.returnToAgentsView === true);
 		this.subagentSummaryLine.onOpen = () => void this.openScopedAgentsView();
@@ -6326,11 +6327,7 @@ export class InteractiveMode {
 
 	private getTrayContextLabel(): string | undefined {
 		if (this.isInlinePickerOpen()) return undefined;
-		const goalLabel = this.getTrayGoalLabel();
-		return (
-			[goalLabel, this.getModelContextLabel()].filter((label) => label !== undefined).join(" · ") ||
-			undefined
-		);
+		return this.getModelContextLabel();
 	}
 
 
@@ -6338,7 +6335,7 @@ export class InteractiveMode {
 		const goal = this.getGoalState();
 		switch (goal.status) {
 			case "active":
-				return `Pursuing goal (${this.formatGoalElapsed(goal.timeUsedSeconds)})`;
+				return `Goal · active (${this.formatGoalElapsed(goal.timeUsedSeconds)})`;
 			case "paused":
 				return `Goal paused (${this.formatGoalElapsed(goal.timeUsedSeconds)})`;
 			case "budget_limited":
