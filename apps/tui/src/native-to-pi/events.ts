@@ -1,3 +1,4 @@
+import { textHydrationState } from "./stream-hydration-state.js";
 /**
  * Convert Native ServerNotification methods into AgentConnectionSessionEvent[].
  * Projection stays inside the adapter — InteractiveMode never sees Native method names.
@@ -93,11 +94,18 @@ function emptyUsage() {
   };
 }
 
-function assistantMessageParts(text: string, thinking: string) {
+const messageItemIds = new WeakMap<object, string[]>();
+
+/** Internal projection identity; omitted from the user-visible message shape. */
+export function nativeMessageItemIds(message: unknown): string[] {
+  return message && typeof message === "object" ? messageItemIds.get(message) ?? [] : [];
+}
+
+function assistantMessageParts(text: string, thinking: string, itemIds: string[] = []) {
   const content: Array<Record<string, unknown>> = [];
   if (thinking) content.push({ type: "thinking", thinking });
   content.push({ type: "text", text: text ?? "" });
-  return {
+  const message = {
     role: "assistant",
     content,
     timestamp: Date.now(),
@@ -105,6 +113,8 @@ function assistantMessageParts(text: string, thinking: string) {
     errorMessage: null,
     usage: emptyUsage(),
   };
+  messageItemIds.set(message, itemIds);
+  return message;
 }
 
 /** Local abort chrome when Ctrl+C clears the turn before turn/completed arrives. */
@@ -136,7 +146,7 @@ function liveAssistantMessage(state: StreamState) {
   const thinking = state.openReasoningItem
     ? (state.reasoningTextByItem.get(state.openReasoningItem) ?? "")
     : "";
-  return assistantMessageParts(text, thinking);
+  return assistantMessageParts(text, thinking, [state.openAssistantItem, state.openReasoningItem].filter((id): id is string => !!id));
 }
 
 function closeImAssistantStreamIfOpen(
@@ -145,11 +155,14 @@ function closeImAssistantStreamIfOpen(
 ): Array<Record<string, unknown>> {
   if (!state.imAssistantStreamOpen) return [];
   state.imAssistantStreamOpen = false;
+  const liveMessage = liveAssistantMessage(state);
+  for (const id of nativeMessageItemIds(liveMessage)) textHydrationState(state).completed.add(id);
   const message = {
-    ...liveAssistantMessage(state),
+    ...liveMessage,
     ...(options?.stopReason != null ? { stopReason: options.stopReason } : {}),
     ...(options?.errorMessage != null ? { errorMessage: options.errorMessage } : {}),
   };
+  messageItemIds.set(message, nativeMessageItemIds(liveMessage));
   return [
     {
       type: "message_end",
@@ -322,6 +335,7 @@ function projectItemStarted(
   } else if (type === "assistantMessage") {
     state.openAssistantItem = key;
     state.assistantTextByItem.set(key, String(item.text ?? ""));
+    textHydrationState(state).baseKnown.add(key);
     if (!state.imAssistantStreamOpen) {
       state.imAssistantStreamOpen = true;
       events.push({
@@ -332,6 +346,7 @@ function projectItemStarted(
   } else if (type === "reasoning") {
     state.openReasoningItem = key;
     state.reasoningTextByItem.set(key, String(item.text ?? ""));
+    textHydrationState(state).baseKnown.add(key);
     if (!state.imAssistantStreamOpen) {
       state.imAssistantStreamOpen = true;
       events.push({
@@ -371,22 +386,27 @@ function projectItemCompleted(
     const existing = state.assistantTextByItem.get(key) ?? "";
     // Delta-less clients (proxy transport, mid-turn attach) never populated
     // the accumulator — the completed item carries the full text.
-    const text = existing.length > 0 ? existing : String(item.text ?? "");
+    const text = typeof item.text === "string" ? item.text : existing;
+    textHydrationState(state).completed.add(key);
+    textHydrationState(state).baseKnown.add(key);
     state.assistantTextByItem.delete(key);
     if (state.openAssistantItem === key) state.openAssistantItem = null;
     const thinking = state.openReasoningItem
       ? (state.reasoningTextByItem.get(state.openReasoningItem) ?? "")
       : "";
+    const reasoningItemId = state.openReasoningItem;
+    if (reasoningItemId) textHydrationState(state).completed.add(reasoningItemId);
     state.imAssistantStreamOpen = false;
     state.openReasoningItem = null;
     events.push({
       type: "message_end",
-      message: assistantMessageParts(text, thinking),
+      message: assistantMessageParts(text, thinking, [key, reasoningItemId].filter((id): id is string => !!id)),
     });
   } else if (type === "reasoning") {
-    const existing = state.reasoningTextByItem.get(key);
-    if ((!existing || existing.length === 0) && item.text) {
-      state.reasoningTextByItem.set(key, String(item.text));
+    textHydrationState(state).completed.add(key);
+    textHydrationState(state).baseKnown.add(key);
+    if (typeof item.text === "string") {
+      state.reasoningTextByItem.set(key, item.text);
     }
     events.push({
       type: "message_update",
@@ -525,6 +545,7 @@ function projectItemUpdated(
     const text = String(item.text ?? "");
     state.openAssistantItem = key;
     state.assistantTextByItem.set(key, text);
+    textHydrationState(state).baseKnown.add(key);
     const events: Array<Record<string, unknown>> = [];
     if (!state.imAssistantStreamOpen) {
       state.imAssistantStreamOpen = true;
@@ -540,6 +561,7 @@ function projectItemUpdated(
   if (type === "reasoning") {
     state.openReasoningItem = key;
     state.reasoningTextByItem.set(key, String(item.text ?? ""));
+    textHydrationState(state).baseKnown.add(key);
     return [
       {
         type: "message_update",

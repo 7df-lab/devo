@@ -1,3 +1,4 @@
+import { hydrateQueuedTextEvent } from "./transcript-hydration.js";
 import { ActivityMonitor, type ActivitySnapshot } from "./activity-monitor.js";
 import { ShellActivityPanel } from "./components/shell-activity-panel.js";
 import type { ActivityLoadState } from "./components/subagent-summary-line.js";
@@ -155,6 +156,7 @@ import { ensureTool, ensureToolWithStatus, formatMissingRipgrepMessage } from ".
 import { checkForNewPiVersion } from "../../utils/version-check.js";
 import type {
 	AgentConnection,
+	AgentConnectionEvent,
 	AgentConnectionExtensionUiRequest,
 	AgentConnectionExtensionUiResponse,
 	AgentConnectionHeartbeat,
@@ -760,6 +762,9 @@ export class InteractiveMode {
 	private pendingBashComponents: BashExecutionComponent[] = [];
 
 	// Serializes session event handling; see subscribeToAgent
+	private restoredStreamingItems = new Set<string>();
+	private streamingBirthPrefixes: NonNullable<AgentConnectionSnapshot["streamingPrefixes"]> = {};
+	private completedTranscriptItems: Record<string, number> = {};
 	private sessionEventQueue: Promise<void> = Promise.resolve();
 	private sessionEventGeneration = 0;
 	private treeNavigationRenderGeneration = 0;
@@ -1348,9 +1353,7 @@ export class InteractiveMode {
 		}
 		this.isInitialized = true;
 
-		await measureAsync("init.rebind_current_session", () => this.rebindCurrentSession());
-
-		await measureAsync("init.render_initial_messages", () => this.renderInitialMessages());
+		await this.initializeSessionTranscript();
 		this.startPostRenderRefreshes();
 
 		onThemeChange(() => {
@@ -2780,6 +2783,20 @@ export class InteractiveMode {
 		this.syncWorkingLoader();
 	}
 
+	/** Join initial replay to the same queue as live events before subscribing. */
+	private async initializeSessionTranscript(): Promise<void> {
+		const generation = this.sessionEventGeneration;
+		const render = this.sessionEventQueue.then(async () => {
+			if (generation !== this.sessionEventGeneration) return;
+			await measureAsync("init.rebind_current_session", () => this.rebindCurrentSession());
+			if (generation !== this.sessionEventGeneration) return;
+			await measureAsync("init.render_initial_messages", () => this.renderInitialMessages());
+		});
+		// Publish the barrier synchronously, before rebind can subscribe and receive events.
+		this.sessionEventQueue = render.catch(() => {});
+		await render;
+	}
+
 	private startPostRenderRefreshes(): void {
 		this.activityStopped = false;
 		this.activityInvalidated = false;
@@ -2896,6 +2913,9 @@ export class InteractiveMode {
 	}
 
 	private async renderResyncedSession(snapshot: AgentConnectionSnapshot): Promise<void> {
+		this.completedTranscriptItems = snapshot.completedItemRevisions ?? {};
+		this.restoredStreamingItems = new Set(snapshot.streamingItemIds ?? []);
+		this.streamingBirthPrefixes = snapshot.streamingPrefixes ?? {};
 		const bashFinished = this.isBashRunning() && !snapshot.state.isBashRunning;
 		this.applyConnectionStateSnapshot(snapshot.state);
 		this.refreshQueueSelectionFromState();
@@ -5130,6 +5150,14 @@ export class InteractiveMode {
 		this.updateSubagentSummaryLine();
 	}
 
+	private isReplayedItemEvent(event: Extract<AgentConnectionEvent, { type: "session_event" }>): boolean {
+		const source = event.sourceItem;
+		if (!source) return false;
+		if (event.event.type === "message_start" && this.restoredStreamingItems?.has(source.id)) return true;
+		const revision = this.completedTranscriptItems?.[source.id];
+		return typeof revision === "number" && (source.revision === undefined || source.revision <= revision);
+	}
+
 	private subscribeToAgent(): void {
 		this.unsubscribe = this.agentConnection.subscribe(async (event) => {
 			try {
@@ -5139,7 +5167,8 @@ export class InteractiveMode {
 					// prevents already-queued source events from mutating the target UI.
 					const generation = this.sessionEventGeneration;
 					const run = this.sessionEventQueue.then(() =>
-						generation === this.sessionEventGeneration ? this.handleEvent(event.event) : undefined,
+						generation === this.sessionEventGeneration && !this.isReplayedItemEvent(event)
+							? this.handleEvent(hydrateQueuedTextEvent(event, this.streamingBirthPrefixes ?? {})) : undefined,
 					);
 					this.sessionEventQueue = run.catch(() => {});
 					await run;
@@ -6658,6 +6687,8 @@ export class InteractiveMode {
 			limitTranscript?: boolean;
 		} = {},
 	): Promise<void> {
+		const connection = this.agentConnection;
+		const generation = this.sessionEventGeneration;
 		this.resetPendingToolState();
 		const transcriptMessages = this.orderMessagesForTranscript(sessionContext.messages);
 		const messagesToRender = options.limitTranscript ? initialRenderMessages(transcriptMessages) : transcriptMessages;
@@ -6676,6 +6707,7 @@ export class InteractiveMode {
 			}
 		}
 		await this.preloadToolDefinitions(toolNames);
+		if (!this.isCurrentConnectionGeneration(connection, generation)) return;
 
 		if (options.clearChat) {
 			this.chatContainer.clear();
@@ -6780,6 +6812,9 @@ export class InteractiveMode {
 		const generation = this.sessionEventGeneration;
 		const snapshot = await measureAsync("snapshot.initial_total", () => this.agentConnection.getInitialSnapshot());
 		if (!this.isCurrentConnectionGeneration(connection, generation)) return;
+		this.completedTranscriptItems = snapshot.completedItemRevisions ?? {};
+		this.restoredStreamingItems = new Set(snapshot.streamingItemIds ?? []);
+		this.streamingBirthPrefixes = snapshot.streamingPrefixes ?? {};
 		const context = this.getSessionContextFromConnectionSnapshot(snapshot);
 		const state = snapshot.state;
 		const streamingMessage = snapshot.streamingMessage;
@@ -6794,6 +6829,7 @@ export class InteractiveMode {
 				limitTranscript: true,
 			}),
 		);
+		if (!this.isCurrentConnectionGeneration(connection, generation)) return;
 		await measureAsync("transcript.restore_streaming_snapshot", () =>
 			this.restoreStreamingMessageFromSnapshot(streamingMessage),
 		);
