@@ -106,11 +106,12 @@ async fn child_terminal_wakes_its_owner_without_goal_or_polling() -> Result<()> 
     })
     .await
     .context("completion was accepted but barrier remained")?;
-    let requests = provider.requests.lock().expect("requests");
-    assert_eq!(requests.len(), 1);
-    let serialized = serde_json::to_string(&requests[0])?;
-    assert!(serialized.contains("unique child result"), "{serialized}");
-    drop(requests);
+    {
+        let requests = provider.requests.lock().expect("requests");
+        assert_eq!(requests.len(), 1);
+        let serialized = serde_json::to_string(&requests[0])?;
+        assert!(serialized.contains("unique child result"), "{serialized}");
+    }
     assert_eq!(runtime.take_background_work_results(owner), None);
     runtime
         .record_subagent_status_event_with_text(
@@ -160,10 +161,11 @@ async fn child_terminal_wakes_its_owner_without_goal_or_polling() -> Result<()> 
     tokio::time::timeout(Duration::from_secs(15), provider.started.acquire())
         .await??
         .forget();
-    let requests = provider.requests.lock().expect("requests");
-    assert_eq!(requests.len(), 2);
-    assert!(serde_json::to_string(&requests[1])?.contains("unique shell result"));
-    drop(requests);
+    {
+        let requests = provider.requests.lock().expect("requests");
+        assert_eq!(requests.len(), 2);
+        assert!(serde_json::to_string(&requests[1])?.contains("unique shell result"));
+    }
     let failed_child = SessionId::new();
     runtime.register_background_work(owner, format!("agent:{failed_child}:startup"));
     runtime
@@ -244,12 +246,13 @@ async fn spawned_child_completion_automatically_starts_parent_request() -> Resul
     tokio::time::timeout(Duration::from_secs(20), provider.started.acquire())
         .await??
         .forget();
-    let requests = provider.requests.lock().expect("requests");
-    assert_eq!(requests.len(), 2);
-    let input = serde_json::to_string(&requests[1])?;
-    assert!(input.contains("done"), "{input}");
-    assert!(input.contains(spawned.child_session_id.as_str()), "{input}");
-    drop(requests);
+    {
+        let requests = provider.requests.lock().expect("requests");
+        assert_eq!(requests.len(), 2);
+        let input = serde_json::to_string(&requests[1])?;
+        assert!(input.contains("done"), "{input}");
+        assert!(input.contains(spawned.child_session_id.as_str()), "{input}");
+    }
     assert!(runtime.active_turn_id_for_session(owner).await.is_some());
     provider.release.add_permits(1);
     Ok(())

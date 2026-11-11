@@ -914,19 +914,20 @@ async fn completed_child_at_turn_limit_keeps_result_held_without_restart() -> Re
         .turn_reservation_snapshot()
         .await
         .context("reservation")?;
-    let queued = snapshot.pending_turn_queue.lock().expect("queue");
-    let item = queued
-        .iter()
-        .find(|item| item.id == receipt.queue_item_id)
-        .context("durable result")?;
-    assert!(crate::runtime::handlers::queue_steer::requires_queue_review(item));
-    assert_eq!(
-        item.metadata
-            .as_ref()
-            .and_then(|m| m.get("maxTurnsReached")),
-        Some(&json!(true))
-    );
-    drop(queued);
+    {
+        let queued = snapshot.pending_turn_queue.lock().expect("queue");
+        let item = queued
+            .iter()
+            .find(|item| item.id == receipt.queue_item_id)
+            .context("durable result")?;
+        assert!(crate::runtime::handlers::queue_steer::requires_queue_review(item));
+        assert_eq!(
+            item.metadata
+                .as_ref()
+                .and_then(|m| m.get("maxTurnsReached")),
+            Some(&json!(true))
+        );
+    }
     let retry = runtime
         .handle_incoming(
             connection,
