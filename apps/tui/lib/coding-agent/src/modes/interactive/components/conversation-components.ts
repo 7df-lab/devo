@@ -14,6 +14,7 @@ import {
 	SESSION_SLASH_COMMAND_RESULT_CUSTOM_TYPE,
 } from "../../../core/messages.js";
 import { AgentMessageComponent } from "./agent-message.js";
+import { CompactionSummaryMessageComponent } from "./compaction-summary-message.js";
 import { CustomMessageComponent } from "./custom-message.js";
 import { AssistantMessageComponent } from "./assistant-message.js";
 import { BashExecutionComponent } from "./bash-execution.js";
@@ -270,6 +271,10 @@ export function buildConversationComponents(
 		} else if (message.role === "custom" && message.display &&
 			["Agent message", "Background notification", "Scheduled notification", "Host notification"].includes(message.customType)) {
 			components.push(new CustomMessageComponent(message, undefined, options.markdownTheme));
+		} else if (message.role === "compactionSummary") {
+			const component = new CompactionSummaryMessageComponent(message, options.markdownTheme);
+			component.setExpanded(expanded);
+			components.push(new Spacer(1), component);
 		} else if (message.role === "user") {
 			const text = readUserText(message.content);
 			const hasContent =
@@ -280,7 +285,7 @@ export function buildConversationComponents(
 				components.push(new UserMessageComponent(display, options.markdownTheme, options.isRecognizedSlashCommand));
 			}
 		}
-		// Non-conversational messages (bash/branch-summary/compaction/other custom) aren't shown.
+		// Non-conversational messages (bash/branch-summary/other custom) aren't shown.
 	}
 	return components;
 }

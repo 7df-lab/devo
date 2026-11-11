@@ -284,6 +284,11 @@ export interface BranchSummaryMessage {
 }
 
 export interface CompactionSummaryMessage {
+	/** Native items are already ordered on the active transcript branch. */
+	transcriptOrder?: "native";
+	/** False when the backend has no measured pre-compaction occupancy. */
+	tokensBeforeMeasured?: boolean;
+	tokensAfter?: number;
 	role: "compactionSummary";
 	summary: string;
 	tokensBefore: number;

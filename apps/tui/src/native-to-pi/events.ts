@@ -453,11 +453,14 @@ function projectItemCompleted(
       );
     }
   } else if (type === "contextCompaction") {
-    const failed = String(item.status ?? envelope.state ?? "").toLowerCase() === "failed";
+    const failed = String(item.status ?? envelope.state ?? "").toLowerCase() === "failed"
+      || /^Compaction failed:/.test(String(item.summary ?? ""));
     const rawMessage = String(
       item.error ?? item.message ?? item.summary ?? (failed ? "Compaction failed" : ""),
     );
-    const tooShort = /too short|skip|not enough/i.test(rawMessage);
+    // A successful summary may legitimately mention "skip" or "too short".
+    // Only diagnostic fields describe a skipped operation.
+    const tooShort = /too short|skip|not enough/i.test(String(item.error ?? item.message ?? (failed ? item.summary : "") ?? ""));
     // InteractiveMode only surfaces manual compaction errors/warnings.
     const reason =
       tooShort || failed ? ("manual" as const) : compactionReason(item.trigger);

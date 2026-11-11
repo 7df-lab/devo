@@ -6629,7 +6629,7 @@ export class InteractiveMode {
 	 * @param options.limitTranscript Limit transcript replay to the recent tail
 	 */
 	private orderMessagesForTranscript(messages: AgentMessage[]): AgentMessage[] {
-		const summaryIndex = messages.findIndex((message) => message.role === "compactionSummary");
+		const summaryIndex = messages.findIndex((message) => message.role === "compactionSummary" && message.transcriptOrder !== "native");
 		if (summaryIndex === -1) return messages;
 		const summary = messages[summaryIndex];
 		if (summary.role !== "compactionSummary") return messages;
