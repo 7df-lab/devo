@@ -162,14 +162,10 @@ export function WorktreeSettings() {
 			try {
 				if (action === "remove") await removeWorktree(wt.projectDir, wt.directory)
 				else await resetWorktree(wt.projectDir, wt.directory)
-				// Data still needs reconciliation if the affected project remains or returns.
-				// This must not take ownership of a newer confirmation or its error.
-				if (
-					mountedRef.current &&
-					projectsRef.current.some((project) => project.directory === wt.projectDir)
-				) {
-					await loadWorktrees()
-				}
+				// Different project folders can share one Git worktree registry.
+				// Refresh the current scope even if the original folder was removed,
+				// without taking ownership of a newer confirmation or its error.
+				if (mountedRef.current) await loadWorktrees()
 				if (ownsConfirmation()) setPending(null)
 			} catch (error) {
 				if (ownsConfirmation()) {

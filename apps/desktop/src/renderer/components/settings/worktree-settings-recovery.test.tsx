@@ -114,7 +114,7 @@ test("removing a project dismisses its unsubmitted worktree confirmation", async
 	expect(removeWorktree.mock.calls).toEqual([])
 })
 
-test("an old removal cannot close a new project's confirmation or refresh its data", async () => {
+test("an old removal can refresh data without closing a new project's confirmation", async () => {
 	const removal = deferred<void>()
 	removeWorktree.mockImplementationOnce(() => removal.promise)
 	await render()
@@ -127,7 +127,7 @@ test("an old removal cannot close a new project's confirmation or refresh its da
 	expect({
 		dialog: document.querySelector('[role="dialog"]')?.textContent?.includes("/b/tree"),
 		reads: listWorktrees.mock.calls.length,
-	}).toEqual({ dialog: true, reads: before })
+	}).toEqual({ dialog: true, reads: before + 1 })
 })
 
 for (const action of ["Remove", "Reset"]) {
@@ -384,3 +384,33 @@ test("reconciliation preserves a newer confirmation and its mutation error", asy
 		error: document.querySelector('[role="alert"]')?.textContent,
 	}).toEqual({ removed: false, dialog: true, error: "B has uncommitted changes" })
 })
+
+for (const listingInFlight of [false, true]) {
+	test(`removal reconciles a shared repository after its original folder is removed: pending listing ${listingInFlight}`, async () => {
+		const removal = deferred<void>()
+		const oldListing = deferred<string[]>()
+		let exists = true
+		store.set(projects, [
+			{ directory: "/repo", name: "Repo" },
+			{ directory: "/repo/apps", name: "Apps" },
+		])
+		listWorktrees.mockImplementation(async () => (exists ? ["/worktrees/shared-tree"] : []))
+		removeWorktree.mockImplementationOnce(async () => {
+			await removal.promise
+			exists = false
+		})
+		await render()
+		await openRemove()
+		await act(async () => button("Remove").click())
+		expect(removeWorktree.mock.calls).toEqual([["/repo/apps", "/worktrees/shared-tree"]])
+		if (listingInFlight) listWorktrees.mockImplementationOnce(() => oldListing.promise)
+		await project("/repo")
+		await act(async () => removal.resolve())
+		if (listingInFlight) await act(async () => oldListing.resolve(["/worktrees/shared-tree"]))
+		expect({ exists, visible: mount.textContent?.includes("/worktrees/shared-tree") }).toEqual({
+			exists: false,
+			visible: false,
+		})
+		expect(mount.textContent).toContain("No worktrees")
+	})
+}
