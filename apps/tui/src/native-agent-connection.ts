@@ -1,3 +1,4 @@
+import { nativeShellTasks } from "./native-to-pi/shell-activity.js";
 /**
  * Native AgentConnection — Devo server transport for InteractiveMode.
  *
@@ -1787,6 +1788,12 @@ export class NativeAgentConnection implements AgentConnection {
       .filter((j) => j.status === "active" || j.status === "paused")
       .map(toAgentCronJob);
   }
+  async listShellTasks() {
+    const sessionId = this.requireSessionId();
+    const result = await this.rpc.request("task/list", { sessionId });
+    return nativeShellTasks(result, sessionId);
+  }
+
   async listHeartbeats() {
     const result = (await this.rpc.request("session/schedule/list", {
       cwd: this.cwd,

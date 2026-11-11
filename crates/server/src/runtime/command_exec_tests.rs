@@ -175,3 +175,84 @@ async fn explicit_session_resolves_sandbox_workspace_from_session() {
     assert_eq!(context.cwd, execution);
     assert_eq!(context.sandbox_workspace, Some(workspace));
 }
+
+#[tokio::test]
+async fn host_bash_tasks_list_and_read_after_python_forgets_handle() {
+    use devo_core::tools::contracts::ToolBudgets;
+    use devo_core::tools::host_bash::{self, SandboxRetry};
+    use devo_core::tools::{ToolAgentScope, ToolCallId, ToolContext};
+    use devo_protocol::CollaborationMode;
+    use tokio_util::sync::CancellationToken;
+
+    let home = tempfile::tempdir().unwrap();
+    let runtime = TestRuntime::noop().runtime(home.path());
+    let session_id = create_session(&runtime, home.path()).await;
+    let other = tempfile::tempdir().unwrap();
+    let other_session = create_session(&runtime, other.path()).await;
+    let ctx = ToolContext {
+        output_store: None,
+        tool_call_id: ToolCallId("activity-test".into()),
+        session_id,
+        turn_id: None,
+        workspace_root: home.path().to_path_buf(),
+        budgets: ToolBudgets {
+            output_limit_bytes: 1024,
+            wall_time_limit_ms: Some(10_000),
+        },
+        cancel_token: CancellationToken::new(),
+        agent_scope: ToolAgentScope::Parent,
+        collaboration_mode: CollaborationMode::Build,
+        agent_coordinator: None,
+        client_filesystem: None,
+        file_read_ledger: None,
+        network_proxy: None,
+        network_no_proxy: None,
+        sandbox_profile: Some("off".into()),
+        sandbox_permission_overlay: None,
+        kernel: None,
+        python_cell_first_wait_ms: None,
+        python_cell_watch: None,
+        python_cell_completion: None,
+        session_dir: None,
+    };
+    let started = host_bash::start(
+        ctx,
+        json!({"command":"echo activity-test"}),
+        SandboxRetry::Never,
+        None,
+    );
+    let id = started["result"]["handle_id"]
+        .as_str()
+        .expect("bash handle");
+    tokio::time::timeout(std::time::Duration::from_secs(10), async {
+        loop {
+            if host_bash::control(session_id.as_str(), "bash.poll", &json!({"handle_id":id}))["result"]["running"] == false {
+                break;
+            }
+            tokio::task::yield_now().await;
+        }
+    }).await.expect("host shell completes");
+    host_bash::control(session_id.as_str(), "bash.forget", &json!({"handle_id":id}));
+    let list = runtime
+        .handle_native_task_list(json!(50), json!({"sessionId":session_id}))
+        .await;
+    let expected_id = format!("host-bash:{id}");
+    let tasks = list["result"]["tasks"].as_array().expect("task list");
+    assert_eq!(tasks.len(), 1);
+    assert_eq!(tasks[0]["id"], json!(expected_id));
+    let read = runtime
+        .handle_native_task_read(json!(51), json!({"itemId":expected_id}))
+        .await;
+    assert_eq!(read["result"]["item"], tasks[0]);
+    assert!(
+        read["result"]["outputTail"]
+            .as_str()
+            .unwrap()
+            .contains("activity-test")
+    );
+    let unrelated = runtime
+        .handle_native_task_list(json!(52), json!({"sessionId":other_session}))
+        .await;
+    assert_eq!(unrelated["result"]["tasks"], json!([]));
+    host_bash::cancel_session(session_id.as_str());
+}

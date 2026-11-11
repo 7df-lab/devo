@@ -9,7 +9,7 @@ import { heartbeatDelivered, rpcSucceeded, turnOutcome } from "./smoke-outcomes.
 
 const repo = resolve(dirname(fileURLToPath(import.meta.url)), "../../..");
 const scenario = process.argv[2] || "T1";
-const scenarios = ["T1", "T2", "T3", "goal", "bash", "agents", "schedule", "heartbeat"];
+const scenarios = ["T1", "T2", "T3", "goal", "bash", "agents", "schedule", "heartbeat", "activity"];
 const tmux = process.env.DEVO_TMUX_BIN || (process.platform === "win32" ? "psmux" : "tmux");
 const binary = resolve(process.env.DEVO_BIN || process.env.DEVO_SERVER_BIN
   || join(repo, "target/debug", process.platform === "win32" ? "devo.exe" : "devo"));
@@ -70,10 +70,21 @@ async function run() {
       mux(["send-keys", "-t", session, "Enter"]);
     }
 
-    await waitFor("ready chat chrome", (events, text) => rpcSucceeded(events, "session/new") && text.includes("← manage"));
+    await waitFor("ready chat chrome", (events, text) => rpcSucceeded(events, "session/new") && text.includes("Subagents") && text.includes("Heartbeats") && text.includes("Shells"));
     console.log("=== boot ===\n" + pane);
     switch (scenario) {
       case "T1": break;
+      case "activity": {
+        // No send-keys call precedes these assertions: boot and background reads
+        // must paint the dock without a keyboard event.
+        await waitFor("authoritative zero activity without input", (events, text) =>
+          rpcSucceeded(events, "task/list") && /Subagents 0/.test(text)
+          && /Heartbeats 0/.test(text) && /Shells 0/.test(text));
+        const initialReads = records().filter((r) => r.method === "task/list").length;
+        await waitFor("automatic activity polling without input", (events) =>
+          events.filter((r) => r.method === "task/list").length > initialReads);
+        break;
+      }
       case "T2":
         await send("Say hello in one short English sentence.");
         await waitFor("completed turn with user and assistant/tool activity", (events) => turnOutcome(events, "completed"));

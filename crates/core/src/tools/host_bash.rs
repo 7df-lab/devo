@@ -12,6 +12,9 @@ use super::{
     ToolCallError, ToolContext, ToolProgress, ToolProgressSender, ToolResult, ToolResultContent,
 };
 
+mod activity;
+pub use activity::{HostBashActivity, activity_snapshot, session_activities};
+
 const MAX_HANDLES: usize = 256;
 const MAX_SESSION_HANDLES: usize = 32;
 const MAX_OUTPUT_BYTES: usize = 256 * 1024;
@@ -63,6 +66,11 @@ pub async fn execute(
 
 struct Entry {
     session_id: String,
+    command: String,
+    turn_id: Option<devo_protocol::TurnId>,
+    cancelled: bool,
+    cwd: std::path::PathBuf,
+    created_at: chrono::DateTime<chrono::Utc>,
     cancel: CancellationToken,
     expiry_cancel: CancellationToken,
     started: Instant,
@@ -139,8 +147,24 @@ pub fn start(
     ctx.cancel_token = ctx.cancel_token.child_token();
     let session_id = ctx.session_id.to_string();
     let handle_id = Uuid::new_v4().to_string();
+    let cwd = match crate::shell_exec::requested_workdir(&input)
+        .and_then(|requested| crate::shell_exec::resolve_shell_dirs(&ctx.workspace_root, requested))
+    {
+        Ok(dirs) => dirs.cwd,
+        Err(message) => return error(&message),
+    };
     let entry = Arc::new(Mutex::new(Entry {
         session_id: session_id.clone(),
+        turn_id: ctx.turn_id,
+        cancelled: false,
+        command: input
+            .get("command")
+            .or_else(|| input.get("cmd"))
+            .and_then(Value::as_str)
+            .unwrap_or_default()
+            .to_owned(),
+        cwd,
+        created_at: chrono::Utc::now(),
         cancel: ctx.cancel_token.clone(),
         expiry_cancel: CancellationToken::new(),
         started: Instant::now(),
@@ -263,6 +287,7 @@ pub fn start(
                 }
                 Err(err) => state.error = Some(err.to_string()),
             }
+            state.cancelled = state.cancel.is_cancelled();
             state.finished = Some(Instant::now());
         }
         if let Some(coordinator) = coordinator {
@@ -303,6 +328,7 @@ pub fn control(session_id: &str, action: &str, params: &Value) -> Value {
             if state.finished.is_none() {
                 return error("cannot forget a running bash handle");
             }
+            activity::retain_completed(id, &state);
             state.expiry_cancel.cancel();
             handles.remove(id);
             json!({"status":"ok", "result":{"forgotten":true}})
@@ -313,7 +339,8 @@ pub fn control(session_id: &str, action: &str, params: &Value) -> Value {
 
 /// Cancel owned processes and release records when a kernel/session is torn down.
 pub fn cancel_session(session_id: &str) {
-    HANDLES.lock().unwrap().retain(|_, entry| {
+    let mut handles = HANDLES.lock().unwrap();
+    handles.retain(|_, entry| {
         let state = entry.lock().unwrap();
         if state.session_id == session_id {
             state.cancel.cancel();
@@ -323,6 +350,7 @@ pub fn cancel_session(session_id: &str) {
             true
         }
     });
+    activity::clear_session(session_id);
 }
 
 #[cfg(test)]
@@ -334,6 +362,11 @@ mod tests {
     fn output_is_bounded_on_utf8_boundary() {
         let mut entry = Entry {
             session_id: "bounds".into(),
+            command: String::new(),
+            turn_id: None,
+            cancelled: false,
+            cwd: std::path::PathBuf::new(),
+            created_at: chrono::Utc::now(),
             cancel: CancellationToken::new(),
             expiry_cancel: CancellationToken::new(),
             started: Instant::now(),
@@ -435,6 +468,9 @@ mod tests {
                 .is_some_and(|output| output.contains("cancelled")),
             "cancelled result: {done}"
         );
+        let activity = session_activities(&session);
+        assert_eq!(activity.len(), 1);
+        assert_eq!((activity[0].running, activity[0].cancelled), (false, true));
         cancel_session(&session);
     }
 
@@ -447,6 +483,11 @@ mod tests {
             id.clone(),
             Arc::new(Mutex::new(Entry {
                 session_id: session.clone(),
+                command: String::new(),
+                turn_id: None,
+                cancelled: false,
+                cwd: std::path::PathBuf::new(),
+                created_at: chrono::Utc::now(),
                 cancel: cancel.clone(),
                 expiry_cancel: CancellationToken::new(),
                 started: Instant::now(),
