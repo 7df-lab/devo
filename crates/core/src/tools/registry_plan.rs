@@ -870,7 +870,8 @@ mod tests {
             .iter()
             .find(|spec| spec.name == "web_search")
             .expect("web_search spec");
-        assert!(web_search_spec.description.contains("Sources:"));
+        assert!(web_search_spec.description.contains("Source attribution:"));
+        assert!(!web_search_spec.description.contains("Sources:"));
     }
 
     #[test]

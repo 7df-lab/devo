@@ -168,7 +168,7 @@ The main groups are:
 | `rlm.update_plan`, `rlm.request_user_input` | Session UI integration. |
 | `rlm.read`, `rlm.write`, `rlm.read_once`, `rlm.write_once` | Direct file I/O, with host-mediated fallback on OS denial. |
 | `rlm.spawn`, `rlm.create_session`, `rlm.find_models`, `rlm.list_subagents`, `rlm.delete_subagent`, `rlm.collect`, `rlm.progress_note`, `rlm.end_turn` | Recursive subagent control. |
-| `rlm.factory` | Experimental, explicit-opt-in DAG workflows; active-cell advance/wait, durable checkpoints/recovery, and v2 guarded joins. See [Factory workflows](../../../docs/factory-workflows.md) and [durable workflows](../../../docs/factory-durable-workflows.md). |
+| `rlm.factory` | Experimental, explicit-opt-in DAG workflows; active-cell advance/wait, durable checkpoints/recovery, and v2 guarded joins. |
 | `rlm.harness`, `rlm.get_harness_state` | Cached reads and async host-owned harness CRUD. |
 | `rlm.emit` | Ship a MIME-keyed display event. |
 
@@ -195,8 +195,7 @@ runs as a separate session. Use `await rlm.collect(reviewer, timeout_ms=10000)`
 for retained typed results; timeout returns partial snapshots without cancellation.
 Children can report `await rlm.progress_note("running tests")` without steering the
 parent. `await rlm.end_turn()` finishes normally after the current tool batch.
-`create_session` creates a separate durable root in the same workspace. See
-[orchestration semantics](../../../docs/rlm-orchestration.md) for limits and recovery.
+`create_session` creates a separate durable root in the same workspace.
 
 Omitted `model` and `thinking` (or `None`) inherit the immediate parent's values.
 An unsupported inherited thinking level fails just like an explicit unsupported
@@ -204,8 +203,7 @@ level; there is no silent fallback. `find_models` returns enabled, configured,
 routable models and supported thinking levels without credentials or network
 probes. It does not guarantee provider health or credits. Selectors are exact
 `provider/model` strings, and model IDs can contain slashes. `limit` must be an
-integer from 1 to 100, not a boolean. See the
-[child model API](../../../docs/rlm-child-models.md) for details.
+integer from 1 to 100, not a boolean.
 
 `rlm.read` and `rlm.write` try the direct filesystem call first. On `OSError`
 they ask the host to perform the operation through its approval pipeline. A
@@ -292,8 +290,7 @@ There are two layers:
   `list_tools()` rechecks the connection and clears stale schemas on failure.
   Their legacy `auth.json` refresh contract is not implemented by the Rust host:
   it reports an explicit error, never a successful no-op. Expired grants must be
-  reconnected through their owning login host. See
-  [MCP connection lifecycle](../../../docs/mcp-connection-lifecycle.md).
+  reconnected through their owning login host.
 
 The MCP exports are lazy. `import rlm` does not import the `mcp` SDK; only an
 integration package that subclasses `McpIntegration` needs it.
@@ -458,7 +455,7 @@ the agent wants the host to review evidence and decide the smallest edit.
   cannot kill the REPL; the next kernel save rewrites a clean file.
 - The Rust schemas are mirrored by hand. If you add or change a
   field, update both sides and bump `SCHEMA_VERSION`.
-- The host's `refinements.jsonl` is an append-only audit mirror. Canonical before/after undo history lives in `harness_state.json` and commits with the entries. See [authorized trajectory refinement and rollback](../../../docs/trajectory-refinement.md). Python's
+- The host's `refinements.jsonl` is an append-only audit mirror. Canonical before/after undo history lives in `harness_state.json` and commits with the entries. Python's
   `record_refinement` writes a `RefinementEvent` into the state JSON's
   `refinements` array; it does not append to the JSONL log.
 

@@ -181,7 +181,7 @@ onboarding.
 - `mcp/reconnect`: replace one enabled Native server transport and rediscover tools.
   Accepts only `{name}`; never accepts credentials or replays tool calls. This is
   not an authored OAuth login/refresh API. Failures are redacted; read `mcp/list`
-  for observed state. See [connection lifecycle](../../docs/mcp-connection-lifecycle.md).
+  for observed state.
 
 ### Skills methods
 

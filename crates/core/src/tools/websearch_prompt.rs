@@ -19,8 +19,12 @@ mod tests {
         let prompt = render_web_search_prompt("June 2026");
 
         assert!(prompt.contains("The current month is June 2026."));
-        assert!(prompt.contains("Sources:"));
-        assert!(prompt.contains("[Source Title 1](https://example.com/1)"));
+        assert!(prompt.contains("Source attribution:"));
+        assert!(prompt.contains("[Title](URL)"));
+        assert!(prompt.contains("If your answer does not use retrieved information"));
+        assert!(prompt.contains("Cite only sources actually retrieved and used."));
+        assert!(!prompt.contains("Sources:"));
+        assert!(!prompt.contains("MUST include"));
         assert!(!prompt.contains("{{currentMonthYear}}"));
     }
 }
