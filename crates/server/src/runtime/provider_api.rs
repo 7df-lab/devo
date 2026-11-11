@@ -75,13 +75,52 @@ impl ServerRuntime {
         &self,
         request_id: serde_json::Value,
     ) -> serde_json::Value {
-        let store = self
-            .deps
-            .config_store
-            .lock()
-            .expect("app config store mutex should not be poisoned");
-        let config = store.effective_config();
-        let home = store.user_config_dir().to_path_buf();
+        let (config, home, connected_provider_ids, connection_models, configured_providers) = {
+            let store = self
+                .deps
+                .config_store
+                .lock()
+                .expect("app config store mutex should not be poisoned");
+            let config = store.effective_config().clone();
+            let home = store.user_config_dir().to_path_buf();
+            let connected_provider_ids = match store.provider_connection_ids() {
+                Ok(provider_ids) => provider_ids,
+                Err(error) => {
+                    return self.error_response(
+                        request_id,
+                        ProtocolErrorCode::InternalError,
+                        format!("failed to read provider connections: {error}"),
+                    );
+                }
+            };
+            let connection_models = match store.provider_connection_models() {
+                Ok(models) => models,
+                Err(error) => {
+                    return self.error_response(
+                        request_id,
+                        ProtocolErrorCode::InternalError,
+                        format!("failed to read provider Connection models: {error}"),
+                    );
+                }
+            };
+            let configured_providers = match store.provider_connections() {
+                Ok(providers) => providers,
+                Err(error) => {
+                    return self.error_response(
+                        request_id,
+                        ProtocolErrorCode::InternalError,
+                        format!("failed to read provider Connections: {error}"),
+                    );
+                }
+            };
+            (
+                config,
+                home,
+                connected_provider_ids,
+                connection_models,
+                configured_providers,
+            )
+        };
         let live_catalog = PresetModelCatalog::load_from_provider_config_with_home(
             &config.provider_catalog,
             &config.provider.model_overrides,
@@ -94,36 +133,6 @@ impl ServerRuntime {
             .unwrap_or(self.deps.model_catalog.as_ref());
         let mut providers = catalog.list_providers();
         let template_provider_ids = catalog.list_template_provider_ids();
-        let connected_provider_ids = match store.provider_connection_ids() {
-            Ok(provider_ids) => provider_ids,
-            Err(error) => {
-                return self.error_response(
-                    request_id,
-                    ProtocolErrorCode::InternalError,
-                    format!("failed to read provider connections: {error}"),
-                );
-            }
-        };
-        let connection_models = match store.provider_connection_models() {
-            Ok(models) => models,
-            Err(error) => {
-                return self.error_response(
-                    request_id,
-                    ProtocolErrorCode::InternalError,
-                    format!("failed to read provider Connection models: {error}"),
-                );
-            }
-        };
-        let configured_providers = match store.provider_connections() {
-            Ok(providers) => providers,
-            Err(error) => {
-                return self.error_response(
-                    request_id,
-                    ProtocolErrorCode::InternalError,
-                    format!("failed to read provider Connections: {error}"),
-                );
-            }
-        };
         for configured in configured_providers {
             // Effective metadata includes live models, while transport remains
             // pinned by user connection configuration.
@@ -147,12 +156,7 @@ impl ServerRuntime {
             .into_iter()
             .map(|provider| {
                 let mut info = canonical_provider_info(provider, catalog);
-                if let Some(config) = store
-                    .effective_config()
-                    .provider_catalog
-                    .providers
-                    .get(&info.id)
-                {
+                if let Some(config) = config.provider_catalog.providers.get(&info.id) {
                     info.options = config.options.clone();
                     info.request = config.request.clone();
                     if let Some(headers) = &config.headers {

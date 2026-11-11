@@ -1,5 +1,4 @@
 use devo_core::ModelCatalog;
-use devo_core::ModelCatalogEntry;
 use devo_core::PresetModelCatalog;
 use devo_protocol::native::rpc_admin::ModelPreferences;
 use devo_protocol::native::rpc_admin::PreferencesOption;
@@ -12,6 +11,7 @@ use crate::session_context::SessionRuntimeContext;
 use crate::{ProtocolErrorCode, SuccessResponse};
 
 use super::ServerRuntime;
+use super::model_catalog_projection::model_infos_from_catalog;
 
 /// Projects the ACP config-option selects into canonical model preferences
 /// (ratified #12): the model select becomes `model` + `available_models`,
@@ -409,18 +409,9 @@ impl ServerRuntime {
             &configured.1,
             Some(home.as_path()),
         ) {
-            catalog
-                .list_visible()
-                .into_iter()
-                .map(|model| model_info_from_catalog_model(model, &catalog))
-                .collect()
+            model_infos_from_catalog(&catalog)
         } else {
-            self.deps
-                .model_catalog
-                .list_visible()
-                .into_iter()
-                .map(|model| model_info_from_catalog_model(model, self.deps.model_catalog.as_ref()))
-                .collect()
+            model_infos_from_catalog(self.deps.model_catalog.as_ref())
         };
         serde_json::to_value(SuccessResponse {
             id: request_id,
@@ -428,36 +419,4 @@ impl ServerRuntime {
         })
         .expect("serialize canonical model/list response")
     }
-}
-
-fn model_info_from_catalog_model(
-    model: &devo_protocol::Model,
-    catalog: &dyn ModelCatalog,
-) -> devo_protocol::native::rpc_admin::ModelInfo {
-    // Prefer the catalog Model's authored thinkingLevelMap (pi-ai
-    // getSupportedThinkingLevels), not capability-only derivation from
-    // ModelCatalogEntry which drops the map.
-    let (reasoning, thinking_level_map, available_thinking_levels) =
-        devo_protocol::resolve_thinking_fields_for_model_info(
-            &model.reasoning_capability,
-            model.reasoning,
-            model.thinking_level_map.as_ref(),
-        );
-    let mut info =
-        devo_protocol::native::rpc_admin::ModelInfo::from(ModelCatalogEntry::from(model));
-    info.reasoning = reasoning;
-    info.thinking_level_map = if thinking_level_map.is_empty() {
-        None
-    } else {
-        Some(thinking_level_map)
-    };
-    info.available_thinking_levels = available_thinking_levels;
-    let Some((provider_id, model_id)) = model.slug.split_once('/') else {
-        return info;
-    };
-    let mut provider_models = catalog.list_provider_models(provider_id);
-    let Some(metadata) = provider_models.remove(model_id) else {
-        return info;
-    };
-    info.with_provider_metadata(provider_id.to_string(), model_id.to_string(), metadata)
 }

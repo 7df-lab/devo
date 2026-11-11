@@ -135,6 +135,7 @@ mod lifecycle;
 mod mcp;
 mod mcp_reconnect;
 mod model_api;
+mod model_catalog_projection;
 mod outbound;
 mod permission_decision;
 mod proposed_plan;
