@@ -640,6 +640,7 @@ pub(super) async fn run_session_actor(
                 });
             }
             SessionCommand::TryBeginActiveTurn {
+                resume_existing,
                 turn,
                 turn_config,
                 reply,
@@ -649,7 +650,20 @@ pub(super) async fn run_session_actor(
                     .lock()
                     .expect("pending turn queue mutex should not be poisoned")
                     .is_empty();
-                if state.active_turn.is_some() || !queue_empty {
+                let resumable = resume_existing
+                    && state.latest_turn.as_ref().is_some_and(|latest| {
+                        latest.turn_id() == turn.turn_id()
+                            && !matches!(
+                                latest.native.status,
+                                devo_protocol::native::turn::TurnStatus::Completed
+                                    | devo_protocol::native::turn::TurnStatus::Failed
+                                    | devo_protocol::native::turn::TurnStatus::Interrupted
+                            )
+                    });
+                if state.active_turn.is_some()
+                    || (resume_existing && !resumable)
+                    || (!resume_existing && !queue_empty)
+                {
                     let _ = reply.send(false);
                     continue;
                 }

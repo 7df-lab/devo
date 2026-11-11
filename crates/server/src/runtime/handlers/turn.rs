@@ -46,8 +46,8 @@ impl ServerRuntime {
     /// Native `turn/start` (L2-DES-APP-008 Phase B): lean params (input +
     /// idempotency key; per-turn model/settings moved to settings updates),
     /// busy sessions reject with `TURN_ALREADY_RUNNING` (clients use
-    /// `session/queue/push`) — except an active turn parked at an approval
-    /// checkpoint, which the new message preempts — and the result carries
+    /// `session/queue/push`). Approval checkpoints are not implicitly cancelled
+    /// by data input, and the result carries
     /// the canonical turn snapshot. Idempotent replays return the originally
     /// started turn.
     async fn handle_native_turn_start(

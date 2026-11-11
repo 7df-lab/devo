@@ -143,6 +143,7 @@ impl ServerRuntime {
                     >(response)
                 {
                     let (decision, scope) = approval_decision_from_native(&answer.decision);
+                    let interrupt_generation = runtime.input_interrupt_generation(spawn_session_id);
                     if runtime.active_turns.has_session(spawn_session_id).await {
                         let _ = controller.send((decision, scope));
                     } else {
@@ -154,6 +155,7 @@ impl ServerRuntime {
                                 &spawn_request_id,
                                 decision,
                                 scope,
+                                interrupt_generation,
                             )
                             .await;
                     }

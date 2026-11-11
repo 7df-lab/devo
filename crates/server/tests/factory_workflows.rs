@@ -11,7 +11,7 @@ use support::*;
 #[tokio::test]
 async fn durable_guarded_diamond_runs_only_selected_branch_and_joins_output() -> Result<()> {
     let home = tempfile::TempDir::new()?;
-    let provider = Arc::new(ScriptedProvider::new([
+    let provider = Arc::new(ScriptedProvider::for_agent_tasks([
         ScriptedProvider::ipython_code_tool_call(
             r#"
 from pathlib import Path
@@ -62,7 +62,7 @@ await rlm.end_turn()
         std::fs::read_to_string(home.path().join("factory-guard-ok"))?.len(),
         32
     );
-    let requests = provider.requests();
+    let requests = provider.task_requests();
     assert_eq!(requests.len(), 4);
     let join = message_texts(&requests[3]).join("\n");
     assert!(join.contains(r#""accept": "accepted result""#), "{join}");
@@ -74,7 +74,7 @@ await rlm.end_turn()
 async fn durable_factory_recovers_existing_child_after_runtime_restart_without_respawn()
 -> Result<()> {
     let home = tempfile::TempDir::new()?;
-    let first_provider = Arc::new(ScriptedProvider::new([
+    let first_provider = Arc::new(ScriptedProvider::for_agent_tasks([
         ScriptedProvider::ipython_code_tool_call(
             r#"
 from pathlib import Path
@@ -111,10 +111,13 @@ await rlm.end_turn()
         json!("completed"),
         "{completed}"
     );
-    assert_eq!(first_provider.stream_calls(), 2);
+    assert_eq!(first_provider.task_stream_calls(), 2);
+    wait_for_completion_requests(&first_provider, /*expected*/ 1).await?;
+    wait_for_session_idle(&first, connection, parent).await?;
+    first.shutdown().await;
     drop(first);
 
-    let provider = Arc::new(ScriptedProvider::new([
+    let provider = Arc::new(ScriptedProvider::for_agent_tasks([
         ScriptedProvider::ipython_code_tool_call(
             r#"
 from pathlib import Path
@@ -166,8 +169,8 @@ await rlm.end_turn()
         std::fs::read_to_string(home.path().join("factory-resumed-ok"))?,
         "no duplicate research"
     );
-    assert_eq!(provider.stream_calls(), 2);
-    let requests = provider.requests();
+    assert_eq!(provider.task_stream_calls(), 2);
+    let requests = provider.task_requests();
     let join = message_texts(&requests[1]).join("\n");
     assert!(
         join.contains(r#""research": "retained research""#),

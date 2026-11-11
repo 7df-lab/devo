@@ -248,6 +248,7 @@ pub(crate) enum SessionCommand {
         reply: oneshot::Sender<super::snapshots::SessionResumeSnapshot>,
     },
     TryBeginActiveTurn {
+        resume_existing: bool,
         turn: RuntimeTurn,
         turn_config: TurnConfig,
         reply: oneshot::Sender<bool>,

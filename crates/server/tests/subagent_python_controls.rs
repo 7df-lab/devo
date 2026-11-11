@@ -13,7 +13,7 @@ use tempfile::TempDir;
 #[tokio::test]
 async fn python_collect_progress_and_graceful_end_turn() -> Result<()> {
     let home = TempDir::new()?;
-    let provider = Arc::new(ScriptedProvider::new([
+    let provider = Arc::new(ScriptedProvider::for_agent_tasks([
         ScriptedProvider::ipython_code_tool_call(
             r#"
 from pathlib import Path
@@ -66,15 +66,16 @@ assert not again.accepted and 0 < again.retry_after_ms <= 10000
         std::fs::read_to_string(home.path().join("controls-ok"))?,
         "complete"
     );
-    // No synthetic parent message and no fourth model request after end_turn.
-    assert_eq!(provider.stream_calls(), 3);
+    // end_turn prevents another task-script request. Child completion still
+    // receives its own host-authored inbox turn without inventing human input.
+    assert_eq!(provider.task_stream_calls(), 3);
     Ok(())
 }
 
 #[tokio::test]
 async fn collect_timeout_does_not_cancel_child_or_block_read_rpcs() -> Result<()> {
     let home = TempDir::new()?;
-    let provider = Arc::new(ScriptedProvider::new([
+    let provider = Arc::new(ScriptedProvider::for_agent_tasks([
         ScriptedProvider::ipython_code_tool_call(
             r#"
 from pathlib import Path
@@ -98,7 +99,7 @@ await rlm.collect(worker, timeout_ms=300000)
         Some("never"),
     )
     .await?;
-    wait_for_stream_calls(&provider, 2).await?;
+    wait_for_task_stream_calls(&provider, 2).await?;
     // Observable file proves the real kernel returned a partial snapshot.
     tokio::time::timeout(Duration::from_secs(10), async {
         while !home.path().join("timeout-ok").exists() {
@@ -145,10 +146,10 @@ await rlm.collect(worker, timeout_ms=300000)
 #[tokio::test]
 async fn collect_restores_direct_children_and_answers_after_restart() -> Result<()> {
     let home = TempDir::new()?;
-    let first_provider = Arc::new(ScriptedProvider::new([ScriptedProvider::completed(
-        "durable answer",
-    )]));
-    let first = build_runtime(home.path(), first_provider)?;
+    let first_provider = Arc::new(ScriptedProvider::for_agent_tasks([
+        ScriptedProvider::completed("durable answer"),
+    ]));
+    let first = build_runtime(home.path(), first_provider.clone())?;
     let (connection, mut notifications) = initialize_connection(&first).await?;
     let parent = start_parent_session(&first, connection, home.path()).await?;
     let child = spawn_child_named(
@@ -161,8 +162,11 @@ async fn collect_restores_direct_children_and_answers_after_restart() -> Result<
     .await?;
     wait_for_session_notification(&mut notifications, "turn/completed", child.child_session_id)
         .await?;
+    wait_for_completion_requests(&first_provider, /*expected*/ 1).await?;
+    wait_for_session_idle(&first, connection, parent).await?;
+    first.shutdown().await;
     drop(first);
-    let provider = Arc::new(ScriptedProvider::new([
+    let provider = Arc::new(ScriptedProvider::for_agent_tasks([
         ScriptedProvider::ipython_code_tool_call(
             r#"
 from pathlib import Path
@@ -205,14 +209,14 @@ await rlm.end_turn()
         std::fs::read_to_string(home.path().join("restored-ok"))?,
         "durable answer"
     );
-    assert_eq!(provider.stream_calls(), 1);
+    assert_eq!(provider.task_stream_calls(), 1);
     Ok(())
 }
 
 #[tokio::test]
 async fn python_create_session_is_an_independent_visible_durable_root() -> Result<()> {
     let home = TempDir::new()?;
-    let provider = Arc::new(ScriptedProvider::new([
+    let provider = Arc::new(ScriptedProvider::for_agent_tasks([
         ScriptedProvider::ipython_code_tool_call(
             r#"
 from pathlib import Path
@@ -287,7 +291,7 @@ await rlm.end_turn()
             .agents
             .is_empty()
     );
-    assert_eq!(provider.stream_calls(), 2);
+    assert_eq!(provider.task_stream_calls(), 2);
     let journal = std::fs::read_to_string(handle["journal"].as_str().context("journal")?)?;
     assert!(journal.contains("independent answer"));
     Ok(())
@@ -296,7 +300,7 @@ await rlm.end_turn()
 #[tokio::test]
 async fn end_turn_keeps_a_running_child_alive() -> Result<()> {
     let home = TempDir::new()?;
-    let provider = Arc::new(ScriptedProvider::new([
+    let provider = Arc::new(ScriptedProvider::for_agent_tasks([
         ScriptedProvider::ipython_code_tool_call(
             r#"
 from pathlib import Path
@@ -329,8 +333,8 @@ Path('ended-ok').write_text('ended')
     );
     let agents = request_agent_list(&runtime, connection, parent).await?;
     assert_eq!(agents.agents[0].status, "running");
-    wait_for_stream_calls(&provider, 2).await?;
-    assert_eq!(provider.stream_calls(), 2);
+    wait_for_task_stream_calls(&provider, 2).await?;
+    assert_eq!(provider.task_stream_calls(), 2);
     request_agent_close(&runtime, connection, parent, "worker").await?;
     Ok(())
 }
@@ -338,7 +342,7 @@ Path('ended-ok').write_text('ended')
 #[tokio::test]
 async fn collect_reports_recoverable_failure_with_its_canonical_error() -> Result<()> {
     let home = TempDir::new()?;
-    let provider = Arc::new(ScriptedProvider::new([
+    let provider = Arc::new(ScriptedProvider::for_agent_tasks([
         ScriptedProvider::ipython_code_tool_call(
             r#"
 from pathlib import Path
@@ -380,11 +384,11 @@ await rlm.end_turn()
 #[tokio::test]
 async fn collect_recognizes_shutdown_interrupted_child_recovery() -> Result<()> {
     let home = TempDir::new()?;
-    let first_provider = Arc::new(ScriptedProvider::pending());
+    let first_provider = Arc::new(ScriptedProvider::pending_agent_tasks());
     let first = build_runtime(home.path(), first_provider.clone())?;
     let (connection, _) = initialize_connection(&first).await?;
     let parent = start_parent_session(&first, connection, home.path()).await?;
-    spawn_child_named(
+    let child = spawn_child_named(
         &first,
         parent,
         "Keep working",
@@ -392,15 +396,17 @@ async fn collect_recognizes_shutdown_interrupted_child_recovery() -> Result<()> 
         Some("recoverable"),
     )
     .await?;
-    wait_for_stream_calls(&first_provider, 1).await?;
+    wait_for_task_stream_calls(&first_provider, 1).await?;
     first.shutdown().await;
     drop(first);
-    let provider = Arc::new(ScriptedProvider::new([
+    let provider = Arc::new(ScriptedProvider::for_agent_tasks([
         ScriptedProvider::ipython_code_tool_call(
             r#"
 from pathlib import Path
 result = (await rlm.collect('recoverable', timeout_ms=300000))[0]
-assert result.status == 'waiting_for_resume' and result.requires_resume, result
+# An interrupted claimed inbox entry is uncertain, so recovery exposes a
+# review barrier instead of replaying its input automatically.
+assert result.status == 'waiting_for_review' and result.requires_resume, result
 assert not result.settled and result.answer_text is None, result
 Path('shutdown-recovery-ok').write_text('no replay')
 await rlm.end_turn()
@@ -430,23 +436,52 @@ await rlm.end_turn()
     .await?;
     let completed =
         wait_for_session_notification(&mut notifications, "turn/completed", parent).await?;
+    let tool_outputs: Vec<_> = provider
+        .task_requests()
+        .iter()
+        .flat_map(|request| {
+            request
+                .messages
+                .iter()
+                .flat_map(|message| message.content.iter())
+                .filter_map(|content| {
+                    if let devo_protocol::RequestContent::ToolResult { content, .. } = content {
+                        Some(content.clone())
+                    } else {
+                        None
+                    }
+                })
+        })
+        .collect();
     assert_eq!(
         completed["params"]["turn"]["status"],
         json!("completed"),
-        "{completed}"
+        "{completed}; Python results: {tool_outputs:?}"
     );
     assert_eq!(
         std::fs::read_to_string(home.path().join("shutdown-recovery-ok"))?,
         "no replay"
     );
-    assert_eq!(provider.stream_calls(), 1);
+    let queue = restored.handle_incoming(connection, json!({
+        "id":82, "method":"session/queue/list", "params":{"sessionId":child.child_session_id}
+    })).await.context("read recovered child inbox")?;
+    let entries = queue["result"]["entries"]
+        .as_array()
+        .context("recovered queue entries")?;
+    assert_eq!(entries.len(), 1);
+    assert_eq!(entries[0]["recoveryRequired"], true);
+    assert_eq!(
+        entries[0]["input"],
+        json!([{"type":"text","text":"Keep working"}])
+    );
+    assert_eq!(provider.task_stream_calls(), 1);
     Ok(())
 }
 
 #[tokio::test]
 async fn collect_waits_through_a_live_queued_followup() -> Result<()> {
     let home = TempDir::new()?;
-    let provider = Arc::new(ScriptedProvider::new([
+    let provider = Arc::new(ScriptedProvider::for_agent_tasks([
         ScriptedProvider::ipython_code_tool_call(
             r#"
 from pathlib import Path
@@ -481,7 +516,7 @@ while not Path('queue-installed').exists():
         Some("never"),
     )
     .await?;
-    wait_for_stream_calls(&provider, 2).await?;
+    wait_for_task_stream_calls(&provider, 2).await?;
     request_agent_send_message(&runtime, connection, parent, "queued", "Do the follow-up").await?;
     std::fs::write(home.path().join("queue-installed"), "ready")?;
     let completed =
@@ -492,7 +527,7 @@ while not Path('queue-installed').exists():
         "{completed}"
     );
     let outputs = provider
-        .requests()
+        .task_requests()
         .into_iter()
         .flat_map(|r| r.messages)
         .flat_map(|m| m.content)
@@ -515,7 +550,7 @@ while not Path('queue-installed').exists():
 #[tokio::test]
 async fn closed_failure_stays_settled_after_restart() -> Result<()> {
     let home = TempDir::new()?;
-    let provider = Arc::new(ScriptedProvider::new([
+    let provider = Arc::new(ScriptedProvider::for_agent_tasks([
         ScriptedProvider::ipython_code_tool_call(
             r#"
 from pathlib import Path
@@ -551,9 +586,11 @@ await rlm.end_turn()
         std::fs::read_to_string(home.path().join("failure-ok"))?,
         "reported"
     );
+    wait_for_completion_requests(&provider, /*expected*/ 1).await?;
+    wait_for_session_idle(&runtime, connection, parent).await?;
     runtime.shutdown().await;
     drop(runtime);
-    let provider = Arc::new(ScriptedProvider::new([
+    let provider = Arc::new(ScriptedProvider::for_agent_tasks([
         ScriptedProvider::ipython_code_tool_call(
             r#"
 from pathlib import Path
@@ -599,7 +636,7 @@ await rlm.end_turn()
 #[tokio::test]
 async fn explicitly_closed_running_child_stays_settled_after_restart() -> Result<()> {
     let home = TempDir::new()?;
-    let first_provider = Arc::new(ScriptedProvider::pending());
+    let first_provider = Arc::new(ScriptedProvider::pending_agent_tasks());
     let first = build_runtime(home.path(), first_provider.clone())?;
     let (connection, _) = initialize_connection(&first).await?;
     let parent = start_parent_session(&first, connection, home.path()).await?;
@@ -611,11 +648,13 @@ async fn explicitly_closed_running_child_stays_settled_after_restart() -> Result
         Some("recoverable"),
     )
     .await?;
-    wait_for_stream_calls(&first_provider, 1).await?;
+    wait_for_task_stream_calls(&first_provider, 1).await?;
     request_agent_close(&first, connection, parent, "recoverable").await?;
+    wait_for_completion_requests(&first_provider, /*expected*/ 1).await?;
+    wait_for_session_idle(&first, connection, parent).await?;
     first.shutdown().await;
     drop(first);
-    let provider = Arc::new(ScriptedProvider::new([
+    let provider = Arc::new(ScriptedProvider::for_agent_tasks([
         ScriptedProvider::ipython_code_tool_call(
             r#"
 from pathlib import Path
@@ -659,6 +698,6 @@ await rlm.end_turn()
         std::fs::read_to_string(home.path().join("shutdown-recovery-ok"))?,
         "no replay"
     );
-    assert_eq!(provider.stream_calls(), 1);
+    assert_eq!(provider.task_stream_calls(), 1);
     Ok(())
 }

@@ -1,7 +1,6 @@
-//! Behavior tests for approval-parked turn preemption: a user message sent
-//! while a turn is parked at an approval checkpoint must not be rejected or
-//! stranded — the parked approval is cancelled, the parked turn is
-//! interrupted, and the message runs as a fresh turn.
+//! Approval is a control-path barrier: ordinary messages queue without
+//! cancelling it. Explicit interruption cancels the parked turn and then
+//! allows the accepted input to run, without executing the denied tool.
 //!
 //! The scripted provider simulates a malicious model call: it adds an
 //! unadvertised network permission request to an `ipython` call. The server
@@ -320,15 +319,14 @@ fn executed_tool_result(value: &serde_json::Value, call_id: &str) -> bool {
 }
 
 #[tokio::test]
-async fn steering_an_approval_parked_turn_cancels_the_approval_and_runs_the_message() -> Result<()>
-{
+async fn steering_an_approval_parked_turn_waits_for_explicit_interrupt() -> Result<()> {
     let temp_dir = TempDir::new()?;
     let workspace_root = temp_dir.path().join("workspace");
     std::fs::create_dir_all(&workspace_root)?;
     let provider = Arc::new(ToolCallThenDoneProvider {
         stream_requests: Mutex::new(Vec::new()),
     });
-    let runtime = build_runtime(temp_dir.path(), provider);
+    let runtime = build_runtime(temp_dir.path(), provider.clone());
     let (connection_id, mut notifications_rx, session_id, parked_turn_id) =
         park_turn_at_approval(&runtime, &workspace_root).await?;
 
@@ -351,8 +349,31 @@ async fn steering_an_approval_parked_turn_cancels_the_approval_and_runs_the_mess
     assert_eq!(
         steer_response["result"]["outcome"],
         serde_json::json!("degradedToQueue"),
-        "steer should degrade to queue after preempting the parked turn: {steer_response}"
+        "steer must remain queued while the approval is pending: {steer_response}"
     );
+
+    // Data input must not implicitly approve, cancel, or execute the parked tool.
+    tokio::time::sleep(Duration::from_millis(100)).await;
+    assert_eq!(provider.stream_requests.lock().expect("requests").len(), 1);
+    while let Ok(event) = notifications_rx.try_recv() {
+        assert!(!has_cancelled_approval_item(&event), "{event}");
+        assert!(
+            turn_completed_status(&event, &parked_turn_id).is_none(),
+            "{event}"
+        );
+        assert!(!executed_tool_result(&event, "call-1"), "{event}");
+    }
+    let interrupted = runtime
+        .handle_incoming(
+            connection_id,
+            json!({
+                "id": 6, "method": "session/interrupt",
+                "params": {"scope": {"scope": "session", "sessionId": session_id}}
+            }),
+        )
+        .await
+        .context("explicit interrupt")?;
+    assert!(interrupted.get("error").is_none(), "{interrupted}");
 
     // The steered message runs as a fresh turn once the parked turn unwinds.
     let seen = collect_until(&mut notifications_rx, |value| {
@@ -384,14 +405,14 @@ async fn steering_an_approval_parked_turn_cancels_the_approval_and_runs_the_mess
 }
 
 #[tokio::test]
-async fn turn_start_on_approval_parked_session_admits_a_new_turn() -> Result<()> {
+async fn turn_start_on_approval_parked_session_queues_until_explicit_interrupt() -> Result<()> {
     let temp_dir = TempDir::new()?;
     let workspace_root = temp_dir.path().join("workspace");
     std::fs::create_dir_all(&workspace_root)?;
     let provider = Arc::new(ToolCallThenDoneProvider {
         stream_requests: Mutex::new(Vec::new()),
     });
-    let runtime = build_runtime(temp_dir.path(), provider);
+    let runtime = build_runtime(temp_dir.path(), provider.clone());
     let (connection_id, mut notifications_rx, session_id, parked_turn_id) =
         park_turn_at_approval(&runtime, &workspace_root).await?;
 
@@ -410,21 +431,47 @@ async fn turn_start_on_approval_parked_session_admits_a_new_turn() -> Result<()>
         )
         .await
         .context("turn/start response")?;
-    assert!(
-        start_response.get("error").is_none(),
-        "turn/start must not be rejected behind an approval-parked turn: {start_response}"
-    );
-    let new_turn_id = start_response["result"]["turn"]["id"]
-        .as_str()
-        .context("turn/start result carries the new turn id")?
-        .to_owned();
-    assert_ne!(
-        new_turn_id, parked_turn_id,
-        "the admitted turn must be a fresh turn"
-    );
-
+    assert_eq!(start_response["error"]["code"], json!("TurnAlreadyRunning"));
+    let queued = runtime
+        .handle_incoming(
+            connection_id,
+            json!({
+                "id": 51, "method": "session/queue/push", "params": {
+                    "sessionId": session_id,
+                    "input": [{"type": "text", "text": "New message instead."}],
+                    "idempotencyKey": "approval-park-explicit-followup"
+                }
+            }),
+        )
+        .await
+        .context("explicit followup")?;
+    assert!(queued.get("error").is_none(), "{queued}");
+    // Data input must not implicitly approve, cancel, or execute the parked tool.
+    tokio::time::sleep(Duration::from_millis(100)).await;
+    assert_eq!(provider.stream_requests.lock().expect("requests").len(), 1);
+    while let Ok(event) = notifications_rx.try_recv() {
+        assert!(!has_cancelled_approval_item(&event), "{event}");
+        assert!(
+            turn_completed_status(&event, &parked_turn_id).is_none(),
+            "{event}"
+        );
+        assert!(!executed_tool_result(&event, "call-1"), "{event}");
+    }
+    let interrupted = runtime
+        .handle_incoming(
+            connection_id,
+            json!({
+                "id": 6, "method": "session/interrupt",
+                "params": {"scope": {"scope": "session", "sessionId": session_id}}
+            }),
+        )
+        .await
+        .context("explicit interrupt")?;
+    assert!(interrupted.get("error").is_none(), "{interrupted}");
     let seen = collect_until(&mut notifications_rx, |value| {
-        turn_completed_status(value, &new_turn_id).as_deref() == Some("completed")
+        value["method"] == "turn/completed"
+            && value["params"]["turn"]["id"] != json!(parked_turn_id)
+            && value["params"]["turn"]["status"] == json!("completed")
     })
     .await?;
     let cancelled = seen.iter().any(has_cancelled_approval_item);
@@ -547,7 +594,8 @@ async fn restored_approval_releases_admission_before_draining_queued_input() -> 
         }
     })).await;
     timeout(Duration::from_secs(/*secs*/ 20), provider.resumed.acquire())
-        .await??
+        .await
+        .context("restored provider request")??
         .forget();
     let reply = restarted.handle_incoming(connection, json!({
         "id": 21, "method": "session/queue/push", "params": {
@@ -557,6 +605,48 @@ async fn restored_approval_releases_admission_before_draining_queued_input() -> 
     })).await.context("queue push")?;
     assert_eq!(reply.get("error"), None, "{reply}");
     provider.finish_resumed.add_permits(1);
+    collect_until(&mut events, |event| {
+        turn_completed_status(event, &parked_turn).as_deref() == Some("completed")
+    })
+    .await
+    .context("approved checkpoint resumes its original turn despite held inbox")?;
+    let listed = restarted
+        .handle_incoming(
+            connection,
+            json!({
+                "id": 22, "method": "session/queue/list", "params": {"sessionId": session}
+            }),
+        )
+        .await
+        .context("held original input")?;
+    let entries = listed["result"]["entries"]
+        .as_array()
+        .context("queue entries")?;
+    assert_eq!(entries.len(), 2, "{listed}");
+    assert_eq!(entries[0]["recoveryRequired"], true);
+    assert_eq!(
+        provider
+            .scripted
+            .stream_requests
+            .lock()
+            .expect("requests")
+            .len(),
+        2
+    );
+    // Approval resumes the existing checkpoint, not the original user input.
+    // The uncertain admission remains held until explicitly discarded: it
+    // must not be inferred consumed merely from a matching message bubble.
+    let removed = restarted
+        .handle_incoming(
+            connection,
+            json!({
+                "id": 23, "method": "session/queue/remove",
+                "params": {"sessionId": session, "queueItemId": entries[0]["queueItemId"]}
+            }),
+        )
+        .await
+        .context("discard already handled original input")?;
+    assert!(removed.get("error").is_none(), "{removed}");
     let seen = collect_until(&mut events, |event| {
         event["method"] == "turn/completed"
             && event["params"]["turn"]["id"] != parked_turn

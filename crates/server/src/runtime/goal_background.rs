@@ -33,6 +33,9 @@ struct SessionWork {
 #[derive(Default)]
 pub(super) struct BackgroundWork {
     sessions: HashMap<SessionId, SessionWork>,
+    // Retain control epochs across actor eviction/deletion. Old async callbacks
+    // live until they finish; discarding an epoch could resurrect one via ABA.
+    interrupt_generations: HashMap<SessionId, u64>,
 }
 
 impl ServerRuntime {
@@ -225,13 +228,26 @@ impl ServerRuntime {
     }
 
     pub(super) fn suspend_background_input(&self, session_id: SessionId) {
+        let mut work = self
+            .background_work
+            .lock()
+            .expect("background work mutex poisoned");
+        let session = work.sessions.entry(session_id).or_default();
+        session.input_suspended = true;
+        let generation = work.interrupt_generations.entry(session_id).or_default();
+        *generation = generation.wrapping_add(1);
+    }
+
+    /// Captured when a control action is accepted, checked under the admission
+    /// gate so a delayed callback cannot undo a newer explicit interruption.
+    pub(super) fn input_interrupt_generation(&self, session_id: SessionId) -> u64 {
         self.background_work
             .lock()
             .expect("background work mutex poisoned")
-            .sessions
-            .entry(session_id)
-            .or_default()
-            .input_suspended = true;
+            .interrupt_generations
+            .get(&session_id)
+            .copied()
+            .unwrap_or(0)
     }
 
     pub(super) fn resume_background_input(&self, session_id: SessionId) {

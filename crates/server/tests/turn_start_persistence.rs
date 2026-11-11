@@ -169,34 +169,83 @@ async fn turn_start_append_failure_does_not_launch_model_turn_or_leave_session_a
     // journal. Restore the exact valid journal to model a transient write
     // failure, then retry.
     std::fs::write(&rollout_path, &original_journal)?;
-    let successful_start = runtime
+    let listed = runtime
         .handle_incoming(
             connection_id,
             serde_json::json!({
-                "id": 4,
-                "method": "turn/start",
-                "params": turn_start_params(&session.id)
+                "id": 4, "method": "session/queue/list", "params": {"sessionId": session.id}
             }),
         )
         .await
-        .context("successful turn/start response")?;
-    let response: devo_server::SuccessResponse<devo_protocol::native::rpc_turn::TurnStartResult> =
-        serde_json::from_value(successful_start)?;
+        .context("held inbox")?;
+    let entries = listed["result"]["entries"].as_array().context("entries")?;
+    assert_eq!(entries.len(), 1, "{listed}");
+    assert_eq!(entries[0]["recoveryRequired"], true);
+    // SQLite admission committed before the separate rollout append failed.
+    // Reopen the DB independently: this is a durable held input, not a phantom
+    // entry in the actor's memory. No provider work happened before the failure.
+    let database =
+        devo_server::db::Database::open(data_root.path().join("turn_start_persistence.db"))?;
+    let claimed = database.list_pending(&session.id, devo_server::db::QueueType::Steer)?;
+    assert_eq!(claimed.len(), 1);
     assert_eq!(
-        response.result.turn.status,
-        devo_protocol::native::turn::TurnStatus::InProgress
+        serde_json::to_value(claimed[0].id)?,
+        entries[0]["queueItemId"]
     );
-    stream_calls_rx
-        .recv()
+    // Exercise the same conservative recovery transaction as process startup.
+    database.recover_interrupted_queue_steers(&session.id)?;
+    let durable = database.list_pending(&session.id, devo_server::db::QueueType::Turn)?;
+    assert_eq!(durable.len(), 1);
+    assert_eq!(
+        serde_json::to_value(durable[0].id)?,
+        entries[0]["queueItemId"]
+    );
+    assert_eq!(
+        durable[0]
+            .metadata
+            .as_ref()
+            .and_then(|m| m.get("queueSteerRecoveryRequired")),
+        Some(&serde_json::json!(true))
+    );
+
+    let replay = runtime
+        .handle_incoming(
+            connection_id,
+            serde_json::json!({
+                "id": 5, "method": "turn/start", "params": turn_start_params(&session.id)
+            }),
+        )
         .await
-        .context("provider stream call after successful turn/start")?;
-    interrupt_session(
-        &runtime,
-        connection_id,
-        &session.id,
-        TurnId::from(response.result.turn.id.as_str()),
-    )
-    .await?;
+        .context("duplicate admission")?;
+    assert!(
+        replay.get("error").is_some(),
+        "uncertain input must not replay: {replay}"
+    );
+    assert!(
+        timeout(Duration::from_millis(150), stream_calls_rx.recv())
+            .await
+            .is_err()
+    );
+    let retried = runtime
+        .handle_incoming(
+            connection_id,
+            serde_json::json!({
+                "id": 6, "method": "session/queue/retry",
+                "params": {"sessionId": session.id, "queueItemId": entries[0]["queueItemId"]}
+            }),
+        )
+        .await
+        .context("explicit retry")?;
+    assert!(retried.get("error").is_none(), "{retried}");
+    timeout(Duration::from_secs(10), stream_calls_rx.recv())
+        .await?
+        .context("provider stream after explicit recovery")?;
+    assert!(
+        timeout(Duration::from_millis(150), stream_calls_rx.recv())
+            .await
+            .is_err()
+    );
+    interrupt_session(&runtime, connection_id, &session.id, TurnId::new()).await?;
 
     Ok(())
 }

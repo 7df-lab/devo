@@ -65,11 +65,12 @@ use support::spawn_child_named;
 use support::start_parent_session;
 use support::start_turn;
 use support::wait_for_child_turn_started;
+use support::wait_for_session_idle;
 use support::wait_for_session_notification;
 
 const DB_FILE: &str = "subagent_lifecycle.db";
 
-/// A provider that holds every turn's stream until all expected turns have
+/// A provider that holds task streams until all expected task turns have
 /// arrived. This makes the concurrent-append test deterministic without sleeps
 /// or polling.
 struct BarrierProvider {
@@ -92,9 +93,11 @@ impl ModelProviderSDK for BarrierProvider {
 
     async fn completion_stream(
         &self,
-        _request: ModelRequest,
+        request: ModelRequest,
     ) -> Result<Pin<Box<dyn futures::Stream<Item = Result<StreamEvent>> + Send>>> {
-        self.barrier.wait().await;
+        if !support::is_child_completion_request(&request) {
+            self.barrier.wait().await;
+        }
         let events = vec![
             StreamEvent::TextDelta {
                 index: 0,
@@ -409,7 +412,10 @@ async fn wait_for_turn_completions(
     notifications: &mut mpsc::Receiver<Value>,
     expected: &[SessionId],
 ) -> Result<()> {
-    let mut remaining: HashSet<SessionId> = expected.iter().copied().collect();
+    let mut remaining: HashMap<SessionId, usize> = HashMap::new();
+    for session_id in expected {
+        *remaining.entry(*session_id).or_default() += 1;
+    }
     timeout(Duration::from_secs(15), async {
         while !remaining.is_empty() {
             let event = notifications
@@ -424,7 +430,13 @@ async fn wait_for_turn_completions(
                 .or_else(|| event["params"]["sessionId"].as_str())
                 .or_else(|| event["params"]["session_id"].as_str());
             if let Some(session_id) = session_id {
-                remaining.remove(&SessionId::from(session_id.to_string()));
+                let session_id = SessionId::from(session_id.to_string());
+                if let Some(count) = remaining.get_mut(&session_id) {
+                    *count -= 1;
+                    if *count == 0 {
+                        remaining.remove(&session_id);
+                    }
+                }
             }
         }
         Ok::<(), anyhow::Error>(())
@@ -487,7 +499,7 @@ fn set_index_rollout_path(
 #[tokio::test]
 async fn persistent_descendants_share_one_journal_and_keep_separate_artifact_dirs() -> Result<()> {
     let data_root = TempDir::new()?;
-    let provider: Arc<dyn ModelProviderSDK> = Arc::new(ScriptedProvider::new([
+    let provider: Arc<dyn ModelProviderSDK> = Arc::new(ScriptedProvider::for_agent_tasks([
         ScriptedProvider::completed("child reply"),
         ScriptedProvider::completed("grandchild reply"),
         ScriptedProvider::completed("root reply"),
@@ -638,7 +650,7 @@ async fn legacy_child_journal_remains_readable_and_unmodified() -> Result<()> {
     let data_root = TempDir::new()?;
     let runtime = build_runtime(
         data_root.path(),
-        Arc::new(ScriptedProvider::new([])) as Arc<dyn ModelProviderSDK>,
+        Arc::new(ScriptedProvider::for_agent_tasks([])) as Arc<dyn ModelProviderSDK>,
     )?;
     let (connection_id, _) = initialize_connection(&runtime).await?;
     let root_session_id = start_parent_session(&runtime, connection_id, data_root.path()).await?;
@@ -805,9 +817,22 @@ async fn concurrent_turns_keep_shared_journal_attributed_and_sequenced() -> Resu
             root_session_id,
             child.child_session_id,
             grandchild.child_session_id,
+            // Grandchild completion wakes the child, and both child turns
+            // produce distinct completion turns in the root.
+            child.child_session_id,
+            root_session_id,
+            root_session_id,
         ],
     )
     .await?;
+
+    for session_id in [
+        grandchild.child_session_id,
+        child.child_session_id,
+        root_session_id,
+    ] {
+        wait_for_session_idle(&runtime, connection_id, session_id).await?;
+    }
 
     let journal = root_journal(data_root.path(), root_session_id);
     let lines = read_journal(&journal)?;
@@ -846,10 +871,13 @@ async fn concurrent_turns_keep_shared_journal_attributed_and_sequenced() -> Resu
             .get(session_id)
             .map(HashSet::len)
             .unwrap_or_default();
-        // Only the already-running child spawns during its turn. Its durable
-        // outgoing row belongs to that real turn; idle root spawn adds no row.
-        let expected_count = if *session_id == child.child_session_id {
-            4
+        // Each turn adds input + assistant output. The first turn also emits
+        // the fresh-kernel notice; completion turns reuse that same kernel.
+        // Only the running child adds a durable outgoing spawn row.
+        let expected_count = if *session_id == root_session_id {
+            7
+        } else if *session_id == child.child_session_id {
+            6
         } else {
             3
         };
@@ -866,10 +894,77 @@ async fn concurrent_turns_keep_shared_journal_attributed_and_sequenced() -> Resu
             "each session must have contiguous unique item seqs"
         );
     }
+    assert_eq!(seq_by_item.len(), 16, "full expected item-id/seq count");
+
+    // Pin the identities behind those totals, not just the number of rows.
+    // Counts are human inputs, host inputs, assistant outputs, kernel notices,
+    // and outgoing child-spawn rows, respectively.
+    let mut item_kinds: HashMap<SessionId, [usize; 5]> = HashMap::new();
+    let mut counted_items = HashSet::new();
+    for line in &lines {
+        if let RolloutLine::Item { item, .. } = line
+            && counted_items.insert((item.session_id, item.id))
+        {
+            use devo_protocol::native::item::Item;
+            let kind = match &item.item {
+                Item::UserMessage { origin: None, .. } => 0,
+                Item::UserMessage {
+                    origin: Some(_), ..
+                } => 1,
+                Item::AssistantMessage { .. } => 2,
+                Item::Warning { code, .. } if code == "ipythonKernelStateFresh" => 3,
+                Item::SubAgent { .. } => 4,
+                unexpected => panic!("unexpected persisted item: {unexpected:?}"),
+            };
+            item_kinds.entry(item.session_id).or_default()[kind] += 1;
+        }
+    }
     assert_eq!(
-        seq_by_item.len(),
-        expected_ids.len() * 3 + 1,
-        "full expected item-id/seq count"
+        item_kinds,
+        HashMap::from([
+            (root_session_id, [1, 2, 3, 1, 0]),
+            (child.child_session_id, [0, 2, 2, 1, 1]),
+            (grandchild.child_session_id, [0, 1, 1, 1, 0]),
+        ])
+    );
+
+    let mut host_senders: HashMap<SessionId, Vec<String>> = HashMap::new();
+    let mut host_input_ids = HashSet::new();
+    for line in &lines {
+        if let RolloutLine::Item { item, .. } = line
+            && let devo_protocol::native::item::Item::UserMessage {
+                origin: Some(origin),
+                ..
+            } = &item.item
+            && host_input_ids.insert((item.session_id, item.id))
+        {
+            assert_eq!(
+                origin.source,
+                devo_protocol::native::host_message::HostMessageSource::Agent
+            );
+            host_senders
+                .entry(item.session_id)
+                .or_default()
+                .push(origin.sender.clone());
+        }
+    }
+    assert_eq!(
+        host_senders,
+        HashMap::from([
+            (root_session_id, vec![child.child_session_id.to_string(); 2]),
+            (
+                child.child_session_id,
+                vec![
+                    root_session_id.to_string(),
+                    grandchild.child_session_id.to_string()
+                ]
+            ),
+            (
+                grandchild.child_session_id,
+                vec![child.child_session_id.to_string()]
+            ),
+        ]),
+        "spawn tasks and completion items must retain their actual sender; no grandchild completion goes directly to root"
     );
 
     let spawn_rows: Vec<_> = lines
@@ -907,7 +1002,7 @@ async fn concurrent_turns_keep_shared_journal_attributed_and_sequenced() -> Resu
 #[tokio::test]
 async fn restart_resumes_each_session_from_shared_journal_with_isolated_history() -> Result<()> {
     let data_root = TempDir::new()?;
-    let provider: Arc<dyn ModelProviderSDK> = Arc::new(ScriptedProvider::new([
+    let provider: Arc<dyn ModelProviderSDK> = Arc::new(ScriptedProvider::for_agent_tasks([
         ScriptedProvider::completed("reply-alpha"),
         ScriptedProvider::completed("reply-beta"),
         ScriptedProvider::completed("reply-gamma"),
@@ -924,8 +1019,13 @@ async fn restart_resumes_each_session_from_shared_journal_with_isolated_history(
         Some("child"),
     )
     .await?;
-    wait_for_session_notification(&mut notifications, "turn/completed", child.child_session_id)
-        .await?;
+    wait_for_turn_completions(
+        &mut notifications,
+        &[child.child_session_id, root_session_id],
+    )
+    .await?;
+    wait_for_session_idle(&runtime, connection_id, child.child_session_id).await?;
+    wait_for_session_idle(&runtime, connection_id, root_session_id).await?;
     subscribe_to_child_notifications(&runtime, connection_id, child.child_session_id).await?;
     let grandchild = spawn_child_named(
         &runtime,
@@ -935,20 +1035,31 @@ async fn restart_resumes_each_session_from_shared_journal_with_isolated_history(
         Some("grandchild"),
     )
     .await?;
-    wait_for_session_notification(
+    wait_for_turn_completions(
         &mut notifications,
-        "turn/completed",
-        grandchild.child_session_id,
+        &[
+            grandchild.child_session_id,
+            child.child_session_id,
+            root_session_id,
+        ],
     )
     .await?;
+    for session_id in [
+        grandchild.child_session_id,
+        child.child_session_id,
+        root_session_id,
+    ] {
+        wait_for_session_idle(&runtime, connection_id, session_id).await?;
+    }
     start_turn(&runtime, connection_id, root_session_id, "root task").await?;
     wait_for_session_notification(&mut notifications, "turn/completed", root_session_id).await?;
+    wait_for_session_idle(&runtime, connection_id, root_session_id).await?;
 
     runtime.shutdown().await;
 
     let rebuilt = build_runtime(
         data_root.path(),
-        Arc::new(ScriptedProvider::new([])) as Arc<dyn ModelProviderSDK>,
+        Arc::new(ScriptedProvider::for_agent_tasks([])) as Arc<dyn ModelProviderSDK>,
     )?;
     rebuilt.refresh_session_index()?;
     let (rebuilt_connection, _) = initialize_connection(&rebuilt).await?;
@@ -976,10 +1087,37 @@ async fn restart_resumes_each_session_from_shared_journal_with_isolated_history(
             items.iter().any(|item| item_contains_text(item, marker)),
             "resumed history for {session_id} must contain its distinct marker {marker}"
         );
+        // Completion bodies intentionally quote child output. They must be
+        // host-authored inputs from the direct child, never replayed child items.
+        let expected_child_output = if session_id == root_session_id {
+            Some((child.child_session_id, "reply-alpha"))
+        } else if session_id == child.child_session_id {
+            Some((grandchild.child_session_id, "reply-beta"))
+        } else {
+            None
+        };
+        if let Some((sender, output)) = expected_child_output {
+            assert!(items.iter().any(|item| {
+                matches!(
+                    &item.item,
+                    devo_protocol::native::item::Item::UserMessage { origin: Some(origin), .. }
+                        if origin.sender == sender.to_string()
+                            && origin.source == devo_protocol::native::host_message::HostMessageSource::Agent
+                ) && item_contains_text(item, output)
+            }), "resumed parent must retain the attributed child completion");
+        }
         for other in markers.iter().filter(|other| **other != marker) {
             assert!(
-                !items.iter().any(|item| item_contains_text(item, other)),
-                "resumed history for {session_id} must not contain {other}"
+                !items.iter().any(|item| {
+                    !matches!(
+                        &item.item,
+                        devo_protocol::native::item::Item::UserMessage {
+                            origin: Some(_),
+                            ..
+                        }
+                    ) && item_contains_text(item, other)
+                }),
+                "resumed task history for {session_id} must not contain {other}"
             );
         }
     }
@@ -990,10 +1128,11 @@ async fn restart_resumes_each_session_from_shared_journal_with_isolated_history(
 #[tokio::test]
 async fn deleted_child_is_tombstoned_and_not_resurrected_after_reindex() -> Result<()> {
     let data_root = TempDir::new()?;
-    let provider: Arc<dyn ModelProviderSDK> = Arc::new(ScriptedProvider::new([
+    let provider: Arc<dyn ModelProviderSDK> = Arc::new(ScriptedProvider::for_agent_tasks([
         ScriptedProvider::completed("child reply"),
         ScriptedProvider::completed("sibling reply"),
         ScriptedProvider::completed("grandchild reply"),
+        ScriptedProvider::completed("root reply"),
     ]));
     let runtime = build_runtime(data_root.path(), provider)?;
     let (connection_id, mut notifications) = initialize_connection(&runtime).await?;
@@ -1006,8 +1145,13 @@ async fn deleted_child_is_tombstoned_and_not_resurrected_after_reindex() -> Resu
         Some("child"),
     )
     .await?;
-    wait_for_session_notification(&mut notifications, "turn/completed", child.child_session_id)
-        .await?;
+    wait_for_turn_completions(
+        &mut notifications,
+        &[child.child_session_id, root_session_id],
+    )
+    .await?;
+    wait_for_session_idle(&runtime, connection_id, child.child_session_id).await?;
+    wait_for_session_idle(&runtime, connection_id, root_session_id).await?;
     let sibling = spawn_child_named(
         &runtime,
         root_session_id,
@@ -1016,12 +1160,13 @@ async fn deleted_child_is_tombstoned_and_not_resurrected_after_reindex() -> Resu
         Some("sibling"),
     )
     .await?;
-    wait_for_session_notification(
+    wait_for_turn_completions(
         &mut notifications,
-        "turn/completed",
-        sibling.child_session_id,
+        &[sibling.child_session_id, root_session_id],
     )
     .await?;
+    wait_for_session_idle(&runtime, connection_id, sibling.child_session_id).await?;
+    wait_for_session_idle(&runtime, connection_id, root_session_id).await?;
     subscribe_to_child_notifications(&runtime, connection_id, child.child_session_id).await?;
     let grandchild = spawn_child_named(
         &runtime,
@@ -1031,14 +1176,25 @@ async fn deleted_child_is_tombstoned_and_not_resurrected_after_reindex() -> Resu
         Some("grandchild"),
     )
     .await?;
-    wait_for_session_notification(
+    wait_for_turn_completions(
         &mut notifications,
-        "turn/completed",
-        grandchild.child_session_id,
+        &[
+            grandchild.child_session_id,
+            child.child_session_id,
+            root_session_id,
+        ],
     )
     .await?;
+    for session_id in [
+        grandchild.child_session_id,
+        child.child_session_id,
+        root_session_id,
+    ] {
+        wait_for_session_idle(&runtime, connection_id, session_id).await?;
+    }
     start_turn(&runtime, connection_id, root_session_id, "root task").await?;
     wait_for_session_notification(&mut notifications, "turn/completed", root_session_id).await?;
+    wait_for_session_idle(&runtime, connection_id, root_session_id).await?;
 
     let journal = root_journal(data_root.path(), root_session_id);
     let child_dir = expected_child_dir(data_root.path(), root_session_id, child.child_session_id);
@@ -1160,7 +1316,7 @@ async fn deleted_child_is_tombstoned_and_not_resurrected_after_reindex() -> Resu
     runtime.shutdown().await;
     let rebuilt = build_runtime(
         data_root.path(),
-        Arc::new(ScriptedProvider::new([])) as Arc<dyn ModelProviderSDK>,
+        Arc::new(ScriptedProvider::for_agent_tasks([])) as Arc<dyn ModelProviderSDK>,
     )?;
     rebuilt.refresh_session_index()?;
     let (rebuilt_connection, _) = initialize_connection(&rebuilt).await?;
@@ -1206,7 +1362,7 @@ async fn deleted_child_is_tombstoned_and_not_resurrected_after_reindex() -> Resu
 #[tokio::test]
 async fn root_delete_removes_unhydrated_descendants_and_the_journal() -> Result<()> {
     let data_root = TempDir::new()?;
-    let provider: Arc<dyn ModelProviderSDK> = Arc::new(ScriptedProvider::new([
+    let provider: Arc<dyn ModelProviderSDK> = Arc::new(ScriptedProvider::for_agent_tasks([
         ScriptedProvider::completed("child reply"),
         ScriptedProvider::completed("grandchild reply"),
     ]));
@@ -1250,7 +1406,7 @@ async fn root_delete_removes_unhydrated_descendants_and_the_journal() -> Result<
     runtime.shutdown().await;
     let rebuilt = build_runtime(
         data_root.path(),
-        Arc::new(ScriptedProvider::new([])) as Arc<dyn ModelProviderSDK>,
+        Arc::new(ScriptedProvider::for_agent_tasks([])) as Arc<dyn ModelProviderSDK>,
     )?;
     rebuilt.refresh_session_index()?;
     let (rebuilt_connection, _) = initialize_connection(&rebuilt).await?;
@@ -1282,7 +1438,7 @@ async fn root_delete_removes_unhydrated_descendants_and_the_journal() -> Result<
 #[tokio::test]
 async fn session_export_filters_to_the_target_session() -> Result<()> {
     let data_root = TempDir::new()?;
-    let provider: Arc<dyn ModelProviderSDK> = Arc::new(ScriptedProvider::new([
+    let provider: Arc<dyn ModelProviderSDK> = Arc::new(ScriptedProvider::for_agent_tasks([
         ScriptedProvider::completed("child reply"),
         ScriptedProvider::completed("grandchild reply"),
     ]));
@@ -1340,10 +1496,9 @@ async fn session_export_filters_to_the_target_session() -> Result<()> {
 #[tokio::test]
 async fn stale_missing_index_child_resolves_shared_journal() -> Result<()> {
     let data_root = TempDir::new()?;
-    let provider: Arc<dyn ModelProviderSDK> =
-        Arc::new(ScriptedProvider::new([ScriptedProvider::completed(
-            "child reply",
-        )]));
+    let provider: Arc<dyn ModelProviderSDK> = Arc::new(ScriptedProvider::for_agent_tasks([
+        ScriptedProvider::completed("child reply"),
+    ]));
     let runtime = build_runtime(data_root.path(), provider)?;
     let (connection_id, mut notifications) = initialize_connection(&runtime).await?;
     let root_session_id = start_parent_session(&runtime, connection_id, data_root.path()).await?;
@@ -1364,7 +1519,7 @@ async fn stale_missing_index_child_resolves_shared_journal() -> Result<()> {
 
     let rebuilt = build_runtime(
         data_root.path(),
-        Arc::new(ScriptedProvider::new([])) as Arc<dyn ModelProviderSDK>,
+        Arc::new(ScriptedProvider::for_agent_tasks([])) as Arc<dyn ModelProviderSDK>,
     )?;
     // Deliberately do not refresh the index: resume must use the journal-content
     // fallback for a shared child whose indexed rollout_path is missing.
@@ -1395,7 +1550,7 @@ async fn stale_missing_index_child_resolves_shared_journal() -> Result<()> {
     )?;
     let stale_runtime = build_runtime(
         data_root.path(),
-        Arc::new(ScriptedProvider::new([])) as Arc<dyn ModelProviderSDK>,
+        Arc::new(ScriptedProvider::for_agent_tasks([])) as Arc<dyn ModelProviderSDK>,
     )?;
     let (stale_connection, _) = initialize_connection(&stale_runtime).await?;
     let resumed = resume_session(&stale_runtime, stale_connection, child.child_session_id).await?;
@@ -1413,10 +1568,9 @@ async fn stale_missing_index_child_resolves_shared_journal() -> Result<()> {
 #[tokio::test]
 async fn reindex_removes_stale_db_row_for_tombstoned_child() -> Result<()> {
     let data_root = TempDir::new()?;
-    let provider: Arc<dyn ModelProviderSDK> =
-        Arc::new(ScriptedProvider::new([ScriptedProvider::completed(
-            "child reply",
-        )]));
+    let provider: Arc<dyn ModelProviderSDK> = Arc::new(ScriptedProvider::for_agent_tasks([
+        ScriptedProvider::completed("child reply"),
+    ]));
     let runtime = build_runtime(data_root.path(), provider)?;
     let (connection_id, mut notifications) = initialize_connection(&runtime).await?;
     let root_session_id = start_parent_session(&runtime, connection_id, data_root.path()).await?;
@@ -1458,10 +1612,9 @@ async fn reindex_removes_stale_db_row_for_tombstoned_child() -> Result<()> {
 #[tokio::test]
 async fn child_delete_with_missing_index_still_persists_tombstone() -> Result<()> {
     let data_root = TempDir::new()?;
-    let provider: Arc<dyn ModelProviderSDK> =
-        Arc::new(ScriptedProvider::new([ScriptedProvider::completed(
-            "child reply",
-        )]));
+    let provider: Arc<dyn ModelProviderSDK> = Arc::new(ScriptedProvider::for_agent_tasks([
+        ScriptedProvider::completed("child reply"),
+    ]));
     let runtime = build_runtime(data_root.path(), provider)?;
     let (connection_id, mut notifications) = initialize_connection(&runtime).await?;
     let root_session_id = start_parent_session(&runtime, connection_id, data_root.path()).await?;
@@ -1484,7 +1637,7 @@ async fn child_delete_with_missing_index_still_persists_tombstone() -> Result<()
 
     let rebuilt = build_runtime(
         data_root.path(),
-        Arc::new(ScriptedProvider::new([])) as Arc<dyn ModelProviderSDK>,
+        Arc::new(ScriptedProvider::for_agent_tasks([])) as Arc<dyn ModelProviderSDK>,
     )?;
     let (rebuilt_connection, _) = initialize_connection(&rebuilt).await?;
     delete_session(&rebuilt, rebuilt_connection, child.child_session_id).await?;
@@ -1527,10 +1680,9 @@ async fn child_delete_with_missing_index_still_persists_tombstone() -> Result<()
 #[tokio::test]
 async fn child_cwd_update_preserves_attribution_and_shared_size_is_not_child_size() -> Result<()> {
     let data_root = TempDir::new()?;
-    let provider: Arc<dyn ModelProviderSDK> =
-        Arc::new(ScriptedProvider::new([ScriptedProvider::completed(
-            "child reply",
-        )]));
+    let provider: Arc<dyn ModelProviderSDK> = Arc::new(ScriptedProvider::for_agent_tasks([
+        ScriptedProvider::completed("child reply"),
+    ]));
     let runtime = build_runtime(data_root.path(), provider)?;
     let (connection_id, mut notifications) = initialize_connection(&runtime).await?;
     let root_session_id = start_parent_session(&runtime, connection_id, data_root.path()).await?;
@@ -1585,7 +1737,7 @@ async fn child_cwd_update_preserves_attribution_and_shared_size_is_not_child_siz
     db.delete_session(&child.child_session_id)?;
     let rebuilt = build_runtime(
         data_root.path(),
-        Arc::new(ScriptedProvider::new([])) as Arc<dyn ModelProviderSDK>,
+        Arc::new(ScriptedProvider::for_agent_tasks([])) as Arc<dyn ModelProviderSDK>,
     )?;
     rebuilt.refresh_session_index()?;
     let (rebuilt_connection, _) = initialize_connection(&rebuilt).await?;
@@ -1631,7 +1783,7 @@ async fn child_cwd_update_preserves_attribution_and_shared_size_is_not_child_siz
 #[tokio::test]
 async fn child_rollback_preview_counts_only_child_turns() -> Result<()> {
     let data_root = TempDir::new()?;
-    let provider: Arc<dyn ModelProviderSDK> = Arc::new(ScriptedProvider::new([
+    let provider: Arc<dyn ModelProviderSDK> = Arc::new(ScriptedProvider::for_agent_tasks([
         ScriptedProvider::completed("child first"),
         ScriptedProvider::completed("child second"),
         ScriptedProvider::completed("root reply"),
@@ -1647,8 +1799,13 @@ async fn child_rollback_preview_counts_only_child_turns() -> Result<()> {
         Some("child"),
     )
     .await?;
-    wait_for_session_notification(&mut notifications, "turn/completed", child.child_session_id)
-        .await?;
+    wait_for_turn_completions(
+        &mut notifications,
+        &[child.child_session_id, root_session_id],
+    )
+    .await?;
+    wait_for_session_idle(&runtime, connection_id, child.child_session_id).await?;
+    wait_for_session_idle(&runtime, connection_id, root_session_id).await?;
     start_turn(
         &runtime,
         connection_id,
@@ -1656,10 +1813,16 @@ async fn child_rollback_preview_counts_only_child_turns() -> Result<()> {
         "child second",
     )
     .await?;
-    wait_for_session_notification(&mut notifications, "turn/completed", child.child_session_id)
-        .await?;
+    wait_for_turn_completions(
+        &mut notifications,
+        &[child.child_session_id, root_session_id],
+    )
+    .await?;
+    wait_for_session_idle(&runtime, connection_id, child.child_session_id).await?;
+    wait_for_session_idle(&runtime, connection_id, root_session_id).await?;
     start_turn(&runtime, connection_id, root_session_id, "root task").await?;
     wait_for_session_notification(&mut notifications, "turn/completed", root_session_id).await?;
+    wait_for_session_idle(&runtime, connection_id, root_session_id).await?;
 
     let response = rpc(
         &runtime,
@@ -1685,10 +1848,9 @@ async fn child_rollback_preview_counts_only_child_turns() -> Result<()> {
 #[tokio::test]
 async fn live_root_delete_removes_shared_journal_and_reindex_does_not_resurrect() -> Result<()> {
     let data_root = TempDir::new()?;
-    let provider: Arc<dyn ModelProviderSDK> =
-        Arc::new(ScriptedProvider::new([ScriptedProvider::completed(
-            "child reply",
-        )]));
+    let provider: Arc<dyn ModelProviderSDK> = Arc::new(ScriptedProvider::for_agent_tasks([
+        ScriptedProvider::completed("child reply"),
+    ]));
     let runtime = build_runtime(data_root.path(), provider)?;
     let (connection_id, mut notifications) = initialize_connection(&runtime).await?;
     let root_session_id = start_parent_session(&runtime, connection_id, data_root.path()).await?;
@@ -1725,7 +1887,7 @@ async fn live_root_delete_removes_shared_journal_and_reindex_does_not_resurrect(
     runtime.shutdown().await;
     let rebuilt = build_runtime(
         data_root.path(),
-        Arc::new(ScriptedProvider::new([])) as Arc<dyn ModelProviderSDK>,
+        Arc::new(ScriptedProvider::for_agent_tasks([])) as Arc<dyn ModelProviderSDK>,
     )?;
     rebuilt.refresh_session_index()?;
     let (rebuilt_connection, _) = initialize_connection(&rebuilt).await?;
@@ -1764,10 +1926,9 @@ async fn live_root_delete_removes_shared_journal_and_reindex_does_not_resurrect(
 #[tokio::test]
 async fn wrong_existing_index_path_delete_and_resume_resolve_true_journal() -> Result<()> {
     let data_root = TempDir::new()?;
-    let provider: Arc<dyn ModelProviderSDK> =
-        Arc::new(ScriptedProvider::new([ScriptedProvider::completed(
-            "child reply",
-        )]));
+    let provider: Arc<dyn ModelProviderSDK> = Arc::new(ScriptedProvider::for_agent_tasks([
+        ScriptedProvider::completed("child reply"),
+    ]));
     let runtime = build_runtime(data_root.path(), provider)?;
     let (connection_id, mut notifications) = initialize_connection(&runtime).await?;
     let root_session_id = start_parent_session(&runtime, connection_id, data_root.path()).await?;
@@ -1805,7 +1966,7 @@ async fn wrong_existing_index_path_delete_and_resume_resolve_true_journal() -> R
     )?;
     let rebuilt = build_runtime(
         data_root.path(),
-        Arc::new(ScriptedProvider::new([])) as Arc<dyn ModelProviderSDK>,
+        Arc::new(ScriptedProvider::for_agent_tasks([])) as Arc<dyn ModelProviderSDK>,
     )?;
     let (rebuilt_connection, _) = initialize_connection(&rebuilt).await?;
     let resumed = resume_session(&rebuilt, rebuilt_connection, child.child_session_id).await?;
@@ -1854,10 +2015,9 @@ async fn wrong_existing_index_path_delete_and_resume_resolve_true_journal() -> R
 #[tokio::test]
 async fn retry_root_delete_cleans_orphan_child_row_and_artifact() -> Result<()> {
     let data_root = TempDir::new()?;
-    let provider: Arc<dyn ModelProviderSDK> =
-        Arc::new(ScriptedProvider::new([ScriptedProvider::completed(
-            "child reply",
-        )]));
+    let provider: Arc<dyn ModelProviderSDK> = Arc::new(ScriptedProvider::for_agent_tasks([
+        ScriptedProvider::completed("child reply"),
+    ]));
     let runtime = build_runtime(data_root.path(), provider)?;
     let (connection_id, mut notifications) = initialize_connection(&runtime).await?;
     let root_session_id = start_parent_session(&runtime, connection_id, data_root.path()).await?;
@@ -1916,10 +2076,9 @@ async fn retry_root_delete_cleans_orphan_child_row_and_artifact() -> Result<()> 
 #[tokio::test]
 async fn retry_delete_with_missing_target_journal_cleans_db_and_artifact() -> Result<()> {
     let data_root = TempDir::new()?;
-    let provider: Arc<dyn ModelProviderSDK> =
-        Arc::new(ScriptedProvider::new([ScriptedProvider::completed(
-            "child reply",
-        )]));
+    let provider: Arc<dyn ModelProviderSDK> = Arc::new(ScriptedProvider::for_agent_tasks([
+        ScriptedProvider::completed("child reply"),
+    ]));
     let runtime = build_runtime(data_root.path(), provider)?;
     let (connection_id, mut notifications) = initialize_connection(&runtime).await?;
     let root_session_id = start_parent_session(&runtime, connection_id, data_root.path()).await?;
@@ -1947,7 +2106,7 @@ async fn retry_delete_with_missing_target_journal_cleans_db_and_artifact() -> Re
     // must finish cleanup instead of failing with "journal path is unknown".
     let rebuilt = build_runtime(
         data_root.path(),
-        Arc::new(ScriptedProvider::new([])) as Arc<dyn ModelProviderSDK>,
+        Arc::new(ScriptedProvider::for_agent_tasks([])) as Arc<dyn ModelProviderSDK>,
     )?;
     let (rebuilt_connection, _) = initialize_connection(&rebuilt).await?;
     delete_session(&rebuilt, rebuilt_connection, child.child_session_id).await?;
@@ -1976,10 +2135,9 @@ async fn retry_delete_with_missing_target_journal_cleans_db_and_artifact() -> Re
 #[tokio::test]
 async fn delete_with_damaged_journal_fails_closed() -> Result<()> {
     let data_root = TempDir::new()?;
-    let provider: Arc<dyn ModelProviderSDK> =
-        Arc::new(ScriptedProvider::new([ScriptedProvider::completed(
-            "child reply",
-        )]));
+    let provider: Arc<dyn ModelProviderSDK> = Arc::new(ScriptedProvider::for_agent_tasks([
+        ScriptedProvider::completed("child reply"),
+    ]));
     let runtime = build_runtime(data_root.path(), provider)?;
     let (connection_id, mut notifications) = initialize_connection(&runtime).await?;
     let root_session_id = start_parent_session(&runtime, connection_id, data_root.path()).await?;
@@ -2004,7 +2162,7 @@ async fn delete_with_damaged_journal_fails_closed() -> Result<()> {
 
     let rebuilt = build_runtime(
         data_root.path(),
-        Arc::new(ScriptedProvider::new([])) as Arc<dyn ModelProviderSDK>,
+        Arc::new(ScriptedProvider::for_agent_tasks([])) as Arc<dyn ModelProviderSDK>,
     )?;
     let (rebuilt_connection, _) = initialize_connection(&rebuilt).await?;
     let response = rpc(
@@ -2044,10 +2202,9 @@ async fn delete_with_damaged_journal_fails_closed() -> Result<()> {
 #[tokio::test]
 async fn user_fork_is_not_an_agent_child_and_owns_its_child_tree() -> Result<()> {
     let data_root = TempDir::new()?;
-    let provider: Arc<dyn ModelProviderSDK> =
-        Arc::new(ScriptedProvider::new([ScriptedProvider::completed(
-            "fork child reply",
-        )]));
+    let provider: Arc<dyn ModelProviderSDK> = Arc::new(ScriptedProvider::for_agent_tasks([
+        ScriptedProvider::completed("fork child reply"),
+    ]));
     let runtime = build_runtime(data_root.path(), provider)?;
     let (connection_id, mut notifications) = initialize_connection(&runtime).await?;
     let source_root_id = start_parent_session(&runtime, connection_id, data_root.path()).await?;
@@ -2109,10 +2266,9 @@ async fn user_fork_is_not_an_agent_child_and_owns_its_child_tree() -> Result<()>
 #[tokio::test]
 async fn wrong_index_missing_journal_preserves_unrelated_artifact_sentinel() -> Result<()> {
     let data_root = TempDir::new()?;
-    let provider: Arc<dyn ModelProviderSDK> =
-        Arc::new(ScriptedProvider::new([ScriptedProvider::completed(
-            "child reply",
-        )]));
+    let provider: Arc<dyn ModelProviderSDK> = Arc::new(ScriptedProvider::for_agent_tasks([
+        ScriptedProvider::completed("child reply"),
+    ]));
     let runtime = build_runtime(data_root.path(), provider)?;
     let (connection_id, mut notifications) = initialize_connection(&runtime).await?;
     let root_session_id = start_parent_session(&runtime, connection_id, data_root.path()).await?;
@@ -2150,7 +2306,7 @@ async fn wrong_index_missing_journal_preserves_unrelated_artifact_sentinel() -> 
     )?;
     let rebuilt = build_runtime(
         data_root.path(),
-        Arc::new(ScriptedProvider::new([])) as Arc<dyn ModelProviderSDK>,
+        Arc::new(ScriptedProvider::for_agent_tasks([])) as Arc<dyn ModelProviderSDK>,
     )?;
     let (rebuilt_connection, _) = initialize_connection(&rebuilt).await?;
     delete_session(&rebuilt, rebuilt_connection, child.child_session_id).await?;
