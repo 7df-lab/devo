@@ -398,23 +398,36 @@ impl ProviderConfigFile {
     /// Overlay keys may be bare model ids or full `provider/model` references.
     /// Bare ids update every matching model id across providers.
     pub fn apply_model_overrides(&mut self, overrides: &BTreeMap<String, ModelOverrideConfig>) {
+        if overrides.is_empty() {
+            return;
+        }
+        // The normalized config contains one override per configured model. A
+        // full scan for every override is quadratic even for simple catalogs.
+        // Index both forms: a reference can be one model's full slug and another
+        // provider's bare model id, and both must retain the previous behavior.
+        let mut by_reference: BTreeMap<String, Vec<(String, String)>> = BTreeMap::new();
+        for (provider_id, provider) in &self.providers {
+            for model_id in provider.models.keys() {
+                let target = (provider_id.clone(), model_id.clone());
+                by_reference
+                    .entry(model_id.clone())
+                    .or_default()
+                    .push(target.clone());
+                by_reference
+                    .entry(format!("{provider_id}/{model_id}"))
+                    .or_default()
+                    .push(target);
+            }
+        }
         for (model_reference, override_config) in overrides {
-            let matches = self
-                .providers
-                .iter()
-                .flat_map(|(provider_id, provider)| {
-                    provider.models.keys().filter_map(move |model_id| {
-                        let exact_reference = format!("{provider_id}/{model_id}");
-                        (model_reference == model_id || model_reference == &exact_reference)
-                            .then(|| (provider_id.clone(), model_id.clone()))
-                    })
-                })
-                .collect::<Vec<_>>();
+            let Some(matches) = by_reference.get(model_reference) else {
+                continue;
+            };
             for (provider_id, model_id) in matches {
                 if let Some(model) = self
                     .providers
-                    .get_mut(&provider_id)
-                    .and_then(|provider| provider.models.get_mut(&model_id))
+                    .get_mut(provider_id)
+                    .and_then(|provider| provider.models.get_mut(model_id))
                 {
                     model.apply_model_override(override_config);
                 }
@@ -1258,3 +1271,7 @@ mod tests {
         );
     }
 }
+
+#[cfg(test)]
+#[path = "catalog_override_tests.rs"]
+mod override_tests;
