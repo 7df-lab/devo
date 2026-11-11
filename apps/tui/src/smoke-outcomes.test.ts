@@ -1,6 +1,6 @@
 import assert from "node:assert/strict";
 import { test } from "node:test";
-import { heartbeatDelivered, rpcSucceeded, turnOutcome } from "../scripts/smoke-outcomes.js";
+import { scheduledDelivered, rpcSucceeded, turnOutcome } from "../scripts/smoke-outcomes.js";
 
 const item = (type: string, extra = {}, turnId = "turn-1") => ({ method: "item/completed",
   payload: { params: { item: { turnId, item: { type, ...extra } } } } });
@@ -34,7 +34,7 @@ test("smoke interruption must terminate the started user turn", () => {
 test("heartbeat slash echo cannot stand in for scheduler delivery", () => {
   const marker = "heartbeat-probe";
   const content = [{ type: "text", text: marker }];
-  assert.equal(heartbeatDelivered([{ method: "turn/start", payload: { params: { input: marker } } }], marker), false);
-  assert.equal(heartbeatDelivered([item("assistantMessage", { content })], marker), false);
-  assert.equal(heartbeatDelivered([item("userMessage", { content })], marker), true);
+  assert.equal(scheduledDelivered([{ method: "turn/start", payload: { params: { input: marker } } }], marker), false);
+  assert.equal(scheduledDelivered([item("assistantMessage", { content })], marker), false);
+  assert.equal(scheduledDelivered([item("userMessage", { content })], marker), true);
 });

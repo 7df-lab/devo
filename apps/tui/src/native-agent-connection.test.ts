@@ -1104,7 +1104,7 @@ test("getContextTree does not invent spend from context occupancy", async () => 
 
 test("schedule heartbeat and export use Native session/heartbeat/command + session/export", async () => {
   const { conn, fake } = await bootConnection();
-  const hb = await conn.setHeartbeat("every 1h", "ping status", "steer");
+  const hb = await conn.setScheduledTask("every 1h", "ping status", "steer");
   assert.equal(hb.id, "job_1");
   assert.ok(
     fake.requests.some(

@@ -64,7 +64,7 @@ export function countRosterSubagentStatuses(
 
 export type ActivityLoadState = "ready" | "loading" | "unavailable" | "error";
 
-export interface HeartbeatSummaryCounts {
+export interface ScheduledSummaryCounts {
 	total: number;
 	active: number;
 	paused: number;
@@ -83,15 +83,15 @@ export interface ShellSummaryCounts {
 export class SubagentSummaryLine implements Component, Focusable {
 	focused = false;
 	private counts: SubagentSummaryCounts = { total: 0, running: 0, idle: 0, inactive: 0 };
-	private heartbeats: HeartbeatSummaryCounts = { total: 0, active: 0, paused: 0 };
+	private scheduledTasks: ScheduledSummaryCounts = { total: 0, active: 0, paused: 0 };
 	private shells: ShellSummaryCounts = { total: 0, running: 0 };
-	private heartbeatState: ActivityLoadState = "loading";
+	private scheduledState: ActivityLoadState = "loading";
 	private shellState: ActivityLoadState = "loading";
 	private openable = false;
 	private selected = 0;
 
 	onOpen?: () => void;
-	onOpenHeartbeats?: () => void;
+	onOpenScheduledTasks?: () => void;
 	onOpenShells?: () => void;
 	onCancel?: () => void;
 	onChatAction?: (data: string) => void;
@@ -101,15 +101,16 @@ export class SubagentSummaryLine implements Component, Focusable {
 		private readonly getContextLabel: () => string | undefined = () => undefined,
 		private readonly getOverrideLabel: () => string | undefined = () => undefined,
 		private readonly getPickerOpen: () => boolean = () => false,
+		private readonly getGoalLabel: () => string | undefined = () => undefined,
 	) {}
 
 	setSubagentCounts(counts: SubagentSummaryCounts): void {
 		this.counts = { ...counts };
 	}
 
-	setHeartbeatCounts(counts: HeartbeatSummaryCounts): void {
-		this.heartbeats = { ...counts };
-		this.heartbeatState = "ready";
+	setScheduledCounts(counts: ScheduledSummaryCounts): void {
+		this.scheduledTasks = { ...counts };
+		this.scheduledState = "ready";
 	}
 
 	setShellCounts(counts: ShellSummaryCounts): void {
@@ -117,8 +118,8 @@ export class SubagentSummaryLine implements Component, Focusable {
 		this.shellState = "ready";
 	}
 
-	setHeartbeatState(state: ActivityLoadState): void {
-		this.heartbeatState = state;
+	setScheduledState(state: ActivityLoadState): void {
+		this.scheduledState = state;
 	}
 
 	setShellState(state: ActivityLoadState): void {
@@ -141,7 +142,7 @@ export class SubagentSummaryLine implements Component, Focusable {
 			return;
 		}
 		if (keybindings.matches(data, "tui.select.confirm")) {
-			[this.onOpen, this.onOpenHeartbeats, this.onOpenShells][this.selected]?.();
+			[this.onOpen, this.onOpenScheduledTasks, this.onOpenShells][this.selected]?.();
 			return;
 		}
 		if (keybindings.matches(data, "tui.select.cancel") || keybindings.matches(data, "app.agents.back")) {
@@ -166,40 +167,60 @@ export class SubagentSummaryLine implements Component, Focusable {
 
 	render(width: number): string[] {
 		if (this.getPickerOpen() || width < 1) return [];
-		const lines = this.renderInfoLine(width);
-		const heartbeatCount = this.heartbeatState === "ready" ? String(this.heartbeats.total) : this.heartbeatState;
+		const info = this.renderInfoLine(width);
+		const lines: string[] = [];
+		const innerWidth = Math.max(1, width - 4);
+		const goal = this.getGoalLabel()?.trim();
+		const colors = ["accent", "warning", "success"] as const;
+		const scheduledCount = this.scheduledState === "ready" ? String(this.scheduledTasks.total) : this.scheduledState;
 		const shellCount = this.shellState === "ready" ? String(this.shells.running) : this.shellState;
 		const groups = [
 			`Subagents ${this.counts.running}`,
-			`Heartbeats ${heartbeatCount}`,
+			`Scheduled ${scheduledCount}`,
 			`Shells ${shellCount}`,
 		];
 		if (!this.focused) {
-			const compact = groups.join(" · ");
+			const coloredGroups = groups.map((group, index) => theme.fg(colors[index]!, group));
+			if (goal) coloredGroups.push(theme.fg("mdHeading", goal));
+			const compact = coloredGroups.join(theme.fg("dim", " · "));
 			// Narrow terminals retain each group instead of silently clipping the last group.
-			const rows = visibleWidth(compact) <= width ? [compact] : groups;
-			return [...lines, ...rows.map((row) => theme.fg("muted", truncateToWidth(row, width, "…")))];
+			const rows = visibleWidth(compact) <= innerWidth ? [compact] : coloredGroups;
+			return [...info, ...this.frame(rows, width)];
 		}
-		let nextHeartbeat = "";
-		if (this.heartbeats.nextRunAt !== undefined && Number.isFinite(this.heartbeats.nextRunAt)) {
-			const seconds = Math.max(0, Math.ceil((this.heartbeats.nextRunAt - Date.now()) / 1000));
-			nextHeartbeat = ` · next ${seconds}s`;
+		let nextScheduled = "";
+		if (this.scheduledTasks.nextRunAt !== undefined && Number.isFinite(this.scheduledTasks.nextRunAt)) {
+			const seconds = Math.max(0, Math.ceil((this.scheduledTasks.nextRunAt - Date.now()) / 1000));
+			nextScheduled = ` · next ${seconds}s`;
 		}
 		const details = [
 			`Subagents · ${this.counts.running} running · ${this.counts.idle} idle · ${this.counts.inactive} inactive${this.openable ? "" : " · details unavailable"}`,
-			this.heartbeatState === "ready"
-				? `Heartbeats · ${this.heartbeats.active} active · ${this.heartbeats.paused} paused${nextHeartbeat}`
-				: `Heartbeats · ${this.heartbeatState}`,
+			this.scheduledState === "ready"
+				? `Scheduled · ${this.scheduledTasks.active} active · ${this.scheduledTasks.paused} paused${nextScheduled}`
+				: `Scheduled · ${this.scheduledState}`,
 			this.shellState === "ready"
 				? `Shells · ${this.shells.running} running · ${this.shells.total} total${this.shells.persistent === undefined ? "" : ` · ${this.shells.persistent} persistent`}`
 				: `Shells · ${this.shellState}`,
 		];
 		for (const [index, detail] of details.entries()) {
-			const row = truncateToWidth(`${index === this.selected ? "›" : " "} ${detail}`, width, "…");
-			lines.push(index === this.selected ? theme.bg("selectedBg", row) : theme.fg("muted", row));
+			const row = theme.fg(colors[index]!, truncateToWidth(`${index === this.selected ? "›" : " "} ${detail}`, innerWidth, "…"));
+			lines.push(index === this.selected ? theme.bg("selectedBg", row) : row);
 		}
-		lines.push(theme.fg("dim", truncateToWidth(`↑/↓/tab select · ${keyText("tui.select.confirm")} open · ${keyText("tui.select.cancel")} back`, width, "…")));
-		return lines;
+		if (goal) lines.push(theme.fg("mdHeading", goal));
+		lines.push(theme.fg("dim", truncateToWidth(`↑/↓/tab select · ${keyText("tui.select.confirm")} open · ${keyText("tui.select.cancel")} back`, innerWidth, "…")));
+		return [...info, ...this.frame(lines, width)];
+	}
+
+	private frame(rows: string[], width: number): string[] {
+		if (width < 5) return rows.map((row) => truncateToWidth(row, width, "…"));
+		const inner = width - 4;
+		return [
+			theme.fg("border", `╭${"─".repeat(width - 2)}╮`),
+			...rows.map((row) => {
+				const content = truncateToWidth(row, inner, "…");
+				return `${theme.fg("border", "│ ")}${content}${" ".repeat(Math.max(0, inner - visibleWidth(content)))}${theme.fg("border", " │")}`;
+			}),
+			theme.fg("border", `╰${"─".repeat(width - 2)}╯`),
+		];
 	}
 
 	private renderInfoLine(width: number): string[] {

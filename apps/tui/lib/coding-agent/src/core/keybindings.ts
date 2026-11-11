@@ -21,6 +21,7 @@ export interface AppKeybindings {
 	"app.model.toggleScope": true;
 	"app.tools.expand": true;
 	"app.subagents.focus": true;
+	// Existing user keymap IDs remain stable for backwards compatibility.
 	"app.heartbeats.open": true;
 	"app.heartbeats.openSelected": true;
 	"app.editor.external": true;
@@ -90,11 +91,11 @@ export const KEYBINDINGS = {
 	},
 	"app.heartbeats.open": {
 		defaultKeys: "ctrl+r",
-		description: "Manage heartbeats",
+		description: "Manage scheduled tasks",
 	},
 	"app.heartbeats.openSelected": {
 		defaultKeys: "right",
-		description: "Open selected heartbeat",
+		description: "Open selected scheduled task",
 	},
 	"app.editor.external": {
 		defaultKeys: "ctrl+g",

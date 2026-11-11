@@ -1,9 +1,9 @@
 import { test } from "node:test";
 import assert from "node:assert/strict";
-import type { AgentConnectionHeartbeat } from "../agent-connection/types.js";
+import type { AgentConnectionScheduledTask } from "../agent-connection/types.js";
 import { InteractiveMode } from "./interactive-mode.js";
 
-type Heartbeat = AgentConnectionHeartbeat;
+type Scheduled = AgentConnectionScheduledTask;
 function deferred<T>() {
   let resolve!: (value: T) => void;
   const promise = new Promise<T>((done) => { resolve = done; });
@@ -12,39 +12,39 @@ function deferred<T>() {
 
 for (const action of ["pause", "stop"] as const) {
   test(`delayed pre-${action} poll cannot overwrite the authoritative mutation result`, async () => {
-    const oldPoll = deferred<Heartbeat[]>();
-    const nextPoll = deferred<Heartbeat[]>();
-    const mutation = deferred<Heartbeat["job"]>();
-    const active = { job: { id: "job-1", activeSessionId: "session-a", source: "heartbeat", status: "active" } } as Heartbeat;
-    const updated = { ...active.job, status: action === "pause" ? "paused" : "stopped" } as Heartbeat["job"];
+    const oldPoll = deferred<Scheduled[]>();
+    const nextPoll = deferred<Scheduled[]>();
+    const mutation = deferred<Scheduled["job"]>();
+    const active = { job: { id: "job-1", activeSessionId: "session-a", source: "heartbeat", status: "active" } } as Scheduled;
+    const updated = { ...active.job, status: action === "pause" ? "paused" : "stopped" } as Scheduled["job"];
     const expected = action === "pause" ? [{ ...active, job: updated }] : [];
     let calls = 0;
-    const published: Heartbeat[][] = [];
+    const published: Scheduled[][] = [];
     const mode = Object.create(InteractiveMode.prototype) as {
-      heartbeatCatalog: Heartbeat[];
-      refreshHeartbeatCatalog(): Promise<void>;
-      manageHeartbeat(heartbeat: Heartbeat, action: "pause" | "stop"): Promise<void>;
+      scheduledCatalog: Scheduled[];
+      refreshScheduledCatalog(): Promise<void>;
+      manageScheduledTask(scheduled: Scheduled, action: "pause" | "stop"): Promise<void>;
     };
     Object.assign(mode, {
       sessionEventGeneration: 1,
-      heartbeatMutationRevision: 0,
-      heartbeatCatalog: [active],
+      scheduledMutationRevision: 0,
+      scheduledCatalog: [active],
       agentConnection: {
-        listHeartbeats: () => ++calls === 1 ? oldPoll.promise : nextPoll.promise,
-        manageHeartbeat: () => mutation.promise,
+        listScheduledTasks: () => ++calls === 1 ? oldPoll.promise : nextPoll.promise,
+        manageScheduledTask: () => mutation.promise,
       },
       isCurrentConnectionGeneration: () => true,
-      applyHeartbeatCatalog: (items: Heartbeat[]) => {
-        mode.heartbeatCatalog = items;
+      applyScheduledCatalog: (items: Scheduled[]) => {
+        mode.scheduledCatalog = items;
         published.push(items);
       },
     });
 
-    const poll = mode.refreshHeartbeatCatalog();
-    const change = mode.manageHeartbeat(active, action);
+    const poll = mode.refreshScheduledCatalog();
+    const change = mode.manageScheduledTask(active, action);
     mutation.resolve(updated);
     await change;
-    assert.deepEqual(mode.heartbeatCatalog, expected);
+    assert.deepEqual(mode.scheduledCatalog, expected);
     assert.equal(calls, 1, "post-mutation refresh joins the in-flight lane");
 
     oldPoll.resolve([active]);
@@ -55,36 +55,36 @@ for (const action of ["pause", "stop"] as const) {
 
     nextPoll.resolve(expected);
     await poll;
-    assert.deepEqual(mode.heartbeatCatalog, expected);
+    assert.deepEqual(mode.scheduledCatalog, expected);
     assert.deepEqual(published, [expected, expected]);
   });
 }
 
 for (const lifecycle of ["stopped", "invalidated", "invalidated-then-recovered"] as const) {
   test(`pending heartbeat refresh cannot publish after ${lifecycle}`, async () => {
-    const pending = deferred<Heartbeat[]>();
-    const published: Heartbeat[][] = [];
+    const pending = deferred<Scheduled[]>();
+    const published: Scheduled[][] = [];
     const mode = Object.create(InteractiveMode.prototype) as {
       activityStopped: boolean;
       activityInvalidated: boolean;
-      heartbeatMutationRevision: number;
-      refreshHeartbeatCatalog(): Promise<void>;
+      scheduledMutationRevision: number;
+      refreshScheduledCatalog(): Promise<void>;
     };
     Object.assign(mode, {
       sessionEventGeneration: 1,
       activityStopped: false,
       activityInvalidated: false,
-      heartbeatMutationRevision: 0,
-      agentConnection: { listHeartbeats: () => pending.promise },
+      scheduledMutationRevision: 0,
+      agentConnection: { listScheduledTasks: () => pending.promise },
       isCurrentConnectionGeneration: () => true,
-      applyHeartbeatCatalog: (items: Heartbeat[]) => published.push(items),
+      applyScheduledCatalog: (items: Scheduled[]) => published.push(items),
     });
-    const refresh = mode.refreshHeartbeatCatalog();
+    const refresh = mode.refreshScheduledCatalog();
     if (lifecycle === "stopped") {
       mode.activityStopped = true;
     } else {
       mode.activityInvalidated = true;
-      mode.heartbeatMutationRevision++;
+      mode.scheduledMutationRevision++;
       if (lifecycle === "invalidated-then-recovered") mode.activityInvalidated = false;
     }
     pending.resolve([]);

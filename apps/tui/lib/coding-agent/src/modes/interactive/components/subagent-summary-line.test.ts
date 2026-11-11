@@ -9,14 +9,15 @@ const plain = (lines: string[]) => lines.join("\n").replace(/\u001b\[[0-?]*[ -/]
 function dock() {
 	initTheme();
 	const component = new SubagentSummaryLine();
-	component.setHeartbeatCounts({ total: 0, active: 0, paused: 0 });
+	component.setScheduledCounts({ total: 0, active: 0, paused: 0 });
 	component.setShellCounts({ total: 0, running: 0 });
 	return component;
 }
 
 test("zero activity appears immediately without keyboard input", () => {
 	const component = dock();
-	assert.equal(plain(component.render(80)), "Subagents 0 · Heartbeats 0 · Shells 0");
+	assert.match(plain(component.render(80)), /│ Subagents 0 · Scheduled 0 · Shells 0 +│/);
+	assert.equal(component.render(80).length, 3);
 	assert.equal(component.isSelectable(), true);
 });
 
@@ -25,7 +26,7 @@ test("all three empty groups remain selectable including unavailable subagent de
 	component.focused = true;
 	const opened: string[] = [];
 	component.onOpen = () => opened.push("agents");
-	component.onOpenHeartbeats = () => opened.push("heartbeats");
+	component.onOpenScheduledTasks = () => opened.push("heartbeats");
 	component.onOpenShells = () => opened.push("shells");
 	component.handleInput("\r");
 	component.handleInput("\u001b[B");
@@ -41,7 +42,7 @@ test("focus expands details, up and escape return to editor, ordinary text is fo
 	const component = dock();
 	component.setOpenable(true);
 	component.setSubagentCounts({ total: 6, running: 1, idle: 2, inactive: 3 });
-	component.setHeartbeatCounts({ total: 3, active: 1, paused: 2 });
+	component.setScheduledCounts({ total: 3, active: 1, paused: 2 });
 	component.setShellCounts({ total: 5, running: 2, persistent: 1 });
 	component.focused = true;
 	const output = plain(component.render(120));
@@ -64,8 +65,8 @@ test("unknown or failed sources are not presented as zero or stale successful co
 	const component = dock();
 	component.setShellCounts({ total: 5, running: 2 });
 	component.setShellState("error");
-	component.setHeartbeatState("unavailable");
-	assert.equal(plain(component.render(100)), "Subagents 0 · Heartbeats unavailable · Shells error");
+	component.setScheduledState("unavailable");
+	assert.match(plain(component.render(100)), /Subagents 0 · Scheduled unavailable · Shells error/);
 	component.focused = true;
 	assert.doesNotMatch(plain(component.render(100)), /persistent|2 running|0 active/);
 	component.setShellState("loading");
@@ -76,7 +77,7 @@ test("unknown or failed sources are not presented as zero or stale successful co
 
 test("narrow widths retain each group and never exceed terminal width", () => {
 	const component = dock();
-	assert.equal(component.render(20).length, 3);
+	assert.equal(component.render(20).length, 5);
 	for (const focused of [false, true]) {
 		component.focused = focused;
 		for (const width of [0, 1, 2, 8, 20, 35, 80]) {
@@ -97,7 +98,7 @@ test("picker hides dock and blocks actions without clearing session data", () =>
 	assert.equal(opened, false);
 	pickerOpen = false;
 	assert.match(plain(component.render(80)), /project.*model/);
-	assert.match(plain(component.render(80)), /Heartbeats loading/);
+	assert.match(plain(component.render(80)), /Scheduled loading/);
 });
 
 test("override label replaces location while preserving context", () => {
@@ -107,3 +108,21 @@ test("override label replaces location while preserving context", () => {
 	assert.match(output, /override.*model/);
 	assert.doesNotMatch(output, /project/);
 });
+
+ test("Goal is conditional and does not change activity keyboard routing", () => {
+ initTheme();
+ let goal: string | undefined;
+ const component = new SubagentSummaryLine(undefined, undefined, undefined, undefined, () => goal);
+ assert.doesNotMatch(plain(component.render(100)), /Goal/);
+ goal = "Goal · active (2m)";
+ assert.match(plain(component.render(100)), /Goal · active/);
+ component.focused = true;
+ assert.match(plain(component.render(100)), /Goal · active/);
+ const opened: string[] = [];
+ component.onOpenShells = () => opened.push("shells");
+ component.handleInput("\t"); component.handleInput("\t"); component.handleInput("\r");
+ assert.deepEqual(opened, ["shells"]);
+ for (const width of [1, 4, 5, 20, 40, 80]) assert.ok(component.render(width).every(line => visibleWidth(line) <= width));
+ goal = undefined;
+ assert.doesNotMatch(plain(component.render(100)), /Goal/);
+ });

@@ -2,7 +2,7 @@ import { test } from "node:test";
 import assert from "node:assert/strict";
 import type {
 	AgentConnection,
-	AgentConnectionHeartbeat,
+	AgentConnectionScheduledTask,
 	AgentConnectionModelCatalog,
 	AgentConnectionResourceSnapshot,
 } from "../agent-connection/types.js";
@@ -138,43 +138,43 @@ test("late roster subscriptions are disposed instead of rebinding to a replaced 
 
 
 test("heartbeat refreshes do not reuse or apply a prior session's in-flight result", async () => {
-	const sessionA = deferred<AgentConnectionHeartbeat[]>();
-	const sessionB = deferred<AgentConnectionHeartbeat[]>();
+	const sessionA = deferred<AgentConnectionScheduledTask[]>();
+	const sessionB = deferred<AgentConnectionScheduledTask[]>();
 	let listCalls = 0;
 	const connection = {
-		listHeartbeats: () => (listCalls++ === 0 ? sessionA.promise : sessionB.promise),
+		listScheduledTasks: () => (listCalls++ === 0 ? sessionA.promise : sessionB.promise),
 	} as unknown as AgentConnection;
 	const mode = Object.create(InteractiveMode.prototype) as {
 		agentConnection: AgentConnection;
 		sessionEventGeneration: number;
-		heartbeatRefreshPromise: Promise<void> | undefined;
-		heartbeatRefreshGeneration: number | undefined;
-		heartbeatRefreshRequested: boolean;
-		appliedHeartbeats: AgentConnectionHeartbeat[][];
-		applyHeartbeatCatalog(heartbeats: AgentConnectionHeartbeat[]): void;
-		refreshHeartbeatCatalog(): Promise<void>;
+		scheduledRefreshPromise: Promise<void> | undefined;
+		scheduledRefreshGeneration: number | undefined;
+		scheduledRefreshRequested: boolean;
+		appliedScheduledTasks: AgentConnectionScheduledTask[][];
+		applyScheduledCatalog(scheduledTasks: AgentConnectionScheduledTask[]): void;
+		refreshScheduledCatalog(): Promise<void>;
 	};
 	Object.assign(mode, {
 		agentConnection: connection,
 		sessionEventGeneration: 20,
-		heartbeatRefreshPromise: undefined,
-		heartbeatRefreshGeneration: undefined,
-		heartbeatRefreshRequested: false,
-		appliedHeartbeats: [],
-		applyHeartbeatCatalog(heartbeats: AgentConnectionHeartbeat[]) {
-			mode.appliedHeartbeats.push(heartbeats);
+		scheduledRefreshPromise: undefined,
+		scheduledRefreshGeneration: undefined,
+		scheduledRefreshRequested: false,
+		appliedScheduledTasks: [],
+		applyScheduledCatalog(scheduledTasks: AgentConnectionScheduledTask[]) {
+			mode.appliedScheduledTasks.push(scheduledTasks);
 		},
 	});
 
-	const refreshA = mode.refreshHeartbeatCatalog();
+	const refreshA = mode.refreshScheduledCatalog();
 	mode.sessionEventGeneration = 21;
-	const refreshB = mode.refreshHeartbeatCatalog();
+	const refreshB = mode.refreshScheduledCatalog();
 	assert.equal(listCalls, 2, "new session starts its own heartbeat read");
 
-	sessionA.resolve([{ id: "heartbeat-A" }] as unknown as AgentConnectionHeartbeat[]);
+	sessionA.resolve([{ id: "heartbeat-A" }] as unknown as AgentConnectionScheduledTask[]);
 	await refreshA;
-	assert.deepEqual(mode.appliedHeartbeats, []);
-	sessionB.resolve([{ id: "heartbeat-B" }] as unknown as AgentConnectionHeartbeat[]);
+	assert.deepEqual(mode.appliedScheduledTasks, []);
+	sessionB.resolve([{ id: "heartbeat-B" }] as unknown as AgentConnectionScheduledTask[]);
 	await refreshB;
-	assert.deepEqual(mode.appliedHeartbeats, [[{ id: "heartbeat-B" }]]);
+	assert.deepEqual(mode.appliedScheduledTasks, [[{ id: "heartbeat-B" }]]);
 });

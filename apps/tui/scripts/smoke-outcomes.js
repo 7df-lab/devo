@@ -18,7 +18,7 @@ export function turnOutcome(records, status) {
   });
 }
 
-export function heartbeatDelivered(records, marker) {
+export function scheduledDelivered(records, marker) {
   return records.some((record) => {
     const item = record.payload?.params?.item?.item;
     return record.method === "item/completed" && item?.type === "userMessage"

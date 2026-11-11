@@ -7,8 +7,8 @@ const tick = () => new Promise((resolve) => setTimeout(resolve, 15));
 test("activity refreshes without keyboard input and retries failures", async () => {
   let count = 0;
   const states: string[] = [];
-  const conn = { listHeartbeats: async () => [], listShellTasks: async () => { if (++count === 1) throw new Error("offline"); return []; } } as unknown as AgentConnection;
-  const monitor = new ActivityMonitor({ getConnection: () => conn, onHeartbeats: () => {}, onShells: (s) => states.push(s.status), intervalMs: 1 });
+  const conn = { listScheduledTasks: async () => [], listShellTasks: async () => { if (++count === 1) throw new Error("offline"); return []; } } as unknown as AgentConnection;
+  const monitor = new ActivityMonitor({ getConnection: () => conn, onScheduledTasks: () => {}, onShells: (s) => states.push(s.status), intervalMs: 1 });
   monitor.start();
   await tick();
   monitor.stop();
@@ -19,11 +19,11 @@ test("activity refreshes without keyboard input and retries failures", async () 
 
 test("old session and stopped requests never mutate current activity", async () => {
   let resolveOld!: (value: never[]) => void;
-  let conn = { listHeartbeats: () => new Promise<never[]>((r) => { resolveOld = r; }) } as unknown as AgentConnection;
+  let conn = { listScheduledTasks: () => new Promise<never[]>((r) => { resolveOld = r; }) } as unknown as AgentConnection;
   const states: string[] = [];
-  const monitor = new ActivityMonitor({ getConnection: () => conn, onHeartbeats: (s) => states.push(s.status), onShells: () => {}, intervalMs: 10000 });
+  const monitor = new ActivityMonitor({ getConnection: () => conn, onScheduledTasks: (s) => states.push(s.status), onShells: () => {}, intervalMs: 10000 });
   monitor.start();
-  conn = { listHeartbeats: async () => [] } as unknown as AgentConnection;
+  conn = { listScheduledTasks: async () => [] } as unknown as AgentConnection;
   monitor.start();
   await tick();
   const expected = [...states];
@@ -35,8 +35,8 @@ test("old session and stopped requests never mutate current activity", async () 
 
 test("no shell capability means unavailable, never a fabricated zero", async () => {
   const states: string[] = [];
-  const conn = { listHeartbeats: async () => [] } as unknown as AgentConnection;
-  const monitor = new ActivityMonitor({ getConnection: () => conn, onHeartbeats: () => {}, onShells: (s) => states.push(s.status) });
+  const conn = { listScheduledTasks: async () => [] } as unknown as AgentConnection;
+  const monitor = new ActivityMonitor({ getConnection: () => conn, onScheduledTasks: () => {}, onShells: (s) => states.push(s.status) });
   monitor.start(); await tick(); monitor.stop();
   assert.deepEqual(states, ["unavailable"]);
 });
@@ -52,13 +52,13 @@ for (const pendingSource of ["heartbeats", "shells"] as const) {
     };
     const healthy = async () => { healthyCalls++; return []; };
     const conn = {
-      listHeartbeats: pendingSource === "heartbeats" ? pending : healthy,
+      listScheduledTasks: pendingSource === "heartbeats" ? pending : healthy,
       listShellTasks: pendingSource === "shells" ? pending : healthy,
     } as unknown as AgentConnection;
     const states: string[] = [];
     const monitor = new ActivityMonitor({
       getConnection: () => conn,
-      onHeartbeats: (snapshot) => states.push(`heartbeats:${snapshot.status}`),
+      onScheduledTasks: (snapshot) => states.push(`heartbeats:${snapshot.status}`),
       onShells: (snapshot) => states.push(`shells:${snapshot.status}`),
       intervalMs: 1,
     });

@@ -158,7 +158,7 @@ export function createNativeAgentsViewBackend(options: {
       return undefined;
     },
 
-    async listHeartbeats() {
+    async listScheduledTasks() {
       return [];
     },
 
