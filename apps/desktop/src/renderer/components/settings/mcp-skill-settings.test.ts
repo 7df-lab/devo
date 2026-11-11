@@ -28,7 +28,7 @@ describe("Desktop MCP and Skills settings", () => {
 			mcpRoute: routerSource.includes('path: "mcp"') && routerSource.includes("McpSettings"),
 			skillsRoute: routerSource.includes('path: "skills"') && routerSource.includes("SkillSettings"),
 			listsMcp: mcpSource.includes("client.mcp.list()"),
-			togglesMcp: mcpSource.includes("client.mcp.setEnabled"),
+			togglesMcp: mcpSource.includes("currentClient.mcp.setEnabled"),
 			listsMcpTools: mcpSource.includes("client.mcp.tools"),
 			hidesToolsWhenDisabled: mcpSource.includes("mcpServerEnabled") && mcpSource.includes("{enabled && ("),
 			opensMcpConfig: mcpSource.includes("openMcpConfigFile()"),
@@ -56,8 +56,8 @@ describe("Desktop MCP and Skills settings", () => {
 		const switchSource = mcpSource.slice(mcpSource.indexOf("<Switch"), mcpSource.indexOf("/>", mcpSource.indexOf("<Switch")))
 		expect({
 			reconnectControl: mcpSource.includes("<McpReconnectButton"),
-			reconnectDoesNotGateToggle: !switchSource.includes("reconnect") && !switchSource.includes("disabled="),
-			toggleStillUsesSetEnabled: mcpSource.includes("toggle.mutate({ name: server.name, enabled: nextEnabled })"),
+			reconnectDoesNotGateToggle: !switchSource.includes("reconnect") && !switchSource.includes("starting"),
+			toggleStillUsesSetEnabled: mcpSource.includes("submit({ name: server.name, enabled: checked === true })"),
 		}).toEqual({ reconnectControl: true, reconnectDoesNotGateToggle: true, toggleStillUsesSetEnabled: true })
 	})
 
