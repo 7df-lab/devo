@@ -208,17 +208,38 @@ async fn check_pause_resume(timing: ResumeTiming) -> Result<()> {
         .context("goal did not enter paused state")??;
     }
     if matches!(timing, ResumeTiming::ClearWhilePausing) {
-        let clear = Box::pin(runtime.handle_incoming(
-            connection_id,
-            serde_json::json!({
-                "id": "clear-during-pause", "method": "session/goal/clear",
-                "params": {"sessionId": session_id, "expectedGoalId": goal.id}
-            }),
-        ))
+        let clear_runtime = runtime.clone();
+        let clear_task = tokio::spawn(async move {
+            Box::pin(clear_runtime.handle_incoming(
+                connection_id,
+                serde_json::json!({
+                    "id": "clear-during-pause", "method": "session/goal/clear",
+                    "params": {"sessionId": session_id, "expectedGoalId": goal.id}
+                }),
+            ))
+            .await
+            .context("clear response")
+        });
+        // Clear is persist-first, but its notification may queue behind the
+        // deliberately stalled subscriber. Release it only after observing
+        // the cleared host state, not after awaiting that blocked delivery.
+        timeout(Duration::from_secs(/*secs*/ 5), async {
+            let mut ticks = tokio::time::interval(Duration::from_millis(/*millis*/ 20));
+            while support::read_goal(&runtime, connection_id, session_id)
+                .await?
+                .is_some()
+            {
+                ticks.tick().await;
+            }
+            Ok::<(), anyhow::Error>(())
+        })
         .await
-        .context("clear response")?;
-        assert!(clear.get("error").is_none(), "{clear}");
+        .context("goal did not clear during pause")??;
         drop(slow_rx);
+        let clear = timeout(Duration::from_secs(/*secs*/ 10), clear_task)
+            .await
+            .context("clear reply timed out")???;
+        assert!(clear.get("error").is_none(), "{clear}");
         let late_pause = timeout(
             Duration::from_secs(/*secs*/ 10),
             pause_task.take().expect("pause task"),
