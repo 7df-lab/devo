@@ -204,8 +204,9 @@ pub async fn dispatch_host_request_with_bridge(bridge: &HostBridge, data: Value)
         "bash.start" => {
             crate::runtime::kernel_host_bridge::handle_bash_start(bridge, &params).await
         }
-        "bash.poll" | "bash.kill" | "bash.forget" => {
-            devo_core::tools::host_bash::control(session_id, &action, &params)
+        "bash.poll" | "bash.kill" | "bash.forget" | "bash.list" | "bash.attach" | "bash.read"
+        | "bash.write" | "bash.close_stdin" | "bash.resize" => {
+            devo_core::tools::host_bash::control_async(session_id, &action, &params).await
         }
         "bash.completed" => {
             push_bash_notice(

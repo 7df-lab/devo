@@ -222,6 +222,12 @@ pub(super) fn spawn(
                                 | "bash.poll"
                                 | "bash.kill"
                                 | "bash.forget"
+                                | "bash.list"
+                                | "bash.attach"
+                                | "bash.read"
+                                | "bash.write"
+                                | "bash.close_stdin"
+                                | "bash.resize"
                         )
                     ) {
                         idle_bash_handler

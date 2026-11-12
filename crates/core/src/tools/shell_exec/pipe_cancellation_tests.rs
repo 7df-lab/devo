@@ -23,6 +23,7 @@ async fn dropping_pipe_call_stops_descendant_work() {
             max_output_tokens: 100,
             progress_limit_bytes: None,
             output_tail: None,
+            interactive: None,
             sandbox_profile: None,
             sandbox_permission_overlay: None,
         },

@@ -39,6 +39,7 @@ pub(crate) async fn run_with_pipes(
         max_output_tokens,
         progress_limit_bytes,
         output_tail,
+        interactive,
         sandbox_profile,
         sandbox_permission_overlay,
     } = run;
@@ -59,7 +60,11 @@ pub(crate) async fn run_with_pipes(
 
     let mut child = plan.build_tokio_command(&shell, &command_to_run);
     child
-        .stdin(Stdio::null())
+        .stdin(if interactive.is_some() {
+            Stdio::piped()
+        } else {
+            Stdio::null()
+        })
         .stdout(Stdio::piped())
         .stderr(Stdio::piped())
         .current_dir(&workdir)
@@ -86,6 +91,14 @@ pub(crate) async fn run_with_pipes(
         }
     };
     plan.schedule_placeholder_cleanup();
+    if let Some(io) = &interactive {
+        let stdin = child.0.stdin().take();
+        super::interactive::pipe_writer(
+            io.connect().map_err(anyhow::Error::msg)?,
+            stdin,
+            io.clone(),
+        );
+    }
 
     // Wall-clock timing so the model can reason about slow or hung commands
     // (start/end instants plus elapsed); the TUI shows the same span as
@@ -98,6 +111,8 @@ pub(crate) async fn run_with_pipes(
         progress_limit_bytes,
         output_capture.clone(),
         output_tail.clone(),
+        interactive.clone(),
+        "stdout",
     );
     let stderr_task = spawn_stream_reader(
         child.0.stderr().take(),
@@ -105,6 +120,8 @@ pub(crate) async fn run_with_pipes(
         progress_limit_bytes,
         output_capture.clone(),
         output_tail.clone(),
+        interactive.clone(),
+        "stderr",
     );
 
     enum WaitOutcome {
@@ -211,6 +228,8 @@ fn spawn_stream_reader<R>(
     progress_limit_bytes: Option<usize>,
     output_capture: Option<Result<devo_tools::output_store::SharedOutputCapture, String>>,
     output_tail: Option<crate::tools::host_bash::OutputTail>,
+    interactive: Option<super::InteractiveIo>,
+    stream: &'static str,
 ) -> tokio::task::JoinHandle<Vec<u8>>
 where
     R: AsyncReadExt + Unpin + Send + 'static,
@@ -225,6 +244,9 @@ where
             match pipe.read(&mut chunk).await {
                 Ok(0) => break,
                 Ok(n) => {
+                    if let Some(io) = &interactive {
+                        io.append(&chunk[..n], stream);
+                    }
                     if let Some(tail) = &output_tail {
                         tail.append(&chunk[..n]);
                     }

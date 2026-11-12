@@ -89,8 +89,9 @@ pub(crate) async fn run_with_pty(
         timeout_ms,
         yield_time_ms,
         max_output_tokens,
-        progress_limit_bytes: _,
-        output_tail: _,
+        progress_limit_bytes,
+        output_tail,
+        interactive,
         sandbox_profile,
         sandbox_permission_overlay,
     } = run;
@@ -139,13 +140,87 @@ pub(crate) async fn run_with_pty(
         .master
         .try_clone_reader()
         .map_err(|error| anyhow::anyhow!("failed to clone PTY reader: {error}"))?;
-    let (tx, rx) = mpsc::channel::<Vec<u8>>();
+    let mut master = Some(pair.master);
+    if let Some(io) = &interactive {
+        let mut writer = master
+            .as_ref()
+            .unwrap()
+            .take_writer()
+            .map_err(|error| anyhow::anyhow!("failed to take PTY writer: {error}"))?;
+        let master = master.take().unwrap();
+        let mut receiver = io.connect().map_err(anyhow::Error::msg)?;
+        let stopped = io.stopped();
+        let write_io = io.clone();
+        std::thread::spawn(move || {
+            while let Some(command) = receiver.blocking_recv() {
+                use super::interactive::Control;
+                match command {
+                    Control::Write(bytes, reply) => {
+                        if reply.is_closed() {
+                            continue;
+                        }
+                        let result = if stopped.is_cancelled() {
+                            Err("process has exited".into())
+                        } else {
+                            (|| {
+                                let mut written = 0;
+                                while written < bytes.len() {
+                                    let n = std::io::Write::write(&mut writer, &bytes[written..])?;
+                                    if n == 0 {
+                                        return Err(std::io::Error::new(
+                                            std::io::ErrorKind::WriteZero,
+                                            "PTY write returned zero",
+                                        ));
+                                    }
+                                    written += n;
+                                    write_io.activity();
+                                }
+                                std::io::Write::flush(&mut writer)?;
+                                Ok(written)
+                            })()
+                            .map_err(|error| {
+                                format!("PTY write failed (possibly partial): {error}")
+                            })
+                        };
+                        let _ = reply.send(result);
+                    }
+                    Control::Resize(cols, rows, reply) => {
+                        if reply.is_closed() {
+                            continue;
+                        }
+                        let result = master
+                            .resize(PtySize {
+                                rows,
+                                cols,
+                                pixel_width: 0,
+                                pixel_height: 0,
+                            })
+                            .map(|()| 0)
+                            .map_err(|error| error.to_string());
+                        let _ = reply.send(result);
+                    }
+                    Control::Close(reply) => {
+                        let _ = reply.send(Err("PTY has no portable stdin half-close".into()));
+                    }
+                }
+            }
+        });
+    }
+    let (tx, rx) = mpsc::sync_channel::<Vec<u8>>(16);
+    let read_io = interactive.clone();
+    let read_tail = output_tail.clone();
     std::thread::spawn(move || {
         let mut buffer = [0u8; 4096];
         loop {
             match std::io::Read::read(&mut reader, &mut buffer) {
                 Ok(0) => break,
                 Ok(size) => {
+                    if let Some(io) = &read_io {
+                        io.append(&buffer[..size], "pty");
+                    }
+                    if let Some(tail) = &read_tail {
+                        tail.append(&buffer[..size]);
+                    }
                     if tx.send(buffer[..size].to_vec()).is_err() {
                         break;
                     }
@@ -156,7 +231,11 @@ pub(crate) async fn run_with_pty(
     });
 
     let started = Instant::now();
-    let sleep_ms = yield_time_ms.max(10);
+    let sleep_ms = if interactive.is_some() {
+        10
+    } else {
+        yield_time_ms.max(10)
+    };
     let timeout = Duration::from_millis(timeout_ms);
     let mut output = Vec::new();
     let mut exit_code = None;
@@ -169,7 +248,12 @@ pub(crate) async fn run_with_pty(
     let mut timeout_duration_ms = 0u64;
 
     loop {
-        while let Ok(chunk) = rx.try_recv() {
+        let mut had_output = false;
+        for _ in 0..64 {
+            let Ok(chunk) = rx.try_recv() else {
+                break;
+            };
+            had_output = true;
             if let Some(Ok(capture)) = &output_capture {
                 let mut capture = capture.lock().expect("output capture lock");
                 if capture.append(&chunk).is_err() {
@@ -180,7 +264,10 @@ pub(crate) async fn run_with_pty(
                 .len()
                 .min((1024_usize * 1024).saturating_sub(output.len()));
             output.extend_from_slice(&chunk[..keep]);
-            if let Some(ref sender) = progress {
+            if let Some(ref sender) = progress
+                && progress_limit_bytes
+                    .is_none_or(|limit| output.len().saturating_sub(keep) < limit)
+            {
                 let text = String::from_utf8_lossy(&chunk).into_owned();
                 let _ = sender.send(text);
             }
@@ -194,7 +281,7 @@ pub(crate) async fn run_with_pty(
             break;
         }
 
-        if started.elapsed() >= timeout {
+        if timeout_ms != super::NO_TIMEOUT_MS && started.elapsed() >= timeout {
             timed_out = true;
             // Capture the span at the decision instant: kill-and-wait teardown
             // time is not the command's runtime (matches the pipe path).
@@ -204,7 +291,7 @@ pub(crate) async fn run_with_pty(
         }
 
         tokio::select! {
-            _ = tokio::time::sleep(Duration::from_millis(sleep_ms)) => {}
+            _ = tokio::time::sleep(Duration::from_millis(if had_output { 0 } else { sleep_ms })) => {}
             _ = cancel_token.cancelled() => {
                 cancelled = true;
                 cancel_duration_ms = started.elapsed().as_millis() as u64;
@@ -214,7 +301,27 @@ pub(crate) async fn run_with_pty(
         }
     }
 
-    while let Ok(chunk) = rx.try_recv() {
+    // Child exit can race its final output. Drain a bounded grace window, not
+    // just the bytes already queued at the instant try_wait reports exit.
+    let drain_deadline = tokio::time::Instant::now() + Duration::from_millis(200);
+    let mut incomplete = false;
+    loop {
+        if tokio::time::Instant::now() >= drain_deadline {
+            incomplete = true;
+            break;
+        }
+        let chunk = match rx.try_recv() {
+            Ok(chunk) => chunk,
+            Err(mpsc::TryRecvError::Disconnected) => break,
+            Err(mpsc::TryRecvError::Empty) => {
+                if tokio::time::Instant::now() >= drain_deadline {
+                    incomplete = true;
+                    break;
+                }
+                tokio::time::sleep(Duration::from_millis(5)).await;
+                continue;
+            }
+        };
         if let Some(Ok(capture)) = &output_capture {
             let mut capture = capture.lock().expect("output capture lock");
             if capture.append(&chunk).is_err() {
@@ -227,8 +334,22 @@ pub(crate) async fn run_with_pty(
         output.extend_from_slice(&chunk[..keep]);
     }
 
+    if incomplete {
+        if let Some(io) = &interactive {
+            io.mark_incomplete();
+        }
+        if let Some(Ok(capture)) = &output_capture {
+            capture
+                .lock()
+                .expect("output capture lock")
+                .mark_incomplete();
+        }
+    }
     let mut text = String::from_utf8_lossy(&output).into_owned();
     text = truncate_output(&text, max_output_tokens);
+    if incomplete {
+        text.push_str("\n[PTY output drain deadline reached; final output may be incomplete]");
+    }
     super::append_capture_notice(&mut text, &output_capture);
 
     if timed_out {

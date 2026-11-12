@@ -103,6 +103,7 @@ pub(crate) struct ResolvedShellRun {
     pub(crate) max_output_tokens: usize,
     pub(crate) progress_limit_bytes: Option<usize>,
     pub(crate) output_tail: Option<crate::tools::host_bash::OutputTail>,
+    pub(crate) interactive: Option<super::InteractiveIo>,
     pub(crate) sandbox_profile: Option<String>,
     pub(crate) sandbox_permission_overlay: Option<devo_sandbox::SandboxPermissionOverlay>,
 }

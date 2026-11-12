@@ -8,7 +8,7 @@ from dataclasses import dataclass, field
 from pathlib import Path
 from typing import Any
 
-from .bash import BashHandle, BashResult, bash
+from .bash import BashChunk, BashHandle, BashRead, BashResult, bash
 from .shell import shell
 from .harness import HarnessEntry, HarnessScope, HarnessState, RefinementEvent, get_harness_state
 from .factory import FactoryNamespace
@@ -538,6 +538,8 @@ sys.modules[__name__].__class__ = _NotCallableModule
 __all__ = [
     "BashHandle",
     "BashResult",
+    "BashRead",
+    "BashChunk",
     "HarnessEntry",
     "FactoryNamespace",
     "HarnessScope",

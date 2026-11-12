@@ -33,8 +33,9 @@ pub(crate) fn idle_host_request_handler(session_id: String) -> HostRequestHandle
         Box::pin(async move {
             let (action, params) = devo_kernel::parse_host_request_data(&data);
             match action.as_str() {
-                "bash.poll" | "bash.kill" | "bash.forget" => {
-                    devo_core::tools::host_bash::control(&session_id, &action, &params)
+                "bash.poll" | "bash.kill" | "bash.forget" | "bash.list" | "bash.attach"
+                | "bash.read" | "bash.write" | "bash.close_stdin" | "bash.resize" => {
+                    devo_core::tools::host_bash::control_async(&session_id, &action, &params).await
                 }
                 // One-shot prompts have no persisted completion-notice inbox.
                 "bash.completed" | "bash.consumed" => {
@@ -64,8 +65,20 @@ async fn dispatch_host_request(runtime: &ToolRuntime, request_id: String, data: 
         return harness::handle_harness(runtime, request_id, action, &params, &home).await;
     }
 
-    if matches!(action, "bash.poll" | "bash.kill" | "bash.forget") {
-        return runtime.control_host_bash(action, &data);
+    if matches!(
+        action,
+        "bash.poll"
+            | "bash.kill"
+            | "bash.forget"
+            | "bash.list"
+            | "bash.attach"
+            | "bash.read"
+            | "bash.write"
+            | "bash.close_stdin"
+            | "bash.resize"
+    ) {
+        let (_, params) = devo_kernel::parse_host_request_data(&data);
+        return runtime.interact_host_bash(action, &params).await;
     }
     if action == "bash.start" {
         let mut input = data.as_object().cloned().unwrap_or_default();
@@ -386,6 +399,51 @@ mod tests {
             );
         }
         devo_core::tools::host_bash::cancel_session("ses_cli_lifecycle");
+    }
+
+    #[cfg(unix)]
+    #[tokio::test]
+    async fn prompt_kernel_interactive_bash_round_trip_and_reattach() {
+        let cwd = std::env::current_dir().expect("cwd");
+        let kernel = devo_core::tools::handlers::ensure_kernel(
+            &None,
+            &cwd,
+            None,
+            devo_protocol::CollaborationMode::Build,
+        )
+        .await
+        .expect("kernel");
+        let session = devo_protocol::SessionId::new();
+        let registry = devo_core::tools::handlers::build_registry_from_plan(&Default::default());
+        let runtime = Arc::new(ToolRuntime::new_with_context(
+            Arc::new(registry),
+            permission_checker(),
+            devo_core::tools::ToolRuntimeContext {
+                session_id: session,
+                cwd,
+                kernel: Some(Arc::clone(&kernel)),
+                sandbox_profile: Some("off".into()),
+                ..Default::default()
+            },
+        ));
+        kernel
+            .set_host_handler(Some(super::host_request_handler(runtime)))
+            .await;
+        kernel
+            .set_idle_bash_completion_handler(Some(super::idle_host_request_handler(
+                session.to_string(),
+            )))
+            .await;
+        let result = tokio::time::timeout(std::time::Duration::from_secs(20), async {
+            let first = kernel.execute("h = bash('cat', mode='interactive', timeout_ms=15000)\nawait h.ready()\nawait h.write('first\\n')\nprint(h.handle_id)").await?;
+            anyhow::ensure!(first.status == "ok", "first: {first:?}");
+            let second = kernel.execute("recovered = await bash.attach(h.handle_id)\nawait recovered.write('second\\n')\nawait recovered.close_stdin()\nresult = await recovered\nassert result.exit_code == 0\nassert 'first' in result.output and 'second' in result.output\nprint('INTERACTIVE_ROUND_TRIP')").await?;
+            anyhow::ensure!(second.status == "ok", "second: {second:?}");
+            Ok::<(), anyhow::Error>(())
+        }).await;
+        devo_core::tools::host_bash::cancel_session(session.as_str());
+        let _ = kernel.shutdown().await;
+        result.expect("round trip timeout").expect("round trip");
     }
 
     #[test]

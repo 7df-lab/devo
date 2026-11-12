@@ -1248,6 +1248,7 @@ fn shell_exec_policy_decision(
             crate::exec_policy_store::exec_policy_decision_for_argv(policy, argv)
     {
         return match decision {
+            Decision::Allow if interactive_shell_request(request) => static_policy_ask(),
             Decision::Allow => AuthorizationDecision::Allow {
                 source: ApprovalDecisionSource::ExecPolicy,
             },
@@ -1259,6 +1260,10 @@ fn shell_exec_policy_decision(
                 source: ApprovalDecisionSource::ExecPolicy,
             },
         };
+    }
+
+    if interactive_shell_request(request) {
+        return static_policy_ask();
     }
 
     if argv
@@ -1731,10 +1736,26 @@ pub(super) fn approval_decision_from_acp_outcome(
     }
 }
 
+fn interactive_shell_request(request: &ToolPermissionRequest) -> bool {
+    matches!(request.resource, devo_safety::ResourceKind::ShellExec)
+        && matches!(
+            request
+                .input
+                .get("mode")
+                .and_then(serde_json::Value::as_str),
+            Some("interactive" | "pty")
+        )
+}
+
 fn cache_grant(
     cache: &crate::execution::ApprovalGrantCache,
     request: &ToolPermissionRequest,
 ) -> Option<PermissionGrant> {
+    // A previous static command approval never grants subsequent arbitrary input.
+    // Full-access mode is handled explicitly before this cache lookup.
+    if interactive_shell_request(request) {
+        return None;
+    }
     if request.sandbox_permissions.requests_escalation() {
         let key = sandbox_bypass_key_from_request(request)?;
         return cache
@@ -2446,6 +2467,24 @@ mod tests {
             path.push(part);
         }
         path
+    }
+
+    #[test]
+    fn interactive_shell_does_not_reuse_static_command_approval() {
+        let (root, profile) = workspace_profile();
+        let mut request = test_permission_request("shell_command");
+        request.cwd = root;
+        request.resource = devo_safety::ResourceKind::ShellExec;
+        request.input = serde_json::json!({"command":"echo ready"});
+        request.target = Some("echo ready".into());
+        request.input["mode"] = serde_json::json!("interactive");
+        let mut cache = crate::execution::ApprovalGrantCache::default();
+        cache.tools.insert(request.tool_name.clone());
+        assert!(cache_grant(&cache, &request).is_none());
+        assert!(matches!(
+            policy_decision(&profile, &request, None),
+            AuthorizationDecision::Ask { .. }
+        ));
     }
 
     #[test]

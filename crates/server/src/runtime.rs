@@ -122,6 +122,8 @@ mod inbox;
 #[cfg(test)]
 mod inbox_tests;
 mod interaction_items;
+#[cfg(test)]
+mod interactive_shell_lifecycle_tests;
 mod items;
 mod kernel_host;
 mod kernel_host_agent_message;

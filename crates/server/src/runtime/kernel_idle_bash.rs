@@ -49,8 +49,14 @@ pub(crate) fn for_session(
                     };
                     super::kernel_host::consume_bash_notice(&session_key, identity);
                 }
-                "bash.poll" | "bash.kill" | "bash.forget" => {
-                    return devo_core::tools::host_bash::control(&session_key, &action, &params);
+                "bash.poll" | "bash.kill" | "bash.forget" | "bash.list" | "bash.attach"
+                | "bash.read" | "bash.write" | "bash.close_stdin" | "bash.resize" => {
+                    return devo_core::tools::host_bash::control_async(
+                        &session_key,
+                        &action,
+                        &params,
+                    )
+                    .await;
                 }
                 _ => {
                     return json!({
