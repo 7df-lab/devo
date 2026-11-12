@@ -77,6 +77,11 @@ impl InteractiveIo {
         }))
     }
 
+    #[cfg(test)]
+    pub(super) fn owner_count(&self) -> usize {
+        Arc::strong_count(&self.0)
+    }
+
     pub fn idle_for(&self) -> Duration {
         self.0.state.lock().unwrap().last_activity.elapsed()
     }

@@ -54,7 +54,7 @@ need confirmation that it exited.
 
 ## PTY mode
 
-Use `mode="pty"` only for programs needing an actual terminal:
+On Unix (Linux/macOS), use `mode="pty"` only for programs needing an actual terminal:
 
 ```python
 h = bash("python -i", mode="pty")
@@ -66,6 +66,11 @@ print(chunk.text)
 await h.terminate()
 await h.wait()
 ```
+
+Interactive PTY is currently rejected on Windows: the current ConPTY backend
+does not provide a verified cancellable-write lifecycle under input saturation.
+Use `mode="interactive"` for Windows pipe-based programs. Existing non-interactive
+PTY execution is unchanged. Do not treat interactive pipe mode as terminal emulation.
 
 PTYs may echo input and transform line endings; stdout/stderr are merged.
 `close_stdin()` is rejected for a PTY: there is no portable reliable half-close.

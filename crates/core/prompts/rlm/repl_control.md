@@ -31,7 +31,7 @@ Python orchestration controls: `await rlm.collect(targets=None, timeout_ms=0)` s
 
 
 For a long-lived bidirectional program, use `h = bash(command, mode="interactive")`
-(pipe stdin/stdout) or `mode="pty"` only when the program needs a terminal, then
+(pipe stdin/stdout) or, on Unix, `mode="pty"` only when the program needs a terminal, then
 `await h.ready()`. Do not await `bash(...)` at launch: awaiting its handle waits
 for process exit. Use `await h.write("input\n")`, `await h.read(wait_ms=1000)`,
 `h.tail(50)`, `await h.close_stdin()` (pipe only), `await h.resize(cols=120, rows=40)`
@@ -46,3 +46,6 @@ are disabled by default for interactive tasks. A write timeout can mean partial
 or uncertain delivery: do not blindly retry. Input may execute further commands;
 interactive process approval is not a static command-prefix grant. Never log
 secrets unnecessarily, and use host-owned bash rather than local subprocesses.
+
+Interactive PTY is not currently supported on Windows; use interactive pipes there.
+Do not retry an unsupported PTY launch as an unsandboxed process.

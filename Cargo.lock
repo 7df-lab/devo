@@ -1488,6 +1488,7 @@ dependencies = [
  "diffy",
  "futures",
  "iana-time-zone",
+ "libc",
  "portable-pty",
  "pretty_assertions",
  "process-wrap",

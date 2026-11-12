@@ -96,6 +96,13 @@ pub(crate) async fn run_with_pty(
         sandbox_permission_overlay,
     } = run;
 
+    #[cfg(not(unix))]
+    if interactive.is_some() {
+        anyhow::bail!(
+            "interactive PTY is not supported on this platform; use interactive pipe mode"
+        );
+    }
+
     let pty_system = native_pty_system();
     let pair = pty_system
         .openpty(PtySize {
@@ -136,6 +143,22 @@ pub(crate) async fn run_with_pty(
     let mut child = PtyChildGuard::new(child);
     drop(pair.slave);
 
+    #[cfg(unix)]
+    if interactive.is_some() {
+        let fd = pair
+            .master
+            .as_raw_fd()
+            .ok_or_else(|| anyhow::anyhow!("PTY descriptor unavailable"))?;
+        // Cloned reader/writer share these flags. Keep nonblocking through
+        // writer Drop: portable-pty also writes an EOF sequence there.
+        // SAFETY: master owns this live fd throughout these calls. fcntl only
+        // reads/changes descriptor flags and does not transfer ownership.
+        let flags = unsafe { libc::fcntl(fd, libc::F_GETFL) };
+        if flags < 0 || unsafe { libc::fcntl(fd, libc::F_SETFL, flags | libc::O_NONBLOCK) } < 0 {
+            return Err(std::io::Error::last_os_error().into());
+        }
+    }
+
     let mut reader = pair
         .master
         .try_clone_reader()
@@ -165,7 +188,25 @@ pub(crate) async fn run_with_pty(
                             (|| {
                                 let mut written = 0;
                                 while written < bytes.len() {
-                                    let n = std::io::Write::write(&mut writer, &bytes[written..])?;
+                                    if stopped.is_cancelled() {
+                                        return Err(std::io::Error::new(
+                                            std::io::ErrorKind::Interrupted,
+                                            "process ended; possibly partial write",
+                                        ));
+                                    }
+                                    let n =
+                                        match std::io::Write::write(&mut writer, &bytes[written..])
+                                        {
+                                            Ok(n) => n,
+                                            Err(error)
+                                                if error.kind()
+                                                    == std::io::ErrorKind::WouldBlock =>
+                                            {
+                                                std::thread::sleep(Duration::from_millis(10));
+                                                continue;
+                                            }
+                                            Err(error) => return Err(error),
+                                        };
                                     if n == 0 {
                                         return Err(std::io::Error::new(
                                             std::io::ErrorKind::WriteZero,
@@ -224,6 +265,15 @@ pub(crate) async fn run_with_pty(
                     if tx.send(buffer[..size].to_vec()).is_err() {
                         break;
                     }
+                }
+                Err(error) if error.kind() == std::io::ErrorKind::WouldBlock => {
+                    if read_io
+                        .as_ref()
+                        .is_some_and(|io| io.stopped().is_cancelled())
+                    {
+                        break;
+                    }
+                    std::thread::sleep(Duration::from_millis(10));
                 }
                 Err(_) => break,
             }
