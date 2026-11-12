@@ -438,25 +438,54 @@ fn parse_response_preserves_reasoning_text_as_metadata() {
 
 #[test]
 fn reasoning_items_round_trip_in_stateless_requests() {
-    let reasoning = json!({"type":"reasoning", "id":"rs_1", "summary":[], "encrypted_content":"opaque"});
-    let response = parse_response(json!({"id":"resp_1", "status":"completed", "output":[reasoning.clone()]})).unwrap();
-    assert_eq!(response.content, vec![ResponseContent::ProviderReasoning {
-        provider: "openai-responses".to_string(), payload: reasoning.clone()
-    }]);
+    let reasoning =
+        json!({"type":"reasoning", "id":"rs_1", "summary":[], "encrypted_content":"opaque"});
+    let response =
+        parse_response(json!({"id":"resp_1", "status":"completed", "output":[reasoning.clone()]}))
+            .unwrap();
+    assert_eq!(
+        response.content,
+        vec![ResponseContent::ProviderReasoning {
+            provider: "openai-responses".to_string(),
+            payload: reasoning.clone()
+        }]
+    );
     let mut request = ModelRequest {
         model_slug: devo_protocol::ModelProfileKey::CatalogSlug("gpt-5".to_string()),
-        model: "gpt-5".to_string(), system: None,
-        messages: vec![RequestMessage {role:"assistant".to_string(), content: vec![
-            RequestContent::ProviderReasoning {provider:"openai-responses".to_string(), payload: reasoning.clone()},
-            RequestContent::ToolUse { id:"call_1".to_string(), name:"lookup".to_string(), input:json!({}) },
-        ]}],
-        max_tokens:256, tools:None, hosted_tools:Vec::new(), sampling:SamplingControls::default(),
-        request_thinking:None, reasoning_effort:None, extra_body:None,
+        model: "gpt-5".to_string(),
+        system: None,
+        messages: vec![RequestMessage {
+            role: "assistant".to_string(),
+            content: vec![
+                RequestContent::ProviderReasoning {
+                    provider: "openai-responses".to_string(),
+                    payload: reasoning.clone(),
+                },
+                RequestContent::ToolUse {
+                    id: "call_1".to_string(),
+                    name: "lookup".to_string(),
+                    input: json!({}),
+                },
+            ],
+        }],
+        max_tokens: 256,
+        tools: None,
+        hosted_tools: Vec::new(),
+        sampling: SamplingControls::default(),
+        request_thinking: None,
+        reasoning_effort: None,
+        extra_body: None,
     };
-    assert_eq!(build_request(&request, true)["input"], json!([
-        reasoning, {"type":"function_call","call_id":"call_1","name":"lookup","arguments":"{}"}
-    ]));
-    request.messages[0].content = vec![RequestContent::ProviderReasoning {provider:"anthropic".to_string(), payload:json!({"type":"thinking"})}];
+    assert_eq!(
+        build_request(&request, true)["input"],
+        json!([
+            reasoning, {"type":"function_call","call_id":"call_1","name":"lookup","arguments":"{}"}
+        ])
+    );
+    request.messages[0].content = vec![RequestContent::ProviderReasoning {
+        provider: "anthropic".to_string(),
+        payload: json!({"type":"thinking"}),
+    }];
     assert_eq!(build_request(&request, true)["input"], json!([]));
 }
 
@@ -464,8 +493,12 @@ fn reasoning_items_round_trip_in_stateless_requests() {
 fn refusal_is_not_silently_discarded() {
     let response = parse_response(json!({"id":"resp_refusal", "status":"completed", "output":[
         {"type":"message","content":[{"type":"refusal","refusal":"Cannot help with that."}]}
-    ]})).unwrap();
-    assert_eq!(response.content, vec![ResponseContent::Text("Cannot help with that.".to_string())]);
+    ]}))
+    .unwrap();
+    assert_eq!(
+        response.content,
+        vec![ResponseContent::Text("Cannot help with that.".to_string())]
+    );
 }
 
 #[test]

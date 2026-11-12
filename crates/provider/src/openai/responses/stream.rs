@@ -7,7 +7,10 @@ use devo_protocol::{
 };
 use futures::{Stream, StreamExt};
 use serde_json::Value;
-use std::{collections::{BTreeMap, HashMap}, pin::Pin};
+use std::{
+    collections::{BTreeMap, HashMap},
+    pin::Pin,
+};
 
 use super::response::{
     function_call_arguments_json, parse_output_item, parse_response, parse_usage,
@@ -383,6 +386,7 @@ pub(super) fn decode_response_stream(
                             if reasoning_started {
                                 yield StreamEvent::ReasoningDone { index: 1 };
                             }
+                            let result = (|| -> Result<ModelResponse> {
                             let response = if let Some(parsed) = chunk.get("response") {
                                 let mut parsed = parsed.clone();
                                 if parsed.get("output").and_then(Value::as_array).is_none_or(Vec::is_empty)
@@ -451,6 +455,17 @@ pub(super) fn decode_response_stream(
                                             }],
                                         }
                                     },
+                                }
+                            };
+                            Ok(response)
+                            })();
+                            let response = match result {
+                                Ok(response) => response,
+                                Err(error) => {
+                                    if let Some(reported_usage) = chunk.pointer("/response/usage").and_then(parse_usage) {
+                                        yield StreamEvent::UsageDelta(reported_usage);
+                                    }
+                                    Err(error)?
                                 }
                             };
                             yield StreamEvent::MessageDone { response };

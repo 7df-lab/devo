@@ -212,10 +212,15 @@ pub(crate) fn resolve_request_profile(
     transport: OpenAITransport,
 ) -> OpenAIRequestProfile {
     if let ModelProfileKey::CatalogSlug(model) = model_profile {
-        let model = model.rsplit_once('/').map_or(model.as_str(), |(_, model)| model);
+        let model = model
+            .rsplit_once('/')
+            .map_or(model.as_str(), |(_, model)| model);
         let model = model.to_ascii_lowercase();
         let o_series = ["o1", "o3", "o4"].iter().any(|prefix| {
-            model == *prefix || model.strip_prefix(*prefix).is_some_and(|suffix| suffix.starts_with('-'))
+            model == *prefix
+                || model
+                    .strip_prefix(*prefix)
+                    .is_some_and(|suffix| suffix.starts_with('-'))
         });
         let gpt5 = model == "gpt-5" || model.starts_with("gpt-5-") || model.starts_with("gpt-5.");
         if o_series && transport == OpenAITransport::Responses {
@@ -242,9 +247,15 @@ pub(crate) fn resolve_request_profile(
                     // default to medium. Do not silently assume none for new models.
                     let defaults_to_none = ["gpt-5.1", "gpt-5.2", "gpt-5.4"].iter().any(|prefix| {
                         model == *prefix
-                            || model.strip_prefix(*prefix).is_some_and(|suffix| suffix.starts_with('-'))
+                            || model
+                                .strip_prefix(*prefix)
+                                .is_some_and(|suffix| suffix.starts_with('-'))
                     });
-                    Some(if defaults_to_none { ReasoningEffort::None } else { ReasoningEffort::Medium })
+                    Some(if defaults_to_none {
+                        ReasoningEffort::None
+                    } else {
+                        ReasoningEffort::Medium
+                    })
                 },
                 ..DEFAULT_CHAT_COMPLETIONS
             };
@@ -277,11 +288,14 @@ mod tests {
                 &ModelProfileKey::CatalogSlug(slug.to_string()),
                 OpenAITransport::Responses,
             );
-            assert_eq!(profile, OpenAIRequestProfile {
-                supports_temperature: false,
-                supports_top_p: false,
-                ..DEFAULT_RESPONSES
-            });
+            assert_eq!(
+                profile,
+                OpenAIRequestProfile {
+                    supports_temperature: false,
+                    supports_top_p: false,
+                    ..DEFAULT_RESPONSES
+                }
+            );
         }
     }
 

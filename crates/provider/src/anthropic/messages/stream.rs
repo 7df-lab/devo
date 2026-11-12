@@ -18,7 +18,7 @@ use super::{
 };
 use crate::anthropic::stream_usage::AnthropicStreamUsage;
 use crate::dsml::DsmlToolCallHealer;
-use crate::error::{format_eventsource_error, stream_error};
+use crate::error::{ProviderError, format_eventsource_error, stream_error};
 use crate::http::invalid_status_error;
 mod error;
 
@@ -51,6 +51,7 @@ pub(super) async fn completion_stream(
         let mut reasoning_blocks: BTreeMap<usize, String> = BTreeMap::new();
         let mut provider_reasoning_blocks: BTreeMap<usize, Map<String, Value>> = BTreeMap::new();
         let mut completed_reasoning_blocks: HashSet<usize> = HashSet::new();
+        let mut invalid_tool_input = None;
         let mut tool_json: HashMap<usize, String> = HashMap::new();
         let mut hosted_tool_inputs: HashMap<String, Value> = HashMap::new();
         let mut dsml_text_filters = BTreeMap::new();
@@ -364,12 +365,21 @@ pub(super) async fn completion_stream(
                                     ResponseContent::ToolUse { input, .. }
                                     | ResponseContent::HostedToolUse { input, .. } => {
                                         if !json_str.is_empty() {
-                                            *input = serde_json::from_str(&json_str).map_err(|error| {
-                                                stream_error(format!("invalid anthropic tool input at content block {index}: {error}"))
-                                            })?;
+                                            match serde_json::from_str(&json_str) {
+                                                Ok(value) => *input = value,
+                                                Err(error) => {
+                                                    invalid_tool_input = Some(ProviderError::InvalidRequestError {
+                                                        message: format!("invalid anthropic tool input at content block {index}: {error}"),
+                                                        details: None,
+                                                    });
+                                                }
+                                            }
                                         }
                                         if !input.is_object() {
-                                            Err(stream_error(format!("anthropic tool input at content block {index} must be an object")))?;
+                                            invalid_tool_input = Some(ProviderError::InvalidRequestError {
+                                                message: format!("anthropic tool input at content block {index} must be an object"),
+                                                details: None,
+                                            });
                                         }
                                     }
                                     ResponseContent::Text(_)
@@ -412,6 +422,9 @@ pub(super) async fn completion_stream(
                             }
                         }
                         "message_stop" => {
+                            if let Some(error) = invalid_tool_input {
+                                Err(error)?;
+                            }
                             for (index, mut filter) in std::mem::take(&mut dsml_text_filters) {
                                 for text in filter.finish() {
                                     yield StreamEvent::TextDelta {

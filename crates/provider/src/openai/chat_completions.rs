@@ -405,16 +405,21 @@ fn build_request(request: &ModelRequest, stream: bool) -> Value {
         root["tools"] = tool_definitions(tools);
     }
 
-    let supports_sampling = profile.sampling_reasoning_default.is_none_or(|default_effort| {
-        request.reasoning_effort.unwrap_or(default_effort) == devo_protocol::ReasoningEffort::None
-    });
-    if profile.supports_temperature && supports_sampling
+    let supports_sampling = profile
+        .sampling_reasoning_default
+        .is_none_or(|default_effort| {
+            request.reasoning_effort.unwrap_or(default_effort)
+                == devo_protocol::ReasoningEffort::None
+        });
+    if profile.supports_temperature
+        && supports_sampling
         && let Some(temperature) = request.sampling.temperature
     {
         root["temperature"] = json!(temperature);
     }
 
-    if profile.supports_top_p && supports_sampling
+    if profile.supports_top_p
+        && supports_sampling
         && let Some(top_p) = request.sampling.top_p
     {
         root["top_p"] = json!(top_p);
@@ -462,9 +467,13 @@ fn build_request(request: &ModelRequest, stream: bool) -> Value {
     // send both mutually incompatible limit parameters after merging it.
     if let Some(extra) = request.extra_body.as_ref() {
         if extra.get("max_completion_tokens").is_some() {
-            root.as_object_mut().expect("request object").remove("max_tokens");
+            root.as_object_mut()
+                .expect("request object")
+                .remove("max_tokens");
         } else if extra.get("max_tokens").is_some() {
-            root.as_object_mut().expect("request object").remove("max_completion_tokens");
+            root.as_object_mut()
+                .expect("request object")
+                .remove("max_completion_tokens");
         }
     }
 
@@ -544,7 +553,10 @@ pub(super) fn parse_tool_use(
 ) -> Result<Option<ResponseContent>> {
     match value.kind.as_str() {
         "function" => {
-            let function = value.function.as_ref().context("missing openai function call")?;
+            let function = value
+                .function
+                .as_ref()
+                .context("missing openai function call")?;
             anyhow::ensure!(
                 !value.id.is_empty() && !function.name.is_empty(),
                 "openai tool call is missing its id or function name"
@@ -564,7 +576,10 @@ pub(super) fn parse_tool_use(
             }))
         }
         "custom" => {
-            let custom = value.custom.as_ref().context("missing openai custom tool call")?;
+            let custom = value
+                .custom
+                .as_ref()
+                .context("missing openai custom tool call")?;
             anyhow::ensure!(
                 !value.id.is_empty() && !custom.name.is_empty(),
                 "openai custom tool call is missing its id or name"

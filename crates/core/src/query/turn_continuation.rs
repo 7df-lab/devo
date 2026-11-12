@@ -202,7 +202,8 @@ mod tests {
 
     #[test]
     fn paused_server_turn_resumes_without_injecting_a_user_message() {
-        let mut policy = TurnContinuationPolicy::for_models("claude-sonnet-4-5", "claude-sonnet-4-5");
+        let mut policy =
+            TurnContinuationPolicy::for_models("claude-sonnet-4-5", "claude-sonnet-4-5");
         let decision = policy.decide(ModelTurnSnapshot {
             stop_reason: Some(StopReason::PauseTurn),
             assistant_content: &[],

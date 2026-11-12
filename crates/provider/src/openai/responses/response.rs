@@ -53,12 +53,16 @@ pub(super) fn parse_response(value: Value) -> Result<ModelResponse> {
 
     let stop_reason = if value["status"] == "incomplete" {
         Some(parse_status_reason(
-            value.pointer("/incomplete_details/reason")
+            value
+                .pointer("/incomplete_details/reason")
                 .and_then(Value::as_str)
                 .unwrap_or("incomplete"),
         ))
     } else {
-        value.get("status").and_then(Value::as_str).map(parse_status_reason)
+        value
+            .get("status")
+            .and_then(Value::as_str)
+            .map(parse_status_reason)
     };
 
     let usage = value.get("usage").and_then(parse_usage).unwrap_or_default();
@@ -117,7 +121,9 @@ fn parse_message_content(item: &Value) -> Option<ResponseContent> {
                 Some(ResponseContent::Text(assistant_text))
             }
         }
-        Some("refusal") => item.get("refusal").and_then(Value::as_str)
+        Some("refusal") => item
+            .get("refusal")
+            .and_then(Value::as_str)
             .map(|text| ResponseContent::Text(text.to_string())),
         Some("tool_call") | Some("function_call") => Some(ResponseContent::ToolUse {
             id: item
@@ -292,7 +298,10 @@ fn parse_status_reason(value: &str) -> StopReason {
 
 /// Validate complete tool inputs before they can be executed by the agent.
 pub(super) fn validate_function_arguments(item: &Value) -> Result<()> {
-    if matches!(item.get("type").and_then(Value::as_str), Some("function_call" | "tool_call")) {
+    if matches!(
+        item.get("type").and_then(Value::as_str),
+        Some("function_call" | "tool_call")
+    ) {
         let arguments = function_call_arguments_json(item);
         validate_arguments_json(&arguments)?;
     }
@@ -302,10 +311,17 @@ pub(super) fn validate_function_arguments(item: &Value) -> Result<()> {
 pub(super) fn validate_arguments_json(arguments: &str) -> Result<()> {
     if !arguments.trim().is_empty() {
         let parsed: Value = serde_json::from_str(arguments).map_err(|error| {
-            crate::error::stream_error(format!("invalid OpenAI Responses tool arguments: {error}"))
+            crate::error::ProviderError::InvalidRequestError {
+                message: format!("invalid OpenAI Responses tool arguments: {error}"),
+                details: None,
+            }
         })?;
         if !parsed.is_object() {
-            return Err(crate::error::stream_error("OpenAI Responses tool arguments must be a JSON object").into());
+            return Err(crate::error::ProviderError::InvalidRequestError {
+                message: "OpenAI Responses tool arguments must be a JSON object".to_string(),
+                details: None,
+            }
+            .into());
         }
     }
     Ok(())

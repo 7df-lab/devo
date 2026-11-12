@@ -65,4 +65,3 @@ pub(super) fn build_provider_specific_response_payload(
         Some(Value::Object(payload))
     }
 }
-

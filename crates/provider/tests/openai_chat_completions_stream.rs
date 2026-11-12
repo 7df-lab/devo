@@ -321,10 +321,10 @@ async fn chat_stream_handles_max_tool_call_index_without_panicking() {
     );
 }
 
-
 #[tokio::test]
 async fn chat_stream_preserves_all_logprobs_and_usage_details() {
-    let first = json!({"token":"Hello","bytes":[72,101,108,108,111],"logprob":-0.2,"top_logprobs":[]});
+    let first =
+        json!({"token":"Hello","bytes":[72,101,108,108,111],"logprob":-0.2,"top_logprobs":[]});
     let second = json!({"token":" world","bytes":null,"logprob":-0.3,"top_logprobs":[]});
     let usage = json!({
         "prompt_tokens": 12, "completion_tokens": 8, "total_tokens": 20,
@@ -348,16 +348,23 @@ async fn chat_stream_preserves_all_logprobs_and_usage_details() {
         }]})),
         sse_data(json!({"choices":[],"usage":usage})),
         "data: [DONE]\n\n".to_string(),
-    ]).await;
+    ])
+    .await;
     let response = message_done_response(&events);
-    assert_eq!(response.content, vec![ResponseContent::Text("Hello world".to_string())]);
-    assert_eq!(response.metadata.extras, vec![devo_protocol::ResponseExtra::ProviderSpecific {
-        provider: "openai".to_string(),
-        payload: json!({
-            "usage": usage,
-            "choices": [{"index":0,"logprobs":{"content":[first,second],"refusal":[]}}]
-        }),
-    }]);
+    assert_eq!(
+        response.content,
+        vec![ResponseContent::Text("Hello world".to_string())]
+    );
+    assert_eq!(
+        response.metadata.extras,
+        vec![devo_protocol::ResponseExtra::ProviderSpecific {
+            provider: "openai".to_string(),
+            payload: json!({
+                "usage": usage,
+                "choices": [{"index":0,"logprobs":{"content":[first,second],"refusal":[]}}]
+            }),
+        }]
+    );
 }
 
 #[tokio::test]
@@ -374,19 +381,31 @@ async fn chat_stream_keeps_alternative_choices_and_tools_separate() {
             }]},"finish_reason":"tool_calls"}
         ]})),
         "data: [DONE]\n\n".to_string(),
-    ]).await;
+    ])
+    .await;
     let response = message_done_response(&events);
-    assert_eq!(response.content, vec![
-        ResponseContent::Text("Selected answer".to_string()),
-        ResponseContent::ToolUse {
-            id:"call_read".to_string(),name:"read".to_string(),input:json!({"path":"README.md"}),
-        },
-    ]);
-    assert_eq!(response.stop_reason, Some(devo_protocol::StopReason::ToolUse));
-    let text: String = events.iter().filter_map(|event| match event {
-        StreamEvent::TextDelta { text, .. } => Some(text.as_str()),
-        _ => None,
-    }).collect();
+    assert_eq!(
+        response.content,
+        vec![
+            ResponseContent::Text("Selected answer".to_string()),
+            ResponseContent::ToolUse {
+                id: "call_read".to_string(),
+                name: "read".to_string(),
+                input: json!({"path":"README.md"}),
+            },
+        ]
+    );
+    assert_eq!(
+        response.stop_reason,
+        Some(devo_protocol::StopReason::ToolUse)
+    );
+    let text: String = events
+        .iter()
+        .filter_map(|event| match event {
+            StreamEvent::TextDelta { text, .. } => Some(text.as_str()),
+            _ => None,
+        })
+        .collect();
     assert_eq!(text, "Selected answer");
 }
 
@@ -400,19 +419,31 @@ async fn chat_stream_emits_refusal_as_visible_text_and_preserves_metadata() {
             "index":0,"delta":{"refusal":"help with that."},"finish_reason":"stop"
         }]})),
         "data: [DONE]\n\n".to_string(),
-    ]).await;
+    ])
+    .await;
     let response = message_done_response(&events);
-    assert_eq!(response.content, vec![ResponseContent::Text("I cannot help with that.".to_string())]);
-    assert_eq!(response.metadata.extras, vec![devo_protocol::ResponseExtra::ProviderSpecific {
-        provider:"openai".to_string(),
-        payload:json!({"choices":[{"index":0,"message":{
-            "role":"assistant","refusal":"I cannot help with that."
-        }}]}),
-    }]);
-    let text: String = events.iter().filter_map(|event| match event {
-        StreamEvent::TextDelta { text, .. } => Some(text.as_str()),
-        _ => None,
-    }).collect();
+    assert_eq!(
+        response.content,
+        vec![ResponseContent::Text(
+            "I cannot help with that.".to_string()
+        )]
+    );
+    assert_eq!(
+        response.metadata.extras,
+        vec![devo_protocol::ResponseExtra::ProviderSpecific {
+            provider: "openai".to_string(),
+            payload: json!({"choices":[{"index":0,"message":{
+                "role":"assistant","refusal":"I cannot help with that."
+            }}]}),
+        }]
+    );
+    let text: String = events
+        .iter()
+        .filter_map(|event| match event {
+            StreamEvent::TextDelta { text, .. } => Some(text.as_str()),
+            _ => None,
+        })
+        .collect();
     assert_eq!(text, "I cannot help with that.");
 }
 
@@ -427,11 +458,21 @@ async fn chat_stream_rejects_malformed_or_unidentified_function_calls() {
                 "index":0,"delta":{"tool_calls":[tool_call]},"finish_reason":"tool_calls"
             }]})),
             "data: [DONE]\n\n".to_string(),
-        ]).await;
+        ])
+        .await;
         let provider = OpenAIProvider::new(base_url);
-        let events = provider.completion_stream(minimal_request()).await.expect("stream").collect::<Vec<_>>().await;
+        let events = provider
+            .completion_stream(minimal_request())
+            .await
+            .expect("stream")
+            .collect::<Vec<_>>()
+            .await;
         assert!(events.iter().any(Result::is_err));
-        assert!(!events.iter().any(|event| matches!(event, Ok(StreamEvent::MessageDone { .. }))));
+        assert!(
+            !events
+                .iter()
+                .any(|event| matches!(event, Ok(StreamEvent::MessageDone { .. })))
+        );
     }
 }
 
@@ -439,11 +480,21 @@ async fn chat_stream_rejects_malformed_or_unidentified_function_calls() {
 async fn chat_stream_reports_truncation_without_done_marker() {
     let base_url = spawn_sse_server(vec![sse_data(json!({
         "id":"chatcmpl-truncated","choices":[{"index":0,"delta":{"content":"Partial"}}]
-    }))]).await;
+    }))])
+    .await;
     let provider = OpenAIProvider::new(base_url);
-    let events = provider.completion_stream(minimal_request()).await.expect("stream").collect::<Vec<_>>().await;
+    let events = provider
+        .completion_stream(minimal_request())
+        .await
+        .expect("stream")
+        .collect::<Vec<_>>()
+        .await;
     assert!(events.iter().any(Result::is_err));
-    assert!(!events.iter().any(|event| matches!(event, Ok(StreamEvent::MessageDone { .. }))));
+    assert!(
+        !events
+            .iter()
+            .any(|event| matches!(event, Ok(StreamEvent::MessageDone { .. })))
+    );
 }
 
 async fn collect_chat_stream_events(chunks: Vec<String>) -> Vec<StreamEvent> {

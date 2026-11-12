@@ -202,15 +202,9 @@ enum AnthropicInputContentBlock {
         input: Value,
     },
     #[serde(rename = "web_search_tool_result")]
-    WebSearchToolResult {
-        tool_use_id: String,
-        content: Value,
-    },
+    WebSearchToolResult { tool_use_id: String, content: Value },
     #[serde(rename = "web_fetch_tool_result")]
-    WebFetchToolResult {
-        tool_use_id: String,
-        content: Value,
-    },
+    WebFetchToolResult { tool_use_id: String, content: Value },
     #[serde(rename = "tool_result")]
     ToolResult {
         tool_use_id: String,

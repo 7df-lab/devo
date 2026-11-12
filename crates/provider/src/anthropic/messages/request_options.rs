@@ -78,12 +78,21 @@ pub(super) fn apply_claude_options(root: &mut Value, request: &ModelRequest) -> 
         _ => false,
     };
     let supports_effort = !manual_thinking || (family == "opus" && major == Some(4) && minor == 5);
-    let supports_xhigh = !manual_thinking
-        && !(major == Some(4) && minor == 6)
-        && model != "mythos-preview";
+    let supports_xhigh =
+        !manual_thinking && !(major == Some(4) && minor == 6) && model != "mythos-preview";
 
+    let explicit_thinking = request
+        .extra_body
+        .as_ref()
+        .and_then(|body| body.get("thinking"));
+    let thinking_type = explicit_thinking
+        .and_then(|thinking| thinking.get("type"))
+        .or_else(|| root.pointer("/thinking/type"))
+        .and_then(Value::as_str);
+    let limited_effort = matches!(thinking_type, Some("disabled" | "between_tools"));
     if let Some(config) = build_output_config(Some("enabled"), request.reasoning_effort)
         && request.reasoning_effort.is_some()
+        && thinking_type != Some("disabled")
     {
         root["output_config"] = json!(config);
     }
@@ -93,7 +102,8 @@ pub(super) fn apply_claude_options(root: &mut Value, request: &ModelRequest) -> 
             .remove("output_config");
     } else if let Some(effort) = root.pointer_mut("/output_config/effort")
         && ((effort.as_str() == Some("xhigh") && !supports_xhigh)
-            || (effort.as_str() == Some("max") && manual_thinking))
+            || (effort.as_str() == Some("max") && manual_thinking)
+            || (matches!(effort.as_str(), Some("xhigh" | "max")) && limited_effort))
     {
         *effort = json!("high");
     }
@@ -102,16 +112,27 @@ pub(super) fn apply_claude_options(root: &mut Value, request: &ModelRequest) -> 
         root.pointer("/thinking/type").and_then(Value::as_str),
         Some("enabled" | "adaptive" | "between_tools")
     );
-    if root.pointer("/thinking/type").and_then(Value::as_str) == Some("enabled") {
+    if root.pointer("/thinking/type").and_then(Value::as_str) == Some("enabled")
+        && explicit_thinking.is_none()
+    {
         if manual_thinking {
+            let max_tokens = request
+                .extra_body
+                .as_ref()
+                .and_then(|body| body.get("max_tokens"))
+                .and_then(Value::as_u64)
+                .and_then(|tokens| usize::try_from(tokens).ok())
+                .unwrap_or(request.max_tokens);
             ensure!(
-                request.max_tokens > 1024,
+                max_tokens > 1024,
                 "Claude extended thinking requires max_tokens greater than 1024; increase max_tokens or disable thinking"
             );
             let effort = request
                 .reasoning_effort
                 .map(|effort| match effort {
-                    ReasoningEffort::Low | ReasoningEffort::Minimal | ReasoningEffort::None => "low",
+                    ReasoningEffort::Low | ReasoningEffort::Minimal | ReasoningEffort::None => {
+                        "low"
+                    }
                     ReasoningEffort::Medium => "medium",
                     ReasoningEffort::High => "high",
                     ReasoningEffort::XHigh => "xhigh",
@@ -125,7 +146,7 @@ pub(super) fn apply_claude_options(root: &mut Value, request: &ModelRequest) -> 
                 "max" => 32768,
                 _ => 8192,
             };
-            root["thinking"]["budget_tokens"] = json!(budget.min(request.max_tokens - 1));
+            root["thinking"]["budget_tokens"] = json!(budget.min(max_tokens - 1));
         } else {
             root["thinking"]["type"] = json!("adaptive");
         }

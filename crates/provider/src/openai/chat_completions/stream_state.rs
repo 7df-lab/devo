@@ -118,7 +118,9 @@ impl ChatCompletionStreamState {
         let metadata = self.choice_metadata.entry(choice_index).or_default();
         metadata.index = Some(choice_index);
         if let Some(logprobs) = choice.logprobs {
-            let accumulated = metadata.logprobs.get_or_insert_with(OpenAIChoiceLogprobs::default);
+            let accumulated = metadata
+                .logprobs
+                .get_or_insert_with(OpenAIChoiceLogprobs::default);
             accumulated.content.extend(logprobs.content);
             accumulated.refusal.extend(logprobs.refusal);
         }
