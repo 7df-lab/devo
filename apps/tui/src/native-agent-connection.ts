@@ -3255,14 +3255,22 @@ export class NativeAgentConnection implements AgentConnection {
   }
 
   async fork(entryId: string, options?: AgentConnectionForkOptions) {
+    const sessionId = this.requireSessionId();
+    const transitionGeneration = ++this.sessionTransitionGeneration;
     this.fireBeforeInvalidate();
     const cut = options?.position === "before" ? "before" : "through";
-    const atTurnId = await this.resolveForkTurnId(entryId);
+    const atTurnId = await this.resolveForkTurnId(entryId, sessionId, transitionGeneration);
+    if (sessionId !== this.sessionId || transitionGeneration !== this.sessionTransitionGeneration || this.disposed) {
+      return { cancelled: true };
+    }
     const result = (await this.rpc.request("session/fork", {
-      sessionId: this.requireSessionId(),
+      sessionId,
       ...(atTurnId ? { atTurnId } : {}),
       cut,
     })) as { session?: { id?: string } };
+    if (sessionId !== this.sessionId || transitionGeneration !== this.sessionTransitionGeneration || this.disposed) {
+      return { cancelled: true };
+    }
     if (!result?.session?.id) {
       throw new Error("session/fork did not return a session");
     }
@@ -3274,18 +3282,20 @@ export class NativeAgentConnection implements AgentConnection {
    * Native fork wants a TurnId (or tip when omitted). Session-tree leaf/entry
    * ids are ItemIds — map them, and treat the current leaf as a tip fork.
    */
-  private async resolveForkTurnId(entryId: string): Promise<string | undefined> {
+  private async resolveForkTurnId(entryId: string, sessionId: string, transitionGeneration: number): Promise<string | undefined> {
     const id = String(entryId ?? "").trim();
     if (!id) return undefined;
     if (id.startsWith("turn_")) return id;
 
     const tree = await this.getSessionTree();
+    if (sessionId !== this.sessionId || transitionGeneration !== this.sessionTransitionGeneration || this.disposed) return undefined;
     if (tree.leafId && id === String(tree.leafId)) {
       // /clone at tip: omit atTurnId (server tip-fork semantics).
       return undefined;
     }
 
     const envelopes = await this.listAllItemEnvelopes();
+    if (sessionId !== this.sessionId || transitionGeneration !== this.sessionTransitionGeneration || this.disposed) return undefined;
     const env = envelopes.find((row) => String(row.id ?? "") === id);
     const turnId = env ? String(env.turnId ?? env.turn_id ?? "") : "";
     if (turnId) return turnId;
@@ -3293,12 +3303,13 @@ export class NativeAgentConnection implements AgentConnection {
   }
 
   private async listAllItemEnvelopes(): Promise<Array<Record<string, unknown>>> {
-    if (!this.sessionId) return [];
+    const sessionId = this.sessionId;
+    if (!sessionId) return [];
     const items: Array<Record<string, unknown>> = [];
     let cursor: string | undefined;
     do {
       const page = (await this.rpc.request("session/items/list", {
-        sessionId: this.sessionId,
+        sessionId,
         ...(cursor ? { cursor } : {}),
         limit: 500,
       })) as { data?: unknown[]; nextCursor?: string | null };
