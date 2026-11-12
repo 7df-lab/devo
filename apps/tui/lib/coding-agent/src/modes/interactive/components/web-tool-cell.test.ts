@@ -59,3 +59,30 @@ test("explicit custom web renderers retain their own shell", () => {
 	}, ui, process.cwd());
 	assert.match(plain(cell.render(100)).join("\n"), /CUSTOM WEB CALL/);
 });
+
+for (const [name, args] of [
+	["web_fetch", { url: "https://doc.rust-lang.org/book/ch17-02-concurrency-with-async.html" }],
+	["web_search", { query: "Rust asynchronous programming documentation and tutorials for beginners" }],
+] as const) {
+	for (const isError of [false, true]) {
+		test(`${name} keeps ${isError ? "failure" : "success"} visible beside long arguments`, () => {
+			initTheme();
+			const output = isError ? "Request failed: rate limit exceeded" : "FOUND PAGE CONTENT";
+			const cell = new ToolExecutionComponent(name, "call", args, {}, undefined, ui, process.cwd());
+			cell.updateResult({ content: [{ type: "text", text: output }], isError });
+			for (const width of [40, 80]) {
+				const collapsed = cell.render(width);
+				assert.equal(collapsed.length, 2);
+				assert.ok(plain(collapsed)[1]!.includes(output));
+				assert.ok(collapsed.every(line => visibleWidth(line) <= width));
+				cell.setExpanded(true);
+				assert.deepEqual(cell.render(width).slice(0, 2), collapsed);
+				cell.setExpanded(false);
+				assert.deepEqual(cell.render(width), collapsed);
+			}
+			for (const width of [1, 2, 3, 10, 20]) {
+				assert.ok(cell.render(width).every(line => visibleWidth(line) <= width));
+			}
+		});
+	}
+}

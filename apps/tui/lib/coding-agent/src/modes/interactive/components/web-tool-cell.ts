@@ -1,4 +1,4 @@
-import { type Component, truncateToWidth, wrapTextWithAnsi } from "@earendil-works/pi-tui";
+import { type Component, truncateToWidth, visibleWidth, wrapTextWithAnsi } from "@earendil-works/pi-tui";
 import { theme } from "../theme/theme.js";
 import { getWorkingPulseFrame, workingIconFrame } from "../theme/working-icon.js";
 import { expandedToolOutput, formatCollapsedToolPreview, summarizeToolArgs, truncateExpandedToolOutput } from "./tool-execution-preview.js";
@@ -32,8 +32,15 @@ export class WebToolCellComponent implements Component {
 		const parts = [`${marker} ${theme.fg("muted", name)}`];
 		if (summary) parts.push(theme.fg("dim", summary));
 		else if (status === "queued" || status === "running") parts.push(theme.fg("dim", "waiting for arguments"));
-		if (output.trim()) parts.push(theme.fg(status === "error" ? "error" : "dim", formatCollapsedToolPreview(output)));
-		const lines = [truncateToWidth(` ${parts.join(theme.fg("dim", " · "))}`, safeWidth, "…")];
+		const header = ` ${parts.join(theme.fg("dim", " · "))}`;
+		const preview = output.trim()
+			? theme.fg(status === "error" ? "error" : "dim", formatCollapsedToolPreview(output)) : "";
+		const combined = preview ? `${header}${theme.fg("dim", " · ")}${preview}` : header;
+		// A long query/URL must never consume the result or failure preview. Keep
+		// short calls on one row, and give overflowing output one bounded row of its own.
+		const lines = preview && visibleWidth(combined) > safeWidth
+			? [truncateToWidth(header, safeWidth, "…"), truncateToWidth(` ${theme.fg("dim", " › ")}${preview}`, safeWidth, "…")]
+			: [truncateToWidth(combined, safeWidth, "…")];
 		if (!expanded) return lines;
 
 		// Use full arguments on expansion; the header's bounded preview is not a substitute.
