@@ -29,6 +29,8 @@ where
         buffer: Vec::new(),
         event: "message".to_string(),
         data: Vec::new(),
+        first_line: true,
+        skip_lf: false,
     }
 }
 
@@ -37,6 +39,8 @@ pub(crate) struct SseDecoder<S> {
     buffer: Vec<u8>,
     event: String,
     data: Vec<String>,
+    first_line: bool,
+    skip_lf: bool,
 }
 
 impl<S, E> Stream for SseDecoder<S>
@@ -47,7 +51,20 @@ where
 
     fn poll_next(mut self: Pin<&mut Self>, cx: &mut Context<'_>) -> Poll<Option<Self::Item>> {
         loop {
-            if let Some(newline) = self.buffer.iter().position(|byte| *byte == b'\n') {
+            if self.skip_lf && !self.buffer.is_empty() {
+                if self.buffer[0] == b'\n' {
+                    self.buffer.remove(0);
+                }
+                self.skip_lf = false;
+            }
+            if let Some(newline) = self
+                .buffer
+                .iter()
+                .position(|byte| matches!(byte, b'\r' | b'\n'))
+            {
+                // CR is a complete separator even if the next chunk has not
+                // arrived. Suppress a following LF so split CRLF is one line.
+                self.skip_lf = self.buffer[newline] == b'\r';
                 let line: Vec<u8> = self.buffer.drain(..=newline).collect();
                 if let Some(message) = self.handle_line(&line[..line.len() - 1]) {
                     return Poll::Ready(Some(Ok(message)));
@@ -81,8 +98,10 @@ impl<S> SseDecoder<S> {
     /// Processes one newline-terminated line; returns a message when the line
     /// completes an event.
     fn handle_line(&mut self, line: &[u8]) -> Option<SseMessage> {
-        let line = if line.ends_with(b"\r") {
-            &line[..line.len() - 1]
+        // SSE permits a single UTF-8 BOM at the beginning of the stream.
+        // Lines are assembled as bytes first, including split BOM/UTF-8 bytes.
+        let line = if std::mem::take(&mut self.first_line) {
+            line.strip_prefix(b"\xef\xbb\xbf").unwrap_or(line)
         } else {
             line
         };
@@ -203,6 +222,67 @@ mod tests {
                 data: "{\"done\":true}".to_string(),
             }]
         );
+    }
+
+    #[test]
+    fn accepts_all_line_endings_at_every_chunk_boundary() {
+        for separator in ["\n", "\r\n", "\r"] {
+            let input = format!(
+                "event: response.output_text.delta{separator}data: 你好{separator}{separator}data: [DONE]{separator}{separator}"
+            );
+            let expected = vec![
+                SseMessage {
+                    event: "response.output_text.delta".into(),
+                    data: "你好".into(),
+                },
+                SseMessage {
+                    event: "message".into(),
+                    data: "[DONE]".into(),
+                },
+            ];
+            for split in 0..=input.len() {
+                assert_eq!(
+                    decode(vec![&input.as_bytes()[..split], &input.as_bytes()[split..]]),
+                    expected
+                );
+            }
+            assert_eq!(decode(input.as_bytes().chunks(1).collect()), expected);
+        }
+    }
+
+    #[test]
+    fn dispatches_cr_events_without_waiting_for_next_chunk_or_eof() {
+        use futures::{FutureExt, StreamExt};
+
+        let source = stream::iter([Ok::<_, std::io::Error>(Bytes::from_static(
+            b"data: live\r\r",
+        ))])
+        .chain(stream::pending());
+        let mut decoder = decode_sse(source);
+        let message = decoder.next().now_or_never().unwrap().unwrap().unwrap();
+        assert_eq!(
+            message,
+            SseMessage {
+                event: "message".into(),
+                data: "live".into()
+            }
+        );
+    }
+
+    #[test]
+    fn strips_only_stream_initial_bom_even_across_chunks() {
+        let input = "\u{feff}data: first\r\n\r\ndata: \u{feff}second\r\n\r\n";
+        let expected = vec![
+            SseMessage {
+                event: "message".into(),
+                data: "first".into(),
+            },
+            SseMessage {
+                event: "message".into(),
+                data: "\u{feff}second".into(),
+            },
+        ];
+        assert_eq!(decode(input.as_bytes().chunks(1).collect()), expected);
     }
 
     #[test]
