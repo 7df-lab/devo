@@ -152,7 +152,9 @@ impl SelfMessageEnv {
     }
 }
 
-async fn initialized_connection(runtime: &Arc<ServerRuntime>) -> Result<(u64, mpsc::Receiver<Value>)> {
+async fn initialized_connection(
+    runtime: &Arc<ServerRuntime>,
+) -> Result<(u64, mpsc::Receiver<Value>)> {
     let (tx, notifications) = crate::test_outbound_channel(512);
     let connection = runtime
         .register_connection(ClientTransportKind::Stdio, tx)
@@ -201,13 +203,23 @@ async fn self_send_waits_for_provider_boundary_and_steers_same_turn_in_order() -
     }
     assert_eq!(json!(live), json!(expected));
     assert_eq!(
-        json!(env.runtime.deps.db.list_pending(&env.session, QueueType::Turn)?),
+        json!(
+            env.runtime
+                .deps
+                .db
+                .list_pending(&env.session, QueueType::Turn)?
+        ),
         json!(expected)
     );
     for item in &expected {
         let origin = item.host_message_origin().context("agent origin")?;
         assert_eq!(
-            (item.delivery(), origin.source, origin.sender, origin.delivery),
+            (
+                item.delivery(),
+                origin.source,
+                origin.sender,
+                origin.delivery
+            ),
             (
                 HostMessageDelivery::Steer,
                 HostMessageSource::Agent,
@@ -244,9 +256,12 @@ async fn self_send_waits_for_provider_boundary_and_steers_same_turn_in_order() -
         }
     )));
     env.provider.release.add_permits(1);
-    tokio::time::timeout(Duration::from_secs(/*secs*/ 15), env.provider.started.acquire())
-        .await??
-        .forget();
+    tokio::time::timeout(
+        Duration::from_secs(/*secs*/ 15),
+        env.provider.started.acquire(),
+    )
+    .await??
+    .forget();
     assert_eq!(
         env.runtime.runtime_active_turn_id(env.session).await,
         Some(turn)
@@ -327,7 +342,10 @@ async fn self_send_cannot_overtake_an_earlier_followup() -> Result<()> {
         .db
         .list_pending(&env.session, QueueType::Turn)?;
     assert_eq!(
-        pending.iter().map(PendingInputItem::delivery).collect::<Vec<_>>(),
+        pending
+            .iter()
+            .map(PendingInputItem::delivery)
+            .collect::<Vec<_>>(),
         vec![HostMessageDelivery::FollowUp, HostMessageDelivery::Steer]
     );
     assert_eq!(json!(pending[1]), json!(self_message));
@@ -337,13 +355,21 @@ async fn self_send_cannot_overtake_an_earlier_followup() -> Result<()> {
         .claim_inbox_steers(env.session, first_turn)
         .await?;
     assert_eq!(
-        json!(env.runtime.deps.db.list_pending(&env.session, QueueType::Turn)?),
+        json!(
+            env.runtime
+                .deps
+                .db
+                .list_pending(&env.session, QueueType::Turn)?
+        ),
         json!(pending)
     );
     env.provider.release.add_permits(1);
-    tokio::time::timeout(Duration::from_secs(/*secs*/ 15), env.provider.started.acquire())
-        .await??
-        .forget();
+    tokio::time::timeout(
+        Duration::from_secs(/*secs*/ 15),
+        env.provider.started.acquire(),
+    )
+    .await??
+    .forget();
     assert_ne!(
         env.runtime.runtime_active_turn_id(env.session).await,
         Some(first_turn)
@@ -351,7 +377,9 @@ async fn self_send_cannot_overtake_an_earlier_followup() -> Result<()> {
     let next = serde_json::to_string(&env.provider.requests.lock().unwrap()[1])?;
     assert!(
         next.find("FOLLOWUP_FIRST").context("followup in request")?
-            < next.find("SELF_AFTER_FOLLOWUP").context("self in request")?
+            < next
+                .find("SELF_AFTER_FOLLOWUP")
+                .context("self in request")?
     );
     assert!(
         env.runtime
@@ -400,7 +428,15 @@ async fn self_steer_restart_recovers_claimed_input_and_preserves_later_delivery(
         .await
         .context("restored actor")?;
     assert_eq!(
-        json!(snapshot.pending_turn_queue.lock().unwrap().iter().cloned().collect::<Vec<_>>()),
+        json!(
+            snapshot
+                .pending_turn_queue
+                .lock()
+                .unwrap()
+                .iter()
+                .cloned()
+                .collect::<Vec<_>>()
+        ),
         json!(restored)
     );
     assert!(provider.requests.lock().unwrap().is_empty());
@@ -495,9 +531,12 @@ async fn self_send_after_owner_interrupt_stays_held_until_explicit_retry() -> Re
         .await
         .context("retry held self")?;
     assert!(retried.get("error").is_none(), "{retried}");
-    tokio::time::timeout(Duration::from_secs(/*secs*/ 15), env.provider.started.acquire())
-        .await??
-        .forget();
+    tokio::time::timeout(
+        Duration::from_secs(/*secs*/ 15),
+        env.provider.started.acquire(),
+    )
+    .await??
+    .forget();
     assert!(!env.runtime.background_input_suspended(env.session));
     assert!(
         serde_json::to_string(&env.provider.requests.lock().unwrap()[0])?.contains("HELD_SELF")
@@ -527,9 +566,12 @@ async fn self_at_turn_limit_is_held_while_parent_send_remains_followup() -> Resu
         })
         .await?
         .child_session_id;
-    tokio::time::timeout(Duration::from_secs(/*secs*/ 15), env.provider.started.acquire())
-        .await??
-        .forget();
+    tokio::time::timeout(
+        Duration::from_secs(/*secs*/ 15),
+        env.provider.started.acquire(),
+    )
+    .await??
+    .forget();
     for role in ["self", "parent"] {
         let receipt = env
             .runtime
@@ -543,7 +585,9 @@ async fn self_at_turn_limit_is_held_while_parent_send_remains_followup() -> Resu
     let held = env.runtime.deps.db.list_pending(&child, QueueType::Turn)?;
     assert_eq!(held.len(), 1);
     assert_eq!(held[0].delivery(), HostMessageDelivery::Steer);
-    assert!(super::handlers::queue_steer::requires_queue_review(&held[0]));
+    assert!(super::handlers::queue_steer::requires_queue_review(
+        &held[0]
+    ));
     assert_eq!(
         held[0].metadata.as_ref().context("metadata")?["maxTurnsReached"],
         json!(true)
@@ -554,7 +598,10 @@ async fn self_at_turn_limit_is_held_while_parent_send_remains_followup() -> Resu
         .db
         .list_pending(&env.session, QueueType::Turn)?;
     assert_eq!(
-        parent.iter().map(PendingInputItem::delivery).collect::<Vec<_>>(),
+        parent
+            .iter()
+            .map(PendingInputItem::delivery)
+            .collect::<Vec<_>>(),
         vec![HostMessageDelivery::FollowUp]
     );
     let child_turn = env
@@ -608,9 +655,12 @@ async fn child_self_steer_settles_queued_ticket_without_settling_active_turn() -
         })
         .await?
         .child_session_id;
-    tokio::time::timeout(Duration::from_secs(/*secs*/ 15), env.provider.started.acquire())
-        .await??
-        .forget();
+    tokio::time::timeout(
+        Duration::from_secs(/*secs*/ 15),
+        env.provider.started.acquire(),
+    )
+    .await??
+    .forget();
     let turn = env
         .runtime
         .runtime_active_turn_id(child)
@@ -626,9 +676,12 @@ async fn child_self_steer_settles_queued_ticket_without_settling_active_turn() -
     assert_eq!(receipt["status"], json!("ok"), "{receipt}");
     assert!(env.runtime.has_pending_subagent_work(child));
     env.provider.release.add_permits(1);
-    tokio::time::timeout(Duration::from_secs(/*secs*/ 15), env.provider.started.acquire())
-        .await??
-        .forget();
+    tokio::time::timeout(
+        Duration::from_secs(/*secs*/ 15),
+        env.provider.started.acquire(),
+    )
+    .await??
+    .forget();
     assert_eq!(env.runtime.runtime_active_turn_id(child).await, Some(turn));
     assert!(
         serde_json::to_string(&env.provider.requests.lock().unwrap()[1])?
@@ -651,7 +704,10 @@ async fn child_self_steer_settles_queued_ticket_without_settling_active_turn() -
     )
     .await;
     assert_eq!(
-        json!([running["status"], running["result"]["results"][0]["settled"]]),
+        json!([
+            running["status"],
+            running["result"]["results"][0]["settled"]
+        ]),
         json!(["ok", false])
     );
     env.provider.release.add_permits(1);

@@ -355,7 +355,10 @@ impl ServerRuntime {
                 .pending_turn_queue
                 .lock()
                 .expect("pending queue mutex poisoned");
-            for item in queue.iter().filter(|item| item.host_message_origin().is_some()) {
+            for item in queue
+                .iter()
+                .filter(|item| item.host_message_origin().is_some())
+            {
                 let work_id = format!("agent:{session_id}:queued:{}", item.id);
                 if turn_limit_reached
                     || suspended
