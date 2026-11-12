@@ -6,6 +6,12 @@ on:
   push:
     branches: [main, master]
 
+# Superseded PR checks must not occupy runners needed by the latest revision.
+# Give non-PR runs a unique group so pushes to main and manual runs are retained.
+concurrency:
+  group: ${{ github.workflow }}-${{ github.event_name == 'pull_request' && format('pr-{0}', github.event.pull_request.number) || format('run-{0}', github.run_id) }}
+  cancel-in-progress: ${{ github.event_name == 'pull_request' }}
+
 jobs:
   runtime:
     name: Private runtimes (${{ matrix.target }})

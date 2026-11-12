@@ -7,6 +7,12 @@ on:
     branches: [main, master]
   workflow_dispatch:
 
+# Superseded PR checks must not occupy runners needed by the latest revision.
+# Give non-PR runs a unique group so pushes to main and manual runs are retained.
+concurrency:
+  group: ${{ github.workflow }}-${{ github.event_name == 'pull_request' && format('pr-{0}', github.event.pull_request.number) || format('run-{0}', github.run_id) }}
+  cancel-in-progress: ${{ github.event_name == 'pull_request' }}
+
 env:
   CARGO_TERM_COLOR: always
   RUSTFLAGS: -Dwarnings
@@ -153,7 +159,9 @@ jobs:
           cache-dependency-path: apps/tui/package-lock.json
       - run: npm ci --ignore-scripts --no-audit --no-fund
       - run: npm test
+        timeout-minutes: 10
       - run: node --import tsx --test lib/coding-agent/src/modes/interactive/interactive-mode-model-candidates.test.ts lib/coding-agent/src/modes/interactive/interactive-mode-session-ancillary.test.ts
+        timeout-minutes: 10
 
   tmux:
     needs: changes
