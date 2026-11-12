@@ -360,18 +360,28 @@ enum Command {
     },
 }
 
+// Interactive startup must not consume repository configuration before trust.
+// Non-interactive commands retain their existing workspace settings behavior.
+fn startup_workspace_root(cli: &Cli) -> Option<std::path::PathBuf> {
+    match cli.command {
+        None | Some(Command::Resume { .. }) => None,
+        Some(Command::Prompt { .. })
+        | Some(Command::Doctor)
+        | Some(Command::Mcp { .. })
+        | Some(Command::Upgrade)
+        | Some(Command::Daemon { .. })
+        | Some(Command::Server { .. }) => std::env::current_dir().ok(),
+    }
+}
+
 async fn maybe_print_startup_update(cli: &Cli) {
     let Ok(home_dir) = find_devo_home() else {
         return;
     };
+    let workspace_root = startup_workspace_root(cli);
     let app_config = FileSystemAppConfigLoader::new(home_dir.clone())
         .with_cli_overrides(cli_logging_overrides(cli))
-        .load(Some(
-            std::env::current_dir()
-                .ok()
-                .as_deref()
-                .unwrap_or_else(|| std::path::Path::new(".")),
-        ))
+        .load(workspace_root.as_deref())
         .unwrap_or_else(|_| AppConfig::default());
     let Ok(checker) = UpdateChecker::new(home_dir, app_config.updates) else {
         return;
@@ -387,9 +397,10 @@ async fn maybe_print_startup_update(cli: &Cli) {
 /// TODO: Rename this function to instll_client_logging
 fn install_logging(cli: &Cli) -> Result<LoggingRuntime> {
     let home_dir = find_devo_home()?;
+    let workspace_root = startup_workspace_root(cli);
     let app_config = devo_core::FileSystemAppConfigLoader::new(home_dir.clone())
         .with_cli_overrides(cli_logging_overrides(cli))
-        .load(Some(std::env::current_dir()?.as_path()))
+        .load(workspace_root.as_deref())
         .unwrap_or_else(|err| {
             eprintln!("warning: failed to load app config for logging: {err}");
             devo_core::AppConfig::default()
@@ -926,5 +937,24 @@ mod tests {
     #[test]
     fn removed_onboard_command_is_rejected() {
         assert!(Cli::try_parse_from(["devo", "onboard"]).is_err());
+    }
+    #[test]
+    fn interactive_startup_does_not_load_workspace_configuration() {
+        let fresh = Cli::try_parse_from(["devo"]).expect("parse interactive");
+        let id = SessionId::new().to_string();
+        let resume = Cli::try_parse_from(["devo", "resume", &id]).expect("parse resume");
+        assert_eq!(super::startup_workspace_root(&fresh), None);
+        assert_eq!(super::startup_workspace_root(&resume), None);
+    }
+
+    #[test]
+    fn noninteractive_startup_keeps_workspace_configuration() {
+        for args in [vec!["devo", "doctor"], vec!["devo", "prompt", "hello"]] {
+            let cli = Cli::try_parse_from(args).expect("parse noninteractive");
+            assert_eq!(
+                super::startup_workspace_root(&cli),
+                std::env::current_dir().ok()
+            );
+        }
     }
 }

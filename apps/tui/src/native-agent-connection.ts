@@ -1,3 +1,4 @@
+import { requireSessionWorkspace, type WorkspaceTrust } from "./workspace-trust.js";
 import { textHydrationState } from "./native-to-pi/stream-hydration-state.js";
 import { completedItemRevisions, notificationItemIdentity, runningAssistantItems, normalizeHistoryItems, hydrateRunningText } from "./native-history-hydration.js";
 import { nativeShellTasks } from "./native-to-pi/shell-activity.js";
@@ -216,6 +217,7 @@ function emptyContextUsage() {
 }
 
 type ConnectOptions = {
+  workspaceTrust?: WorkspaceTrust;
   writeLine: (line: string) => void;
   cwd?: string;
   nativeApiVersion?: string;
@@ -226,6 +228,7 @@ type ConnectOptions = {
 export class NativeAgentConnection implements AgentConnection {
   readonly rpc: StdioJsonRpc;
   private cwd: string;
+  private readonly workspaceTrust?: WorkspaceTrust;
   private nativeApiVersion: string;
   private listeners = new Set<AgentConnectionEventListener>();
   private beforeInvalidate = new Set<AgentConnectionBeforeSessionInvalidateListener>();
@@ -315,6 +318,7 @@ export class NativeAgentConnection implements AgentConnection {
   private turnSawFileMutation = false;
 
   private constructor(options: ConnectOptions) {
+    this.workspaceTrust = options.workspaceTrust;
     this.trafficLog = options.trafficLog;
     this.rpc = new StdioJsonRpc(
       (line) => {
@@ -3113,9 +3117,11 @@ export class NativeAgentConnection implements AgentConnection {
 
   async newSession(_options?: AgentConnectionNewSessionOptions) {
     const transitionGeneration = ++this.sessionTransitionGeneration;
+    const cwd = this.workspaceTrust ? await this.workspaceTrust.require(this.cwd) : this.cwd;
+    if (this.disposed || transitionGeneration !== this.sessionTransitionGeneration) return { cancelled: true };
     this.fireBeforeInvalidate();
     const result = (await this.rpc.request("session/new", {
-      cwd: this.cwd,
+      cwd,
       idempotencyKey: randomUUID(),
     })) as { session?: Record<string, unknown> };
 
@@ -3128,6 +3134,7 @@ export class NativeAgentConnection implements AgentConnection {
     this.sessionId = id;
     this.activeSessionId = id;
     this.sessionName = session?.title as string | undefined;
+    this.cwd = String(session?.cwd ?? cwd);
     this.messages = [];
     this.streamState = createStreamState();
     this.localAbortChromePending = false;
@@ -3163,6 +3170,10 @@ export class NativeAgentConnection implements AgentConnection {
 
   async switchSession(sessionPath: string, options?: AgentConnectionSwitchSessionOptions) {
     const transitionGeneration = ++this.sessionTransitionGeneration;
+    if (this.workspaceTrust) {
+      await requireSessionWorkspace(this.rpc, this.workspaceTrust, sessionPath);
+      if (this.disposed || transitionGeneration !== this.sessionTransitionGeneration) return { cancelled: true };
+    }
     this.fireBeforeInvalidate();
     const sessionId = sessionPath;
     const resumed = (await this.rpc.request("session/resume", { sessionId })) as {
@@ -3379,7 +3390,10 @@ export class NativeAgentConnection implements AgentConnection {
   }
 
   async importFromJsonl(inputPath: string, cwdOverride?: string) {
-    const cwd = cwdOverride ?? this.cwd;
+    const transitionGeneration = ++this.sessionTransitionGeneration;
+    const requestedCwd = cwdOverride ?? this.cwd;
+    const cwd = this.workspaceTrust ? await this.workspaceTrust.require(requestedCwd) : requestedCwd;
+    if (this.disposed || transitionGeneration !== this.sessionTransitionGeneration) return { cancelled: true };
     const resolvedPath = path.isAbsolute(inputPath) ? inputPath : path.resolve(cwd, inputPath);
     if (!fs.existsSync(resolvedPath)) {
       throw new SessionImportFileNotFoundError(resolvedPath);
@@ -3393,8 +3407,8 @@ export class NativeAgentConnection implements AgentConnection {
       if (!result?.sessionId) {
         throw new Error("session/import did not return a sessionId");
       }
-      await this.switchSession(String(result.sessionId));
-      return { cancelled: false };
+      if (this.disposed || transitionGeneration !== this.sessionTransitionGeneration) return { cancelled: true };
+      return this.switchSession(String(result.sessionId));
     } catch (error) {
       if (error instanceof SessionImportFileNotFoundError) throw error;
       const message = error instanceof Error ? error.message : String(error);
@@ -3455,6 +3469,8 @@ export class NativeAgentConnection implements AgentConnection {
   async watchSession(activeSessionId: string) {
     const sessionId = String(activeSessionId ?? "").trim();
     if (!sessionId) return undefined;
+    if (this.workspaceTrust) await requireSessionWorkspace(this.rpc, this.workspaceTrust, sessionId);
+    if (this.disposed) return undefined;
 
     const listeners = new Set<AgentConnectionEventListener>();
     let closed = false;
@@ -3477,6 +3493,8 @@ export class NativeAgentConnection implements AgentConnection {
 
     return {
       getMessages: async () => {
+        if (this.workspaceTrust) await requireSessionWorkspace(this.rpc, this.workspaceTrust, sessionId);
+        if (closed || this.disposed) return [] as never[];
         try {
           await this.rpc.request("session/resume", { sessionId });
         } catch {

@@ -7,6 +7,7 @@ import { NativeAgentConnection } from "./native-agent-connection.js";
 import { createNativeTrafficLogFromEnv } from "./native-traffic-log.js";
 import { applyDevoAgentDirEnv, runInteractiveHost } from "./host.js";
 import { applyCliSessionOverrides, nativeServerArgs } from "./cli-session-overrides.js";
+import { WorkspaceTrust, promptWorkspaceTrust } from "./workspace-trust.js";
 import { DEVO_TUI_VERSION } from "./devo-brand.js";
 
 export function assertInheritedTty(): void {
@@ -23,10 +24,11 @@ function resolveServerBin(): string {
 
 export async function main(): Promise<void> {
   assertInheritedTty();
-  applyDevoAgentDirEnv();
+  const home = applyDevoAgentDirEnv();
+  const trust = new WorkspaceTrust(home, promptWorkspaceTrust);
+  const cwd = await trust.require(process.cwd());
 
   const serverBin = resolveServerBin();
-  const cwd = process.cwd();
   const child = spawn(serverBin, nativeServerArgs(process.env.DEVO_CLI_LOG_LEVEL), {
     cwd,
     stdio: ["pipe", "pipe", "inherit"],
@@ -46,31 +48,13 @@ export async function main(): Promise<void> {
   const conn = NativeAgentConnection.create({
     writeLine,
     cwd,
+    workspaceTrust: trust,
     trafficLog: createNativeTrafficLogFromEnv(),
   });
   child.stdout.setEncoding("utf8");
   child.stdout.on("data", (chunk: string) => {
     conn.pushChunk(chunk);
   });
-
-  await conn.initialize({
-    name: "devo-tui",
-    version: DEVO_TUI_VERSION,
-  });
-
-  const resumeSessionId = String(process.env.DEVO_RESUME_SESSION_ID ?? "").trim();
-  if (resumeSessionId) {
-    const resumed = await conn.switchSession(resumeSessionId);
-    if (resumed.cancelled) {
-      throw new Error(`Failed to resume session ${resumeSessionId}`);
-    }
-  } else {
-    await conn.newSession();
-  }
-
-  // A CLI --yolo flag must take effect before the first user turn, including
-  // when resuming a session with more restrictive saved settings.
-  await applyCliSessionOverrides(conn, process.env.DEVO_CLI_FULL_ACCESS);
 
   const onChildExit = new Promise<never>((_, reject) => {
     child.on("exit", (code, signal) => {
@@ -81,10 +65,20 @@ export async function main(): Promise<void> {
 
   try {
     await Promise.race([
-      runInteractiveHost({
-        connection: conn,
-        cwd,
-      }),
+      (async () => {
+        await conn.initialize({ name: "devo-tui", version: DEVO_TUI_VERSION });
+        const resumeSessionId = String(process.env.DEVO_RESUME_SESSION_ID ?? "").trim();
+        if (resumeSessionId) {
+          const resumed = await conn.switchSession(resumeSessionId);
+          if (resumed.cancelled) throw new Error(`Failed to resume session ${resumeSessionId}`);
+        } else {
+          await conn.newSession();
+        }
+        trust.finishStartup();
+        // Full access is independent of trust and applies only after admission.
+        await applyCliSessionOverrides(conn, process.env.DEVO_CLI_FULL_ACCESS);
+        await runInteractiveHost({ connection: conn, cwd });
+      })(),
       onChildExit,
     ]);
   } finally {

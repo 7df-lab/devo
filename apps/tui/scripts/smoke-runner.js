@@ -70,13 +70,16 @@ async function run() {
       mux(["send-keys", "-t", session, "Enter"]);
     }
 
+    // The isolated test home has no saved approvals; admit only this test repo.
+    await waitFor("workspace trust", (_events, text) => text.includes("Trust this workspace?"));
+    await send("yes");
     await waitFor("ready chat chrome", (events, text) => rpcSucceeded(events, "session/new") && text.includes("Subagents") && text.includes("Scheduled") && text.includes("Shells"));
     console.log("=== boot ===\n" + pane);
     switch (scenario) {
       case "T1": break;
       case "activity": {
-        // No send-keys call precedes these assertions: boot and background reads
-        // must paint the dock without a keyboard event.
+        // No chat keyboard event precedes these assertions: boot and background
+        // reads must paint the dock after the separate startup trust prompt.
         await waitFor("authoritative zero activity without input", (events, text) =>
           rpcSucceeded(events, "task/list") && /Subagents 0/.test(text)
           && /Scheduled 0/.test(text) && /Shells 0/.test(text));
