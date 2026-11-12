@@ -103,6 +103,7 @@ import type {
 	ExtensionWidgetOptions,
 } from "../../core/extensions/index.js";
 import { FooterDataProvider, type ReadonlyFooterDataProvider } from "../../core/footer-data-provider.js";
+import { GoalElapsedClock } from "../../core/goal-elapsed-clock.js";
 import { emptyGoalState, formatGoalUsage, GOAL_CONTEXT_PREVIEW_LABEL, type GoalState } from "../../core/goals.js";
 import type { KernelSentAgentMessage } from "../../core/kernel/index.js";
 import { type AppKeybinding, KeybindingsManager } from "../../core/keybindings.js";
@@ -737,6 +738,7 @@ export class InteractiveMode {
 	private lastStatusSpacer: Spacer | undefined = undefined;
 	private lastStatusText: Text | undefined = undefined;
 	private lastGoalAnnouncement: GoalAnnouncementSnapshot | undefined = undefined;
+	private readonly goalElapsedClock = new GoalElapsedClock();
 	private goalTrayTimer: NodeJS.Timeout | undefined = undefined;
 
 	private streamingComponent: AssistantMessageComponent | undefined = undefined;
@@ -5230,6 +5232,7 @@ export class InteractiveMode {
 				} else if (event.type === "server_request_resolved") {
 					this.cancelConnectionExtensionUiRequests({ userInputRequestId: event.requestId });
 				} else if (event.type === "connection_status") {
+					this.goalElapsedClock.setConnected(event.status === "connected");
 					this.showStatus(
 						event.status === "connected" ? "Daemon reconnected" : "Daemon connection lost; reconnecting…",
 						event.status === "reconnecting" ? "warning" : "dim",
@@ -5240,6 +5243,8 @@ export class InteractiveMode {
 				} else if (event.type === "heartbeats_changed") {
 					await this.refreshScheduledCatalog();
 				} else if (event.type === "closed") {
+					this.goalElapsedClock.setConnected(false);
+					this.stopGoalTrayTimer();
 					this.showError(event.error ?? "Agent connection closed");
 				}
 			} catch (error) {
@@ -6032,6 +6037,7 @@ export class InteractiveMode {
 	}
 
 	private syncGoalTray(goal: GoalState): void {
+		this.goalElapsedClock.read(goal, this.connectionState?.sessionId ?? "");
 		this.subagentSummaryLine.invalidate();
 		this.updateGoalTrayTimer(goal);
 	}
@@ -6354,13 +6360,14 @@ export class InteractiveMode {
 
 	private getTrayGoalLabel(): string | undefined {
 		const goal = this.getGoalState();
+		const elapsed = this.goalElapsedClock.read(goal, this.connectionState?.sessionId ?? "");
 		switch (goal.status) {
 			case "active":
-				return `Pursuing goal (${this.formatGoalElapsed(goal.timeUsedSeconds)})`;
+				return `Pursuing goal (${this.formatGoalElapsed(elapsed)})`;
 			case "paused":
-				return `Goal paused (${this.formatGoalElapsed(goal.timeUsedSeconds)})`;
+				return `Goal paused (${this.formatGoalElapsed(elapsed)})`;
 			case "budget_limited":
-				return `Goal budget limited (${this.formatGoalElapsed(goal.timeUsedSeconds)})`;
+				return `Goal budget limited (${this.formatGoalElapsed(elapsed)})`;
 			case "idle":
 			case "complete":
 			case "error":

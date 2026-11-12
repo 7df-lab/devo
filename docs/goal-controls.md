@@ -26,3 +26,14 @@ skill still exposes only get/create/complete and explicitly leaves pause and
 resume to the user/host. Its `crates/pa-tui/src/goal_surface.rs` consumes
 `goal_update` state for the Pursuing goal dock. Devo therefore needs actual
 Python host controls, not only a copied prompt or a new slash command.
+
+The dock's elapsed time is a live, display-only estimate of observed active
+pursuit, driven by a monotonic clock. It freezes while paused or disconnected,
+resumes without including that gap, and resets when the goal or session changes.
+System wall-clock adjustments do not affect it. Restoring a session starts from
+server-accounted usage; the client does not infer work during an offline gap.
+Server `timeUsedSeconds` remains completed-turn accounting, not a per-second
+clock. After a live `turn/completed` notification the TUI rereads that accounting
+with the same session/event fencing used for restoration. It reconciles with
+the local estimate using the greater value, rather than counting a settled
+turn twice. The display estimate does not change durable usage or budgets.
