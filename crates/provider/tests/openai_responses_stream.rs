@@ -41,6 +41,7 @@ async fn responses_stream_completion_closes_tagged_reasoning_before_message_done
                     content: vec![ResponseContent::Text("final".to_string())],
                     stop_reason: Some(StopReason::EndTurn),
                     usage: Usage {
+                        terminal_sample: false,
                         unreported_fields: None,
                         reported: true,
                         input_tokens: 1,
@@ -275,6 +276,7 @@ async fn responses_stream_separates_reasoning_summary_parts_with_paragraph_break
                     content: vec![ResponseContent::Text("done".to_string())],
                     stop_reason: Some(StopReason::EndTurn),
                     usage: Usage {
+                        terminal_sample: false,
                         unreported_fields: None,
                         reported: true,
                         input_tokens: 1,
@@ -339,6 +341,7 @@ async fn responses_stream_does_not_emit_part_boundary_across_reasoning_items() {
                     content: vec![ResponseContent::Text("done".to_string())],
                     stop_reason: Some(StopReason::EndTurn),
                     usage: Usage {
+                        terminal_sample: false,
                         unreported_fields: None,
                         reported: true,
                         input_tokens: 1,
@@ -402,6 +405,7 @@ async fn responses_stream_does_not_emit_part_boundary_after_function_call_withou
                     content: vec![ResponseContent::Text("done".to_string())],
                     stop_reason: Some(StopReason::EndTurn),
                     usage: Usage {
+                        terminal_sample: false,
                         unreported_fields: None,
                         reported: true,
                         input_tokens: 1,
@@ -445,6 +449,7 @@ async fn completion_folds_streamed_text_when_completed_event_replays_no_output()
         )],
         stop_reason: Some(StopReason::EndTurn),
         usage: Usage {
+            terminal_sample: false,
             unreported_fields: None,
             reported: true,
             input_tokens: 7,

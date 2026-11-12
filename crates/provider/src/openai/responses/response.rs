@@ -257,6 +257,7 @@ pub(super) fn parse_usage(value: &Value) -> Option<Usage> {
         .or_else(|| value.get("completion_tokens"))
         .and_then(Value::as_u64);
     let usage = Usage {
+        terminal_sample: false,
         unreported_fields: None,
         reported: input_tokens.is_some() || output_tokens.is_some(),
         input_tokens: input_tokens.unwrap_or(0) as usize,

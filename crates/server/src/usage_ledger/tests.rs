@@ -49,6 +49,7 @@ fn usage_record_is_appended_to_the_session_rollout() {
         extra_body: None,
     };
     let usage = Usage {
+        terminal_sample: false,
         unreported_fields: None,
         reported: true,
         input_tokens: 10,
@@ -577,4 +578,61 @@ fn registered_session_without_calls_preserves_usage_timestamp() {
         timestamp - chrono::Duration::seconds(1),
     );
     assert_eq!(projection.session(id).unwrap().updated_at, timestamp);
+}
+
+#[tokio::test]
+async fn partial_stream_counters_survive_provisional_zero_and_missing_final_usage() {
+    for partial in [
+        Usage {
+            cache_read_input_tokens: Some(7),
+            ..Usage::default()
+        },
+        Usage {
+            cache_creation_input_tokens: Some(11),
+            ..Usage::default()
+        },
+        Usage {
+            reasoning_output_tokens: Some(13),
+            ..Usage::default()
+        },
+    ] {
+        let f = Fixture::new();
+        let provider = instrument(
+            &f,
+            TurnId::new(),
+            vec![
+                Ok(StreamEvent::UsageDelta(partial.clone())),
+                Ok(StreamEvent::UsageDelta(reported(0, 0))),
+                Ok(StreamEvent::MessageDone {
+                    response: response(Usage::default()),
+                }),
+            ],
+            false,
+        );
+        let events = provider
+            .completion_stream(request())
+            .await
+            .unwrap()
+            .collect::<Vec<_>>()
+            .await;
+        let StreamEvent::MessageDone { response } = events.last().unwrap().as_ref().unwrap() else {
+            panic!("expected final response");
+        };
+        assert_eq!(response.usage, partial);
+        let usage = f.ledger.session_usage(f.session.id).unwrap().total;
+        assert_eq!(usage.call_count, 1);
+        assert_eq!(usage.metered_call_count, 1);
+        assert_eq!(
+            usage.cache_read_input_tokens,
+            partial.cache_read_input_tokens.unwrap_or(0) as u64
+        );
+        assert_eq!(
+            usage.cache_creation_input_tokens,
+            partial.cache_creation_input_tokens.unwrap_or(0) as u64
+        );
+        assert_eq!(
+            usage.reasoning_tokens,
+            partial.reasoning_output_tokens.unwrap_or(0) as u64
+        );
+    }
 }

@@ -666,6 +666,7 @@ impl ModelProviderSDK for ScriptedProvider {
                         content: vec![ResponseContent::Text("cached response".into())],
                         stop_reason: Some(StopReason::EndTurn),
                         usage: Usage {
+                            terminal_sample: false,
                             unreported_fields: None,
                             reported: true,
                             input_tokens: 100,

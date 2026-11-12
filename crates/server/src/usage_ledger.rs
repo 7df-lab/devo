@@ -303,7 +303,7 @@ impl ModelProviderSDK for InstrumentedProvider {
         );
         let samples = attempt.last_usage.clone();
         let observer = Arc::new(move |usage: &Usage| {
-            if usage.is_reported() {
+            if usage.is_trusted_stream_sample() {
                 *samples.lock().expect("usage sample lock") = Some(usage.clone());
             }
         });
@@ -454,7 +454,13 @@ impl Stream for MeteredStream {
             response.usage = usage;
         }
         let result = match &item {
-            Poll::Ready(Some(Ok(StreamEvent::UsageDelta(usage)))) if usage.is_reported() => {
+            Poll::Ready(Some(Ok(StreamEvent::UsageDelta(usage))))
+                if usage.is_trusted_stream_sample() =>
+            {
+                // Initial all-zero stream counters are provisional, not a
+                // measured zero. Do not promote them to terminal usage when
+                // the stream ends without an explicit final sample. Nonzero
+                // partial/cache/reasoning counters remain valid for accounting.
                 *self.attempt.last_usage.lock().expect("usage sample lock") = Some(usage.clone());
                 Ok(())
             }

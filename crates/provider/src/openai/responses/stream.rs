@@ -90,7 +90,7 @@ pub(super) fn decode_response_stream(
                         .and_then(parse_usage)
                         .or_else(|| chunk.pointer("/response/usage").and_then(parse_usage))
                     {
-                        yield StreamEvent::UsageDelta(reported_usage);
+                        yield StreamEvent::UsageDelta(reported_usage.into_terminal_sample());
                     }
                     Err(error)?;
                 }
@@ -108,12 +108,12 @@ pub(super) fn decode_response_stream(
                     // Do not promote zero counters attached to progress events
                     // into an authoritative terminal sample. Untyped usage-only
                     // compatibility events retain their existing meaning.
-                    if matches!(event, "message" | "response.completed" | "response.done" | "response.incomplete")
-                        || crate::stream_usage::has_nonzero_counters(&parsed_usage)
+                    let terminal_sample = matches!(event, "message" | "response.completed" | "response.done" | "response.incomplete");
+                    if terminal_sample || crate::stream_usage::has_nonzero_counters(&parsed_usage)
                     {
                         usage = Some(parsed_usage.clone());
                     }
-                    yield StreamEvent::UsageDelta(parsed_usage);
+                    yield StreamEvent::UsageDelta(if terminal_sample { parsed_usage.into_terminal_sample() } else { parsed_usage });
                 }
 
                 match event {
@@ -482,7 +482,7 @@ pub(super) fn decode_response_stream(
                                 Ok(response) => response,
                                 Err(error) => {
                                     if let Some(reported_usage) = chunk.pointer("/response/usage").and_then(parse_usage) {
-                                        yield StreamEvent::UsageDelta(reported_usage);
+                                        yield StreamEvent::UsageDelta(reported_usage.into_terminal_sample());
                                     }
                                     Err(error)?
                                 }

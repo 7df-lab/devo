@@ -100,11 +100,15 @@ impl ChatCompletionStreamState {
                 || chunk
                     .choices
                     .iter()
-                    .any(|choice| choice.finish_reason.is_some());
+                    .any(|choice| choice.index.unwrap_or(0) == 0 && choice.finish_reason.is_some());
             if terminal_sample || crate::stream_usage::has_nonzero_counters(&usage) {
                 self.usage = Some(usage.clone());
             }
-            events.push(StreamEvent::UsageDelta(usage));
+            events.push(StreamEvent::UsageDelta(if terminal_sample {
+                usage.into_terminal_sample()
+            } else {
+                usage
+            }));
         }
 
         if let Some(usage) = chunk.usage {
