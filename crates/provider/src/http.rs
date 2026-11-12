@@ -191,6 +191,18 @@ pub(crate) async fn invalid_status_error(
     // Prefer typed HTTP classification so retry policy does not treat
     // "stream error … 400 Bad Request" as a transient network failure.
     let typed = match status.as_u16() {
+        // Explicit exhausted-balance codes are permanent, including when the
+        // provider reports HTTP 429. Match structured fields, never message text.
+        _ if [error_kind, error_code].into_iter().flatten().any(|value| {
+            value.eq_ignore_ascii_case("insufficient_quota")
+                || value.eq_ignore_ascii_case("credit_balance_exhausted")
+        }) =>
+        {
+            Some(ProviderError::QuotaExceededError {
+                message: message.clone(),
+                provider_name: Some(provider.to_string()),
+            })
+        }
         401 | 403 => Some(ProviderError::AuthenticationError {
             message: message.clone(),
             provider_name: Some(provider.to_string()),
@@ -455,6 +467,80 @@ mod tests {
         }
 
         assert_eq!(build_count.load(Ordering::SeqCst), 1);
+    }
+
+    #[tokio::test]
+    async fn http_quota_errors_are_not_transient_rate_limits() {
+        // Keep this HTTP caller subscribed while the logging regression test runs
+        // concurrently; an unsubscribed caller can cache this shared callsite as disabled.
+        let subscriber = tracing_subscriber::fmt()
+            .with_max_level(tracing::Level::WARN)
+            .with_writer(std::io::sink)
+            .finish();
+        let _subscriber = tracing::subscriber::set_default(subscriber);
+        for (kind, code, quota) in [
+            (Some("insufficient_quota"), Some("429"), true),
+            (Some("rate_limit_error"), Some("insufficient_quota"), true),
+            (
+                Some("rate_limit_error"),
+                Some("credit_balance_exhausted"),
+                true,
+            ),
+            (Some("CREDIT_BALANCE_EXHAUSTED"), None, true),
+            (None, Some("INSUFFICIENT_QUOTA"), true),
+            (Some("rate_limit_error"), Some("rate_limit_exceeded"), false),
+            (Some("unknown"), Some("other"), false),
+            (None, None, false),
+        ] {
+            let listener = tokio::net::TcpListener::bind("127.0.0.1:0")
+                .await
+                .expect("bind provider mock");
+            let address = listener.local_addr().expect("local address");
+            let body = serde_json::json!({
+                "error": { "message": "Account unavailable: insufficient_quota", "type": kind, "code": code }
+            })
+            .to_string();
+            let server = tokio::spawn(async move {
+                let (mut socket, _) = listener.accept().await.expect("accept");
+                let mut request = [0; 4096];
+                tokio::io::AsyncReadExt::read(&mut socket, &mut request)
+                    .await
+                    .expect("read");
+                let response = format!(
+                    "HTTP/1.1 429 Too Many Requests\r\ncontent-type: application/json\r\ncontent-length: {}\r\nconnection: close\r\n\r\n{body}",
+                    body.len()
+                );
+                tokio::io::AsyncWriteExt::write_all(&mut socket, response.as_bytes())
+                    .await
+                    .expect("write");
+            });
+            let response = Client::new()
+                .get(format!("http://{address}"))
+                .send()
+                .await
+                .expect("response");
+            let error = invalid_status_error(
+                "openai",
+                "model",
+                "completion",
+                StatusCode::TOO_MANY_REQUESTS,
+                response,
+                &Value::Null,
+            )
+            .await;
+            assert!(error.to_string().contains("Invalid status code: 429"));
+            let typed = error
+                .downcast_ref::<ProviderError>()
+                .expect("typed provider error");
+            let expected = if quota {
+                serde_json::json!({"error_kind":"quota_exceeded_error", "message":"Account unavailable: insufficient_quota", "provider_name":"openai"})
+            } else {
+                serde_json::json!({"error_kind":"rate_limit_error", "message":"Account unavailable: insufficient_quota", "provider_name":"openai", "retry_after_seconds":null})
+            };
+            assert_eq!(serde_json::to_value(typed).expect("serialize"), expected);
+            assert_eq!(typed.is_recoverable(), !quota);
+            server.await.expect("server exits");
+        }
     }
 
     /// Verifies: provider custom headers parse from a JSON object string.
