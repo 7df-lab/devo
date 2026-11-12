@@ -2,7 +2,7 @@ import assert from "node:assert/strict";
 import { test } from "node:test";
 import { NativeAgentConnection } from "./native-agent-connection.js";
 
-function harness() {
+function harness(compactingTarget?: string) {
   let conn: NativeAgentConnection;
   let pendingQueue: { respond: (result: unknown) => void; reject: () => void } | undefined;
   let holdQueue = false;
@@ -11,7 +11,7 @@ function harness() {
     const request = JSON.parse(line); if (request.id == null) return;
     const respond = (result: unknown) => conn.pushChunk(JSON.stringify({ jsonrpc: "2.0", id: request.id, result }) + "\n");
     if (request.method === "session/resume") return respond({ session: { id: request.params.sessionId } });
-    if (request.method === "subscription/create") return respond({ subscriptionId: "subscription", cursors: [] });
+    if (request.method === "subscription/create") return respond({ subscriptionId: "subscription", cursors: [], snapshots: compactingTarget === request.params.selectors?.[0]?.sessionId ? [{ data: { session: { id: compactingTarget, flags: ["compacting"] } } }] : [] });
     if (request.method === "session/queue/list") {
       if (holdQueue) {
         holdQueue = false;
@@ -73,6 +73,16 @@ test("target compaction notifications still update the freshly scoped state", as
     h.conn.pushChunk(JSON.stringify({ jsonrpc: "2.0", method: "session/statusChanged", params: { sessionId: "B", flags: ["compacting"] } }) + "\n");
     assert.equal((await h.conn.getState()).isCompacting, true);
     h.conn.pushChunk(JSON.stringify({ jsonrpc: "2.0", method: "session/statusChanged", params: { sessionId: "A", flags: [] } }) + "\n");
+    assert.equal((await h.conn.getState()).isCompacting, true);
+  } finally { await h.conn.dispose(); }
+});
+
+
+test("target subscription snapshot restores an already-running compaction", async () => {
+  const h = harness("B");
+  try {
+    await h.conn.switchSession("A", { historyLoadMode: "deferred" });
+    await h.conn.switchSession("B", { historyLoadMode: "deferred" });
     assert.equal((await h.conn.getState()).isCompacting, true);
   } finally { await h.conn.dispose(); }
 });

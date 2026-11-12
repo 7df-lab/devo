@@ -1038,6 +1038,9 @@ export class NativeAgentConnection implements AgentConnection {
       const data = (snapshot.data ?? snapshot) as Record<string, unknown>;
       const session = (data.session ?? data) as Record<string, unknown>;
       if (session && typeof session === "object") this.applySessionSnapshot(session);
+      // Restore the target's current state before replay; a fresh attachment
+      // may never receive the statusChanged event that started compaction.
+      if (Array.isArray(session.flags)) this.isCompacting = session.flags.includes("compacting");
       const activeTurn = (data.activeTurn ?? data.active_turn) as
         | { id?: string }
         | null
