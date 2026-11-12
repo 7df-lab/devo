@@ -69,10 +69,10 @@ impl ModelProviderSDK for ControllingGoalProvider {
             1 => {
                 let controls = match self.outcome {
                     ControlOutcome::ReplacementPaused => {
-                        "for action in (goal.pause, goal.resume, goal.cancel):\n    result = await action()\n    assert result['status'] == 'ok', result\nresult = await goal.create('Replacement goal')\nassert result['status'] == 'ok', result\nresult = await goal.pause()\nassert result['status'] == 'ok', result"
+                        "for action, status in ((goal.pause, 'paused'), (goal.resume, 'active'), (goal.cancel, 'canceled')):\n    result = await action()\n    assert result['goal']['status'] == status, result\nresult = await goal.create('Replacement goal')\nassert result['goal']['status'] == 'active', result\nresult = await goal.pause()\nassert result['goal']['status'] == 'paused', result"
                     }
-                    ControlOutcome::Paused => "assert (await goal.pause())['status'] == 'ok'",
-                    ControlOutcome::Canceled => "assert (await goal.cancel())['status'] == 'ok'",
+                    ControlOutcome::Paused => "assert (await goal.pause())['goal']['status'] == 'paused'",
+                    ControlOutcome::Canceled => "assert (await goal.cancel())['goal']['status'] == 'canceled'",
                 };
                 let code = format!(
                     "import goal, asyncio\n{controls}\nawait asyncio.sleep(1.1)\nprint('goal-controls-finished')"

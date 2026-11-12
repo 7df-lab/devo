@@ -120,7 +120,7 @@ async fn check_pause_resume(timing: ResumeTiming) -> Result<()> {
         requests: AtomicUsize::new(0),
         started_path: started_path.clone(),
         script_prefix: if matches!(timing, ResumeTiming::AfterPythonPauseResume) {
-            "import goal\nassert (await goal.pause())['status'] == 'ok'\nassert (await goal.resume())['status'] == 'ok'\n"
+            "import goal\nassert (await goal.pause())['goal']['status'] == 'paused'\nassert (await goal.resume())['goal']['status'] == 'active'\n"
         } else {
             ""
         },

@@ -17,4 +17,4 @@ Before marking the goal complete, audit the current state against every requirem
 
 Do not call `goal.complete()` unless the goal is complete. Do not mark a goal complete merely because the budget is nearly exhausted or because you are stopping work.
 
-If the user asks to pause, resume, or cancel the goal, use `await goal.pause()`, `await goal.resume()`, or `await goal.cancel()` in the Python REPL. Cancellation does not mean the objective was achieved. Check the returned status before reporting success.
+If the user asks to pause, resume, or cancel the goal, use `await goal.pause()`, `await goal.resume()`, or `await goal.cancel()` in the Python REPL. Cancellation does not mean the objective was achieved. Check the returned goal state before reporting success.

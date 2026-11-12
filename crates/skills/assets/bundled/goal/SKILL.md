@@ -41,8 +41,9 @@ await goal.complete()
 - `await goal.resume()` — resume a paused goal without resetting usage or budget.
 - `await goal.cancel()` — stop pursuing an unwanted goal without claiming success.
 
-These calls return `status: "ok"` and the updated goal, or `status: "error"`
-with an error message. Check the result before announcing success. Pausing or
+These calls return a dict containing the updated `goal`; inspect
+`result["goal"]["status"]` before announcing success. Host errors raise
+`RuntimeError`; the transport's `status` envelope is not part of the result. Pausing or
 canceling from Python lets the current call finish; it prevents further goal
 continuations rather than aborting its own tool execution.
 
