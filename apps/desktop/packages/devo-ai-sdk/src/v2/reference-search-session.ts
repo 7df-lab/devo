@@ -116,6 +116,10 @@ function filePathsFromSnapshot(snapshot: ReferenceSearchSnapshot): string[] {
 export class ReferenceSearchSession {
 	private searchId: string | null = null
 	private activeQuery = ""
+	private generation = 0
+	private active = false
+	private readonly earlySnapshots = new Map<string, ReferenceSearchSnapshot>()
+	private readonly earlyFailures = new Map<string, string>()
 	private snapshot: ReferenceSearchSnapshot | null = null
 	private error: string | null = null
 	private readonly listeners = new Set<SnapshotListener>()
@@ -142,17 +146,51 @@ export class ReferenceSearchSession {
 	}
 
 	async startOrUpdate(query: string): Promise<ReferenceSearchSnapshot> {
+		const generation = ++this.generation
+		const searchId = this.searchId
+		this.active = true
 		this.activeQuery = query
+		this.snapshot = null
+		this.earlySnapshots.clear()
+		this.earlyFailures.clear()
 		this.error = null
-		const snapshot = this.searchId
-			? await this.update(query)
-			: await this.start(query)
-		this.applySnapshot(snapshot)
-		return snapshot
+		const result = await this.request(
+			searchId ? "search/update" : "search/start",
+			searchId ? { searchId, query } : { cwd: this.cwd, query },
+		)
+		const snapshot = parseSnapshot(result)
+		if (!snapshot) throw new Error("invalid reference search response")
+		if (generation !== this.generation || !this.active) {
+			// A cancelled start can finish after a new search began. Clean up only
+			// its own server search; never cancel the current search on a late update.
+			if (!searchId && snapshot.search_id !== this.searchId) {
+				void this.request("search/cancel", {
+					searchId: snapshot.search_id,
+				}).catch(() => {})
+			}
+			return snapshot
+		}
+		if (snapshot.query !== query || (searchId && snapshot.search_id !== searchId)) {
+			throw new Error("mismatched reference search response")
+		}
+		this.searchId = snapshot.search_id
+		// File notifications can overtake the RPC response. Do not regress a
+		// completed result to the initial, incomplete RPC snapshot.
+		let latest = this.earlySnapshots.get(snapshot.search_id) ?? this.snapshot ?? snapshot
+		this.error = this.earlyFailures.get(snapshot.search_id) ?? this.error
+		if (this.error) latest = { ...latest, file_search_complete: true }
+		this.earlySnapshots.clear()
+		this.earlyFailures.clear()
+		this.applySnapshot(latest)
+		return latest
 	}
 
 	async cancel(): Promise<void> {
 		const searchId = this.searchId
+		this.generation++
+		this.active = false
+		this.earlySnapshots.clear()
+		this.earlyFailures.clear()
 		this.searchId = null
 		this.activeQuery = ""
 		this.snapshot = null
@@ -167,16 +205,23 @@ export class ReferenceSearchSession {
 
 	handleNotification(method: string, payload: unknown): boolean {
 		const innerMethod = method
+		if (!this.active && ["search/failed", "search/updated", "search/completed"].includes(method))
+			return true
 		if (innerMethod === "search/failed") {
 			const failed = payload as Partial<ReferenceSearchFailedPayload>
-			if (!failed.search_id || this.searchId !== failed.search_id) return true
-			if (failed.query && failed.query !== this.activeQuery) return true
+			if (!failed.search_id || failed.query !== this.activeQuery) return true
+			if (!this.searchId) {
+				this.earlyFailures.delete(failed.search_id)
+				this.earlyFailures.set(failed.search_id, failed.message ?? "reference search failed")
+				if (this.earlyFailures.size > 16) {
+					this.earlyFailures.delete(this.earlyFailures.keys().next().value!)
+				}
+				return true
+			}
+			if (this.searchId !== failed.search_id) return true
 			this.error = failed.message ?? "reference search failed"
 			if (this.snapshot) {
-				this.applySnapshot({
-					...this.snapshot,
-					file_search_complete: true,
-				})
+				this.applySnapshot({ ...this.snapshot, file_search_complete: true })
 			}
 			return true
 		}
@@ -185,34 +230,24 @@ export class ReferenceSearchSession {
 		}
 		const snapshot = parseSnapshot(payload)
 		if (!snapshot) return true
-		if (this.searchId && snapshot.search_id !== this.searchId) return true
 		if (snapshot.query !== this.activeQuery) return true
+		if (!this.searchId) {
+			// Until start resolves, identity is unconfirmed. Keep a bounded buffer
+			// for early notifications, without publishing another search's rows.
+			this.earlySnapshots.delete(snapshot.search_id)
+			this.earlySnapshots.set(snapshot.search_id, snapshot)
+			if (this.earlySnapshots.size > 16) {
+				this.earlySnapshots.delete(this.earlySnapshots.keys().next().value!)
+			}
+			return true
+		}
+		if (snapshot.search_id !== this.searchId) return true
 		this.applySnapshot(snapshot)
 		return true
 	}
 
-	private async start(query: string): Promise<ReferenceSearchSnapshot> {
-		const result = (await this.request("search/start", {
-			cwd: this.cwd,
-			query,
-		})) as { snapshot: ReferenceSearchSnapshot }
-		const snapshot = parseSnapshot(result.snapshot)
-		if (!snapshot) throw new Error("invalid reference search start response")
-		this.searchId = snapshot.search_id
-		return snapshot
-	}
-
-	private async update(query: string): Promise<ReferenceSearchSnapshot> {
-		const result = (await this.request("search/update", {
-			searchId: this.searchId,
-			query,
-		})) as { snapshot: ReferenceSearchSnapshot }
-		const snapshot = parseSnapshot(result.snapshot)
-		if (!snapshot) throw new Error("invalid reference search update response")
-		return snapshot
-	}
-
 	private applySnapshot(snapshot: ReferenceSearchSnapshot): void {
+		snapshot = this.error ? { ...snapshot, file_search_complete: true } : snapshot
 		this.snapshot = snapshot
 		for (const listener of this.listeners) {
 			listener(snapshot)
