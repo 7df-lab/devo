@@ -457,7 +457,15 @@ mod tests {
             ]
         })));
 
-        assert_eq!(events.len(), 2);
+        assert_eq!(
+            events,
+            vec![StreamEvent::ToolCallStart {
+                index: 0,
+                id: "call_bad".to_string(),
+                name: "broken_tool".to_string(),
+                input: json!({}),
+            }]
+        );
 
         let response = state.into_response().expect("valid response");
         assert_eq!(response.usage.input_tokens, 11);

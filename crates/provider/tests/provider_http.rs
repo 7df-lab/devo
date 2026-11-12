@@ -58,7 +58,7 @@ async fn openai_chat_completions_applies_custom_headers_after_builtin_headers() 
 /// Verifies: OpenAI Responses requests include custom provider headers and custom values override built-in headers.
 #[tokio::test]
 async fn openai_responses_applies_custom_headers_after_builtin_headers() {
-    let (base_url, capture) = spawn_json_server(openai_responses_response()).await;
+    let (base_url, capture) = spawn_sse_server(openai_responses_response()).await;
     let provider = OpenAIResponsesProvider::new(base_url)
         .with_http_options(
             ProviderHttpOptions::from_raw(
@@ -889,7 +889,11 @@ fn openai_chat_response() -> &'static str {
 }
 
 fn openai_responses_response() -> &'static str {
-    r#"{"id":"resp-test","status":"completed","output":[{"type":"message","content":[{"type":"output_text","text":"OK"}]}],"usage":{"input_tokens":1,"output_tokens":1,"total_tokens":2}}"#
+    concat!(
+        "HTTP/1.1 200 OK\r\ncontent-type: text/event-stream\r\nconnection: close\r\n\r\n",
+        "event: response.completed\n",
+        "data: {\"response\":{\"id\":\"resp-test\",\"status\":\"completed\",\"output\":[{\"type\":\"message\",\"content\":[{\"type\":\"output_text\",\"text\":\"OK\"}]}],\"usage\":{\"input_tokens\":1,\"output_tokens\":1,\"total_tokens\":2}}}\n\n",
+    )
 }
 
 fn anthropic_response() -> &'static str {

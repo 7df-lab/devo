@@ -126,7 +126,7 @@ async fn explicit_event_takes_precedence_over_json_type() {
     });
     assert_eq!(
         collect_events(format!(
-            "event: response.output_text.delta\ndata: {payload}\n\n"
+            "event: response.output_text.delta\ndata: {payload}\n\ndata: [DONE]\n\n"
         ))
         .await,
         vec![

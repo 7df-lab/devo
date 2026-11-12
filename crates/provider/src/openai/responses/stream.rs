@@ -389,7 +389,8 @@ pub(super) fn decode_response_stream(
                             let result = (|| -> Result<ModelResponse> {
                             let response = if let Some(parsed) = chunk.get("response") {
                                 let mut parsed = parsed.clone();
-                                if parsed.get("output").and_then(Value::as_array).is_none_or(Vec::is_empty)
+                                let terminal_has_output = parsed.get("output").and_then(Value::as_array).is_some_and(|output| !output.is_empty());
+                                if !terminal_has_output
                                     && !completed_items.is_empty()
                                 {
                                     parsed["output"] = Value::Array(completed_items.values().cloned().collect());
@@ -400,10 +401,10 @@ pub(super) fn decode_response_stream(
                                 {
                                     response.usage = reported_usage.clone();
                                 }
-                                if !text_buf.is_empty() && !response.content.iter().any(|item| matches!(item, ResponseContent::Text(_))) {
+                                if !terminal_has_output && !text_buf.is_empty() && !response.content.iter().any(|item| matches!(item, ResponseContent::Text(_))) {
                                     response.content.push(ResponseContent::Text(text_buf.clone()));
                                 }
-                                if !response.content.iter().any(|item| matches!(item, ResponseContent::ToolUse { .. } | ResponseContent::HostedToolUse { .. })) {
+                                if !terminal_has_output && !response.content.iter().any(|item| matches!(item, ResponseContent::ToolUse { .. } | ResponseContent::HostedToolUse { .. })) {
                                     // Codex-style backends do not replay the
                                     // output items in the terminal
                                     // `response.completed` event, so the
