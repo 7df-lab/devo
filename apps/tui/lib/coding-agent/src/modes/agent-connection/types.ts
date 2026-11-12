@@ -565,7 +565,7 @@ export interface AgentConnectionScheduledTask {
 	firstMessage?: string;
 }
 
-export type AgentConnectionExtensionUiResponse = { value: string } | { confirmed: boolean } | { cancelled: true };
+export type AgentConnectionExtensionUiResponse = { value: string } | { confirmed: boolean } | { cancelled: true } | { answers: Record<string, { answers: string[] }> };
 
 export interface AgentConnectionExtensionUiRequest {
 	id: string;

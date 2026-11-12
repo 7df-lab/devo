@@ -2185,6 +2185,11 @@ export class NativeAgentConnection implements AgentConnection {
       return;
     }
 
+    if (method === "userInput/request" && "answers" in response) {
+      this.rpc.respond(id, { requestId: wireRequestId, answers: response.answers });
+      return;
+    }
+
     if ("confirmed" in response) {
       this.rpc.respond(id, {
         requestId: wireRequestId,
@@ -3928,31 +3933,12 @@ export function reverseRpcToExtensionUiRequest(requestId: string, method: string
     };
   }
   if (method === "userInput/request") {
-    const questions = (p.questions as Array<Record<string, unknown>>) ?? [];
-    const first = questions[0] ?? {};
-    const options = Array.isArray(first.options) ? first.options : undefined;
     const requestIdRaw = p.requestId ?? p.request_id;
-    const userInputRequestId =
-      typeof requestIdRaw === "string" && requestIdRaw ? requestIdRaw : undefined;
-    if (options && options.length > 0) {
-      return {
-        id: requestId,
-        method: "select",
-        userInputRequestId,
-        payload: {
-          title: first.question ?? first.header ?? "Question",
-          options,
-        },
-      };
-    }
     return {
       id: requestId,
-      method: "input",
-      userInputRequestId,
-      payload: {
-        title: first.question ?? first.header ?? "Input required",
-        placeholder: first.placeholder ?? "",
-      },
+      method: "user_input",
+      userInputRequestId: typeof requestIdRaw === "string" ? requestIdRaw : undefined,
+      payload: { questions: p.questions },
     };
   }
   return {
