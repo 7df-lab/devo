@@ -142,7 +142,13 @@ for (const operation of ["new", "switch", "import"] as const) {
       } });
       t.after(() => conn.dispose());
       const pending = operation === "new" ? conn.newSession() : operation === "switch" ? conn.switchSession("A") : conn.importFromJsonl("missing.jsonl");
-      while (!approve) await new Promise(resolve => setImmediate(resolve));
+      // A failed fixture must not keep the Windows worker alive after timeout.
+      void pending.catch(() => {});
+      t.after(() => { approve?.(false); });
+      while (!approve) {
+        t.signal.throwIfAborted();
+        await new Promise(resolve => setImmediate(resolve));
+      }
       if (invalidate === "dispose") await conn.dispose(); else await conn.switchSession("B", { historyLoadMode: "deferred" });
       approve(true);
       assert.deepEqual(await pending, { cancelled: true });
