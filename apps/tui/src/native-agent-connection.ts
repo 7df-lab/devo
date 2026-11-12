@@ -259,6 +259,8 @@ export class NativeAgentConnection implements AgentConnection {
   private sessionVersion = 0;
   private goal = emptyGoalState();
   private goalRevision = 0;
+  private goalReadSequence = 0;
+  private goalAppliedReadSequence = 0;
   private retiredGoalIds = new Set<unknown>();
   private sessionActions = emptySessionActions();
   private queue: AgentConnectionQueueState = { steering: [], followUp: [], ordered: [] };
@@ -497,6 +499,8 @@ export class NativeAgentConnection implements AgentConnection {
       }
       this.resolveIdleWaiters();
       if (this.subscriptionReplayDepth === 0) {
+        // Server settles goal usage before publishing turn/completed.
+        if (this.sessionId) void this.refreshGoal(this.sessionId, this.sessionTransitionGeneration);
         void this.refreshQueueFromServer();
         const status = String(turn.status ?? "").toLowerCase();
         // Interrupted / no file mutations: clear footer. Never re-scan a dirty
@@ -1110,11 +1114,14 @@ export class NativeAgentConnection implements AgentConnection {
 
   private async refreshGoal(sessionId: string, generation: number): Promise<void> {
     const revision = this.goalRevision;
+    const sequence = ++this.goalReadSequence;
     try {
       const result = await this.rpc.request("session/goal/read", { sessionId }) as { goal?: unknown };
-      if (!Object.hasOwn(result, "goal") || this.sessionId !== sessionId || generation !== this.sessionTransitionGeneration || revision !== this.goalRevision) return;
+      if (this.disposed || !Object.hasOwn(result, "goal") || this.sessionId !== sessionId || generation !== this.sessionTransitionGeneration || revision !== this.goalRevision || sequence < this.goalAppliedReadSequence) return;
+      this.goalAppliedReadSequence = sequence;
       this.goal = applyGoalFromWire(result.goal) as never;
-      this.emitSessionEvent({ type: "goal_update", goal: this.goal });
+      // Read results do not invalidate newer reads; live goal mutations do.
+      this.emit({ type: "session_event", event: { type: "goal_update", goal: this.goal } });
     } catch {
       // A goal read is supplemental; an unavailable read must not undo live state.
     }

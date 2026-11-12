@@ -2697,3 +2697,29 @@ test("Native userInput/request round-trips the complete answer map", async () =>
   assert.deepEqual(reply, { jsonrpc: "2.0", id: 912, result: { requestId: "question_912", answers: { flavor: { answers: ["B"] }, note: { answers: ["hello"] } } } });
   await conn.dispose();
 });
+
+for (const reverse of [false, true]) {
+  test(`completed turns refresh settled goal usage with ${reverse ? "reversed" : "ordered"} responses`, async () => {
+    let hold = false;
+    const reads: Array<(result: unknown) => void> = [];
+    const { conn } = await bootConnection([(method, _params, respond) => {
+      if (method !== "session/goal/read" || !hold) return false;
+      reads.push(respond);
+      return true;
+    }]);
+    hold = true;
+    for (const id of ["one", "two"]) {
+      conn.pushChunk(`${JSON.stringify({ jsonrpc: "2.0", method: "turn/completed", params: {
+        turn: { id, sessionId: "sess_test", status: "completed" },
+      } })}\n`);
+    }
+    await new Promise((resolve) => setImmediate(resolve));
+    assert.equal(reads.length, 2);
+    for (const index of reverse ? [1, 0] : [0, 1]) {
+      reads[index]({ goal: { id: "goal", status: "active", timeUsedSeconds: (index + 1) * 10 } });
+      await new Promise((resolve) => setImmediate(resolve));
+    }
+    assert.equal((await conn.getState()).goal.timeUsedSeconds, 20);
+    await conn.dispose();
+  });
+}
