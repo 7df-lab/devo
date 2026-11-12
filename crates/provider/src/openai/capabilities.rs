@@ -1,4 +1,5 @@
 use devo_protocol::ModelProfileKey;
+use devo_protocol::ReasoningEffort;
 use devo_protocol::RequestRole;
 
 /// Transport variants used to resolve OpenAI-family capabilities.
@@ -28,6 +29,9 @@ pub(crate) struct OpenAIRequestProfile {
     pub supports_top_p: bool,
     pub supports_top_k: bool,
     pub require_reasoning_content: bool,
+    /// When set, sampling requires no reasoning; the value is the model default.
+    pub sampling_reasoning_default: Option<ReasoningEffort>,
+    pub max_tokens_parameter: &'static str,
 }
 
 impl OpenAIRequestProfile {
@@ -46,6 +50,8 @@ impl OpenAIRequestProfile {
             supports_top_p,
             supports_top_k,
             require_reasoning_content,
+            max_tokens_parameter: "max_tokens",
+            sampling_reasoning_default: None,
         }
     }
 }
@@ -205,6 +211,57 @@ pub(crate) fn resolve_request_profile(
     model_profile: &ModelProfileKey,
     transport: OpenAITransport,
 ) -> OpenAIRequestProfile {
+    if let ModelProfileKey::CatalogSlug(model) = model_profile {
+        let model = model
+            .rsplit_once('/')
+            .map_or(model.as_str(), |(_, model)| model);
+        let model = model.to_ascii_lowercase();
+        let o_series = ["o1", "o3", "o4"].iter().any(|prefix| {
+            model == *prefix
+                || model
+                    .strip_prefix(*prefix)
+                    .is_some_and(|suffix| suffix.starts_with('-'))
+        });
+        let gpt5 = model == "gpt-5" || model.starts_with("gpt-5-") || model.starts_with("gpt-5.");
+        if o_series && transport == OpenAITransport::Responses {
+            return OpenAIRequestProfile {
+                supports_temperature: false,
+                supports_top_p: false,
+                ..DEFAULT_RESPONSES
+            };
+        }
+        if transport == OpenAITransport::ChatCompletions && (o_series || gpt5) {
+            // max_tokens is incompatible with OpenAI reasoning models. Keep the
+            // legacy parameter for generic / third-party compatibility profiles.
+            let fixed_sampling = o_series
+                || model == "gpt-5"
+                || (model.starts_with("gpt-5-") && !model.starts_with("gpt-5-chat"));
+            return OpenAIRequestProfile {
+                max_tokens_parameter: "max_completion_tokens",
+                supports_temperature: !fixed_sampling,
+                supports_top_p: !fixed_sampling,
+                sampling_reasoning_default: if fixed_sampling || model.contains("-chat") {
+                    None
+                } else {
+                    // GPT-5.1/5.2/5.4 default to none; GPT-5.5 and later
+                    // default to medium. Do not silently assume none for new models.
+                    let defaults_to_none = ["gpt-5.1", "gpt-5.2", "gpt-5.4"].iter().any(|prefix| {
+                        model == *prefix
+                            || model
+                                .strip_prefix(*prefix)
+                                .is_some_and(|suffix| suffix.starts_with('-'))
+                    });
+                    Some(if defaults_to_none {
+                        ReasoningEffort::None
+                    } else {
+                        ReasoningEffort::Medium
+                    })
+                },
+                ..DEFAULT_CHAT_COMPLETIONS
+            };
+        }
+    }
+
     for rule in OPENAI_PROFILE_RULES {
         if rule.transport == transport
             && matches!(model_profile, ModelProfileKey::CatalogSlug(model) if rule.matcher.matches(model))
@@ -223,6 +280,24 @@ pub(crate) fn resolve_request_profile(
 mod tests {
     use super::*;
     use pretty_assertions::assert_eq;
+
+    #[test]
+    fn responses_o_series_omit_sampling_controls() {
+        for slug in ["openai/o1", "o3-mini", "o4-mini-2025-04-16"] {
+            let profile = resolve_request_profile(
+                &ModelProfileKey::CatalogSlug(slug.to_string()),
+                OpenAITransport::Responses,
+            );
+            assert_eq!(
+                profile,
+                OpenAIRequestProfile {
+                    supports_temperature: false,
+                    supports_top_p: false,
+                    ..DEFAULT_RESPONSES
+                }
+            );
+        }
+    }
 
     #[test]
     fn resolve_request_profile_uses_zai_thinking_for_chat_completions() {

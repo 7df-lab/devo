@@ -1,6 +1,6 @@
 //! Ordered tool state accumulated across Responses stream events.
 
-use super::response::parse_function_call_arguments_json;
+use super::response::{parse_function_call_arguments_json, validate_arguments_json};
 use devo_protocol::ResponseContent;
 use serde_json::Value;
 use std::collections::HashMap;
@@ -19,9 +19,10 @@ pub(super) type ResponsesStreamHostedToolCall =
 pub(super) fn responses_stream_tool_content(
     tool_calls: &HashMap<String, ResponsesStreamToolCall>,
     hosted_tool_calls: &HashMap<String, ResponsesStreamHostedToolCall>,
-) -> Vec<ResponseContent> {
+) -> anyhow::Result<Vec<ResponseContent>> {
     let mut indexed_content = Vec::new();
     for call in tool_calls.values() {
+        validate_arguments_json(&call.arguments_json)?;
         indexed_content.push((
             call.index,
             ResponseContent::ToolUse {
@@ -44,8 +45,8 @@ pub(super) fn responses_stream_tool_content(
         ));
     }
     indexed_content.sort_by_key(|(index, _)| *index);
-    indexed_content
+    Ok(indexed_content
         .into_iter()
         .map(|(_, content)| content)
-        .collect()
+        .collect())
 }

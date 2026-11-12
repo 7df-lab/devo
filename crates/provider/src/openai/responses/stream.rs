@@ -7,10 +7,14 @@ use devo_protocol::{
 };
 use futures::{Stream, StreamExt};
 use serde_json::Value;
-use std::{collections::HashMap, pin::Pin};
+use std::{
+    collections::{BTreeMap, HashMap},
+    pin::Pin,
+};
 
 use super::response::{
     function_call_arguments_json, parse_output_item, parse_response, parse_usage,
+    validate_arguments_json,
 };
 use super::stream_tools::{
     ResponsesStreamHostedToolCall, ResponsesStreamToolCall, responses_stream_tool_content,
@@ -32,6 +36,8 @@ pub(super) fn decode_response_stream(
         let mut tool_call_keys_by_item_id: HashMap<String, String> = HashMap::new();
         let mut hosted_tool_calls: HashMap<String, ResponsesStreamHostedToolCall> = HashMap::new();
         let mut usage: Option<Usage> = None;
+        let mut completed_items = BTreeMap::new();
+        let mut received_done_marker = false;
         let mut reasoning_started = false;
         // Item id of the reasoning block currently being streamed. The
         // boundary between summary parts must only fire *within* one
@@ -63,6 +69,7 @@ pub(super) fn decode_response_stream(
 
             {
                 if message.data == "[DONE]" {
+                    received_done_marker = true;
                     break;
                 }
 
@@ -90,7 +97,8 @@ pub(super) fn decode_response_stream(
 
                 if response_id.is_empty() {
                     response_id = chunk
-                        .get("id")
+                        .pointer("/response/id")
+                        .or_else(|| chunk.get("id"))
                         .and_then(Value::as_str)
                         .unwrap_or_default()
                         .to_string();
@@ -270,6 +278,16 @@ pub(super) fn decode_response_stream(
                         }
                         "response.output_item.done" => {
                             if let Some(item) = chunk.get("item")
+                                && let Some(index) = chunk.get("output_index").and_then(Value::as_u64)
+                            {
+                                if let Some(id) = item.get("call_id").and_then(Value::as_str)
+                                    && let Some(call) = tool_calls.get_mut(id)
+                                {
+                                    call.arguments_json = function_call_arguments_json(item);
+                                }
+                                completed_items.insert(index, item.clone());
+                            }
+                            if let Some(item) = chunk.get("item")
                                 && let Some(ResponseContent::HostedToolUse { id, name, input, output, status }) =
                                     parse_output_item(item).into_iter().next()
                             {
@@ -339,7 +357,7 @@ pub(super) fn decode_response_stream(
                                 };
                             }
                         }
-                        "response.completed" | "response.done" => {
+                        "response.completed" | "response.done" | "response.incomplete" => {
                             for fragment in text_parser.finish() {
                                 match fragment {
                                     TaggedTextFragment::Text(text) => {
@@ -369,14 +387,25 @@ pub(super) fn decode_response_stream(
                             if reasoning_started {
                                 yield StreamEvent::ReasoningDone { index: 1 };
                             }
+                            let result = (|| -> Result<ModelResponse> {
                             let response = if let Some(parsed) = chunk.get("response") {
-                                let mut response = parse_response(parsed.clone())?;
+                                let mut parsed = parsed.clone();
+                                let terminal_has_output = parsed.get("output").and_then(Value::as_array).is_some_and(|output| !output.is_empty());
+                                if !terminal_has_output
+                                    && !completed_items.is_empty()
+                                {
+                                    parsed["output"] = Value::Array(completed_items.values().cloned().collect());
+                                }
+                                let mut response = parse_response(parsed)?;
                                 if !response.usage.is_reported()
                                     && let Some(reported_usage) = &usage
                                 {
                                     response.usage = reported_usage.clone();
                                 }
-                                if response.content.is_empty() {
+                                if !terminal_has_output && !text_buf.is_empty() && !response.content.iter().any(|item| matches!(item, ResponseContent::Text(_))) {
+                                    response.content.push(ResponseContent::Text(text_buf.clone()));
+                                }
+                                if !terminal_has_output && !response.content.iter().any(|item| matches!(item, ResponseContent::ToolUse { .. } | ResponseContent::HostedToolUse { .. })) {
                                     // Codex-style backends do not replay the
                                     // output items in the terminal
                                     // `response.completed` event, so the
@@ -384,17 +413,10 @@ pub(super) fn decode_response_stream(
                                     // the assistant content; a non-stream
                                     // `completion()` folded from this stream
                                     // would otherwise report no content.
-                                    let mut content = Vec::new();
-                                    if !text_buf.is_empty() {
-                                        content.push(ResponseContent::Text(
-                                            text_buf.clone(),
-                                        ));
-                                    }
-                                    content.extend(responses_stream_tool_content(
+                                    response.content.extend(responses_stream_tool_content(
                                         &tool_calls,
                                         &hosted_tool_calls,
-                                    ));
-                                    response.content = content;
+                                    )?);
                                 }
                                 if !reasoning_buf.is_empty()
                                     && !response.metadata.extras.iter().any(|extra| {
@@ -421,7 +443,7 @@ pub(super) fn decode_response_stream(
                                         content.extend(responses_stream_tool_content(
                                             &tool_calls,
                                             &hosted_tool_calls,
-                                        ));
+                                        )?);
                                         content
                                     },
                                     stop_reason: Some(StopReason::EndTurn),
@@ -437,12 +459,40 @@ pub(super) fn decode_response_stream(
                                     },
                                 }
                             };
+                            // The consumer retains streamed tool calls even when a
+                            // terminal envelope contains only text. Validate those
+                            // calls independently from response-content fallback.
+                            for call in tool_calls.values() {
+                                if !response.content.iter().any(|item| matches!(item,
+                                    ResponseContent::ToolUse { id, .. } if id == &call.id))
+                                {
+                                    validate_arguments_json(&call.arguments_json)?;
+                                }
+                            }
+                            Ok(response)
+                            })();
+                            let response = match result {
+                                Ok(response) => response,
+                                Err(error) => {
+                                    if let Some(reported_usage) = chunk.pointer("/response/usage").and_then(parse_usage) {
+                                        yield StreamEvent::UsageDelta(reported_usage);
+                                    }
+                                    Err(error)?
+                                }
+                            };
                             yield StreamEvent::MessageDone { response };
                             return;
                         }
                         _ => {}
                     }
             }
+        }
+
+        // A clean HTTP EOF is not evidence of a completed generation. Keep the
+        // explicit [DONE] compatibility marker, but never synthesize success
+        // from a disconnected official Responses stream.
+        if !received_done_marker {
+            Err(stream_error("openai responses stream ended without a terminal event"))?;
         }
 
         for fragment in text_parser.finish() {
@@ -486,7 +536,7 @@ pub(super) fn decode_response_stream(
                 content.extend(responses_stream_tool_content(
                     &tool_calls,
                     &hosted_tool_calls,
-                ));
+                )?);
                 content
             },
             stop_reason: Some(StopReason::EndTurn),

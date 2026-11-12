@@ -20,6 +20,14 @@ pub(super) fn provider_error_from_event(
             chunk.pointer("/response/error").unwrap_or(&Value::Null),
             "OpenAI Responses request failed without error details",
         ),
+        "response.done" | "response.completed"
+            if chunk.pointer("/response/status").and_then(Value::as_str) == Some("failed") =>
+        {
+            (
+                chunk.pointer("/response/error").unwrap_or(&Value::Null),
+                "OpenAI Responses request failed without error details",
+            )
+        }
         // Non-terminal events still belong to the ordinary stream decoder.
         _ => return None,
     };

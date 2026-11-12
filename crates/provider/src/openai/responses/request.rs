@@ -114,6 +114,12 @@ fn append_input_items(input: &mut Vec<Value>, role: OpenAIRole, content: &[Reque
                 // Prior reasoning is omitted unless carried as a provider
                 // reasoning item with a stable id (ProviderReasoning).
             }
+            RequestContent::ProviderReasoning { provider, payload }
+                if provider == "openai-responses" && payload["type"] == "reasoning" =>
+            {
+                flush_message(input, &mut message_blocks);
+                input.push(payload.clone());
+            }
             RequestContent::ProviderReasoning { .. } => {}
             RequestContent::Image {
                 mime_type,

@@ -126,7 +126,7 @@ async fn explicit_event_takes_precedence_over_json_type() {
     });
     assert_eq!(
         collect_events(format!(
-            "event: response.output_text.delta\ndata: {payload}\n\n"
+            "event: response.output_text.delta\ndata: {payload}\n\ndata: [DONE]\n\n"
         ))
         .await,
         vec![
@@ -485,7 +485,7 @@ async fn completion_fold_propagates_failure_instead_of_returning_partial_text() 
 }
 
 #[tokio::test]
-async fn ordinary_eof_still_completes_streamed_text() {
+async fn ordinary_eof_does_not_complete_streamed_text() {
     let events = collect_events(
         concat!(
             "event: response.output_text.delta\n",
@@ -502,17 +502,118 @@ async fn ordinary_eof_still_completes_streamed_text() {
                 index: 0,
                 text: "Hello".to_string()
             }),
-            Ok(StreamEvent::MessageDone {
-                response: ModelResponse {
-                    id: "resp_eof".to_string(),
-                    content: vec![ResponseContent::Text("Hello".to_string())],
-                    stop_reason: Some(StopReason::EndTurn),
-                    usage: Usage::default(),
-                    metadata: ResponseMetadata::default(),
-                }
-            }),
+            Err(json!({
+                "error_kind": "stream_error",
+                "message": "openai responses stream ended without a terminal event",
+                "bytes_received": null
+            })),
         ]
     );
+}
+
+#[tokio::test]
+async fn incomplete_preserves_reason_usage_and_partial_content() {
+    for (reason, stop_reason) in [
+        ("max_output_tokens", StopReason::MaxTokens),
+        ("content_filter", StopReason::StopSequence),
+    ] {
+        let events = collect_events(format!("data: {}\n\n", json!({
+            "type": "response.incomplete",
+            "response": {
+                "id": "resp_incomplete", "status": "incomplete",
+                "incomplete_details": {"reason": reason},
+                "output": [{"type":"message","content":[{"type":"output_text","text":"partial"}]}],
+                "usage": {"input_tokens": 4, "output_tokens": 2}
+            }
+        }))).await;
+        assert_eq!(
+            events,
+            vec![Ok(StreamEvent::MessageDone {
+                response: ModelResponse {
+                    id: "resp_incomplete".to_string(),
+                    content: vec![ResponseContent::Text("partial".to_string())],
+                    stop_reason: Some(stop_reason),
+                    usage: Usage {
+                        reported: true,
+                        input_tokens: 4,
+                        output_tokens: 2,
+                        ..Usage::default()
+                    }
+                    .with_field_coverage(Some(4), Some(2)),
+                    metadata: ResponseMetadata::default(),
+                }
+            })]
+        );
+    }
+}
+
+#[tokio::test]
+async fn completed_items_preserve_final_reasoning_and_tool_arguments() {
+    let reasoning = json!({"type":"reasoning", "id":"rs_1", "summary":[], "encrypted_content":"final-ciphertext"});
+    let call = json!({"type":"function_call", "id":"fc_1", "call_id":"call_1", "name":"lookup", "arguments":"{\"key\":1}"});
+    let body = [
+        json!({"type":"response.output_item.added", "output_index":0, "item":{
+            "type":"reasoning", "id":"rs_1", "summary":[], "encrypted_content":"partial-ciphertext"
+        }}),
+        json!({"type":"response.output_item.done", "output_index":0, "item":reasoning.clone()}),
+        json!({"type":"response.output_item.added", "output_index":1, "item":{
+            "type":"function_call", "id":"fc_1", "call_id":"call_1", "name":"lookup", "arguments":""
+        }}),
+        json!({"type":"response.output_item.done", "output_index":1, "item":call}),
+        json!({"type":"response.completed", "response":{"id":"resp_1", "status":"completed", "output":[]}}),
+    ].iter().map(|event| format!("data: {event}\n\n")).collect::<String>();
+    let events = collect_events(body).await;
+    assert_eq!(
+        events.last(),
+        Some(&Ok(StreamEvent::MessageDone {
+            response: ModelResponse {
+                id: "resp_1".to_string(),
+                content: vec![
+                    ResponseContent::ProviderReasoning {
+                        provider: "openai-responses".to_string(),
+                        payload: reasoning
+                    },
+                    ResponseContent::ToolUse {
+                        id: "call_1".to_string(),
+                        name: "lookup".to_string(),
+                        input: json!({"key":1})
+                    },
+                ],
+                stop_reason: Some(StopReason::EndTurn),
+                usage: Usage::default(),
+                metadata: ResponseMetadata::default(),
+            }
+        }))
+    );
+}
+
+#[tokio::test]
+async fn truncated_function_arguments_cannot_become_empty_inputs() {
+    for output in [
+        json!([]),
+        json!([{"type":"message","content":[{"type":"output_text","text":"done"}]}]),
+    ] {
+        let events = collect_events([
+            json!({"type":"response.output_item.added", "output_index":0, "item":{
+                "type":"function_call", "id":"fc_1", "call_id":"call_1", "name":"lookup", "arguments":""
+            }}),
+            json!({"type":"response.function_call_arguments.delta", "item_id":"fc_1", "delta":"{"}),
+            json!({"type":"response.completed", "response":{"id":"resp_1", "status":"completed", "output":output, "usage":{"input_tokens":7,"output_tokens":3}}}),
+        ].iter().map(|event| format!("data: {event}\n\n")).collect()).await;
+        assert!(events.iter().any(
+            |event| matches!(event, Ok(StreamEvent::UsageDelta(usage)) if usage.output_tokens == 3 && usage.input_tokens == 7)
+        ));
+        assert_eq!(
+            events.last().unwrap().as_ref().unwrap_err()["error_kind"],
+            json!("invalid_request_error")
+        );
+        assert!(events.last().is_some_and(Result::is_err));
+        assert!(
+            !events
+                .iter()
+                .any(|event| matches!(event, Ok(StreamEvent::MessageDone { .. })))
+        );
+    }
 }
 
 async fn collect_events(body: String) -> Vec<Result<StreamEvent, Value>> {

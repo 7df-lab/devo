@@ -123,7 +123,7 @@ mode = "provider"
 
 用户 web 配置目前只提供 search 的 `mode`、`local_provider`、`local_providers` 与 fetch 的 `mode`。正常 core turn 创建默认 `HostedWebSearchTool::new()` / `HostedWebFetchTool::new()`，没有从这些配置映射域名过滤、地理位置、引用开关、工具版本、`max_uses` 等高级参数。
 
-协议内部结构虽包含 search 的 `search_context_size` / `max_uses` / `anthropic_tool_type`，以及 fetch 的域名列表、`citations`、`max_content_tokens` 等字段，**不代表在 TOML 添上同名字段就生效**。此外当前 fetch serializer 将 `citations` 表示为布尔值，而 Anthropic 官方文档要求对象 `{"enabled":true}`；默认路径未设置它，但不能把内部结构当成完整正确的公开配置 API。
+协议内部结构虽包含 search 的 `search_context_size` / `max_uses` / `anthropic_tool_type`，以及 fetch 的域名列表、`citations`、`max_content_tokens` 等字段，**不代表在 TOML 添上同名字段就生效**。协议审查修复后，Anthropic fetch serializer 已将内部布尔 `citations` 序列化为官方要求的对象 `{"enabled":true}`（禁用时为 `{"enabled":false}`）。默认 core 路径仍未设置它，也未从用户 web 配置开放引用开关，因此不能直接在 TOML 添加 `citations` 来启用引用。
 
 官方依据：[OpenAI Web Search](https://developers.openai.com/api/docs/guides/tools-web-search)、[Anthropic Web Search](https://platform.claude.com/docs/en/agents-and-tools/tool-use/web-search-tool)、[Anthropic Web Fetch](https://platform.claude.com/docs/en/agents-and-tools/tool-use/web-fetch-tool)。具体可用模型、额度和价格请以接入点当前文档与账户为准。
 

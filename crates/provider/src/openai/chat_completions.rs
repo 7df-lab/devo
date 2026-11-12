@@ -154,11 +154,11 @@ pub(super) struct OpenAIChatCompletionChoice {
     message: Option<OpenAIChatCompletionMessage>,
 }
 
-#[derive(Debug, Clone, Deserialize, Serialize)]
+#[derive(Debug, Clone, Default, Deserialize, Serialize)]
 pub(super) struct OpenAIChoiceLogprobs {
-    #[serde(default)]
+    #[serde(default, deserialize_with = "deserialize_null_vec")]
     content: Vec<OpenAIChatCompletionTokenLogprob>,
-    #[serde(default)]
+    #[serde(default, deserialize_with = "deserialize_null_vec")]
     refusal: Vec<OpenAIChatCompletionTokenLogprob>,
 }
 
@@ -396,21 +396,30 @@ fn build_request(request: &ModelRequest, stream: bool) -> Value {
     let mut root = json!({
         "model": request.model,
         "messages": messages,
-        "max_tokens": request.max_tokens,
         "stream": stream,
     });
+
+    root[profile.max_tokens_parameter] = json!(request.max_tokens);
 
     if let Some(tools) = &request.tools {
         root["tools"] = tool_definitions(tools);
     }
 
+    let supports_sampling = profile
+        .sampling_reasoning_default
+        .is_none_or(|default_effort| {
+            request.reasoning_effort.unwrap_or(default_effort)
+                == devo_protocol::ReasoningEffort::None
+        });
     if profile.supports_temperature
+        && supports_sampling
         && let Some(temperature) = request.sampling.temperature
     {
         root["temperature"] = json!(temperature);
     }
 
     if profile.supports_top_p
+        && supports_sampling
         && let Some(top_p) = request.sampling.top_p
     {
         root["top_p"] = json!(top_p);
@@ -454,6 +463,19 @@ fn build_request(request: &ModelRequest, stream: bool) -> Value {
     apply_openai_chat_completions_hosted_tools(&mut root, &request.hosted_tools);
 
     merge_extra_body(&mut root, request.extra_body.as_ref());
+    // An explicit provider override chooses the token limit dialect; do not
+    // send both mutually incompatible limit parameters after merging it.
+    if let Some(extra) = request.extra_body.as_ref() {
+        if extra.get("max_completion_tokens").is_some() {
+            root.as_object_mut()
+                .expect("request object")
+                .remove("max_tokens");
+        } else if extra.get("max_tokens").is_some() {
+            root.as_object_mut()
+                .expect("request object")
+                .remove("max_completion_tokens");
+        }
+    }
 
     root
 }
@@ -466,7 +488,12 @@ fn parse_response(value: Value, dsml_healer: &DsmlToolCallHealer) -> Result<Mode
     let mut stop_reason = None;
     let mut metadata = ResponseMetadata::default();
 
-    if let Some(choice) = response.choices.first() {
+    if let Some(choice) = response
+        .choices
+        .iter()
+        .find(|choice| choice.index == Some(0))
+        .or_else(|| response.choices.first())
+    {
         if let Some(message) = &choice.message {
             if let Some(reasoning_content) = &message.reasoning_content {
                 metadata.extras.push(ResponseExtra::ReasoningText {
@@ -484,8 +511,11 @@ fn parse_response(value: Value, dsml_healer: &DsmlToolCallHealer) -> Result<Mode
                     content.push(ResponseContent::Text(assistant_text));
                 }
             }
+            if let Some(refusal) = message.refusal.as_ref().filter(|text| !text.is_empty()) {
+                content.push(ResponseContent::Text(refusal.clone()));
+            }
             for tool_call in &message.tool_calls {
-                if let Some(parsed) = parse_tool_use(tool_call) {
+                if let Some(parsed) = parse_tool_use(tool_call)? {
                     content.push(parsed);
                 }
             }
@@ -520,27 +550,47 @@ fn parse_response(value: Value, dsml_healer: &DsmlToolCallHealer) -> Result<Mode
 
 pub(super) fn parse_tool_use(
     value: &OpenAIChatCompletionMessageToolCall,
-) -> Option<ResponseContent> {
+) -> Result<Option<ResponseContent>> {
     match value.kind.as_str() {
         "function" => {
-            let function = value.function.as_ref()?;
-            let input = serde_json::from_str(&function.arguments)
-                .unwrap_or_else(|_| Value::Object(serde_json::Map::new()));
-            Some(ResponseContent::ToolUse {
+            let function = value
+                .function
+                .as_ref()
+                .context("missing openai function call")?;
+            anyhow::ensure!(
+                !value.id.is_empty() && !function.name.is_empty(),
+                "openai tool call is missing its id or function name"
+            );
+            // Some compatible servers omit arguments for a parameterless tool.
+            // Never turn nonempty, malformed arguments into an executable {}.
+            let input = if function.arguments.trim().is_empty() {
+                json!({})
+            } else {
+                serde_json::from_str(&function.arguments)
+                    .context("invalid JSON in openai function call arguments")?
+            };
+            Ok(Some(ResponseContent::ToolUse {
                 id: value.id.clone(),
                 name: function.name.clone(),
                 input,
-            })
+            }))
         }
         "custom" => {
-            let custom = value.custom.as_ref()?;
-            Some(ResponseContent::ToolUse {
+            let custom = value
+                .custom
+                .as_ref()
+                .context("missing openai custom tool call")?;
+            anyhow::ensure!(
+                !value.id.is_empty() && !custom.name.is_empty(),
+                "openai custom tool call is missing its id or name"
+            );
+            Ok(Some(ResponseContent::ToolUse {
                 id: value.id.clone(),
                 name: custom.name.clone(),
                 input: Value::String(custom.input.clone()),
-            })
+            }))
         }
-        _ => None,
+        _ => Ok(None),
     }
 }
 
@@ -1368,3 +1418,7 @@ mod tests {
         assert_eq!(body["messages"][0]["reasoning_content"], json!(""));
     }
 }
+
+#[cfg(test)]
+#[path = "chat_completions/contract_tests.rs"]
+mod contract_tests;
