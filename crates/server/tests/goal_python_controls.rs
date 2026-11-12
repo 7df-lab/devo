@@ -35,11 +35,18 @@ use support::read_goal;
 use support::start_session;
 use support::wait_for_captured_request_count;
 
-#[derive(Default)]
+#[derive(Clone, Copy)]
+enum ControlOutcome {
+    ReplacementPaused,
+    Paused,
+    Canceled,
+}
+
 struct ControllingGoalProvider {
     requests: AtomicUsize,
     captured_requests: Mutex<Vec<ModelRequest>>,
     unexpected_request: Notify,
+    outcome: ControlOutcome,
 }
 
 #[async_trait]
@@ -60,7 +67,13 @@ impl ModelProviderSDK for ControllingGoalProvider {
 
         match request_number {
             1 => {
-                let input = serde_json::json!({ "code": "import goal\nfor action in (goal.pause, goal.resume, goal.cancel):\n    result = await action()\n    assert result['status'] == 'ok', result\nresult = await goal.create('Replacement goal')\nassert result['status'] == 'ok', result\nresult = await goal.pause()\nassert result['status'] == 'ok', result\nprint('goal-controls-finished')" });
+                let controls = match self.outcome {
+                    ControlOutcome::ReplacementPaused => "for action in (goal.pause, goal.resume, goal.cancel):\n    result = await action()\n    assert result['status'] == 'ok', result\nresult = await goal.create('Replacement goal')\nassert result['status'] == 'ok', result\nresult = await goal.pause()\nassert result['status'] == 'ok', result",
+                    ControlOutcome::Paused => "assert (await goal.pause())['status'] == 'ok'",
+                    ControlOutcome::Canceled => "assert (await goal.cancel())['status'] == 'ok'",
+                };
+                let code = format!("import goal, asyncio\n{controls}\nawait asyncio.sleep(1.1)\nprint('goal-controls-finished')");
+                let input = serde_json::json!({ "code": code });
                 Ok(Box::pin(stream::iter(vec![
                     Ok(StreamEvent::ToolCallStart {
                         index: 0,
@@ -77,7 +90,12 @@ impl ModelProviderSDK for ControllingGoalProvider {
                                 input,
                             }],
                             stop_reason: Some(StopReason::ToolUse),
-                            usage: Usage::default(),
+                            usage: Usage {
+                                reported: true,
+                                input_tokens: 10,
+                                output_tokens: 4,
+                                ..Default::default()
+                            },
                             metadata: ResponseMetadata::default(),
                         },
                     }),
@@ -106,8 +124,27 @@ impl ModelProviderSDK for ControllingGoalProvider {
 
 #[tokio::test]
 async fn python_goal_controls_broadcast_without_aborting_their_own_turn() -> Result<()> {
+    check_python_goal_controls(ControlOutcome::ReplacementPaused).await
+}
+
+#[tokio::test]
+async fn python_goal_pause_accounts_final_turn_usage() -> Result<()> {
+    check_python_goal_controls(ControlOutcome::Paused).await
+}
+
+#[tokio::test]
+async fn python_goal_cancel_accounts_final_turn_usage() -> Result<()> {
+    check_python_goal_controls(ControlOutcome::Canceled).await
+}
+
+async fn check_python_goal_controls(outcome: ControlOutcome) -> Result<()> {
     let data_root = TempDir::new()?;
-    let provider = Arc::new(ControllingGoalProvider::default());
+    let provider = Arc::new(ControllingGoalProvider {
+        requests: AtomicUsize::new(0),
+        captured_requests: Mutex::new(Vec::new()),
+        unexpected_request: Notify::new(),
+        outcome,
+    });
     let runtime = build_runtime_with_registry(
         data_root.path(),
         provider.clone(),
@@ -162,16 +199,34 @@ async fn python_goal_controls_broadcast_without_aborting_their_own_turn() -> Res
         })
         .collect::<Vec<_>>();
     lifecycle.dedup();
-    assert_eq!(
-        lifecycle,
-        vec!["active", "paused", "active", "canceled", "active", "paused"]
-    );
+    let expected_lifecycle = match outcome {
+        ControlOutcome::ReplacementPaused => {
+            vec!["active", "paused", "active", "canceled", "active", "paused"]
+        }
+        ControlOutcome::Paused => vec!["active", "paused"],
+        ControlOutcome::Canceled => vec!["active", "canceled"],
+    };
+    assert_eq!(lifecycle, expected_lifecycle);
 
-    let response = read_goal(&runtime, connection_id, session_id).await?;
-    assert_eq!(
-        response.map(|goal| goal.status),
-        Some(devo_protocol::native::goal::GoalStatus::Paused)
-    );
+    let goal = read_goal(&runtime, connection_id, session_id)
+        .await?
+        .context("goal after Python control")?;
+    let expected_status = match outcome {
+        ControlOutcome::ReplacementPaused | ControlOutcome::Paused => {
+            devo_protocol::native::goal::GoalStatus::Paused
+        }
+        ControlOutcome::Canceled => devo_protocol::native::goal::GoalStatus::Canceled,
+    };
+    assert_eq!(goal.status, expected_status);
+    match outcome {
+        ControlOutcome::ReplacementPaused => {
+            assert_eq!((goal.tokens_used, goal.time_used_seconds), (0, 0));
+        }
+        ControlOutcome::Paused | ControlOutcome::Canceled => {
+            assert_eq!(goal.tokens_used, 14);
+            assert!(goal.time_used_seconds >= 1, "final turn elapsed time was lost");
+        }
+    }
 
     {
         let requests = provider
