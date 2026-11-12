@@ -1,3 +1,4 @@
+import { ComposerGoalRequests } from "./composer-goal-requests"
 import { latestEditableUserTurnIndex as findLatestEditableUserTurnIndex } from "../../atoms/derived/session-chat"
 import { useSessionHistoryShortcuts } from "../../hooks/use-session-history-shortcuts"
 import { useTurnRecovery } from "../../hooks/use-turn-recovery"
@@ -1309,6 +1310,11 @@ export function ChatInputSection({
 	const [activeTrigger, setActiveTrigger] = useState<ComposerTrigger | null>(null)
 	const [activeGoal, setActiveGoal] = useState<ComposerGoal | null>(null)
 	const [goalAction, setGoalAction] = useState<ComposerGoalAction | null>(null)
+	const goalRequests = useMemo(() => new ComposerGoalRequests(), [agent.sessionId, agent.directory])
+	useEffect(() => {
+		goalRequests.activate()
+		return () => goalRequests.dispose()
+	}, [goalRequests])
 	const [modelPickerOpen, setModelPickerOpen] = useState(false)
 	const [skillPickerOpen, setSkillPickerOpen] = useState(false)
 	const {
@@ -1337,7 +1343,7 @@ export function ChatInputSection({
 		if (pendingPermission) {
 			setPermissionProfile(pendingPermission)
 		}
-	}, [agent.sessionId])
+	}, [agent.sessionId, agent.directory])
 
 	const loadGoalStatus = useCallback(async (): Promise<ComposerGoal | null> => {
 		if (!agent.directory) return null
@@ -1348,33 +1354,25 @@ export function ChatInputSection({
 	}, [agent.directory, agent.sessionId])
 
 	const refreshGoalStatus = useCallback(async () => {
+		const request = goalRequests.read()
+		if (!request) return
 		try {
-			setActiveGoal(await loadGoalStatus())
+			const goal = await loadGoalStatus()
+			if (request.isCurrent()) setActiveGoal(goal)
 		} catch (err) {
-			log.error("goal.status failed", { sessionId: agent.sessionId }, err)
+			if (request.isCurrent()) {
+				log.error("goal.status failed", { sessionId: agent.sessionId }, err)
+			}
+		} finally {
+			request.finish()
 		}
-	}, [agent.sessionId, loadGoalStatus])
+	}, [agent.sessionId, loadGoalStatus, goalRequests])
 
 	useEffect(() => {
-		let disposed = false
-		const load = async () => {
-			try {
-				const nextGoal = await loadGoalStatus()
-				if (!disposed) setActiveGoal(nextGoal)
-			} catch (err) {
-				if (!disposed) {
-					setActiveGoal(null)
-					log.error("goal.status failed", { sessionId: agent.sessionId }, err)
-				}
-			}
-		}
-		void load()
-		const interval = setInterval(load, 15_000)
-		return () => {
-			disposed = true
-			clearInterval(interval)
-		}
-	}, [agent.sessionId, loadGoalStatus])
+		void refreshGoalStatus()
+		const interval = setInterval(() => void refreshGoalStatus(), 15_000)
+		return () => clearInterval(interval)
+	}, [refreshGoalStatus])
 
 	useEffect(() => {
 		if (!isWorking) void refreshGoalStatus()
@@ -1783,46 +1781,55 @@ export function ChatInputSection({
 		if (!agent.directory || goalAction !== null) return
 		const client = getProjectClient(agent.directory)
 		if (!client?.goal?.pause) return
+		const request = goalRequests.mutate()
+		if (!request) return
 		setGoalAction("pause")
 		try {
 			const result = await client.goal.pause({ sessionId: agent.sessionId })
-			setActiveGoal(normalizeComposerGoal(result.data))
+			if (request.isCurrent()) setActiveGoal(normalizeComposerGoal(result.data))
 		} catch (err) {
 			log.error("goal.pause failed", { sessionId: agent.sessionId }, err)
 		} finally {
-			setGoalAction(null)
+			if (request.isCurrent()) setGoalAction(null)
+			request.finish()
 		}
-	}, [agent.directory, agent.sessionId, goalAction])
+	}, [agent.directory, agent.sessionId, goalAction, goalRequests])
 
 	const handleResumeGoal = useCallback(async () => {
 		if (!agent.directory || goalAction !== null) return
 		const client = getProjectClient(agent.directory)
 		if (!client?.goal?.resume) return
+		const request = goalRequests.mutate()
+		if (!request) return
 		setGoalAction("resume")
 		try {
 			const result = await client.goal.resume({ sessionId: agent.sessionId })
-			setActiveGoal(normalizeComposerGoal(result.data))
+			if (request.isCurrent()) setActiveGoal(normalizeComposerGoal(result.data))
 		} catch (err) {
 			log.error("goal.resume failed", { sessionId: agent.sessionId }, err)
 		} finally {
-			setGoalAction(null)
+			if (request.isCurrent()) setGoalAction(null)
+			request.finish()
 		}
-	}, [agent.directory, agent.sessionId, goalAction])
+	}, [agent.directory, agent.sessionId, goalAction, goalRequests])
 
 	const handleClearGoal = useCallback(async () => {
 		if (!agent.directory || goalAction !== null) return
 		const client = getProjectClient(agent.directory)
 		if (!client?.goal?.clear) return
+		const request = goalRequests.mutate()
+		if (!request) return
 		setGoalAction("clear")
 		try {
 			await client.goal.clear({ sessionId: agent.sessionId })
-			setActiveGoal(null)
+			if (request.isCurrent()) setActiveGoal(null)
 		} catch (err) {
 			log.error("goal.clear failed", { sessionId: agent.sessionId }, err)
 		} finally {
-			setGoalAction(null)
+			if (request.isCurrent()) setGoalAction(null)
+			request.finish()
 		}
-	}, [agent.directory, agent.sessionId, goalAction])
+	}, [agent.directory, agent.sessionId, goalAction, goalRequests])
 
 	const handleSlashCommand = useCallback(
 		async (text: string): Promise<boolean> => {
