@@ -735,30 +735,35 @@ async fn parse_stdio_json_line(
 }
 
 #[test]
-fn stdio_fixture_binaries_follow_the_test_profile() -> Result<()> {
+fn stdio_fixture_binaries_share_the_test_output_directory() -> Result<()> {
     let executable = std::fs::canonicalize(std::env::current_exe()?)?;
     let target_directory = std::fs::canonicalize(
         Path::new(env!("CARGO_TARGET_TMPDIR"))
             .parent()
             .context("Cargo target directory")?,
     )?;
-    // Locate the actual profile directory independently of the helper's
-    // executable-layout parser. Cargo creates deps in that directory both for
-    // traditional test binaries and for the reorganized build/.../out layout.
-    let expected = executable
-        .ancestors()
-        .find(|directory| {
-            directory.join("deps").is_dir()
-                && directory
-                    .strip_prefix(&target_directory)
-                    .is_ok_and(|relative| matches!(relative.components().count(), 1 | 2))
-        })
-        .context("test profile directory containing Cargo deps")?;
     let mcp = cargo_test_binary::current_binary_path("test_stdio_server")?;
     let devo = cargo_test_binary::current_binary_path("devo")?;
+    let directory = mcp.parent().context("fixture output directory")?;
+    assert_eq!(devo.parent(), Some(directory));
+    // Check the real invocation without assuming Cargo creates a deps
+    // directory. Exact profile/target mapping is covered by the helper's
+    // table-driven tests; the stdio suites execute the actual built fixtures.
+    let relative = directory.strip_prefix(&target_directory)?;
+    assert!(matches!(relative.components().count(), 1 | 2));
+    assert!(executable.starts_with(directory));
     assert_eq!(
-        [mcp.parent(), devo.parent()],
-        [Some(expected), Some(expected)],
+        [mcp.file_name(), devo.file_name()],
+        [
+            Some(std::ffi::OsStr::new(&format!(
+                "test_stdio_server{}",
+                std::env::consts::EXE_SUFFIX
+            ))),
+            Some(std::ffi::OsStr::new(&format!(
+                "devo{}",
+                std::env::consts::EXE_SUFFIX
+            ))),
+        ],
     );
     Ok(())
 }
