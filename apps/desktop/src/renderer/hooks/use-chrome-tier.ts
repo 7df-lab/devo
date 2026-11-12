@@ -36,24 +36,28 @@ export function useChromeTier() {
 	const isTransparent = useAtomValue(isTransparentAtom)
 	const isOpaque = useAtomValue(opaqueWindowsAtom)
 
-	// Pull the chrome tier immediately on mount (avoids race with push event)
+	// Subscribe before requesting the snapshot, and fence both by this lifetime.
 	useEffect(() => {
 		if (!isElectron()) return
 
-		window.devo.getChromeTier().then((tier) => {
+		let active = true
+		let receivedUpdate = false
+		const unsubscribe = window.devo.onChromeTier((tier: WindowChromeTier) => {
+			if (!active) return
+			receivedUpdate = true
 			setChromeTier(tier)
 		})
-	}, [setChromeTier])
+		window.devo
+			.getChromeTier()
+			.then((tier) => {
+				if (active && !receivedUpdate) setChromeTier(tier)
+			})
+			.catch(() => {})
 
-	// Also listen for the push event (backup / future tier changes)
-	useEffect(() => {
-		if (!isElectron()) return
-
-		const unsubscribe = window.devo.onChromeTier((tier: string) => {
-			setChromeTier(tier as WindowChromeTier)
-		})
-
-		return unsubscribe
+		return () => {
+			active = false
+			unsubscribe()
+		}
 	}, [setChromeTier])
 
 	// Sync CSS class on <html> — three mutually exclusive states

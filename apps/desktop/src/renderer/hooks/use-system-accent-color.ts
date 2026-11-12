@@ -56,16 +56,24 @@ export function useSystemAccentColor(): void {
 	useEffect(() => {
 		if (!("devo" in window)) return
 
-		// Read initial value
-		window.devo.getAccentColor().then((color) => {
-			if (color) applyAccentColor(color)
-		})
-
-		// Subscribe to live changes
+		let active = true
+		let receivedUpdate = false
+		// Subscribe first so a pending snapshot cannot replace a newer OS color.
 		const unsubscribe = window.devo.onAccentColorChanged((color) => {
+			if (!active) return
+			receivedUpdate = true
 			applyAccentColor(color)
 		})
+		window.devo
+			.getAccentColor()
+			.then((color) => {
+				if (active && !receivedUpdate && color) applyAccentColor(color)
+			})
+			.catch(() => {})
 
-		return unsubscribe
+		return () => {
+			active = false
+			unsubscribe()
+		}
 	}, [])
 }
