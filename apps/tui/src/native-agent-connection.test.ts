@@ -1999,7 +1999,7 @@ test("userInput request carries requestId and serverRequest/resolved emits event
       method: "userInput/request",
       params: {
         requestId: "q_ask_flavor",
-        questions: [{ question: "What flavor?", options: ["vanilla", "chocolate"] }],
+        questions: [{ question: "What flavor?", options: [{ label: "vanilla", description: "Classic" }, { label: "chocolate", description: "Rich" }] }],
       },
     }) + "\n",
   );
@@ -2677,4 +2677,23 @@ test("disposed connection neither publishes pending context reads nor starts new
   assert.ok(unsubscribeResponse);
   unsubscribeResponse({});
   await disposal;
+});
+
+test("Native userInput/request round-trips the complete answer map", async () => {
+  const { conn, fake } = await bootConnection();
+  let request: any;
+  conn.subscribe((event) => { if (event.type === "extension_ui_request") request = event.request; });
+  const questions = [{ id: "flavor", question: "Flavor?", options: [{ label: "A", description: "first" }, { label: "B", description: "second" }] }, { id: "note", question: "Note?" }];
+  conn.pushChunk(JSON.stringify({ jsonrpc: "2.0", id: 912, method: "userInput/request", params: { requestId: "question_912", questions } }) + "\n");
+  await new Promise((resolve) => setImmediate(resolve));
+  assert.equal(request.method, "user_input");
+  assert.deepEqual(request.payload, { questions });
+  const { resolveUserInputQuestions } = await import("../lib/coding-agent/src/modes/interactive/user-input-questions.js");
+  const response = await resolveUserInputQuestions(request.payload.questions, {
+    async select(_, options) { return options[1]; }, async input() { return "hello"; },
+  });
+  await conn.respondToExtensionUiRequest(request.id, response);
+  const reply = fake.lines.map((line) => JSON.parse(line)).find((line) => line.id === 912);
+  assert.deepEqual(reply, { jsonrpc: "2.0", id: 912, result: { requestId: "question_912", answers: { flavor: { answers: ["B"] }, note: { answers: ["hello"] } } } });
+  await conn.dispose();
 });
