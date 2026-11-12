@@ -85,7 +85,7 @@ test("denied Native switch/new/import leaves current UI valid and sends no activ
   const trust = new WorkspaceTrust(home, async () => true);
   await trust.require(workspace); trust.finishStartup();
   const methods: string[] = [];
-  let conn: InstanceType<typeof NativeAgentConnection>;
+  let conn: ReturnType<typeof NativeAgentConnection.create>;
   conn = NativeAgentConnection.create({ cwd: workspace, workspaceTrust: trust, writeLine(line) {
     const request = JSON.parse(line); if (request.id == null) return; methods.push(request.method);
     const respond = (result: unknown) => conn.pushChunk(JSON.stringify({ id: request.id, result }) + "\n");
@@ -129,7 +129,7 @@ for (const operation of ["new", "switch", "import"] as const) {
       let approve!: (value: boolean) => void;
       const trust = new WorkspaceTrust(home, async cwd => cwd === other ? true : new Promise(resolve => { approve = resolve; }));
       const activations: string[] = [];
-      let conn: InstanceType<typeof NativeAgentConnection>;
+      let conn: ReturnType<typeof NativeAgentConnection.create>;
       conn = NativeAgentConnection.create({ cwd: workspace, workspaceTrust: trust, writeLine(line) {
         const request = JSON.parse(line); if (request.id == null) return;
         const respond = (result: unknown) => conn.pushChunk(JSON.stringify({ id: request.id, result }) + "\n");
