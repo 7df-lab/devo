@@ -1,57 +1,64 @@
-import { useCallback, useEffect, useState } from "react"
+import { useCallback, useEffect, useRef, useState } from "react"
 import type { AppSettings } from "../../preload/api"
 import { DEFAULT_APP_SETTINGS } from "../../shared/app-settings"
 
 const isElectron = typeof window !== "undefined" && "devo" in window
 
-const DEFAULT_SETTINGS: AppSettings = DEFAULT_APP_SETTINGS
-
 export function useSettings() {
-	const [settings, setSettings] = useState<AppSettings>(DEFAULT_SETTINGS)
+	const [settings, setSettings] = useState<AppSettings>(DEFAULT_APP_SETTINGS)
 	const [loading, setLoading] = useState(true)
+	const lifecycle = useRef({ active: false, revision: 0, mutation: 0 })
 
 	useEffect(() => {
+		const current = { active: true, revision: 0, mutation: 0 }
+		lifecycle.current = current
 		if (!isElectron) {
 			setLoading(false)
-			return
+			return () => {
+				current.active = false
+			}
 		}
+		const unsubscribe = window.devo.onSettingsChanged((updated) => {
+			if (!current.active) return
+			current.revision++
+			setSettings(updated)
+			setLoading(false)
+		})
+		const revision = current.revision
 		window.devo
 			.getSettings()
 			.then((s) => {
-				setSettings(s as AppSettings)
+				if (current.active && current.revision === revision) setSettings(s)
 			})
 			.catch((err) => {
-				console.error("Failed to load settings:", err)
+				if (current.active) console.error("Failed to load settings:", err)
 			})
 			.finally(() => {
-				setLoading(false)
+				if (current.active) setLoading(false)
 			})
+		return () => {
+			current.active = false
+			unsubscribe()
+		}
 	}, [])
 
-	// Listen for settings changes pushed from the main process.
-	// This ensures the renderer stays in sync if settings change externally
-	// (e.g. notification action buttons update a setting from the main process).
-	useEffect(() => {
-		if (!isElectron) return
-		return window.devo.onSettingsChanged((updated) => {
-			setSettings(updated)
-		})
-	}, [])
-
-	const updateSettings = useCallback(
-		async (partial: Record<string, unknown>) => {
-			if (!isElectron) return
-			const prev = settings
-			try {
-				const updated = (await window.devo.updateSettings(partial)) as AppSettings
+	const updateSettings = useCallback(async (partial: Record<string, unknown>) => {
+		const current = lifecycle.current
+		if (!isElectron || !current.active) return
+		const revision = current.revision
+		const mutation = ++current.mutation
+		try {
+			const updated = await window.devo.updateSettings(partial)
+			// A live push or a newer mutation supersedes this response.
+			if (current.active && current.revision === revision && current.mutation === mutation) {
+				current.revision++
 				setSettings(updated)
-			} catch (err) {
-				console.error("Failed to update settings:", err)
-				setSettings(prev)
 			}
-		},
-		[settings],
-	)
+		} catch (err) {
+			// Nothing was optimistically applied, so rolling back would erase newer state.
+			if (current.active) console.error("Failed to update settings:", err)
+		}
+	}, [])
 
 	return { settings, loading, updateSettings }
 }
