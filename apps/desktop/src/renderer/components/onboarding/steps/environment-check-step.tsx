@@ -36,7 +36,8 @@ export function EnvironmentCheckStep({ onComplete }: EnvironmentCheckStepProps) 
 	])
 	const [devoResult, setDevoResult] = useState<DevoCheckResult | null>(null)
 	const [allDone, setAllDone] = useState(false)
-	const hasRun = useRef(false)
+	const generation = useRef(0)
+	const mounted = useRef(false)
 	const isElectron = typeof window !== "undefined" && "devo" in window
 
 	const updateCheck = useCallback((id: string, update: Partial<CheckItem>) => {
@@ -44,7 +45,9 @@ export function EnvironmentCheckStep({ onComplete }: EnvironmentCheckStepProps) 
 	}, [])
 
 	const runChecks = useCallback(async () => {
-		if (!isElectron) return
+		if (!isElectron || !mounted.current) return
+		const request = ++generation.current
+		const isCurrent = () => mounted.current && generation.current === request
 		setAllDone(false)
 		setDevoResult(null)
 		setChecks([
@@ -54,6 +57,7 @@ export function EnvironmentCheckStep({ onComplete }: EnvironmentCheckStepProps) 
 
 		try {
 			const result = await window.devo.onboarding.checkDevo()
+			if (!isCurrent()) return
 			setDevoResult(result)
 
 			if (!result.installed) {
@@ -72,6 +76,7 @@ export function EnvironmentCheckStep({ onComplete }: EnvironmentCheckStepProps) 
 			})
 			updateCheck("version", { status: "running" })
 			await new Promise((resolve) => setTimeout(resolve, 300))
+			if (!isCurrent()) return
 
 			if (result.compatibility === "too-old" || result.compatibility === "blocked") {
 				updateCheck("version", {
@@ -93,6 +98,7 @@ export function EnvironmentCheckStep({ onComplete }: EnvironmentCheckStepProps) 
 			}
 			setAllDone(true)
 		} catch (error) {
+			if (!isCurrent()) return
 			updateCheck("locate", {
 				status: "error",
 				detail: error instanceof Error ? error.message : "Check failed",
@@ -101,9 +107,12 @@ export function EnvironmentCheckStep({ onComplete }: EnvironmentCheckStepProps) 
 	}, [isElectron, updateCheck])
 
 	useEffect(() => {
-		if (hasRun.current) return
-		hasRun.current = true
-		runChecks()
+		mounted.current = true
+		void runChecks()
+		return () => {
+			mounted.current = false
+			generation.current++
+		}
 	}, [runChecks])
 
 	return (
@@ -141,10 +150,7 @@ export function EnvironmentCheckStep({ onComplete }: EnvironmentCheckStepProps) 
 						<Button
 							size="sm"
 							variant="outline"
-							onClick={() => {
-								hasRun.current = false
-								runChecks()
-							}}
+							onClick={() => { void runChecks() }}
 							className="gap-2"
 						>
 							<RefreshCwIcon aria-hidden="true" className="size-3.5" />
