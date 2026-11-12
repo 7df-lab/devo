@@ -298,6 +298,19 @@ impl ServerRuntime {
         {
             return true;
         }
+        let children = self
+            .agent_registries
+            .lock()
+            .await
+            .get(&session_id)
+            .map(|registry| registry.children_of(&session_id))
+            .unwrap_or_default();
+        if children
+            .iter()
+            .any(|child| self.has_pending_background_work(*child))
+        {
+            return true;
+        }
         let connections = self.connections.lock().await;
         for connection in connections.values() {
             if connection

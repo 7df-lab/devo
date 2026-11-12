@@ -28,3 +28,24 @@ RLM host APIs are called from Python through `ipython`, not as separate model to
 - `await rlm.web_search("query")` and `await rlm.web_fetch("https://...")` use Rust host operations; `rlm.web_search` requires local search configuration. When provider-hosted web tools are configured, use their provider-native capability directly; those are separate from the regular function-tool list.
 
 Python orchestration controls: `await rlm.collect(targets=None, timeout_ms=0)` snapshots direct children; a positive timeout (up to 300000 ms) waits only until completion, recovery is required, or the deadline. Timeout returns partial snapshots and never cancels work. Results retain status, settled, answer_text, answer_preview, answer_truncated, error, progress_note, and requires_resume. A saved unfinished turn with no live execution reports waiting_for_resume; explicitly recover it rather than replaying blindly. `await rlm.progress_note('running tests')` lets children publish non-steering progress, at most 512 UTF-16 units and one accepted note per 10 seconds. `await rlm.end_turn()` finishes normally after the current tool batch is committed, without an extra model call or canceling children. The rest of the cell and other calls in that batch still run.
+
+
+For a long-lived bidirectional program, use `h = bash(command, mode="interactive")`
+(pipe stdin/stdout) or, on Unix, `mode="pty"` only when the program needs a terminal, then
+`await h.ready()`. Do not await `bash(...)` at launch: awaiting its handle waits
+for process exit. Use `await h.write("input\n")`, `await h.read(wait_ms=1000)`,
+`h.tail(50)`, `await h.close_stdin()` (pipe only), `await h.resize(cols=120, rows=40)`
+(PTY only), and `await h.terminate()`. `read` returns bytes/text plus a cursor,
+truncation flag and EOF; reads/waits timing out do not kill the process.
+Interactive tasks belong to this agent's session, survive cell/turn completion,
+compaction and client disconnection while the same server lives. Recover a handle
+with `await bash.attach(handle_id)` or list with `await bash.list()`. They do not
+survive server restart or session deletion. Explicit `timeout_ms` limits total
+runtime; optional `idle_timeout_ms` measures real input/output inactivity. Both
+are disabled by default for interactive tasks. A write timeout can mean partial
+or uncertain delivery: do not blindly retry. Input may execute further commands;
+interactive process approval is not a static command-prefix grant. Never log
+secrets unnecessarily, and use host-owned bash rather than local subprocesses.
+
+Interactive PTY is not currently supported on Windows; use interactive pipes there.
+Do not retry an unsupported PTY launch as an unsandboxed process.

@@ -35,6 +35,7 @@ const SESSION_MAILBOX_CAPACITY: usize = 64;
 #[derive(Clone)]
 pub(crate) struct SessionHandle {
     session_id: SessionId,
+    lifetime: tokio_util::sync::CancellationToken,
     tx: mpsc::Sender<SessionCommand>,
     max_turns: Option<u32>,
     state_change_gate: Arc<tokio::sync::Mutex<()>>,
@@ -42,6 +43,10 @@ pub(crate) struct SessionHandle {
 }
 
 impl SessionHandle {
+    pub(crate) fn lifetime_token(&self) -> tokio_util::sync::CancellationToken {
+        self.lifetime.clone()
+    }
+
     pub(crate) fn id(&self) -> SessionId {
         self.session_id
     }
@@ -66,6 +71,7 @@ impl SessionHandle {
         let (tx, rx) = mpsc::channel(SESSION_MAILBOX_CAPACITY);
         let handle = Self {
             session_id,
+            lifetime: tokio_util::sync::CancellationToken::new(),
             tx,
             max_turns,
             state_change_gate: Arc::new(tokio::sync::Mutex::new(())),
@@ -931,6 +937,7 @@ impl SessionHandle {
     }
 
     async fn shutdown_actor(&self) -> Option<Arc<devo_kernel::KernelSession>> {
+        self.lifetime.cancel();
         devo_core::tools::host_bash::cancel_session(self.session_id.as_str());
         let (reply_tx, reply_rx) = oneshot::channel();
         if self

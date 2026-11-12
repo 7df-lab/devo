@@ -13,6 +13,9 @@ use super::{
 };
 
 mod activity;
+mod interactive;
+pub use crate::shell_exec::InteractiveIo;
+pub use interactive::{BashMode, control_async};
 mod tail;
 #[cfg(all(test, unix))]
 mod tail_tests;
@@ -70,6 +73,8 @@ pub async fn execute(
 
 struct Entry {
     session_id: String,
+    mode: BashMode,
+    io: Option<InteractiveIo>,
     command: String,
     turn_id: Option<devo_protocol::TurnId>,
     cancelled: bool,
@@ -89,6 +94,8 @@ impl Entry {
     fn snapshot(&self, handle_id: &str) -> Value {
         json!({"status":"ok", "result": {
             "handle_id":handle_id, "running":self.finished.is_none(),
+            "mode":self.mode.as_str(), "command":self.command,
+            "ready":self.io.as_ref().is_none_or(InteractiveIo::is_ready),
             "exit_code":self.exit_code, "output":self.output, "output_truncated":self.output_truncated,
             "duration":self.finished.unwrap_or_else(Instant::now).duration_since(self.started).as_secs_f64(),
             "error":self.error,
@@ -126,18 +133,43 @@ fn error(message: &str) -> Value {
 
 /// Schedule an authorized shell command. The child token retains originating turn cancellation.
 pub fn start(
-    mut ctx: ToolContext,
+    ctx: ToolContext,
     input: Value,
     retry: SandboxRetry,
     kernel_lifetime: Option<CancellationToken>,
+) -> Value {
+    start_with_session_lifetime(ctx, input, retry, kernel_lifetime, None)
+}
+
+/// Interactive callers supply a session token independent of turn/kernel
+/// lifetime. Linking it before registry insertion closes delete/admit races.
+pub fn start_with_session_lifetime(
+    mut ctx: ToolContext,
+    mut input: Value,
+    retry: SandboxRetry,
+    mut kernel_lifetime: Option<CancellationToken>,
+    session_lifetime: Option<CancellationToken>,
 ) -> Value {
     if input.get("env").is_some() || input.get("persistent").and_then(Value::as_bool) == Some(true)
     {
         return error("host bash does not support env or persistent execution");
     }
-    if input.get("tty").and_then(Value::as_bool) == Some(true) {
-        return error("host bash handles do not support tty execution");
-    }
+    let mode = match BashMode::parse(&input) {
+        Ok(mode) => mode,
+        Err(message) => return error(&message),
+    };
+    input["tty"] = json!(mode == BashMode::Pty);
+    let idle_timeout = match input.get("idle_timeout_ms") {
+        None | Some(Value::Null) => None,
+        Some(value) => match value.as_u64() {
+            Some(ms) if ms > 0 && mode != BashMode::Pipe => Some(Duration::from_millis(ms)),
+            _ => {
+                return error(
+                    "idle_timeout_ms requires an interactive mode and a positive integer",
+                );
+            }
+        },
+    };
     if ctx.cancel_token.is_cancelled() {
         return error("originating turn cancelled");
     }
@@ -149,7 +181,19 @@ pub fn start(
     }
     // The lifetime token, not an Arc back to the kernel, owns this execution.
     ctx.kernel = None;
-    ctx.cancel_token = ctx.cancel_token.child_token();
+    ctx.cancel_token = if mode == BashMode::Pipe {
+        ctx.cancel_token.child_token()
+    } else {
+        // Admission was checked above. Interactive tasks are session-owned, not
+        // tied to a transient turn, Python kernel, or client connection.
+        kernel_lifetime = None;
+        session_lifetime
+            .unwrap_or_else(|| ctx.cancel_token.clone())
+            .child_token()
+    };
+    if ctx.cancel_token.is_cancelled() {
+        return error("originating session stopped");
+    }
     let session_id = ctx.session_id.to_string();
     let handle_id = Uuid::new_v4().to_string();
     let cwd = match crate::shell_exec::requested_workdir(&input)
@@ -160,6 +204,8 @@ pub fn start(
     };
     let entry = Arc::new(Mutex::new(Entry {
         session_id: session_id.clone(),
+        mode,
+        io: (mode != BashMode::Pipe).then(|| InteractiveIo::new(mode == BashMode::Pty)),
         turn_id: ctx.turn_id,
         cancelled: false,
         command: input
@@ -238,15 +284,28 @@ pub fn start(
             }
         };
         let cancel = ctx.cancel_token.clone();
+        let (tail, io) = {
+            let state = task_entry.lock().unwrap();
+            (state.tail.clone(), state.io.clone())
+        };
+        let execution_mode = match &io {
+            Some(io) => ShellExecutionMode::HostInteractive {
+                tail,
+                io: io.clone(),
+            },
+            None => ShellExecutionMode::HostBackground { tail },
+        };
         let execution = async {
             let execution = execute(
                 ctx,
                 input,
-                retry,
-                Some(sender),
-                ShellExecutionMode::HostBackground {
-                    tail: task_entry.lock().unwrap().tail.clone(),
+                if mode == BashMode::Pipe {
+                    retry
+                } else {
+                    SandboxRetry::Never
                 },
+                Some(sender),
+                execution_mode,
             );
             tokio::pin!(execution);
             if let Some(lifetime) = kernel_lifetime {
@@ -262,7 +321,31 @@ pub fn start(
                 execution.await
             }
         };
+        let idle_expired = std::sync::atomic::AtomicBool::new(false);
+        let idle_watch = async {
+            match (&io, idle_timeout) {
+                (Some(io), Some(timeout)) => loop {
+                    if io.is_ready() && io.idle_for() >= timeout {
+                        idle_expired.store(true, std::sync::atomic::Ordering::SeqCst);
+                        cancel.cancel();
+                        break;
+                    }
+                    tokio::time::sleep(timeout.min(Duration::from_millis(100))).await;
+                },
+                _ => std::future::pending::<()>().await,
+            }
+        };
+        let execution = async {
+            tokio::pin!(execution);
+            tokio::select! {
+                result = &mut execution => result,
+                () = idle_watch => execution.await,
+            }
+        };
         let (outcome, ()) = tokio::join!(execution, collect);
+        if let Some(io) = &io {
+            io.finish();
+        }
         {
             let mut state = task_entry.lock().unwrap();
             match outcome {
@@ -295,6 +378,10 @@ pub fn start(
                 }
                 Err(err) => state.error = Some(err.to_string()),
             }
+            if idle_expired.load(std::sync::atomic::Ordering::SeqCst) {
+                state.error = Some("interactive bash idle timeout".into());
+                state.append("\ninteractive bash idle timeout");
+            }
             state.cancelled = state.cancel.is_cancelled();
             state.finished = Some(Instant::now());
         }
@@ -315,6 +402,19 @@ pub fn start(
 
 /// Inspect or cancel only handles owned by this session; never accepts an OS PID.
 pub fn control(session_id: &str, action: &str, params: &Value) -> Value {
+    if action == "bash.list" {
+        let handles = HANDLES.lock().unwrap();
+        let mut snapshots: Vec<Value> = handles
+            .iter()
+            .filter_map(|(id, entry)| {
+                let state = entry.lock().unwrap();
+                (state.session_id == session_id && state.mode != BashMode::Pipe)
+                    .then(|| state.snapshot(id)["result"].clone())
+            })
+            .collect();
+        snapshots.sort_by_key(|value| value["handle_id"].as_str().unwrap_or_default().to_owned());
+        return json!({"status":"ok", "result":{"handles":snapshots}});
+    }
     let Some(id) = params.get("handle_id").and_then(Value::as_str) else {
         return error("missing bash handle_id");
     };
@@ -327,7 +427,10 @@ pub fn control(session_id: &str, action: &str, params: &Value) -> Value {
         return error("unknown bash handle");
     }
     match action {
-        "bash.poll" => {
+        "bash.poll" | "bash.attach" => {
+            if action == "bash.attach" && state.mode == BashMode::Pipe {
+                return error("only interactive bash handles can be attached");
+            }
             // Recent bytes are a polling view, not duplicate transcript content
             // in the completion notification sent to the owning agent.
             let mut snapshot = state.snapshot(id);
@@ -368,165 +471,10 @@ pub fn cancel_session(session_id: &str) {
 }
 
 #[cfg(test)]
-mod tests {
-    use super::*;
-    use pretty_assertions::assert_eq;
+mod tests;
 
-    #[test]
-    fn output_is_bounded_on_utf8_boundary() {
-        let mut entry = Entry {
-            session_id: "bounds".into(),
-            command: String::new(),
-            turn_id: None,
-            cancelled: false,
-            cwd: std::path::PathBuf::new(),
-            created_at: chrono::Utc::now(),
-            cancel: CancellationToken::new(),
-            expiry_cancel: CancellationToken::new(),
-            started: Instant::now(),
-            finished: None,
-            output: "x".repeat(MAX_OUTPUT_BYTES - 1),
-            tail: OutputTail::default(),
-            output_truncated: false,
-            exit_code: None,
-            error: None,
-        };
-        entry.append("é");
-        assert_eq!(entry.output.len(), MAX_OUTPUT_BYTES);
-        assert!(entry.output.ends_with("[host bash output truncated]"));
-        assert!(entry.output_truncated);
-        let output = entry.output.clone();
-        entry.append("abc");
-        assert_eq!(entry.output, output);
-    }
-
-    #[cfg(unix)]
-    #[tokio::test]
-    async fn origin_cancellation_finishes_started_handle() {
-        use crate::contracts::ToolBudgets;
-        use crate::invocation::ToolCallId;
-        use devo_protocol::{CollaborationMode, SessionId};
-        use devo_tools::ToolAgentScope;
-
-        let cancel = CancellationToken::new();
-        let session = Uuid::new_v4().to_string();
-        let ctx = ToolContext {
-            output_store: None,
-            tool_call_id: ToolCallId("host-bash-cancel".into()),
-            session_id: SessionId::from(session.clone()),
-            turn_id: None,
-            workspace_root: std::env::temp_dir(),
-            budgets: ToolBudgets {
-                output_limit_bytes: 32 * 1024,
-                wall_time_limit_ms: Some(10_000),
-            },
-            cancel_token: cancel.clone(),
-            agent_scope: ToolAgentScope::Parent,
-            collaboration_mode: CollaborationMode::Build,
-            agent_coordinator: None,
-            client_filesystem: None,
-            file_read_ledger: None,
-            network_proxy: None,
-            network_no_proxy: None,
-            sandbox_profile: Some("off".into()),
-            sandbox_permission_overlay: None,
-            kernel: None,
-            python_cell_first_wait_ms: None,
-            python_cell_watch: None,
-            python_cell_completion: None,
-            session_dir: None,
-        };
-        let started = start(
-            ctx,
-            json!({
-                "command": "printf streaming; sleep 30",
-                "workdir": std::fs::canonicalize(std::env::temp_dir())
-                    .expect("canonical temp dir")
-                    .to_string_lossy()
-            }),
-            SandboxRetry::Never,
-            None,
-        );
-        let id = started["result"]["handle_id"]
-            .as_str()
-            .expect("handle id")
-            .to_string();
-        tokio::time::timeout(Duration::from_secs(10), async {
-            loop {
-                let snapshot = control(&session, "bash.poll", &json!({"handle_id": id}));
-                if snapshot["result"]["output"]
-                    .as_str()
-                    .is_some_and(|output| output.contains("streaming"))
-                {
-                    break;
-                }
-                tokio::task::yield_now().await;
-            }
-        })
-        .await
-        .expect("streaming output");
-        cancel.cancel();
-        let done = tokio::time::timeout(Duration::from_secs(10), async {
-            loop {
-                let snapshot = control(&session, "bash.poll", &json!({"handle_id": id}));
-                if snapshot["result"]["running"] == false {
-                    break snapshot;
-                }
-                tokio::task::yield_now().await;
-            }
-        })
-        .await
-        .expect("cancel completes");
-        assert!(
-            done["result"]["output"]
-                .as_str()
-                .is_some_and(|output| output.contains("cancelled")),
-            "cancelled result: {done}"
-        );
-        let activity = session_activities(&session);
-        assert_eq!(activity.len(), 1);
-        assert_eq!((activity[0].running, activity[0].cancelled), (false, true));
-        cancel_session(&session);
-    }
-
-    #[test]
-    fn cancel_session_cancels_owned_token_and_removes_handle() {
-        let session = Uuid::new_v4().to_string();
-        let id = Uuid::new_v4().to_string();
-        let cancel = CancellationToken::new();
-        HANDLES.lock().unwrap().insert(
-            id.clone(),
-            Arc::new(Mutex::new(Entry {
-                session_id: session.clone(),
-                command: String::new(),
-                turn_id: None,
-                cancelled: false,
-                cwd: std::path::PathBuf::new(),
-                created_at: chrono::Utc::now(),
-                cancel: cancel.clone(),
-                expiry_cancel: CancellationToken::new(),
-                started: Instant::now(),
-                finished: None,
-                output: String::new(),
-                tail: OutputTail::default(),
-                output_truncated: false,
-                exit_code: None,
-                error: None,
-            })),
-        );
-        cancel_session(&session);
-        assert_eq!(
-            (
-                cancel.is_cancelled(),
-                control(&session, "bash.poll", &json!({"handle_id":id}))
-            ),
-            (
-                true,
-                json!({"status":"error", "error":"unknown bash handle"})
-            )
-        );
-    }
-}
+#[cfg(all(test, unix))]
+mod interactive_tests;
 
 #[cfg(all(test, unix))]
 #[path = "host_bash_background_tests.rs"]

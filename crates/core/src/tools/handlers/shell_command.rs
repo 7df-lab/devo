@@ -16,6 +16,10 @@ use crate::tool_spec::ToolSpec;
 #[derive(Clone)]
 pub enum ShellExecutionMode {
     Foreground,
+    HostInteractive {
+        tail: crate::tools::host_bash::OutputTail,
+        io: crate::shell_exec::InteractiveIo,
+    },
     HostBackground {
         tail: crate::tools::host_bash::OutputTail,
     },
@@ -86,7 +90,8 @@ impl ShellCommandHandler {
             .or_else(|| input["timeout_ms"].as_u64())
             .unwrap_or(match &mode {
                 ShellExecutionMode::Foreground => DEFAULT_TIMEOUT_MS,
-                ShellExecutionMode::HostBackground { .. } => crate::shell_exec::NO_TIMEOUT_MS,
+                ShellExecutionMode::HostBackground { .. }
+                | ShellExecutionMode::HostInteractive { .. } => crate::shell_exec::NO_TIMEOUT_MS,
             });
         let requested = match requested_workdir(&input) {
             Ok(requested) => requested,
@@ -142,11 +147,17 @@ impl ShellCommandHandler {
             max_output_tokens,
             output_tail: match &mode {
                 ShellExecutionMode::Foreground => None,
-                ShellExecutionMode::HostBackground { tail } => Some(tail.clone()),
+                ShellExecutionMode::HostBackground { tail }
+                | ShellExecutionMode::HostInteractive { tail, .. } => Some(tail.clone()),
+            },
+            interactive: match &mode {
+                ShellExecutionMode::HostInteractive { io, .. } => Some(io.clone()),
+                ShellExecutionMode::Foreground | ShellExecutionMode::HostBackground { .. } => None,
             },
             progress_limit_bytes: match mode {
                 ShellExecutionMode::Foreground => None,
-                ShellExecutionMode::HostBackground { .. } => Some(256 * 1024),
+                ShellExecutionMode::HostBackground { .. }
+                | ShellExecutionMode::HostInteractive { .. } => Some(256 * 1024),
             },
             sandbox_profile: ctx.sandbox_profile.clone(),
             sandbox_permission_overlay: crate::tools::sandbox_overlay_for_spawn(

@@ -294,6 +294,15 @@ impl ToolRuntime {
         super::host_bash::control(self.context.session_id.as_str(), action, params)
     }
 
+    /// Control an admitted interactive task owned by this session.
+    pub async fn interact_host_bash(
+        &self,
+        action: &str,
+        params: &serde_json::Value,
+    ) -> serde_json::Value {
+        super::host_bash::control_async(self.context.session_id.as_str(), action, params).await
+    }
+
     pub(crate) async fn execute_single(
         &self,
         call: &ToolCall,
@@ -710,8 +719,19 @@ impl ToolRuntime {
             command_str_for_tool_input(tool_name, &call.input).and_then(safe_shell_argv);
         let command_pattern = command_str_for_tool_input(tool_name, &call.input)
             .and_then(|command| generalize_command_pattern(command, &approval_cwd));
-        let action_summary =
+        let mut action_summary =
             crate::tool_summary::tool_summary(tool_name, &call.input, &approval_cwd);
+        let (command_prefix, command_pattern) = if matches!(tool_name, "bash" | "shell_command")
+            && call.input.get("mode").is_some()
+            && super::host_bash::BashMode::parse(&call.input)? != super::host_bash::BashMode::Pipe
+        {
+            action_summary = format!(
+                "Start persistent interactive process (subsequent input may execute commands): {action_summary}"
+            );
+            (None, None)
+        } else {
+            (command_prefix, command_pattern)
+        };
         Ok(Some(ToolPermissionRequest {
             tool_call_id: call.id.clone(),
             tool_name: tool_name.to_string(),

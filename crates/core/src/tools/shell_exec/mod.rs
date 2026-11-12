@@ -6,7 +6,11 @@
 //! - [`pipe`]: non-TTY spawn + pipe-specific result formatting
 //! - [`pty`]: TTY spawn + PTY-specific result formatting
 
+mod interactive;
+#[cfg(test)]
+mod interactive_tests;
 mod launch;
+pub use interactive::InteractiveIo;
 mod pipe;
 mod pipe_child;
 mod pty;
@@ -146,6 +150,7 @@ pub(crate) struct ShellExecRequest {
     /// Optional bound on live progress bytes per stream; final capture is independent.
     pub progress_limit_bytes: Option<usize>,
     pub output_tail: Option<crate::tools::host_bash::OutputTail>,
+    pub interactive: Option<InteractiveIo>,
     pub sandbox_profile: Option<String>,
     pub sandbox_permission_overlay: Option<devo_sandbox::SandboxPermissionOverlay>,
 }
@@ -159,6 +164,7 @@ pub(crate) async fn execute_shell_command(
     progress: Option<ToolProgressSender>,
     cancel_token: CancellationToken,
 ) -> anyhow::Result<FunctionToolOutput> {
+    let _finish_io = interactive::FinishIo(request.interactive.clone());
     let ShellExecRequest {
         output_capture,
         command,
@@ -173,6 +179,7 @@ pub(crate) async fn execute_shell_command(
         max_output_tokens,
         progress_limit_bytes,
         output_tail,
+        interactive,
         sandbox_profile,
         sandbox_permission_overlay,
     } = request;
@@ -199,6 +206,7 @@ pub(crate) async fn execute_shell_command(
         max_output_tokens,
         progress_limit_bytes,
         output_tail,
+        interactive,
         sandbox_profile,
         sandbox_permission_overlay,
     };

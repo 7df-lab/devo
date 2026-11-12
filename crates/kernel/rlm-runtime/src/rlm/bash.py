@@ -6,6 +6,7 @@ import os
 import secrets
 from typing import Any
 
+from .bash_interactive import BashChunk, BashRead, InteractiveBashOperations, _integer
 from .local_bash import (
     BashResult,
     _consume_notice_task,
@@ -19,7 +20,7 @@ _POLL_INTERVAL = 0.1
 _COMPLETION_NOTICE_COMMAND_CAP = 1000
 
 
-class BashHandle:
+class BashHandle(InteractiveBashOperations):
     """Awaitable host command. Creation schedules start; it does not block on approval.
 
     Accessors return the latest snapshot. ``handle_id`` is None until admission;
@@ -27,15 +28,19 @@ class BashHandle:
     ``kill()`` schedules host cancellation, and awaiting the handle waits for exit.
     """
 
-    def __init__(self, command: str, payload: dict[str, Any]) -> None:
+    def __init__(self, command: str, payload: dict[str, Any], *, snapshot: dict[str, Any] | None = None) -> None:
         loop = asyncio.get_running_loop()
         self.command = command
+        self._mode = payload.get("mode", "pipe")
+        self._ready = False
+        self._spawned = asyncio.Event()
         self._handle_id: str | None = None
         self._output = ""
         self._tail = ""
         self._result: BashResult | None = None
         self._terminal = False
         self._error: Exception | None = None
+        self._terminal_error: Exception | None = None
         self._released = False
         self._consumed = False
         self._notice_accepted = False
@@ -53,7 +58,7 @@ class BashHandle:
         if context:
             from . import repl
             repl.emit({"application/vnd.bash-activity+json": self._activity})
-        self._task = loop.create_task(self._run(payload))
+        self._task = loop.create_task(self._run(payload, snapshot))
         self._task.add_done_callback(_consume_notice_task)
         if context:
             self._notice_task = loop.create_task(self._notify_completion())
@@ -123,6 +128,15 @@ class BashHandle:
         if self._handle_id is not None and handle_id != self._handle_id:
             raise RuntimeError("bash host changed the command handle")
         self._handle_id = handle_id
+        mode = snapshot.get("mode", self._mode)
+        if mode != self._mode:
+            raise RuntimeError("bash host changed command mode")
+        ready = snapshot.get("ready", self._mode == "pipe")
+        if not isinstance(ready, bool):
+            raise RuntimeError("bash host returned invalid readiness")
+        self._ready = self._ready or ready
+        if self._ready or not running:
+            self._spawned.set()
         self._output = output
         tail = snapshot.get("tail")
         self._tail = tail if isinstance(tail, str) and tail else output
@@ -131,16 +145,22 @@ class BashHandle:
             code, duration = snapshot.get("exit_code"), snapshot.get("duration")
             if code is None:
                 error = snapshot.get("error") or "host command ended without an exit status"
-                raise RuntimeError(f"{error}\n{output}".rstrip())
+                terminal_error = RuntimeError(f"{error}\n{output}".rstrip())
+                if self._mode == "pipe":
+                    raise terminal_error
+                # Admission of a retained record is separate from its execution
+                # result: attach/read must still expose the diagnostic bytes.
+                self._terminal_error = self._error = terminal_error
+                return False
             if not isinstance(code, int) or not isinstance(duration, (int, float)):
                 raise RuntimeError("bash host returned an invalid completion")
             self._result = BashResult(code, output, float(duration))
         return running
 
-    async def _run(self, payload: dict[str, Any]) -> BashResult:
+    async def _run(self, payload: dict[str, Any], snapshot: dict[str, Any] | None = None) -> BashResult:
         from . import host_request
         try:
-            running = self._apply(await host_request("bash.start", payload))
+            running = self._apply(snapshot if snapshot is not None else await host_request("bash.start", payload))
             self._started.set()
             self._admission.set_result(None)
             while running:
@@ -153,12 +173,13 @@ class BashHandle:
             self._error = exc
             if not self._admission.done():
                 self._admission.set_exception(exc)
-            elif self._handle_id is not None and not self._terminal:
+            elif self._handle_id is not None and not self._terminal and self._mode == "pipe":
                 self.kill()
             raise
         finally:
             self._started.set()
-            if self._terminal and self._handle_id is not None:
+            self._spawned.set()
+            if self._mode == "pipe" and self._terminal and self._handle_id is not None:
                 try:
                     await host_request("bash.forget", {"handle_id": self._handle_id})
                 except (OSError, RuntimeError):
@@ -171,7 +192,7 @@ class BashHandle:
         if awaiter is not None and not _creating_cell_waits_for(owner, awaiter):
             return
         self._consumed = True
-        if self._notice_accepted:
+        if self._notice_accepted or self._mode != "pipe":
             task = asyncio.create_task(self._withdraw_notice())
             task.add_done_callback(_consume_notice_task)
 
@@ -194,7 +215,7 @@ class BashHandle:
             result = await asyncio.shield(self._task)
             assert self._cell_finished is not None
             await self._cell_finished.wait()
-            if self._awaited_by_creating_cell or self._consumed or not repl.is_active():
+            if self._mode != "pipe" or self._awaited_by_creating_cell or self._consumed or not repl.is_active():
                 return
             await host_request("bash.completed", {**self._notice_payload(), "exitCode": result.exit_code})
             self._notice_accepted = True
@@ -222,7 +243,7 @@ class BashHandle:
                 self._awaited_by_creating_cell = True
             return result
         except asyncio.CancelledError:
-            if owned:
+            if owned and self._mode == "pipe":
                 # Keep start alive so its eventual ID can be cancelled. Never lose
                 # an admitted process by cancelling the start RPC's reply future.
                 self.kill()
@@ -250,6 +271,8 @@ def bash(
     prefix_rule: list[str] | None = None,
     timeout_ms: int | None = None,
     workdir: str | None = None,
+    mode: str = "pipe",
+    idle_timeout_ms: int | None = None,
 ) -> BashHandle:
     """Schedule a host shell command; no host means failure, never local fallback.
 
@@ -261,15 +284,56 @@ def bash(
     """
     if not isinstance(command, str) or not command.strip():
         raise ValueError("command must be a non-empty string")
+    if mode not in ("pipe", "interactive", "pty"):
+        raise ValueError("mode must be pipe, interactive, or pty")
+    if timeout_ms is not None:
+        _integer(timeout_ms, "timeout_ms", 0, 2**63 - 1)
+    if idle_timeout_ms is not None:
+        _integer(idle_timeout_ms, "idle_timeout_ms", 1, 2**63 - 1)
+        if mode == "pipe":
+            raise ValueError("idle_timeout_ms requires interactive or pty mode")
     payload: dict[str, Any] = {
         "command": command,
         "workdir": os.getcwd() if workdir is None else workdir,
         "sandbox_permissions": sandbox_permissions,
     }
+    if mode != "pipe":
+        payload["mode"] = mode
     payload.update({key: value for key, value in {
         "justification": justification,
         "additional_permissions": additional_permissions,
         "prefix_rule": prefix_rule,
         "timeout_ms": timeout_ms,
+        "idle_timeout_ms": idle_timeout_ms,
     }.items() if value is not None})
     return BashHandle(command, payload)
+
+
+async def list_bash() -> list[dict[str, Any]]:
+    """List retained host tasks belonging to the current agent/session."""
+    from . import host_request
+    result = await host_request("bash.list", {})
+    handles = result.get("handles") if isinstance(result, dict) else None
+    if not isinstance(handles, list) or any(not isinstance(item, dict) for item in handles):
+        raise RuntimeError("bash host returned an invalid task list")
+    return handles
+
+
+async def attach_bash(handle_id: str) -> BashHandle:
+    """Recover a proxy to a current session's interactive process, not an OS PID."""
+    from . import host_request
+    if not isinstance(handle_id, str) or not handle_id:
+        raise ValueError("handle_id must be a non-empty string")
+    snapshot = await host_request("bash.attach", {"handle_id": handle_id})
+    if not isinstance(snapshot, dict) or snapshot.get("handle_id") != handle_id:
+        raise RuntimeError("bash host returned an invalid task snapshot")
+    command, mode = snapshot.get("command"), snapshot.get("mode")
+    if not isinstance(command, str) or mode not in ("interactive", "pty"):
+        raise RuntimeError("only retained interactive bash tasks can be attached")
+    handle = BashHandle(command, {"mode": mode}, snapshot=snapshot)
+    await asyncio.shield(handle._admission)
+    return handle
+
+
+bash.list = list_bash
+bash.attach = attach_bash

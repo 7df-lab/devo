@@ -1,4 +1,5 @@
 use super::*;
+use crate::tools::host_bash::BashMode;
 use crate::tools::host_bash::{cancel_session, control};
 use pretty_assertions::assert_eq;
 use std::sync::Arc;
@@ -7,6 +8,8 @@ use uuid::Uuid;
 
 fn insert_entry(session: &str, id: &str) -> Arc<Mutex<Entry>> {
     let entry = Arc::new(Mutex::new(Entry {
+        mode: BashMode::Pipe,
+        io: None,
         session_id: session.into(),
         command: "echo fixture".into(),
         turn_id: None,

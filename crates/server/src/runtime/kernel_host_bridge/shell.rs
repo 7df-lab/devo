@@ -16,6 +16,15 @@ async fn prepare_bash(
     ),
     Value,
 > {
+    let mode = match if params.get("mode").is_some() {
+        devo_core::tools::host_bash::BashMode::parse(params)
+    } else {
+        Ok(devo_core::tools::host_bash::BashMode::Pipe)
+    } {
+        Ok(mode) => mode,
+        Err(message) => return Err(error_reply(message)),
+    };
+    let interactive = mode != devo_core::tools::host_bash::BashMode::Pipe;
     let command = params
         .get("command")
         .or_else(|| params.get("cmd"))
@@ -55,7 +64,13 @@ async fn prepare_bash(
         "shell_command",
         input.clone(),
         ResourceKind::ShellExec,
-        format!("Run shell command: {command_str}"),
+        if interactive {
+            format!(
+                "Start persistent interactive process (subsequent input may execute commands): {command_str}"
+            )
+        } else {
+            format!("Run shell command: {command_str}")
+        },
         /*path*/ None,
         Some(command_str),
     );
@@ -76,6 +91,11 @@ async fn prepare_bash(
     req.command_argv = safe_shell_argv(command.as_str().unwrap_or_default());
     req.command_pattern =
         generalize_command_pattern(command.as_str().unwrap_or_default(), &workdir);
+    if interactive {
+        // A static command prefix does not describe future interactive input.
+        req.command_prefix = None;
+        req.command_pattern = None;
+    }
     let kernel_stopped = async {
         if let Some(lifetime) = &bridge.kernel_lifetime {
             lifetime.cancelled().await;
@@ -103,7 +123,8 @@ async fn prepare_bash(
         ctx.sandbox_profile = Some("off".to_string());
     }
     ctx.sandbox_permission_overlay = grant.sandbox_permission_overlay.clone();
-    let retry = if grant.already_approved
+    let retry = if !interactive
+        && grant.already_approved
         && !grant.bypass_sandbox
         && grant.sandbox_permission_overlay.is_none()
         && devo_sandbox::unsandboxed_execution_allowed(bridge.sandbox_profile.as_deref(), &workdir)
@@ -133,11 +154,27 @@ pub(crate) async fn handle_bash(bridge: &HostBridge, params: &Value) -> Value {
 }
 
 pub(crate) async fn handle_bash_start(bridge: &HostBridge, params: &Value) -> Value {
+    if let Err(message) = devo_core::tools::host_bash::BashMode::parse(params) {
+        return error_reply(message);
+    }
     let (ctx, input, retry) = match prepare_bash(bridge, params).await {
         Ok(prepared) => prepared,
         Err(reply) => return reply,
     };
-    devo_core::tools::host_bash::start(ctx, input, retry, bridge.kernel_lifetime.clone())
+    let lifetime = match bridge.runtime() {
+        Some(runtime) => match runtime.session(bridge.session_id).await {
+            Some(session) => Some(session.lifetime_token()),
+            None => return error_reply("originating session is closed"),
+        },
+        None => None, // Standalone/test callers retain context cancellation.
+    };
+    devo_core::tools::host_bash::start_with_session_lifetime(
+        ctx,
+        input,
+        retry,
+        bridge.kernel_lifetime.clone(),
+        lifetime,
+    )
 }
 
 #[cfg(test)]

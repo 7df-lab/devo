@@ -22,6 +22,7 @@ async fn recent_output_continues_after_progress_and_final_capture_limits() {
             max_output_tokens: 100,
             progress_limit_bytes: Some(256 * 1024),
             output_tail: Some(tail.clone()),
+            interactive: None,
             sandbox_profile: None,
             sandbox_permission_overlay: None,
         },
