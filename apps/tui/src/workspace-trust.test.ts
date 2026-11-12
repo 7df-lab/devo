@@ -1,6 +1,6 @@
 import assert from "node:assert/strict";
 import test from "node:test";
-import { mkdtemp, mkdir, readdir, readFile, writeFile, rm, symlink } from "node:fs/promises";
+import { mkdtemp, mkdir, readdir, readFile, writeFile, rm, symlink, realpath } from "node:fs/promises";
 import { join } from "node:path";
 import { tmpdir } from "node:os";
 import { PassThrough } from "node:stream";
@@ -122,12 +122,13 @@ test("retargeting a symlink while the prompt is open rejects acceptance", { skip
 
 for (const operation of ["new", "switch", "import"] as const) {
   for (const invalidate of ["newer-switch", "dispose"] as const) {
-    test(`late ${operation} admission cannot activate after ${invalidate}`, async (t) => {
+    test(`late ${operation} admission cannot activate after ${invalidate}`, { timeout: 10_000 }, async (t) => {
       const { NativeAgentConnection } = await import("./native-agent-connection.js");
       const { home, workspace, root } = await fixture(t);
       const other = join(root, "other"); await mkdir(other);
+      const canonicalOther = await realpath(other);
       let approve!: (value: boolean) => void;
-      const trust = new WorkspaceTrust(home, async cwd => cwd === other ? true : new Promise(resolve => { approve = resolve; }));
+      const trust = new WorkspaceTrust(home, async cwd => cwd === canonicalOther ? true : new Promise(resolve => { approve = resolve; }));
       const activations: string[] = [];
       let conn: ReturnType<typeof NativeAgentConnection.create>;
       conn = NativeAgentConnection.create({ cwd: workspace, workspaceTrust: trust, writeLine(line) {
