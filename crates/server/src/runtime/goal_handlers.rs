@@ -518,8 +518,8 @@ impl ServerRuntime {
                             .cloned();
                         self.sync_core_session_goal(session_id, latest_goal.as_ref())
                             .await;
-                        let Some(latest_goal) = latest_goal
-                            .filter(|goal| goal.goal_id == native_goal.id)
+                        let Some(latest_goal) =
+                            latest_goal.filter(|goal| goal.goal_id == native_goal.id)
                         else {
                             return self.error_response(
                                 request_id,

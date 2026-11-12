@@ -25,6 +25,7 @@ import {
 	readBackgroundShellHandle,
 	type ShellCompletion,
 } from "./shell-completion.js";
+import { isWebTool, WebToolCellComponent } from "./web-tool-cell.js";
 import { ToolPanel } from "./tool-panel.js";
 import { expandedToolOutput, formatCollapsedToolPreview, summarizeToolArgs, truncateExpandedToolOutput } from "./tool-execution-preview.js";
 export { formatCollapsedToolPreview, summarizeToolArgs } from "./tool-execution-preview.js";
@@ -242,7 +243,7 @@ export class ToolExecutionComponent extends Container {
 		this.contentPanel = new ToolPanel();
 		this.selfRenderContainer = new Container();
 
-		if (this.toolName === "update_plan" || (this.hasRendererDefinition() && this.getRenderShell() === "self")) {
+		if (this.usesSelfRenderShell()) {
 			this.addChild(this.selfRenderContainer);
 		} else {
 			this.addChild(this.contentPanel);
@@ -520,13 +521,25 @@ export class ToolExecutionComponent extends Container {
 	}
 
 	private usesSelfRenderShell(): boolean {
-		return this.toolName === "update_plan" || (this.hasRendererDefinition() && this.getRenderShell() === "self");
+		return this.toolName === "update_plan" || this.shouldUseWebRenderer() || (this.hasRendererDefinition() && this.getRenderShell() === "self");
+	}
+
+	private shouldUseWebRenderer(): boolean {
+		return isWebTool(this.toolName) && !this.toolDefinition?.renderCall && !this.toolDefinition?.renderResult;
 	}
 
 	private updateDisplay(): void {
 		let hasContent = false;
 		this.hideComponent = false;
-		if (this.toolName === "update_plan") {
+		if (this.shouldUseWebRenderer()) {
+			this.selfRenderContainer.clear();
+			this.selfRenderContainer.addChild(new WebToolCellComponent({
+				name: this.toolName, args: this.args, output: getRenderedTextOutput(this.result, this.showImages),
+				details: this.result?.details, expanded: this.expanded,
+				status: this.result?.isError ? "error" : this.result && !this.isPartial ? "done" : this.executionStarted ? "running" : "queued",
+			}));
+			hasContent = true;
+		} else if (this.toolName === "update_plan") {
 			this.selfRenderContainer.clear();
 			this.selfRenderContainer.addChild(this.createPlanCellComponent());
 			hasContent = true;

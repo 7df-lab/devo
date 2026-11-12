@@ -68,11 +68,15 @@ impl ModelProviderSDK for ControllingGoalProvider {
         match request_number {
             1 => {
                 let controls = match self.outcome {
-                    ControlOutcome::ReplacementPaused => "for action in (goal.pause, goal.resume, goal.cancel):\n    result = await action()\n    assert result['status'] == 'ok', result\nresult = await goal.create('Replacement goal')\nassert result['status'] == 'ok', result\nresult = await goal.pause()\nassert result['status'] == 'ok', result",
+                    ControlOutcome::ReplacementPaused => {
+                        "for action in (goal.pause, goal.resume, goal.cancel):\n    result = await action()\n    assert result['status'] == 'ok', result\nresult = await goal.create('Replacement goal')\nassert result['status'] == 'ok', result\nresult = await goal.pause()\nassert result['status'] == 'ok', result"
+                    }
                     ControlOutcome::Paused => "assert (await goal.pause())['status'] == 'ok'",
                     ControlOutcome::Canceled => "assert (await goal.cancel())['status'] == 'ok'",
                 };
-                let code = format!("import goal, asyncio\n{controls}\nawait asyncio.sleep(1.1)\nprint('goal-controls-finished')");
+                let code = format!(
+                    "import goal, asyncio\n{controls}\nawait asyncio.sleep(1.1)\nprint('goal-controls-finished')"
+                );
                 let input = serde_json::json!({ "code": code });
                 Ok(Box::pin(stream::iter(vec![
                     Ok(StreamEvent::ToolCallStart {
@@ -224,7 +228,10 @@ async fn check_python_goal_controls(outcome: ControlOutcome) -> Result<()> {
         }
         ControlOutcome::Paused | ControlOutcome::Canceled => {
             assert_eq!(goal.tokens_used, 14);
-            assert!(goal.time_used_seconds >= 1, "final turn elapsed time was lost");
+            assert!(
+                goal.time_used_seconds >= 1,
+                "final turn elapsed time was lost"
+            );
         }
     }
 

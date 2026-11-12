@@ -338,6 +338,38 @@ impl ServerRuntime {
                 }
             }
         }
+        // A claimed self steer can be restored before consumption (for example,
+        // cancellation at the final-response boundary). Reestablish eligible
+        // queued ownership before the active child turn's ticket is settled.
+        // Held or interrupted input is review-only and must not pin a parent.
+        if let Some(parent) = state.parent_session_id() {
+            let turn_limit_reached = state.max_turns.is_some_and(|limit| {
+                limit == 0
+                    || state
+                        .latest_turn
+                        .as_ref()
+                        .is_some_and(|turn| turn.native.sequence >= limit)
+            });
+            let suspended = self.background_input_suspended(session_id);
+            let queue = state
+                .pending_turn_queue
+                .lock()
+                .expect("pending queue mutex poisoned");
+            for item in queue
+                .iter()
+                .filter(|item| item.host_message_origin().is_some())
+            {
+                let work_id = format!("agent:{session_id}:queued:{}", item.id);
+                if turn_limit_reached
+                    || suspended
+                    || crate::runtime::handlers::queue_steer::requires_queue_review(item)
+                {
+                    self.complete_background_work(parent, work_id, String::new());
+                } else {
+                    self.register_background_work(parent, work_id);
+                }
+            }
+        }
         for id in held_ids {
             self.broadcast_queue_updated(
                 session_id,

@@ -1,12 +1,12 @@
 ---
 name: agent-message
-description: Message an agent's parent, siblings, or direct children through the daemon. Discover reachable agents with agent_observe.list_agents, then send direct text without spoofing sender identity.
+description: Send yourself safe-boundary steering input, or send follow-ups to your parent, siblings, or direct children. All messages preserve strict FIFO and agent provenance.
 ---
 
 # Agent Message
 
-Send direct messages within the current agent's nuclear family through the
-local daemon: parent, siblings, and direct children only. Roots are siblings
+Send direct messages to yourself or within the current agent's nuclear family
+through the local daemon: parent, siblings, and direct children. Roots are siblings
 of each other only when they share a parent worker; a root has no parent to
 message. The daemon derives your sender identity from the current session; do
 not try to include a `from` field.
@@ -47,13 +47,28 @@ if child is not None:
   `send("all", message)` broadcasts only to the family roster and returns
   `{receipts: [...]}` in roster order; successful entries are ordinary receipts
   and failed entries contain the target id and a short `error`. One failed delivery
-  does not reject successful deliveries. Messages use follow-up delivery: a busy target
+  does not reject successful deliveries. Family messages use follow-up delivery: a busy target
   receives them after its current turn finishes, without interrupting active work.
-  `receiver_role="self"` queues a message for this agent itself; omit `receiver_name`.
+  `receiver_role="self"` queues steering input for this agent itself; omit `receiver_name`.
+  It is consumed at the next safe model/tool boundary, without interrupting an active
+  model call or tool. Strict FIFO applies: it cannot overtake earlier follow-up or
+  held input, so it may wait until a later turn. An idle eligible session wakes.
+  There is no `delivery_mode` argument and no promotion of already queued messages.
   Self messages preserve agent provenance and cannot grant human authorization.
   All targets use the same ordered inbox. A receipt with `deliveryStatus: "queued"`
   and `queueItemId` means durable admission (in-memory for ephemeral sessions),
   not that the model has processed or answered the message.
+
+```python
+receipt = await agent_message.send(
+    "At the next safe boundary, check the latest result before continuing.",
+    receiver_role="self",
+)
+```
+
+Do not wait inside the current Python call for the model to process your self
+message. Return control to reach a safe boundary. Interruption, exhausted turn
+budgets, or uncertain crash recovery can hold input for review rather than run it.
 
 
 ## Safety

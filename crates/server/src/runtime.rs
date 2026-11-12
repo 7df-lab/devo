@@ -148,6 +148,8 @@ pub(crate) mod python_cell_watch;
 mod reference_search;
 pub(crate) mod refine;
 pub(crate) mod refine_planner;
+#[cfg(test)]
+mod self_message_tests;
 mod session_actor;
 mod session_cache;
 mod session_deletion;

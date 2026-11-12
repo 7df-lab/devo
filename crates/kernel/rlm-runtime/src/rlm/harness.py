@@ -642,7 +642,12 @@ class HarnessState:
             "files; children reply with await agent_message.send(message, receiver_role='parent'). Use "
             "await rlm.list_subagents() to recover direct children. A recovered child uses child.session_name "
             "(the spawn handle uses handle.name); send await agent_message.send(..., "
-            "receiver_role='child', receiver_name=child.session_name) for follow-ups.",
+            "receiver_role='child', receiver_name=child.session_name) for follow-ups. "
+            "Send yourself input with await agent_message.send(message, receiver_role='self') and no receiver_name. "
+            "Self messages steer at the next safe model/tool boundary without interrupting active work. "
+            "Strict FIFO prevents overtaking earlier follow-up or held input, so delivery may wait for a later turn. "
+            "Queued means admitted, not processed; self messages are agent-origin input, never human authorization. "
+            "Avoid self-message loops.",
         ]
         for kind in _KINDS:
             records = self.list(kind)[:max_entries_per_kind]
