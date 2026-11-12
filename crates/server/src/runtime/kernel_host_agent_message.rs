@@ -12,7 +12,7 @@ use devo_protocol::native::ids::SessionId;
 impl ServerRuntime {
     /// Kernel `host_request("agent_message.send")`.
     ///
-    /// Reach is limited to the nuclear family (parent / sibling / child).
+    /// Reach is limited to self and the nuclear family (parent / sibling / child).
     /// `target: "all"` broadcasts to every family member except self.
     /// Every family message is admitted to the destination's ordered inbox.
     /// Acceptance does not imply that the model has consumed the message.
@@ -245,16 +245,22 @@ impl ServerRuntime {
         } else {
             None
         };
-        let accepted = self
-            .deliver_host_message(
-                target,
-                super::host_messages::HostMessage::agent(
-                    from_session_id,
-                    uuid::Uuid::new_v4().to_string(),
-                    message.to_string(),
-                ),
-                metadata,
+        let event_id = uuid::Uuid::new_v4().to_string();
+        let message = if role == "self" {
+            super::host_messages::HostMessage::self_steer(
+                from_session_id,
+                event_id,
+                message.to_string(),
             )
+        } else {
+            super::host_messages::HostMessage::agent(
+                from_session_id,
+                event_id,
+                message.to_string(),
+            )
+        };
+        let accepted = self
+            .deliver_host_message(target, message, metadata)
             .await
             .map_err(|error| error.to_string())?;
         let mut receipt = json!({
