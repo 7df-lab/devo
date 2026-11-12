@@ -43,3 +43,45 @@ test("malformed question sets fail explicitly", async () => {
   await assert.rejects(resolveUserInputQuestions([{ id: "x" }], dialogs), /Invalid/);
   await assert.rejects(resolveUserInputQuestions([{ id: "x", question: "X" }, { id: "x", question: "Y" }], dialogs), /Duplicate/);
 });
+
+
+test("secret questions never open an unmasked dialog", async () => {
+  await assert.rejects(resolveUserInputQuestions([{ ...questions[0], isOther: true, isSecret: true }], {
+    async select() { assert.fail("must not open"); }, async input() { assert.fail("must not open"); },
+  }), /Secret user input/);
+});
+
+test("InteractiveMode opens Native questions and forwards the complete response", async () => {
+  const { InteractiveMode } = await import("../lib/coding-agent/src/modes/interactive/interactive-mode.js");
+  const mode = Object.create(InteractiveMode.prototype) as any;
+  mode.activeConnectionExtensionUiRequests = new Map();
+  const replies: unknown[] = [];
+  mode.agentConnection = { async respondToExtensionUiRequest(id: string, response: unknown) { replies.push({ id, response }); } };
+  mode.showExtensionSelector = async (_title: string, options: string[]) => options[0];
+  mode.showExtensionInput = async () => "Ada";
+  mode.showError = (error: string) => assert.fail(error);
+  await mode.handleConnectionExtensionUiRequest({ id: "12", method: "user_input", userInputRequestId: "q_12", payload: { questions } });
+  assert.deepEqual(JSON.parse(JSON.stringify(replies)), [{ id: "12", response: { answers: { path: { answers: ["A"] }, name: { answers: ["Ada"] } } } }]);
+  assert.equal(mode.activeConnectionExtensionUiRequests.size, 0);
+});
+
+test("InteractiveMode dismisses a question when another controller resolves it", async () => {
+  const { InteractiveMode } = await import("../lib/coding-agent/src/modes/interactive/interactive-mode.js");
+  const mode = Object.create(InteractiveMode.prototype) as any;
+  mode.activeConnectionExtensionUiRequests = new Map();
+  const replies: unknown[] = [];
+  mode.agentConnection = { async respondToExtensionUiRequest(id: string, response: unknown) { replies.push({ id, response }); } };
+  let started!: () => void;
+  const ready = new Promise<void>((resolve) => { started = resolve; });
+  mode.showExtensionSelector = async (_title: string, _options: string[], options: { signal: AbortSignal }) => new Promise((resolve) => {
+    options.signal.addEventListener("abort", () => resolve(undefined), { once: true }); started();
+  });
+  mode.showExtensionInput = async () => assert.fail("must not open second question");
+  mode.showError = (error: string) => assert.fail(error);
+  const pending = mode.handleConnectionExtensionUiRequest({ id: "12", method: "user_input", userInputRequestId: "q_12", payload: { questions } });
+  await ready;
+  mode.cancelConnectionExtensionUiRequests({ userInputRequestId: "q_12" });
+  await pending;
+  assert.deepEqual(replies, [{ id: "12", response: { cancelled: true } }]);
+  assert.equal(mode.activeConnectionExtensionUiRequests.size, 0);
+});

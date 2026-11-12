@@ -17,6 +17,9 @@ export async function resolveUserInputQuestions(
 		if (!question || typeof question.id !== "string" || !question.id || typeof question.question !== "string") {
 			throw new Error("Invalid user input question");
 		}
+		// The standard extension input is not masked. Fail closed rather than
+		// accidentally echoing a secret into the terminal/scrollback.
+		if (question.isSecret) throw new Error("Secret user input is not supported in the TUI; use a secure input channel");
 		if (Object.hasOwn(answers, question.id)) throw new Error("Duplicate user input question id");
 		if (signal?.aborted) return { cancelled: true };
 		const options: Array<{ label: string; description?: string }> = Array.isArray(question.options) ? question.options : [];
