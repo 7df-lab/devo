@@ -11,6 +11,11 @@ pub(super) enum QueryEventDeliveryPolicy {
 
 pub(super) fn query_event_delivery_policy(event: &QueryEvent) -> QueryEventDeliveryPolicy {
     match event {
+        // Failed responses may carry their only authoritative measurement in
+        // a delta, without a later Usage event to recover a dropped sample.
+        QueryEvent::UsageDelta { usage } if usage.terminal_sample => {
+            QueryEventDeliveryPolicy::MustDeliver
+        }
         QueryEvent::ToolProgress {
             progress:
                 devo_core::tools::ToolProgress::OutputDelta { .. }

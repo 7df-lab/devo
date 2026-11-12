@@ -394,3 +394,128 @@ fn high_volume_query_events_are_best_effort() {
         vec![QueryEventDeliveryPolicy::BestEffort; events.len()]
     );
 }
+
+#[tokio::test]
+async fn terminal_usage_delta_waits_for_channel_capacity() {
+    let (event_tx, mut event_rx) = tokio::sync::mpsc::channel(1);
+    event_tx
+        .send(devo_core::QueryEvent::TextDelta("busy".into()))
+        .await
+        .unwrap();
+    let usage = devo_protocol::Usage {
+        terminal_sample: true,
+        ..Default::default()
+    };
+    // A failed provider response may report its final measurement only as a
+    // UsageDelta, without a subsequent successful Usage event to recover it.
+    assert_eq!(
+        query_event_delivery_policy(&devo_core::QueryEvent::UsageDelta {
+            usage: usage.clone()
+        }),
+        QueryEventDeliveryPolicy::MustDeliver,
+    );
+    let expected = usage.clone();
+    let enqueue = tokio::spawn(async move {
+        enqueue_query_event(&event_tx, devo_core::QueryEvent::UsageDelta { usage }).await;
+    });
+    tokio::task::yield_now().await;
+    assert!(!enqueue.is_finished());
+    assert!(matches!(
+        event_rx.recv().await,
+        Some(devo_core::QueryEvent::TextDelta(_))
+    ));
+    enqueue.await.unwrap();
+    match event_rx.recv().await {
+        Some(devo_core::QueryEvent::UsageDelta { usage }) => assert_eq!(usage, expected),
+        other => panic!("expected terminal usage delta, got {other:?}"),
+    }
+}
+
+#[tokio::test]
+async fn failed_query_terminal_zero_replaces_earlier_sample_under_backpressure() {
+    use std::sync::Arc;
+
+    let temp = tempfile::TempDir::new().unwrap();
+    let runtime = crate::test_support::TestRuntime::noop().runtime(temp.path());
+    let session_id = SessionId::new();
+    let turn_id = TurnId::new();
+    let turn = crate::turn::RuntimeTurn::new(
+        devo_protocol::native::turn::Turn {
+            id: turn_id,
+            session_id,
+            sequence: 1,
+            kind: devo_protocol::native::turn::TurnKind::Regular,
+            status: devo_protocol::native::turn::TurnStatus::InProgress,
+            model: devo_protocol::native::model::ModelBinding {
+                provider: "test".into(),
+                model: "test-model".into(),
+                variant: None,
+                reasoning_effort: None,
+            },
+            collaboration_mode: None,
+            started_at: chrono::Utc::now(),
+            completed_at: None,
+            error: None,
+            usage: None,
+        },
+        crate::turn::RuntimeTurnExtras {
+            request_thinking: None,
+            stop_reason: None,
+            failure_reason: None,
+        },
+    );
+    let earlier = devo_protocol::Usage {
+        reported: true,
+        input_tokens: 120,
+        ..Default::default()
+    };
+    let terminal = devo_protocol::Usage {
+        reported: true,
+        terminal_sample: true,
+        ..Default::default()
+    };
+    let expected = devo_protocol::native::usage::TurnUsage::from_provider_usage(&terminal);
+    let (tx, rx) = tokio::sync::mpsc::channel(1);
+    tx.send(devo_core::QueryEvent::UsageDelta { usage: earlier })
+        .await
+        .unwrap();
+    let mut terminal_enqueue = Box::pin(enqueue_query_event(
+        &tx,
+        devo_core::QueryEvent::UsageDelta { usage: terminal },
+    ));
+    // Poll before starting the consumer: this deterministically exercises a
+    // full queue, without timing assumptions about the task scheduler.
+    let completed_early = futures::poll!(&mut terminal_enqueue).is_ready();
+    let event_task = super::event_stream::spawn_turn_event_stream(
+        Arc::clone(&runtime),
+        Arc::new(tokio::sync::Mutex::new(Default::default())),
+        session_id,
+        turn,
+        devo_protocol::CollaborationMode::default(),
+        Arc::new(devo_core::tools::ToolRegistry::new()),
+        None,
+        Some(1000),
+        rx,
+    );
+    if !completed_early {
+        terminal_enqueue.await;
+    } else {
+        drop(terminal_enqueue);
+    }
+    // Failed provider responses have no successful QueryEvent::Usage after
+    // their terminal sample. The event summary used by finalization must not
+    // retain the earlier nonzero measurement.
+    enqueue_query_event(
+        &tx,
+        devo_core::QueryEvent::ProviderQueryFailed {
+            attempt: 1,
+            max_attempts: 1,
+            message: "provider failed after reporting usage".into(),
+        },
+    )
+    .await;
+    drop(tx);
+    let summary = event_task.await.unwrap();
+    assert_eq!(summary.latest_query_usage, Some(expected));
+    runtime.shutdown().await;
+}
