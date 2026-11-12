@@ -9,7 +9,7 @@ import { scheduledDelivered, rpcSucceeded, turnOutcome } from "./smoke-outcomes.
 
 const repo = resolve(dirname(fileURLToPath(import.meta.url)), "../../..");
 const scenario = process.argv[2] || "T1";
-const scenarios = ["T1", "T2", "T3", "goal", "bash", "agents", "schedule", "heartbeat", "activity", "effort", "theme"];
+const scenarios = ["T1", "T2", "T3", "goal", "bash", "agents", "schedule", "heartbeat", "activity", "effort", "theme", "fork"];
 const tmux = process.env.DEVO_TMUX_BIN || (process.platform === "win32" ? "psmux" : "tmux");
 const binary = resolve(process.env.DEVO_BIN || process.env.DEVO_SERVER_BIN
   || join(repo, "target/debug", process.platform === "win32" ? "devo.exe" : "devo"));
@@ -91,6 +91,39 @@ async function run() {
     console.log("=== boot ===\n" + pane);
     switch (scenario) {
       case "T1": break;
+      case "fork": {
+        const screen = () => mux(["capture-pane", "-t", session, "-p"]).stdout;
+        const forkRequests = () => records().filter((event) => event.direction === "tui-to-server" && event.method === "session/fork");
+        for (let i = 1; i <= 12; i++) {
+          const start = records().length;
+          await send(`fork-smoke-${i}: say hello briefly.`);
+          await waitFor(`fork seed ${i}`, events => turnOutcome(events.slice(start), "completed"));
+        }
+        const opened = () => screen().includes("Fork from Message") && screen().includes("Enter fork") && screen().includes("Esc cancel");
+        await send("/fork");
+        await waitFor("fork wide help and latest point", () => opened() && /›.*fork-smoke-12/.test(screen()));
+        console.log("=== fork wide ===\n" + screen());
+        mux(["resize-window", "-t", session, "-x", "40", "-y", "24"]);
+        await waitFor("fork narrow help and latest point", () => opened() && /›.*fork-smoke-12/.test(screen()));
+        console.log("=== fork narrow ===\n" + screen());
+        mux(["send-keys", "-t", session, "Up"]);
+        await waitFor("previous fork point", () => /›.*fork-smoke-11/.test(screen()));
+        mux(["send-keys", "-t", session, "Escape"]);
+        await waitFor("cancel fork", () => !screen().includes("Fork from Message"));
+        if (forkRequests().length !== 0) throw new Error("Cancel unexpectedly forked the session");
+        await send("/fork");
+        await waitFor("fork reopens at latest point", () => opened() && /›.*fork-smoke-12/.test(screen()));
+        mux(["send-keys", "-t", session, "Up", "Enter"]);
+        await waitFor("confirmed fork", events => rpcSucceeded(events, "session/fork") && screen().includes("Forked to new session"));
+        const request = forkRequests();
+        const selectedTurn = records().find(event => event.method === "item/completed"
+          && event.payload?.params?.item?.item?.type === "userMessage"
+          && event.payload.params.item.item.content?.some(block => block.text?.startsWith("fork-smoke-11:")))?.payload.params.item.turnId;
+        if (request.length !== 1 || !selectedTurn || request[0].payload.params.atTurnId !== selectedTurn
+          || request[0].payload.params.cut !== "through") throw new Error("Fork selected the wrong history point");
+        if (screen().includes("Fork from Message")) throw new Error("Fork selector remained open");
+        break;
+      }
       case "theme": {
         const screen = () => mux(["capture-pane", "-t", session, "-p"]).stdout;
         const titleStyle = () => mux(["capture-pane", "-t", session, "-p", "-e"]).stdout

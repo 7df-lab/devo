@@ -208,6 +208,7 @@ jobs:
           printf '%s\n' '{"deepseek": {"type": "api_key", "key": "ci-mock-key"}}' > "$home/auth.json"
           chmod 600 "$home/auth.json"
           DEVO_HOME="$home" node scripts/run-tmux-smoke.js T2
+          DEVO_HOME="$home" node scripts/run-tmux-smoke.js fork
 
   check:
     needs: changes
