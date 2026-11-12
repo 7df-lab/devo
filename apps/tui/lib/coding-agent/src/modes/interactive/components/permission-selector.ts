@@ -6,7 +6,7 @@ export type PermissionProfile = "default" | "autoReview" | "fullAccess";
 
 const PROFILE_DESCRIPTIONS: Record<PermissionProfile, string> = {
 	default: "Ask before risky actions",
-	autoReview: "Auto-approve tools, review afterwards",
+	autoReview: "Review before approval; may ask you",
 	fullAccess: "Allow everything without asking",
 };
 
