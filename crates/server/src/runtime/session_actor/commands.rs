@@ -255,6 +255,7 @@ pub(crate) enum SessionCommand {
     },
     ReplaceState {
         state: Box<SessionActorState>,
+        kernel_policy: super::KernelReplacementPolicy,
         reply: oneshot::Sender<()>,
     },
     PersistTurnLine {

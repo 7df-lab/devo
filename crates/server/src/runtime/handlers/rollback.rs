@@ -683,7 +683,10 @@ impl ServerRuntime {
         }
         rebuilt.rollout_path = rollout_path;
         session_handle
-            .replace_state(SessionActorState::from_runtime_session(rebuilt))
+            .replace_state(
+                SessionActorState::from_runtime_session(rebuilt),
+                crate::runtime::session_actor::KernelReplacementPolicy::Reset,
+            )
             .await;
         Ok(SessionRollbackCommitResult {
             restored_turn_count: plan.public_plan.dropped_turn_count,

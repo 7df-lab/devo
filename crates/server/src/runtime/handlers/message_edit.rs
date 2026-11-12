@@ -671,6 +671,7 @@ impl ServerRuntime {
         session_handle
             .replace_state(
                 crate::runtime::session_actor::SessionActorState::from_runtime_session(session),
+                crate::runtime::session_actor::KernelReplacementPolicy::Reset,
             )
             .await;
 

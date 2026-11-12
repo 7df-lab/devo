@@ -299,9 +299,6 @@ impl ServerRuntime {
                                 .set_runtime_session_idle(Some(failed_runtime.clone()))
                                 .await;
                             runtime_for_panic
-                                .clear_active_turn_runtime_handles(compaction_session_id)
-                                .await;
-                            runtime_for_panic
                                 .broadcast_notification(
                                     devo_protocol::native::event::ServerNotification::ContextCompactionFailed {
                                         session_id: failed_runtime.native.session_id,
@@ -324,6 +321,9 @@ impl ServerRuntime {
                                     failed.turn_id(),
                                     TerminalTurnSnapshot::from_runtime_turn(&failed),
                                 )
+                                .await;
+                            runtime_for_panic
+                                .release_manual_compaction_admission_and_drain(compaction_session_id)
                                 .await;
                         }
                     }
@@ -1056,24 +1056,10 @@ impl ServerRuntime {
                         crate::runtime::session_actor::SessionActorState::from_runtime_session(
                             runtime_session,
                         ),
+                        crate::runtime::session_actor::KernelReplacementPolicy::Preserve,
                     )
                     .await;
                 drop(state_change_guard);
-                self.clear_active_turn_runtime_handles(session_id).await;
-                // Follow-ups queued while compacting must run next: a manual
-                // compaction turn never runs the turn_exec post-turn pipeline,
-                // so drain here once the session is idle again — otherwise the
-                // queued message strands and makes TryBeginActiveTurn reject
-                // every later turn ("active or queued"). This mirrors the drain
-                // in finalize_manual_compaction_turn for the non-replaced
-                // outcomes.
-                let drain_runtime = Arc::clone(&self);
-                let drain_session_id = session_id;
-                tokio::spawn(async move {
-                    drain_runtime
-                        .spawn_next_turn_from_queue(drain_session_id)
-                        .await;
-                });
                 if let Some(persistence) = session_handle.turn_persistence_snapshot().await
                     && persistence.rollout_path.is_some()
                     && let Err(error) = self
@@ -1138,6 +1124,8 @@ impl ServerRuntime {
                     TerminalTurnSnapshot::from_runtime_turn(&completed_turn),
                 )
                 .await;
+                self.release_manual_compaction_admission_and_drain(session_id)
+                    .await;
             }
             Ok(CompactAction::Skipped) => {
                 drop(state_change_guard);
@@ -1221,21 +1209,6 @@ impl ServerRuntime {
         session_handle
             .set_runtime_session_idle(Some(runtime_turn.clone()))
             .await;
-        self.clear_active_turn_runtime_handles(session_id).await;
-
-        // A manual compaction turn never runs the turn_exec post-turn
-        // pipeline, so follow-ups queued while compacting would strand here
-        // forever — and their presence makes TryBeginActiveTurn reject every
-        // later turn or compaction ("active or queued"). Drain once the
-        // session is idle again.
-        let drain_runtime = Arc::clone(self);
-        let drain_session_id = session_id;
-        tokio::spawn(async move {
-            drain_runtime
-                .spawn_next_turn_from_queue(drain_session_id)
-                .await;
-        });
-
         if let Some(persistence) = session_handle.turn_persistence_snapshot().await
             && persistence.rollout_path.is_some()
             && let Err(error) = self
@@ -1319,6 +1292,8 @@ impl ServerRuntime {
                         TerminalTurnSnapshot::from_runtime_turn(&turn),
                     )
                     .await;
+                    self.release_manual_compaction_admission_and_drain(session_id)
+                        .await;
                     return;
                 };
                 if let Some(occupancy) = summary.last_context_occupancy.clone() {
@@ -1396,6 +1371,21 @@ impl ServerRuntime {
             TerminalTurnSnapshot::from_runtime_turn(&turn),
         )
         .await;
+        self.release_manual_compaction_admission_and_drain(session_id)
+            .await;
+    }
+
+    /// Release admission only after terminal notifications are enqueued. Otherwise
+    /// the next turn can start before an older completion clears client UI state.
+    pub(crate) async fn release_manual_compaction_admission_and_drain(
+        self: &Arc<Self>,
+        session_id: SessionId,
+    ) {
+        self.clear_active_turn_runtime_handles(session_id).await;
+        let runtime = Arc::clone(self);
+        tokio::spawn(async move {
+            runtime.spawn_next_turn_from_queue(session_id).await;
+        });
     }
 }
 

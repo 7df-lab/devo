@@ -121,9 +121,10 @@ test("InteractiveMode live completion rebuilds through history and clears previo
   Object.assign(mode, {
     isInitialized: true, footer: { invalidate() {} }, updateConnectionStateFromEvent() {},
     activityTracker: { handleEvent() {} }, updateWorkingLoaderMessage() {}, syncWorkingLoader() {},
-    agentConnection: { getSessionContext: async () => ({ messages }) },
-    renderSessionContext: async (context: any, options: any) => {
-      assert.deepEqual(context.messages, messages); assert.equal(options.clearChat, true); operations.push("replace");
+    agentConnection: { getInitialSnapshot: async () => ({ messages }) },
+    isCurrentConnectionGeneration: () => true,
+    renderResyncedSession: async (context: any) => {
+      assert.deepEqual(context.messages, messages); operations.push("replace");
     },
     refreshConnectionContextUsage: async () => operations.push("usage"),
     ui: { requestRender: () => operations.push("render") },

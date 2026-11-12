@@ -320,6 +320,8 @@ export interface AgentConnectionSnapshot {
 	replay?: AgentConnectionReplayInfo;
 	/** Completed durable items already represented by the transcript snapshot. */
 	completedItemRevisions?: Record<string, number>;
+	/** Turn starts/terminal states already represented by the snapshot. */
+	transcriptTurns?: Record<string, "started" | "terminal">;
 }
 
 export interface AgentConnectionScopedModel {
@@ -664,7 +666,7 @@ export type AgentConnectionSessionEvent =
 	  };
 
 export type AgentConnectionEvent =
-	| { type: "session_event"; event: AgentConnectionSessionEvent; sourceItem?: { id: string; revision?: number; missingTextBaseIds?: string[] } }
+	| { type: "session_event"; event: AgentConnectionSessionEvent; sourceTurn?: { id: string; phase: "started" | "terminal" }; sourceItem?: { id: string; revision?: number; missingTextBaseIds?: string[] } }
 	| { type: "side_question_event"; event: AgentConnectionSideQuestionEvent }
 	| { type: "session_replaced"; state: AgentConnectionState; messages: AgentMessage[] }
 	| { type: "session_resynced"; snapshot: AgentConnectionSnapshot }

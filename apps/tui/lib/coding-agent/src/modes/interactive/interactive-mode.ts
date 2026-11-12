@@ -764,6 +764,7 @@ export class InteractiveMode {
 
 	// Serializes session event handling; see subscribeToAgent
 	private restoredStreamingItems = new Set<string>();
+	private transcriptTurns: NonNullable<AgentConnectionSnapshot["transcriptTurns"]> = {};
 	private streamingBirthPrefixes: NonNullable<AgentConnectionSnapshot["streamingPrefixes"]> = {};
 	private completedTranscriptItems: Record<string, number> = {};
 	private sessionEventQueue: Promise<void> = Promise.resolve();
@@ -2923,6 +2924,7 @@ export class InteractiveMode {
 
 	private async renderResyncedSession(snapshot: AgentConnectionSnapshot): Promise<void> {
 		this.completedTranscriptItems = snapshot.completedItemRevisions ?? {};
+		this.transcriptTurns = snapshot.transcriptTurns ?? {};
 		this.restoredStreamingItems = new Set(snapshot.streamingItemIds ?? []);
 		this.streamingBirthPrefixes = snapshot.streamingPrefixes ?? {};
 		const bashFinished = this.isBashRunning() && !snapshot.state.isBashRunning;
@@ -5160,6 +5162,11 @@ export class InteractiveMode {
 	}
 
 	private isReplayedItemEvent(event: Extract<AgentConnectionEvent, { type: "session_event" }>): boolean {
+		const turn = event.sourceTurn;
+		if (turn) {
+			const phase = this.transcriptTurns?.[turn.id];
+			if (phase === "terminal" || (phase === "started" && turn.phase === "started")) return true;
+		}
 		const source = event.sourceItem;
 		if (!source) return false;
 		if (event.event.type === "message_start" && this.restoredStreamingItems?.has(source.id)) return true;
@@ -6824,6 +6831,7 @@ export class InteractiveMode {
 		const snapshot = await measureAsync("snapshot.initial_total", () => this.agentConnection.getInitialSnapshot());
 		if (!this.isCurrentConnectionGeneration(connection, generation)) return;
 		this.completedTranscriptItems = snapshot.completedItemRevisions ?? {};
+		this.transcriptTurns = snapshot.transcriptTurns ?? {};
 		this.restoredStreamingItems = new Set(snapshot.streamingItemIds ?? []);
 		this.streamingBirthPrefixes = snapshot.streamingPrefixes ?? {};
 		const context = this.getSessionContextFromConnectionSnapshot(snapshot);
@@ -6892,8 +6900,14 @@ export class InteractiveMode {
 	}
 
 	private async rebuildChatFromMessages(): Promise<void> {
-		const context = await this.agentConnection.getSessionContext();
-		await this.renderSessionContext(context, { clearChat: true });
+		const connection = this.agentConnection;
+		const generation = this.sessionEventGeneration;
+		// A queued turn can start while compaction history is loading. Install
+		// the same item/revision fence as reconnect before releasing queued live
+		// events, otherwise messages included in history are appended again.
+		const snapshot = await connection.getInitialSnapshot();
+		if (!this.isCurrentConnectionGeneration(connection, generation)) return;
+		await this.renderResyncedSession(snapshot);
 	}
 
 	private handleEscape(): void {

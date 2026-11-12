@@ -492,11 +492,16 @@ impl SessionHandle {
             .await;
     }
 
-    pub(crate) async fn replace_state(&self, state: SessionActorState) {
+    pub(crate) async fn replace_state(
+        &self,
+        state: SessionActorState,
+        kernel_policy: super::KernelReplacementPolicy,
+    ) {
         let (reply_tx, reply_rx) = oneshot::channel();
         if self
             .send(SessionCommand::ReplaceState {
                 state: Box::new(state),
+                kernel_policy,
                 reply: reply_tx,
             })
             .await
