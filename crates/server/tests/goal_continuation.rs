@@ -43,6 +43,7 @@ async fn goal_token_budget_reached_after_turn_enters_budget_limited() -> Result<
         requests: std::sync::atomic::AtomicUsize::new(0),
         captured_requests: Mutex::new(Vec::new()),
         usage: Usage {
+            terminal_sample: false,
             unreported_fields: None,
             reported: true,
             input_tokens: 120,
@@ -95,6 +96,7 @@ async fn budget_limited_goal_pause_interrupts_pending_wrapup_turn() -> Result<()
         requests: std::sync::atomic::AtomicUsize::new(0),
         captured_requests: Mutex::new(Vec::new()),
         usage: Usage {
+            terminal_sample: false,
             unreported_fields: None,
             reported: true,
             input_tokens: 120,

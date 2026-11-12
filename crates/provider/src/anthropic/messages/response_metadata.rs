@@ -7,6 +7,7 @@ pub(super) fn map_usage(usage: &AnthropicUsage) -> Usage {
     let cache_creation_input_tokens = usage.cache_creation_input_tokens.unwrap_or(0);
     let cache_read_input_tokens = usage.cache_read_input_tokens.unwrap_or(0);
     Usage {
+        terminal_sample: false,
         unreported_fields: None,
         reported: usage.input_tokens.is_some() || usage.output_tokens.is_some(),
         input_tokens: usage

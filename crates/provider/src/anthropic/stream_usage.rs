@@ -28,6 +28,7 @@ impl AnthropicStreamUsage {
         let cache_creation_input_tokens = self.cache_creation_input_tokens.unwrap_or(0);
         let cache_read_input_tokens = self.cache_read_input_tokens.unwrap_or(0);
         Usage {
+            terminal_sample: false,
             unreported_fields: None,
             reported: self.reported,
             input_tokens: self

@@ -305,6 +305,7 @@ async fn anthropic_messages_stream_uses_nested_message_start_usage() {
         vec![
             StreamEvent::UsageDelta(
                 Usage {
+                    terminal_sample: false,
                     unreported_fields: None,
                     reported: true,
                     input_tokens: 85_937,
@@ -326,6 +327,7 @@ async fn anthropic_messages_stream_uses_nested_message_start_usage() {
             },
             StreamEvent::UsageDelta(
                 Usage {
+                    terminal_sample: false,
                     unreported_fields: None,
                     reported: true,
                     input_tokens: 85_937,
@@ -346,6 +348,7 @@ async fn anthropic_messages_stream_uses_nested_message_start_usage() {
                     content: vec![ResponseContent::Text("ok".to_string())],
                     stop_reason: Some(StopReason::EndTurn),
                     usage: Usage {
+                        terminal_sample: false,
                         unreported_fields: None,
                         reported: true,
                         input_tokens: 85_937,
@@ -386,6 +389,7 @@ async fn anthropic_messages_stream_keeps_legacy_top_level_start_usage() {
         vec![
             StreamEvent::UsageDelta(
                 Usage {
+                    terminal_sample: false,
                     unreported_fields: None,
                     reported: true,
                     input_tokens: 3,
@@ -404,6 +408,7 @@ async fn anthropic_messages_stream_keeps_legacy_top_level_start_usage() {
             },
             StreamEvent::UsageDelta(
                 Usage {
+                    terminal_sample: false,
                     unreported_fields: None,
                     reported: true,
                     input_tokens: 3,
@@ -424,6 +429,7 @@ async fn anthropic_messages_stream_keeps_legacy_top_level_start_usage() {
                     content: vec![ResponseContent::Text("legacy".to_string())],
                     stop_reason: Some(StopReason::EndTurn),
                     usage: Usage {
+                        terminal_sample: false,
                         unreported_fields: None,
                         reported: true,
                         input_tokens: 3,
@@ -463,6 +469,7 @@ async fn anthropic_messages_stream_completes_thinking_blocks_before_text() {
         vec![
             StreamEvent::UsageDelta(
                 Usage {
+                    terminal_sample: false,
                     unreported_fields: None,
                     reported: true,
                     input_tokens: 1,
@@ -490,6 +497,7 @@ async fn anthropic_messages_stream_completes_thinking_blocks_before_text() {
             },
             StreamEvent::UsageDelta(
                 Usage {
+                    terminal_sample: false,
                     unreported_fields: None,
                     reported: true,
                     input_tokens: 1,
@@ -519,6 +527,7 @@ async fn anthropic_messages_stream_completes_thinking_blocks_before_text() {
                     ],
                     stop_reason: Some(StopReason::EndTurn),
                     usage: Usage {
+                        terminal_sample: false,
                         unreported_fields: None,
                         reported: true,
                         input_tokens: 1,

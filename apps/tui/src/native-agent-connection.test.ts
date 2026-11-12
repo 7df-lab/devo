@@ -2797,3 +2797,33 @@ test("a successful completion racing abort cannot suppress a later server-only c
   assert.equal(fake.requests.filter((r) => r.method === "session/interrupt").length, 2);
   await conn.dispose();
 });
+
+test("resumed context survives prompt admission until a new authoritative usage arrives", async () => {
+  const { conn } = await bootConnection([(method, params, respond) => {
+    if (method === "session/resume") {
+      respond({ session: { id: params.sessionId, model: { provider: "openai", id: "gpt-test" } },
+        lastContextOccupancy: { totalTokens: 120, contextWindowTokens: 1000 } });
+      return true;
+    }
+    if (method === "context/usage/read") {
+      respond({ occupancy: { totalTokens: 120, contextWindowTokens: 1000 } });
+      return true;
+    }
+    if (method === "turn/start") {
+      respond({ turn: { id: "resumed-turn" } });
+      return true;
+    }
+    return false;
+  }]);
+  await conn.switchSession("history-session");
+  const expected = { tokens: 120, contextWindow: 1000, percent: 12 };
+  assert.deepEqual((await conn.getInitialSnapshot()).state.contextUsage, expected);
+  await conn.prompt("Continue", { streamingBehavior: "steer" });
+  conn.pushChunk(JSON.stringify({ jsonrpc: "2.0", method: "turn/started", params: {
+    sessionId: "history-session", turn: { id: "resumed-turn" },
+  } }) + "\n");
+  assert.deepEqual((await conn.getState()).contextUsage, expected);
+  pushUsage(conn, { sessionId: "history-session", occupancy: { totalTokens: 0, contextWindowTokens: 1000 } }, "context/usageUpdated");
+  assert.deepEqual((await conn.getState()).contextUsage, { tokens: 0, contextWindow: 1000, percent: 0 });
+  await conn.dispose();
+});
