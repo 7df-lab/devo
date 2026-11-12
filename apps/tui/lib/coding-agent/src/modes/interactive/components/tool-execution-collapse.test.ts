@@ -29,7 +29,7 @@ for (const toolName of ["web_search", "web_fetch"]) {
 			const cell = new ToolExecutionComponent(toolName, "call", {}, {}, withDefinition ? { name: toolName, label: "Web tool", description: "", parameters: {} } : undefined, ui, process.cwd());
 			cell.updateResult({ content: [{ type: "text", text: "Search unavailable: rate limit exceeded" }], isError: true });
 			const error = cell.render(80).map(stripAnsi).join("\n");
-			assert.match(error, /error/);
+			assert.match(error, /^ ✗ /);
 			assert.match(error, /Search unavailable: rate limit exceeded/);
 			const fullText = Array.from({ length: 160 }, (_, index) => `Fetched line ${index}: ${"x".repeat(100)}`).join("\n");
 			cell.updateResult({ content: [{ type: "text", text: fullText }], isError: false });
