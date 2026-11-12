@@ -1,6 +1,7 @@
-import { Container, type SelectItem, SelectList, type SelectListLayoutOptions } from "@earendil-works/pi-tui";
-import { getAvailableThemes, getSelectListTheme } from "../theme/theme.js";
+import { Container, type SelectItem, SelectList, type SelectListLayoutOptions, Text } from "@earendil-works/pi-tui";
+import { getAvailableThemes, getSelectListTheme, theme } from "../theme/theme.js";
 import { DynamicBorder } from "./dynamic-border.js";
+import { keyHint, keyText } from "./keybinding-hints.js";
 
 const THEME_SELECT_LIST_LAYOUT: SelectListLayoutOptions = {
 	minPrimaryColumnWidth: 12,
@@ -9,6 +10,8 @@ const THEME_SELECT_LIST_LAYOUT: SelectListLayoutOptions = {
 
 export class ThemeSelectorComponent extends Container {
 	private selectList: SelectList;
+	private title = new Text("", 1, 0);
+	private help = new Text("", 1, 0);
 	private onPreview: (themeName: string) => void;
 
 	constructor(
@@ -28,6 +31,7 @@ export class ThemeSelectorComponent extends Container {
 		}));
 
 		this.addChild(new DynamicBorder());
+		this.addChild(this.title);
 
 		this.selectList = new SelectList(themeItems, 10, getSelectListTheme(), THEME_SELECT_LIST_LAYOUT);
 
@@ -49,8 +53,21 @@ export class ThemeSelectorComponent extends Container {
 		};
 
 		this.addChild(this.selectList);
+		this.addChild(this.help);
 
 		this.addChild(new DynamicBorder());
+	}
+
+	render(width: number): string[] {
+		// Theme changes while this selector is open, so resolve colors at render time.
+		this.title.setText(theme.fg("accent", "Theme preview"));
+		this.help.setText(
+			theme.fg("dim", `${keyText("tui.select.up", { primaryOnly: true })}/${keyText("tui.select.down", { primaryOnly: true })}`)
+				+ theme.fg("muted", " preview  ")
+				+ keyHint("tui.select.confirm", "save", { primaryOnly: true }) + "  "
+				+ keyHint("tui.select.cancel", "restore", { primaryOnly: true }),
+		);
+		return super.render(width);
 	}
 
 	getSelectList(): SelectList {
