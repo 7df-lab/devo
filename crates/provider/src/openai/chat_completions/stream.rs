@@ -460,7 +460,7 @@ mod tests {
         assert_eq!(
             events,
             vec![StreamEvent::ToolCallStart {
-                index: 0,
+                index: 1,
                 id: "call_bad".to_string(),
                 name: "broken_tool".to_string(),
                 input: json!({}),
