@@ -124,6 +124,7 @@ mod inbox_tests;
 mod interaction_items;
 mod items;
 mod kernel_host;
+mod kernel_host_goal;
 mod kernel_host_agent_message;
 mod kernel_host_bridge;
 mod kernel_host_controls;

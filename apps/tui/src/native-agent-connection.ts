@@ -570,6 +570,14 @@ export class NativeAgentConnection implements AgentConnection {
       }
     }
 
+    // Native status notifications carry only identity and status. Preserve the
+    // matching goal's objective and usage, but never inherit a replaced goal.
+    if (method === "session/goal/statusChanged" && !p.goal) {
+      const goalId = p.goalId ?? p.goal_id;
+      if (goalId && goalId === this.goal.goalId) {
+        params = { ...p, goal: { ...this.goal, status: p.status } };
+      }
+    }
     const sourceItem = notificationItemIdentity(method, params);
     for (const ev of nativeNotificationToPiEvents(method, params, this.streamState)) {
       if (ev.type === "compaction_start") {
@@ -654,6 +662,9 @@ export class NativeAgentConnection implements AgentConnection {
         ...projectedSource,
         ...(projectedIds.length ? { missingTextBaseIds: projectedIds.filter(id => !textHydrationState(this.streamState).baseKnown.has(id)) } : {}),
       } : undefined;
+      if (ev.type === "goal_update") {
+        this.goal = (ev.goal ?? emptyGoalState()) as never;
+      }
       this.emitSessionEvent(ev, eventSource);
       if (ev.type === "auto_retry_start") {
         this.retryAttempt = Number((ev as { attempt?: unknown }).attempt ?? 0);
@@ -666,9 +677,6 @@ export class NativeAgentConnection implements AgentConnection {
         this.isBashRunning = false;
         this.activeBashItemId = null;
         this.streamState.userBashUiMounted = false;
-      }
-      if (ev.type === "goal_update") {
-        this.goal = (ev.goal ?? emptyGoalState()) as never;
       }
       if (ev.type === "session_action_update") {
         this.queueRevision += 1;

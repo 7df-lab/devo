@@ -1,0 +1,221 @@
+use std::pin::Pin;
+use std::sync::Arc;
+use std::sync::Mutex;
+use std::sync::atomic::AtomicUsize;
+use std::sync::atomic::Ordering;
+use std::time::Duration;
+
+use anyhow::Context;
+use anyhow::Result;
+use async_trait::async_trait;
+use devo_core::tools::create_default_tool_registry;
+use devo_protocol::ModelRequest;
+use devo_protocol::ModelResponse;
+use devo_protocol::ResponseContent;
+use devo_protocol::ResponseMetadata;
+use devo_protocol::StopReason;
+use devo_protocol::StreamEvent;
+use devo_protocol::Usage;
+use devo_protocol::native::rpc_session::GoalIfExists;
+use devo_provider::ModelProviderSDK;
+use futures::Stream;
+use futures::stream;
+use pretty_assertions::assert_eq;
+use tempfile::TempDir;
+use tokio::sync::Notify;
+use tokio::time::timeout;
+
+#[path = "support/goal_continuation.rs"]
+mod support;
+
+use support::build_runtime_with_registry;
+use support::create_goal;
+use support::initialize_connection;
+use support::read_goal;
+use support::start_session;
+use support::wait_for_captured_request_count;
+
+#[derive(Default)]
+struct ControllingGoalProvider {
+    requests: AtomicUsize,
+    captured_requests: Mutex<Vec<ModelRequest>>,
+    unexpected_request: Notify,
+}
+
+#[async_trait]
+impl ModelProviderSDK for ControllingGoalProvider {
+    async fn completion(&self, _request: ModelRequest) -> Result<ModelResponse> {
+        Ok(text_response("goal-title", "Completed goal"))
+    }
+
+    async fn completion_stream(
+        &self,
+        request: ModelRequest,
+    ) -> Result<Pin<Box<dyn Stream<Item = Result<StreamEvent>> + Send>>> {
+        let request_number = self.requests.fetch_add(1, Ordering::SeqCst) + 1;
+        self.captured_requests
+            .lock()
+            .expect("lock captured requests")
+            .push(request);
+
+        match request_number {
+            1 => {
+                let input = serde_json::json!({ "code": "import goal\nfor action in (goal.pause, goal.resume, goal.cancel):\n    result = await action()\n    assert result['status'] == 'ok', result\nresult = await goal.create('Replacement goal')\nassert result['status'] == 'ok', result\nresult = await goal.pause()\nassert result['status'] == 'ok', result\nprint('goal-controls-finished')" });
+                Ok(Box::pin(stream::iter(vec![
+                    Ok(StreamEvent::ToolCallStart {
+                        index: 0,
+                        id: "control-goal".to_string(),
+                        name: "ipython".to_string(),
+                        input: input.clone(),
+                    }),
+                    Ok(StreamEvent::MessageDone {
+                        response: ModelResponse {
+                            id: "update-goal-response".to_string(),
+                            content: vec![ResponseContent::ToolUse {
+                                id: "control-goal".to_string(),
+                                name: "ipython".to_string(),
+                                input,
+                            }],
+                            stop_reason: Some(StopReason::ToolUse),
+                            usage: Usage::default(),
+                            metadata: ResponseMetadata::default(),
+                        },
+                    }),
+                ])))
+            }
+            2 => Ok(Box::pin(stream::iter(vec![
+                Ok(StreamEvent::TextDelta {
+                    index: 0,
+                    text: "The replacement goal is paused.".to_string(),
+                }),
+                Ok(StreamEvent::MessageDone {
+                    response: text_response("final-response", "The replacement goal is paused."),
+                }),
+            ]))),
+            _ => {
+                self.unexpected_request.notify_one();
+                anyhow::bail!("unexpected provider request {request_number} after goal pause")
+            }
+        }
+    }
+
+    fn name(&self) -> &str {
+        "controlling-goal-provider"
+    }
+}
+
+#[tokio::test]
+async fn python_goal_controls_broadcast_without_aborting_their_own_turn() -> Result<()> {
+    let data_root = TempDir::new()?;
+    let provider = Arc::new(ControllingGoalProvider::default());
+    let runtime = build_runtime_with_registry(
+        data_root.path(),
+        provider.clone(),
+        Arc::new(create_default_tool_registry()),
+    )?;
+    let (connection_id, mut notifications_rx) = initialize_connection(&runtime).await?;
+    let session_id = start_session(&runtime, connection_id, data_root.path()).await?;
+
+    create_goal(
+        &runtime,
+        connection_id,
+        session_id,
+        "exercise the goal controls from Python",
+        /*token_budget*/ None,
+        GoalIfExists::Reject,
+        "goal-python-controls",
+    )
+    .await?;
+
+    // This turn starts a real Python process and performs a host RPC. The
+    // tool-free goal fixture's five-second budget can expire on a busy runner.
+    let mut observed = Vec::new();
+    timeout(Duration::from_secs(/*secs*/ 30), async {
+        while let Some(value) = notifications_rx.recv().await {
+            let completed = value.get("method") == Some(&serde_json::json!("turn/completed"));
+            observed.push(value);
+            if completed {
+                return Ok(());
+            }
+        }
+        anyhow::bail!("notification channel closed before turn/completed")
+    })
+    .await
+    .with_context(|| {
+        format!(
+            "timed out waiting for Python goal completion; provider requests: {}; notifications: {observed:?}",
+            provider.requests.load(Ordering::SeqCst),
+        )
+    })??;
+    wait_for_captured_request_count(&provider.captured_requests, /*expected*/ 2).await?;
+    let mut lifecycle = observed.iter().filter_map(|event| {
+        let params = &event["params"];
+        match event["method"].as_str()? {
+            "session/goal/created" | "session/goal/updated" => params["goal"]["status"].as_str(),
+            "session/goal/statusChanged" => params["status"].as_str(),
+            _ => None,
+        }
+    }).collect::<Vec<_>>();
+    lifecycle.dedup();
+    assert_eq!(lifecycle, vec!["active", "paused", "active", "canceled", "active", "paused"]);
+
+
+    let response = read_goal(&runtime, connection_id, session_id).await?;
+    assert_eq!(
+        response.map(|goal| goal.status),
+        Some(devo_protocol::native::goal::GoalStatus::Paused)
+    );
+
+    {
+        let requests = provider
+            .captured_requests
+            .lock()
+            .expect("lock captured requests");
+        let active_goal_contexts = requests
+            .iter()
+            .map(|request| {
+                request.messages.iter().any(|message| {
+                    message.content.iter().any(|content| {
+                        matches!(content, devo_protocol::RequestContent::Text { text, .. }
+                            if text.contains("Continue working toward the active thread goal."))
+                    })
+                })
+            })
+            .collect::<Vec<_>>();
+        assert_eq!(active_goal_contexts, vec![true, false]);
+        assert!(
+            requests[1].messages.iter().any(|message| {
+                message.content.iter().any(|content| {
+                    matches!(
+                        content,
+                        devo_protocol::RequestContent::ToolResult { content, .. }
+                            if content.contains("goal-controls-finished")
+                    )
+                })
+            }),
+            "the follow-up request should contain the final Python marker"
+        );
+    }
+
+    assert!(
+        timeout(
+            Duration::from_secs(/*secs*/ 1),
+            provider.unexpected_request.notified()
+        )
+        .await
+        .is_err(),
+        "a paused goal must not start another provider request"
+    );
+    assert_eq!(provider.requests.load(Ordering::SeqCst), 2);
+    Ok(())
+}
+
+fn text_response(id: &str, text: &str) -> ModelResponse {
+    ModelResponse {
+        id: id.to_string(),
+        content: vec![ResponseContent::Text(text.to_string())],
+        stop_reason: Some(StopReason::EndTurn),
+        usage: Usage::default(),
+        metadata: ResponseMetadata::default(),
+    }
+}

@@ -2524,3 +2524,35 @@ test("live assistant deltas do not starve an initial snapshot", async () => {
   assert.equal(reads, 1);
   await conn.dispose();
 });
+
+test("live goal notifications preserve details and update subscribers immediately", async () => {
+  const { conn } = await bootConnection();
+  const sessionId = (await conn.getState()).sessionId;
+  const observed: unknown[] = [];
+  const states: Promise<unknown>[] = [];
+  conn.subscribe((event) => {
+    if (event.type === "session_event" && event.event.type === "goal_update") {
+      observed.push(event.event.goal);
+      states.push(conn.getState().then((state) => state.goal));
+    }
+  });
+  const notify = async (method: string, params: unknown) => {
+    conn.pushChunk(`${JSON.stringify({ jsonrpc: "2.0", method, params })}\n`);
+    await new Promise((resolve) => setImmediate(resolve));
+  };
+  await notify("session/goal/created", { goal: {
+    sessionId, id: "g-live", status: "active", objective: "Ship the release",
+    tokensUsed: 42, timeUsedSeconds: 65,
+  } });
+  const initial = (await conn.getState()).goal;
+  assert.equal(initial.objective, "Ship the release");
+  for (const [wire, status, active] of [["paused", "paused", false], ["active", "active", true], ["canceled", "idle", false]] as const) {
+    await notify("session/goal/statusChanged", { sessionId, goalId: "g-live", status: wire });
+    assert.deepEqual((await conn.getState()).goal, { ...initial, status, active });
+  }
+  assert.deepEqual(await Promise.all(states), observed);
+  await notify("session/goal/created", { goal: { sessionId, id: "g-new", status: "active", objective: "New objective" } });
+  await notify("session/goal/cleared", { sessionId, goalId: "g-new" });
+  assert.equal((await conn.getState()).goal.status, "idle");
+  await conn.dispose();
+});

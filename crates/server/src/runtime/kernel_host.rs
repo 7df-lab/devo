@@ -188,6 +188,12 @@ pub async fn dispatch_host_request_with_bridge(bridge: &HostBridge, data: Value)
             };
             runtime.host_goal_create(session_id, &params).await
         }
+        "goal.pause" | "goal.resume" | "goal.cancel" => {
+            let Some(runtime) = bridge.runtime() else {
+                return error_reply("runtime not available for goal transition");
+            };
+            runtime.host_goal_transition(session_id, &action).await
+        }
         "goal.complete" => {
             let Some(runtime) = bridge.runtime() else {
                 return error_reply("runtime not available for goal.complete");

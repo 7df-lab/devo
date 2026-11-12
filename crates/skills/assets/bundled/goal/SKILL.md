@@ -1,6 +1,6 @@
 ---
 name: goal
-description: Manage the persistent thread goal from the Python REPL. Use to read goal status and budget usage, to start a goal when the user explicitly asks for one, or to mark the active goal complete once its objective is fully achieved.
+description: Manage the persistent thread goal from the Python REPL. Use to read goal status and budget usage, to start a goal when the user explicitly asks for one, to pause, resume, or cancel a goal when requested, or to mark the active goal complete once its objective is fully achieved.
 ---
 
 # Goal
@@ -12,7 +12,10 @@ it. Call it directly from the Python REPL:
 
 ```python
 await goal.get()
-await goal.create("ship the release notes", token_budget=200000)
+await goal.create("ship the release notes")
+await goal.pause()
+await goal.resume()
+# If the user cancels the objective: await goal.cancel()
 await goal.complete()
 ```
 
@@ -34,11 +37,20 @@ await goal.complete()
   stopping work. When the result includes a `completion_budget_report`, report
   that final usage to the user.
 
+- `await goal.pause()` — stop automatic pursuit and retain the objective.
+- `await goal.resume()` — resume a paused goal without resetting usage or budget.
+- `await goal.cancel()` — stop pursuing an unwanted goal without claiming success.
+
+These calls return `status: "ok"` and the updated goal, or `status: "error"`
+with an error message. Check the result before announcing success. Pausing or
+canceling from Python lets the current call finish; it prevents further goal
+continuations rather than aborting its own tool execution.
+
 ## Rules
 
-- Goal status transitions other than completion (pause, resume, clear,
-  budget-limiting) are controlled by the user and the host; there is no API for
-  them here.
+- Use pause, resume, and cancel when requested by the user or system/developer
+  instructions. Cancel is not completion; do not report the objective achieved.
+- Clear and budget-limiting remain host-controlled; no Python API exposes them.
 - When an active goal is actually complete, call `await goal.complete()`; do
   not merely say it is done — the harness keeps continuing the goal until the
   completion call arrives.
