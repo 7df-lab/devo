@@ -737,17 +737,28 @@ async fn parse_stdio_json_line(
 #[test]
 fn stdio_fixture_binaries_follow_the_test_profile() -> Result<()> {
     let executable = std::fs::canonicalize(std::env::current_exe()?)?;
+    let target_directory = std::fs::canonicalize(
+        Path::new(env!("CARGO_TARGET_TMPDIR"))
+            .parent()
+            .context("Cargo target directory")?,
+    )?;
+    // Locate the actual profile directory independently of the helper's
+    // executable-layout parser. Cargo creates deps in that directory both for
+    // traditional test binaries and for the reorganized build/.../out layout.
     let expected = executable
-        .parent()
-        .context("test deps directory")?
-        .parent()
-        .context("test profile directory")?
-        .to_path_buf();
+        .ancestors()
+        .find(|directory| {
+            directory.join("deps").is_dir()
+                && directory
+                    .strip_prefix(&target_directory)
+                    .is_ok_and(|relative| matches!(relative.components().count(), 1 | 2))
+        })
+        .context("test profile directory containing Cargo deps")?;
     let mcp = cargo_test_binary::current_binary_path("test_stdio_server")?;
     let devo = cargo_test_binary::current_binary_path("devo")?;
     assert_eq!(
         [mcp.parent(), devo.parent()],
-        [Some(expected.as_path()), Some(expected.as_path())],
+        [Some(expected), Some(expected)],
     );
     Ok(())
 }
