@@ -21,18 +21,25 @@ export function useUpdater() {
 	useEffect(() => {
 		if (!isElectron) return
 
-		// Get current state on mount
-		window.devo
-			.getUpdateState()
-			.then(setState)
-			.catch(() => {})
-
-		// Subscribe to state changes pushed from main process
+		let active = true
+		let receivedUpdate = false
+		// Subscribe first; an in-flight snapshot must not regress a live update.
 		const unsubscribe = window.devo.onUpdateStateChanged((newState) => {
+			if (!active) return
+			receivedUpdate = true
 			setState(newState)
 		})
+		window.devo
+			.getUpdateState()
+			.then((initialState) => {
+				if (active && !receivedUpdate) setState(initialState)
+			})
+			.catch(() => {})
 
-		return unsubscribe
+		return () => {
+			active = false
+			unsubscribe()
+		}
 	}, [])
 
 	const checkForUpdates = useCallback(async () => {
