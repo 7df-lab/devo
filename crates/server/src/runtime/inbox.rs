@@ -91,6 +91,7 @@ impl ServerRuntime {
             claimed
         };
         drop(guard);
+        let claimed_ids: Vec<_> = claimed.iter().map(|item| item.id).collect();
         for item in claimed {
             let content = match &item.kind {
                 devo_protocol::PendingInputKind::UserText { text } => {
@@ -152,6 +153,20 @@ impl ServerRuntime {
                 Some(turn_id),
             )
             .await;
+        }
+        // The active child turn now owns this prefix. Its own work ticket
+        // remains pending until terminalization; queued-turn tickets must not
+        // keep collect/parent goals waiting after same-turn steering is consumed.
+        // Settle only after the whole prefix persists, so failure recovery above
+        // can retain its held queue entries and their tickets together.
+        if let Some(parent) = reservation.summary.parent_session_id() {
+            for id in claimed_ids {
+                self.complete_background_work(
+                    parent,
+                    format!("agent:{session_id}:queued:{id}"),
+                    String::new(),
+                );
+            }
         }
         Ok(())
     }

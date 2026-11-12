@@ -21,7 +21,12 @@ async def send(
     receiver_role: ReceiverRole | str | None = None,
     receiver_name: str | None = None,
 ) -> dict[str, Any]:
-    """Send one direct role-addressed message or broadcast to ``"all"``."""
+    """Queue a self steer or a family follow-up, preserving strict inbox FIFO.
+
+    Self steering runs at a safe boundary, never interrupts active work, and
+    cannot overtake earlier follow-up or held input. Receipts mean admission,
+    not that the model has processed the message.
+    """
     roles = ("parent", "sibling", "child", "self")
     if broadcast_message is not None:
         if message != "all":

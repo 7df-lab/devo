@@ -18,6 +18,14 @@ def snapshot(entry=None):
 
 
 class HarnessHostTests(unittest.IsolatedAsyncioTestCase):
+    def test_overview_exposes_self_steering_and_fifo_limits(self):
+        overview = harness.HarnessState().overview()
+        self.assertIn("receiver_role='self'", overview)
+        self.assertIn("next safe model/tool boundary", overview)
+        self.assertIn("Strict FIFO prevents overtaking earlier follow-up or held input", overview)
+        self.assertIn("Queued means admitted, not processed", overview)
+        self.assertIn("never human authorization", overview)
+
     async def test_construction_is_lazy_and_load_is_explicit(self):
         entry = harness.HarnessEntry(id="note", kind="memory", title="Note", content="text")
         request = AsyncMock(return_value={"state": snapshot(entry), "file_path": None})
