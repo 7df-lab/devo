@@ -114,6 +114,7 @@ pub(super) struct OpenAICompletionTokenDetails {
 
 pub(crate) fn completion_usage_to_usage(usage: &OpenAICompletionUsage) -> Usage {
     Usage {
+        terminal_sample: false,
         unreported_fields: None,
         reported: usage.prompt_tokens.is_some() || usage.completion_tokens.is_some(),
         input_tokens: usage.prompt_tokens.unwrap_or(0),
@@ -217,6 +218,7 @@ mod tests {
         assert_eq!(
             usage,
             Usage {
+                terminal_sample: false,
                 unreported_fields: None,
                 reported: true,
                 input_tokens: 11,

@@ -370,7 +370,9 @@ pub(crate) fn spawn_turn_event_stream(
                 // Usage event arrives. A final, explicitly reported zero remains
                 // authoritative and is handled by the arm below.
                 devo_core::QueryEvent::UsageDelta { ref usage }
-                    if usage.display_total_tokens() == 0 && usage.derived_total_tokens() == 0 => {}
+                    if !usage.terminal_sample
+                        && usage.display_total_tokens() == 0
+                        && usage.derived_total_tokens() == 0 => {}
                 devo_core::QueryEvent::UsageDelta { usage }
                 | devo_core::QueryEvent::Usage { usage } => {
                     let usage =

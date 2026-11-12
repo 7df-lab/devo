@@ -336,6 +336,7 @@ mod tests {
     #[test]
     fn turn_usage_from_usage_preserves_provider_total_breakdown() {
         let usage = Usage {
+            terminal_sample: false,
             unreported_fields: None,
             reported: true,
             input_tokens: 10,

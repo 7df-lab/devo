@@ -33,6 +33,10 @@ pub enum ResponseContent {
 /// again when deriving totals.
 #[derive(Debug, Clone, Default, PartialEq, Eq, Serialize, Deserialize)]
 pub struct Usage {
+    /// In-process provenance for a sample emitted by an explicit terminal
+    /// provider event (including failures). Never accepted from serialized data.
+    #[serde(skip)]
+    pub terminal_sample: bool,
     /// Missing counters. `None` means a legacy sample with unknown coverage.
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub unreported_fields: Option<Vec<crate::native::usage::UsageField>>,
@@ -61,6 +65,24 @@ pub struct Usage {
 }
 
 impl Usage {
+    pub fn into_terminal_sample(mut self) -> Self {
+        self.terminal_sample = true;
+        self
+    }
+
+    /// A zero in a progress sample can be a placeholder. Explicit terminal
+    /// zero and any meaningful partial counters remain valid measurements.
+    pub fn is_trusted_stream_sample(&self) -> bool {
+        self.is_reported()
+            && (self.terminal_sample
+                || self.input_tokens > 0
+                || self.output_tokens > 0
+                || self.total_tokens.unwrap_or(0) > 0
+                || self.cache_read_input_tokens.unwrap_or(0) > 0
+                || self.cache_creation_input_tokens.unwrap_or(0) > 0
+                || self.reasoning_output_tokens.unwrap_or(0) > 0)
+    }
+
     /// Distinguishes an actual reported zero from a missing usage sample.
     /// Nonzero and optional legacy counters retain their previous meaning.
     pub fn is_reported(&self) -> bool {
@@ -205,6 +227,38 @@ pub enum StreamEvent {
 
 #[cfg(test)]
 mod tests {
+    #[test]
+    fn terminal_sample_provenance_is_internal_and_preserves_real_zero() {
+        let zero = super::Usage {
+            reported: true,
+            ..super::Usage::default()
+        };
+        assert!(!zero.is_trusted_stream_sample());
+        let terminal = zero.into_terminal_sample();
+        assert!(terminal.is_trusted_stream_sample());
+        let mut json = serde_json::to_value(&terminal).unwrap();
+        assert!(json.get("terminal_sample").is_none());
+        json["terminal_sample"] = serde_json::json!(true);
+        let restored: super::Usage = serde_json::from_value(json).unwrap();
+        assert!(!restored.terminal_sample);
+        for partial in [
+            super::Usage {
+                cache_read_input_tokens: Some(1),
+                ..super::Usage::default()
+            },
+            super::Usage {
+                cache_creation_input_tokens: Some(1),
+                ..super::Usage::default()
+            },
+            super::Usage {
+                reasoning_output_tokens: Some(1),
+                ..super::Usage::default()
+            },
+        ] {
+            assert!(partial.is_trusted_stream_sample());
+        }
+    }
+
     use pretty_assertions::assert_eq;
     use serde_json::json;
 
@@ -263,6 +317,7 @@ mod tests {
     #[test]
     fn usage_totals_follow_conservative_accounting() {
         let usage = Usage {
+            terminal_sample: false,
             unreported_fields: None,
             reported: true,
             input_tokens: 100,
@@ -287,6 +342,7 @@ mod tests {
     #[test]
     fn usage_serde_skips_none_optional_usage_fields() {
         let usage = Usage {
+            terminal_sample: false,
             unreported_fields: None,
             reported: true,
             input_tokens: 100,
@@ -314,6 +370,7 @@ mod tests {
         assert_eq!(
             usage,
             Usage {
+                terminal_sample: false,
                 unreported_fields: None,
                 reported: false,
                 input_tokens: 100,
@@ -349,6 +406,7 @@ mod tests {
             content: vec![ResponseContent::Text("hello".into())],
             stop_reason: Some(StopReason::EndTurn),
             usage: Usage {
+                terminal_sample: false,
                 unreported_fields: None,
                 reported: true,
                 input_tokens: 10,

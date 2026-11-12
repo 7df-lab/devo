@@ -49,6 +49,7 @@ fn usage_record_is_appended_to_the_session_rollout() {
         extra_body: None,
     };
     let usage = Usage {
+        terminal_sample: false,
         unreported_fields: None,
         reported: true,
         input_tokens: 10,

@@ -122,6 +122,7 @@ fn concurrent_attempts_replay_exactly_once_with_provider_totals_and_cache_subset
                     session,
                     turn,
                     Usage {
+                        terminal_sample: false,
                         unreported_fields: Some(Vec::new()),
                         reported: true,
                         input_tokens: 100,

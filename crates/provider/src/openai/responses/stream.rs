@@ -90,7 +90,7 @@ pub(super) fn decode_response_stream(
                         .and_then(parse_usage)
                         .or_else(|| chunk.pointer("/response/usage").and_then(parse_usage))
                     {
-                        yield StreamEvent::UsageDelta(reported_usage);
+                        yield StreamEvent::UsageDelta(reported_usage.into_terminal_sample());
                     }
                     Err(error)?;
                 }
@@ -475,7 +475,7 @@ pub(super) fn decode_response_stream(
                                 Ok(response) => response,
                                 Err(error) => {
                                     if let Some(reported_usage) = chunk.pointer("/response/usage").and_then(parse_usage) {
-                                        yield StreamEvent::UsageDelta(reported_usage);
+                                        yield StreamEvent::UsageDelta(reported_usage.into_terminal_sample());
                                     }
                                     Err(error)?
                                 }

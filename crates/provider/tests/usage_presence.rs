@@ -249,6 +249,7 @@ async fn failed_responses_emit_reported_usage_before_the_error() {
         StreamEvent::UsageDelta(
             Usage {
                 reported: true,
+                terminal_sample: true,
                 input_tokens: 7,
                 output_tokens: 2,
                 ..Usage::default()
@@ -448,6 +449,7 @@ async fn completion_observer_preserves_usage_when_responses_fails() {
         vec![
             Usage {
                 reported: true,
+                terminal_sample: true,
                 input_tokens: 7,
                 output_tokens: 2,
                 ..Usage::default()
@@ -624,6 +626,7 @@ async fn routed_completion_observer_preserves_failed_responses_usage() {
             vec![
                 Usage {
                     reported: true,
+                    terminal_sample: true,
                     input_tokens: 7,
                     output_tokens: 2,
                     ..Usage::default()

@@ -59,6 +59,7 @@ impl UsageReplyProvider {
 
     fn usage(&self) -> Usage {
         Usage {
+            terminal_sample: false,
             unreported_fields: None,
             reported: true,
             input_tokens: self.input_tokens,
@@ -1367,6 +1368,7 @@ impl AutoCompactTestProvider {
 
     fn usage(&self) -> Usage {
         Usage {
+            terminal_sample: false,
             unreported_fields: None,
             reported: true,
             input_tokens: self.input_tokens,
