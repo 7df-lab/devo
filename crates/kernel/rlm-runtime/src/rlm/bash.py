@@ -32,6 +32,7 @@ class BashHandle:
         self.command = command
         self._handle_id: str | None = None
         self._output = ""
+        self._tail = ""
         self._result: BashResult | None = None
         self._terminal = False
         self._error: Exception | None = None
@@ -85,8 +86,9 @@ class BashHandle:
         return self._output
 
     def tail(self, n: int = 50) -> str:
-        output = self.output()
-        return "\n".join(output.splitlines()[-n:]) if n > 0 else ""
+        self._released = True
+        self._note_consumed()
+        return "\n".join(self._tail.splitlines()[-n:]) if n > 0 else ""
 
     def kill(self) -> None:
         """Schedule host cancellation, including when start/approval is pending.
@@ -122,6 +124,8 @@ class BashHandle:
             raise RuntimeError("bash host changed the command handle")
         self._handle_id = handle_id
         self._output = output
+        tail = snapshot.get("tail")
+        self._tail = tail if isinstance(tail, str) and tail else output
         self._terminal = not running
         if not running:
             code, duration = snapshot.get("exit_code"), snapshot.get("duration")

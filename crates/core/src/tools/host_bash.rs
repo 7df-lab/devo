@@ -13,7 +13,11 @@ use super::{
 };
 
 mod activity;
+mod tail;
+#[cfg(all(test, unix))]
+mod tail_tests;
 pub use activity::{HostBashActivity, activity_snapshot, session_activities};
+pub use tail::OutputTail;
 
 const MAX_HANDLES: usize = 256;
 const MAX_SESSION_HANDLES: usize = 32;
@@ -41,7 +45,7 @@ pub async fn execute(
         ));
     }
     let outcome = ShellCommandHandler::new()
-        .execute(ctx.clone(), input.clone(), progress.clone(), mode)
+        .execute(ctx.clone(), input.clone(), progress.clone(), mode.clone())
         .await;
     let denied = outcome.as_ref().is_ok_and(|output| {
         let text = match &output.content {
@@ -76,6 +80,7 @@ struct Entry {
     started: Instant,
     finished: Option<Instant>,
     output: String,
+    tail: OutputTail,
     output_truncated: bool,
     exit_code: Option<i64>,
     error: Option<String>,
@@ -170,6 +175,7 @@ pub fn start(
         started: Instant::now(),
         finished: None,
         output: String::new(),
+        tail: OutputTail::default(),
         output_truncated: false,
         exit_code: None,
         error: None,
@@ -238,7 +244,9 @@ pub fn start(
                 input,
                 retry,
                 Some(sender),
-                ShellExecutionMode::HostBackground,
+                ShellExecutionMode::HostBackground {
+                    tail: task_entry.lock().unwrap().tail.clone(),
+                },
             );
             tokio::pin!(execution);
             if let Some(lifetime) = kernel_lifetime {
@@ -319,7 +327,13 @@ pub fn control(session_id: &str, action: &str, params: &Value) -> Value {
         return error("unknown bash handle");
     }
     match action {
-        "bash.poll" => state.snapshot(id),
+        "bash.poll" => {
+            // Recent bytes are a polling view, not duplicate transcript content
+            // in the completion notification sent to the owning agent.
+            let mut snapshot = state.snapshot(id);
+            snapshot["result"]["tail"] = json!(state.tail.snapshot(MAX_OUTPUT_BYTES));
+            snapshot
+        }
         "bash.kill" => {
             state.cancel.cancel();
             state.snapshot(id)
@@ -372,6 +386,7 @@ mod tests {
             started: Instant::now(),
             finished: None,
             output: "x".repeat(MAX_OUTPUT_BYTES - 1),
+            tail: OutputTail::default(),
             output_truncated: false,
             exit_code: None,
             error: None,
@@ -493,6 +508,7 @@ mod tests {
                 started: Instant::now(),
                 finished: None,
                 output: String::new(),
+                tail: OutputTail::default(),
                 output_truncated: false,
                 exit_code: None,
                 error: None,

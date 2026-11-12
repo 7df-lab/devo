@@ -13,10 +13,12 @@ use crate::tool_handler::ToolHandler;
 use crate::tool_spec::ToolSpec;
 
 /// Execution defaults chosen by the trusted caller, never by model input.
-#[derive(Clone, Copy)]
+#[derive(Clone)]
 pub enum ShellExecutionMode {
     Foreground,
-    HostBackground,
+    HostBackground {
+        tail: crate::tools::host_bash::OutputTail,
+    },
 }
 
 /// Tool adapter for `shell_command` (and the legacy `bash` alias).
@@ -82,9 +84,9 @@ impl ShellCommandHandler {
         let timeout_ms = input["timeout"]
             .as_u64()
             .or_else(|| input["timeout_ms"].as_u64())
-            .unwrap_or(match mode {
+            .unwrap_or(match &mode {
                 ShellExecutionMode::Foreground => DEFAULT_TIMEOUT_MS,
-                ShellExecutionMode::HostBackground => crate::shell_exec::NO_TIMEOUT_MS,
+                ShellExecutionMode::HostBackground { .. } => crate::shell_exec::NO_TIMEOUT_MS,
             });
         let requested = match requested_workdir(&input) {
             Ok(requested) => requested,
@@ -138,9 +140,13 @@ impl ShellCommandHandler {
             timeout_ms,
             yield_time_ms,
             max_output_tokens,
+            output_tail: match &mode {
+                ShellExecutionMode::Foreground => None,
+                ShellExecutionMode::HostBackground { tail } => Some(tail.clone()),
+            },
             progress_limit_bytes: match mode {
                 ShellExecutionMode::Foreground => None,
-                ShellExecutionMode::HostBackground => Some(256 * 1024),
+                ShellExecutionMode::HostBackground { .. } => Some(256 * 1024),
             },
             sandbox_profile: ctx.sandbox_profile.clone(),
             sandbox_permission_overlay: crate::tools::sandbox_overlay_for_spawn(
