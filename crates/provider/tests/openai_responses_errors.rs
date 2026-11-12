@@ -589,26 +589,31 @@ async fn completed_items_preserve_final_reasoning_and_tool_arguments() {
 
 #[tokio::test]
 async fn truncated_function_arguments_cannot_become_empty_inputs() {
-    let events = collect_events([
-        json!({"type":"response.output_item.added", "output_index":0, "item":{
-            "type":"function_call", "id":"fc_1", "call_id":"call_1", "name":"lookup", "arguments":""
-        }}),
-        json!({"type":"response.function_call_arguments.delta", "item_id":"fc_1", "delta":"{"}),
-        json!({"type":"response.completed", "response":{"id":"resp_1", "status":"completed", "output":[], "usage":{"input_tokens":7,"output_tokens":3}}}),
-    ].iter().map(|event| format!("data: {event}\n\n")).collect()).await;
-    assert!(events.iter().any(
-        |event| matches!(event, Ok(StreamEvent::UsageDelta(usage)) if usage.output_tokens == 3 && usage.input_tokens == 7)
-    ));
-    assert_eq!(
-        events.last().unwrap().as_ref().unwrap_err()["error_kind"],
-        json!("invalid_request_error")
-    );
-    assert!(events.last().is_some_and(Result::is_err));
-    assert!(
-        !events
-            .iter()
-            .any(|event| matches!(event, Ok(StreamEvent::MessageDone { .. })))
-    );
+    for output in [
+        json!([]),
+        json!([{"type":"message","content":[{"type":"output_text","text":"done"}]}]),
+    ] {
+        let events = collect_events([
+            json!({"type":"response.output_item.added", "output_index":0, "item":{
+                "type":"function_call", "id":"fc_1", "call_id":"call_1", "name":"lookup", "arguments":""
+            }}),
+            json!({"type":"response.function_call_arguments.delta", "item_id":"fc_1", "delta":"{"}),
+            json!({"type":"response.completed", "response":{"id":"resp_1", "status":"completed", "output":output, "usage":{"input_tokens":7,"output_tokens":3}}}),
+        ].iter().map(|event| format!("data: {event}\n\n")).collect()).await;
+        assert!(events.iter().any(
+            |event| matches!(event, Ok(StreamEvent::UsageDelta(usage)) if usage.output_tokens == 3 && usage.input_tokens == 7)
+        ));
+        assert_eq!(
+            events.last().unwrap().as_ref().unwrap_err()["error_kind"],
+            json!("invalid_request_error")
+        );
+        assert!(events.last().is_some_and(Result::is_err));
+        assert!(
+            !events
+                .iter()
+                .any(|event| matches!(event, Ok(StreamEvent::MessageDone { .. })))
+        );
+    }
 }
 
 async fn collect_events(body: String) -> Vec<Result<StreamEvent, Value>> {

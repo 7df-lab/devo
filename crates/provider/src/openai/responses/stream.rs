@@ -14,6 +14,7 @@ use std::{
 
 use super::response::{
     function_call_arguments_json, parse_output_item, parse_response, parse_usage,
+    validate_arguments_json,
 };
 use super::stream_tools::{
     ResponsesStreamHostedToolCall, ResponsesStreamToolCall, responses_stream_tool_content,
@@ -458,6 +459,16 @@ pub(super) fn decode_response_stream(
                                     },
                                 }
                             };
+                            // The consumer retains streamed tool calls even when a
+                            // terminal envelope contains only text. Validate those
+                            // calls independently from response-content fallback.
+                            for call in tool_calls.values() {
+                                if !response.content.iter().any(|item| matches!(item,
+                                    ResponseContent::ToolUse { id, .. } if id == &call.id))
+                                {
+                                    validate_arguments_json(&call.arguments_json)?;
+                                }
+                            }
                             Ok(response)
                             })();
                             let response = match result {
