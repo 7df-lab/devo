@@ -46,8 +46,12 @@ Config/auth: `DEVO_CODING_AGENT_DIR` / `PRIME_AGENT_CODING_AGENT_DIR` → `~/.de
 
 Web search, web fetch, and other provider-hosted tools use the same call/result
 lifecycle in live turns and restored history. Queries and URLs are refreshed
-when the provider supplies final arguments. Collapsed rows show a bounded result
-preview, including failures, rather than hiding web search output behind a status.
+when the provider supplies final arguments. Web search and fetch use Python-style compact rows: a status marker, muted tool
+name, query or URL, and bounded result preview, including failures. They do not
+use the generic boxed tool panel. When a long query or URL fills the row, the
+result or failure preview gets its own bounded line so it remains visible.
+Expanded rows retain the same header and show
+full arguments and readable results beneath it.
 Ctrl+O expands result details: search titles, URLs and snippets, or fetched page
 text. Expanded output is capped to keep large provider responses manageable.
 
