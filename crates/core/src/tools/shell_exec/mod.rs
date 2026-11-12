@@ -14,6 +14,8 @@ mod resolve;
 
 #[cfg(test)]
 mod pipe_cancellation_tests;
+#[cfg(all(test, unix))]
+mod tail_tests;
 #[cfg(test)]
 mod tests;
 
@@ -143,6 +145,7 @@ pub(crate) struct ShellExecRequest {
     pub max_output_tokens: usize,
     /// Optional bound on live progress bytes per stream; final capture is independent.
     pub progress_limit_bytes: Option<usize>,
+    pub output_tail: Option<crate::tools::host_bash::OutputTail>,
     pub sandbox_profile: Option<String>,
     pub sandbox_permission_overlay: Option<devo_sandbox::SandboxPermissionOverlay>,
 }
@@ -169,6 +172,7 @@ pub(crate) async fn execute_shell_command(
         yield_time_ms,
         max_output_tokens,
         progress_limit_bytes,
+        output_tail,
         sandbox_profile,
         sandbox_permission_overlay,
     } = request;
@@ -194,6 +198,7 @@ pub(crate) async fn execute_shell_command(
         yield_time_ms,
         max_output_tokens,
         progress_limit_bytes,
+        output_tail,
         sandbox_profile,
         sandbox_permission_overlay,
     };

@@ -38,6 +38,7 @@ pub(crate) async fn run_with_pipes(
         yield_time_ms,
         max_output_tokens,
         progress_limit_bytes,
+        output_tail,
         sandbox_profile,
         sandbox_permission_overlay,
     } = run;
@@ -96,12 +97,14 @@ pub(crate) async fn run_with_pipes(
         progress.clone(),
         progress_limit_bytes,
         output_capture.clone(),
+        output_tail.clone(),
     );
     let stderr_task = spawn_stream_reader(
         child.0.stderr().take(),
         progress,
         progress_limit_bytes,
         output_capture.clone(),
+        output_tail.clone(),
     );
 
     enum WaitOutcome {
@@ -207,6 +210,7 @@ fn spawn_stream_reader<R>(
     progress: Option<ToolProgressSender>,
     progress_limit_bytes: Option<usize>,
     output_capture: Option<Result<devo_tools::output_store::SharedOutputCapture, String>>,
+    output_tail: Option<crate::tools::host_bash::OutputTail>,
 ) -> tokio::task::JoinHandle<Vec<u8>>
 where
     R: AsyncReadExt + Unpin + Send + 'static,
@@ -221,6 +225,9 @@ where
             match pipe.read(&mut chunk).await {
                 Ok(0) => break,
                 Ok(n) => {
+                    if let Some(tail) = &output_tail {
+                        tail.append(&chunk[..n]);
+                    }
                     if let Some(ref sender) = progress
                         && progress_limit_bytes.is_none_or(|limit| buffer.len() < limit)
                     {

@@ -130,9 +130,14 @@ async fn success_and_failure_publish_retained_terminal_snapshot() {
             .unwrap()
             .unwrap();
         let retained = control(session_id.as_str(), "bash.poll", &json!({"handle_id": id}));
+        let mut notification_snapshot = retained.clone();
+        notification_snapshot["result"]
+            .as_object_mut()
+            .unwrap()
+            .remove("tail");
         assert_eq!(
             completed,
-            WorkEvent::Completed(session_id, work_id, retained.clone())
+            WorkEvent::Completed(session_id, work_id, notification_snapshot)
         );
         assert_eq!(retained["result"]["running"], false);
         // Native task/list observations survive Python's automatic forget.

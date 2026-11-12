@@ -90,6 +90,7 @@ pub(crate) async fn run_with_pty(
         yield_time_ms,
         max_output_tokens,
         progress_limit_bytes: _,
+        output_tail: _,
         sandbox_profile,
         sandbox_permission_overlay,
     } = run;

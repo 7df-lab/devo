@@ -37,6 +37,7 @@ impl HostBashActivity {
             .finished
             .unwrap_or_else(Instant::now)
             .duration_since(entry.started);
+        let tail = entry.tail.snapshot(OUTPUT_LIMIT);
         Self {
             handle_id: handle_id.to_owned(),
             session_id: entry.session_id.clone(),
@@ -49,7 +50,11 @@ impl HostBashActivity {
             running: entry.finished.is_none(),
             exit_code: entry.exit_code,
             error: entry.error.as_deref().map(bounded_tail),
-            output: bounded_tail(&entry.output),
+            output: bounded_tail(if tail.is_empty() || entry.error.is_some() {
+                &entry.output
+            } else {
+                &tail
+            }),
         }
     }
 }

@@ -40,6 +40,19 @@ class HostBashTests(unittest.IsolatedAsyncioTestCase):
                                  ("bash.poll", {"handle_id": "host-opaque-1"}),
                                  ("bash.forget", {"handle_id": "host-opaque-1"})])
 
+    async def test_tail_uses_recent_bytes_without_replacing_final_diagnostics(self):
+        async def host(kind, payload):
+            data = snapshot(False, "formatted final output", 0)
+            data["tail"] = "recent line 1\nrecent line 2\n"
+            return data
+        with patch.object(rlm, "host_request", host):
+            handle = rlm.bash("long output")
+            result = await handle
+            self.assertEqual(result.output, "formatted final output")
+            self.assertEqual(handle.output(), "formatted final output")
+            self.assertEqual(handle.tail(1), "recent line 2")
+            self.assertEqual(handle.tail(0), "")
+
     async def test_authorization_arguments(self):
         calls = []
         async def host(kind, payload):

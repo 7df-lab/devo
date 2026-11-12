@@ -18,6 +18,7 @@ fn insert_entry(session: &str, id: &str) -> Arc<Mutex<Entry>> {
         started: Instant::now(),
         finished: None,
         output: String::new(),
+        tail: crate::tools::host_bash::OutputTail::default(),
         output_truncated: false,
         exit_code: None,
         error: None,
@@ -75,10 +76,12 @@ fn activity_output_is_utf8_bounded_and_preserves_errors() {
         let mut entry = entry.lock().unwrap();
         entry.finished = Some(Instant::now());
         entry.output = "中".repeat(OUTPUT_LIMIT);
+        entry.tail.append(b"raw process output without diagnostics");
         entry.error = Some("failed".into());
     }
     let result = activity_snapshot(&id).unwrap();
     assert!(result.output.len() <= OUTPUT_LIMIT);
+    assert_eq!(result.output, "中".repeat(OUTPUT_LIMIT / 3));
     assert_eq!(
         (result.running, result.exit_code, result.error),
         (false, None, Some("failed".into()))
@@ -104,5 +107,19 @@ fn expired_completed_observations_are_not_returned() {
     );
     assert_eq!(session_activities(&session), vec![]);
     assert_eq!(activity_snapshot(&id), None);
+    cancel_session(&session);
+}
+
+#[test]
+fn activity_uses_recent_tail_for_successful_output() {
+    let session = Uuid::new_v4().to_string();
+    let id = Uuid::new_v4().to_string();
+    let entry = insert_entry(&session, &id);
+    {
+        let mut entry = entry.lock().unwrap();
+        entry.output = "stale prefix".into();
+        entry.tail.append(b"latest output");
+    }
+    assert_eq!(activity_snapshot(&id).unwrap().output, "latest output");
     cancel_session(&session);
 }
