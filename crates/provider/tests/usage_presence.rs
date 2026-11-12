@@ -81,8 +81,9 @@ impl Family {
             ),
             (Self::Anthropic, Mode::Stream) => (
                 format!(
-                    "event: message_start\ndata: {}\n\nevent: message_stop\ndata: {{}}\n\n",
-                    json!({"message": response})
+                    "event: message_start\ndata: {}\n\nevent: message_delta\ndata: {}\n\nevent: message_stop\ndata: {{}}\n\n",
+                    json!({"message": response}),
+                    json!({"usage": response.get("usage")})
                 ),
                 "text/event-stream",
             ),
@@ -141,7 +142,13 @@ async fn all_providers_distinguish_missing_placeholders_and_reported_zero() {
                         // other adapters also emit the normalized UsageDelta.
                         let expected_samples =
                             if expected.is_reported() && !matches!(family, Family::Responses) {
-                                vec![expected]
+                                if matches!(family, Family::Anthropic) {
+                                    vec![expected.clone(), expected.into_terminal_sample()]
+                                } else if matches!(family, Family::Chat) {
+                                    vec![expected.into_terminal_sample()]
+                                } else {
+                                    vec![expected]
+                                }
                             } else {
                                 Vec::new()
                             };
@@ -157,7 +164,10 @@ async fn all_providers_distinguish_missing_placeholders_and_reported_zero() {
 #[tokio::test]
 async fn streaming_placeholders_do_not_erase_a_reported_sample() {
     for family in [Family::Chat, Family::Responses, Family::Anthropic] {
-        let reported = family.zero();
+        let reported = match family {
+            Family::Chat => json!({"prompt_tokens": 7, "completion_tokens": 2}),
+            _ => json!({"input_tokens": 7, "output_tokens": 2}),
+        };
         let body = match family {
             Family::Chat => format!(
                 "data: {}\n\ndata: {{\"usage\":{{}}}}\n\ndata: [DONE]\n\n",
@@ -187,13 +197,20 @@ async fn streaming_placeholders_do_not_erase_a_reported_sample() {
         }
         let expected = Usage {
             reported: true,
+            input_tokens: 7,
+            output_tokens: 2,
             ..Usage::default()
         }
         .with_field_coverage(
             /*input_tokens*/ Some(0),
             /*output_tokens*/ Some(0),
         );
-        assert_eq!(usage_events, vec![expected.clone(), expected], "{family:?}");
+        let delta = if matches!(family, Family::Anthropic) {
+            expected.clone()
+        } else {
+            expected.clone().into_terminal_sample()
+        };
+        assert_eq!(usage_events, vec![delta, expected], "{family:?}");
         server.await.expect("server task");
     }
 }
@@ -419,7 +436,7 @@ async fn anthropic_stream_fills_primary_coverage_without_erasing_start_fields() 
             UsageField::CacheCreationInputTokens
         ])
     );
-    assert_eq!(samples[1], samples[2]);
+    assert_eq!(samples[1], samples[2].clone().into_terminal_sample());
     server.await.unwrap();
 }
 
@@ -485,6 +502,7 @@ async fn completion_observer_reports_each_responses_sample_and_final_snapshot() 
         .map(|output_tokens| {
             Usage {
                 reported: true,
+                terminal_sample: output_tokens == 1,
                 input_tokens: 7,
                 output_tokens,
                 ..Usage::default()
@@ -638,6 +656,184 @@ async fn routed_completion_observer_preserves_failed_responses_usage() {
             ],
             "{routing:?}"
         );
+        server.await.unwrap();
+    }
+}
+
+async fn initial_zero_without_terminal_usage(family: Family, explicit_final_zero: bool) {
+    let zero = family.zero();
+    let body = match family {
+        Family::Chat => format!(
+            "data: {}\n\ndata: {}\n\ndata: [DONE]\n\n",
+            json!({"id":"initial-zero","choices":[{"index":0,"delta":{"role":"assistant"},"finish_reason":null}],"usage":zero}),
+            json!({"id":"initial-zero","choices":[{"index":0,"delta":{"content":"hello"},"finish_reason":"stop"}]}),
+        ),
+        Family::Responses => format!(
+            "event: response.in_progress\ndata: {}\n\nevent: response.completed\ndata: {}\n\n",
+            json!({"type":"response.in_progress","usage":zero,"response":{"id":"initial-zero","status":"in_progress"}}),
+            json!({"response":{"id":"initial-zero","status":"completed","output":[]}}),
+        ),
+        Family::Anthropic => format!(
+            "event: message_start\ndata: {}\n\nevent: message_delta\ndata: {}\n\nevent: message_stop\ndata: {{}}\n\n",
+            json!({"message":{"id":"initial-zero","content":[],"stop_reason":null,"usage":zero}}),
+            json!({"delta":{"stop_reason":"end_turn"}}),
+        ),
+        Family::Google => unreachable!(),
+    };
+    let body = if explicit_final_zero {
+        match family {
+            Family::Chat => body.replace(
+                "data: [DONE]",
+                &format!(
+                    "data: {}\n\ndata: [DONE]",
+                    json!({"choices":[],"usage":family.zero()})
+                ),
+            ),
+            Family::Responses => body.replace(
+                "\"status\":\"completed\"",
+                &format!("\"status\":\"completed\",\"usage\":{}", family.zero()),
+            ),
+            Family::Anthropic => body.replace(
+                "event: message_stop",
+                &format!(
+                    "event: message_delta\ndata: {}\n\nevent: message_stop",
+                    json!({"usage":family.zero()})
+                ),
+            ),
+            Family::Google => unreachable!(),
+        }
+    } else {
+        body
+    };
+    let (url, server) = serve(body, "text/event-stream").await;
+    let provider = family.provider(url);
+    let mut stream = provider.completion_stream(request()).await.expect("stream");
+    let mut done = None;
+    while let Some(event) = stream.next().await {
+        if let StreamEvent::MessageDone { response } = event.expect("event") {
+            done = Some(response.usage);
+        }
+    }
+    if explicit_final_zero {
+        let usage = done.expect("final usage");
+        assert!(
+            usage.is_reported(),
+            "{family:?}: explicit final zero is authoritative"
+        );
+        assert_eq!(usage.display_total_tokens(), 0);
+    } else {
+        assert_eq!(
+            done,
+            Some(Usage::default()),
+            "{family:?}: initial zero is not a terminal measurement"
+        );
+    }
+    server.await.expect("server");
+}
+
+#[tokio::test]
+async fn chat_initial_zero_without_terminal_usage_is_unknown() {
+    initial_zero_without_terminal_usage(Family::Chat, false).await;
+}
+#[tokio::test]
+async fn responses_initial_zero_without_terminal_usage_is_unknown() {
+    initial_zero_without_terminal_usage(Family::Responses, false).await;
+}
+#[tokio::test]
+async fn anthropic_initial_zero_without_terminal_usage_is_unknown() {
+    initial_zero_without_terminal_usage(Family::Anthropic, false).await;
+}
+
+#[tokio::test]
+async fn explicit_terminal_zero_after_initial_placeholder_remains_reported() {
+    for family in [Family::Chat, Family::Responses, Family::Anthropic] {
+        initial_zero_without_terminal_usage(family, true).await;
+    }
+}
+
+#[tokio::test]
+async fn terminal_zero_remains_authoritative_when_a_later_event_is_malformed() {
+    for family in [Family::Chat, Family::Responses, Family::Anthropic] {
+        let positive = match family {
+            Family::Chat => json!({"prompt_tokens":7,"completion_tokens":2}),
+            _ => json!({"input_tokens":7,"output_tokens":2}),
+        };
+        let body = match family {
+            Family::Chat => format!(
+                "data: {}\n\ndata: {}\n\ndata: invalid-json\n\n",
+                json!({"choices":[{"index":0,"delta":{"role":"assistant"}}],"usage":positive}),
+                json!({"choices":[],"usage":family.zero()})
+            ),
+            Family::Anthropic => format!(
+                "event: message_start\ndata: {}\n\nevent: message_delta\ndata: {}\n\nevent: content_block_delta\ndata: invalid-json\n\n",
+                json!({"message":{"id":"m","usage":positive}}),
+                json!({"usage":family.zero()})
+            ),
+            Family::Responses => format!(
+                "event: response.in_progress\ndata: {}\n\nevent: response.completed\ndata: {}\n\n",
+                json!({"usage":positive}),
+                json!({"usage":family.zero(),"response":{"status":"completed","output":[{"type":"function_call","name":"python","arguments":"not-json","call_id":"bad"}]}})
+            ),
+            Family::Google => unreachable!(),
+        };
+        let (url, server) = serve(body, "text/event-stream").await;
+        let mut stream = family
+            .provider(url)
+            .completion_stream(request())
+            .await
+            .unwrap();
+        let mut last = None;
+        let mut failed = false;
+        while let Some(event) = stream.next().await {
+            match event {
+                Ok(StreamEvent::UsageDelta(usage)) => last = Some(usage),
+                Err(_) => {
+                    failed = true;
+                    break;
+                }
+                _ => {}
+            }
+        }
+        assert!(failed, "{family:?}");
+        let last = last.expect("terminal sample before error");
+        assert!(
+            last.terminal_sample && last.is_trusted_stream_sample(),
+            "{family:?}"
+        );
+        assert_eq!(last.display_total_tokens(), 0, "{family:?}");
+        server.await.unwrap();
+    }
+}
+
+#[tokio::test]
+async fn nonselected_chat_choice_finish_does_not_authorize_placeholder_zero() {
+    for selected_index in [Some(0), None] {
+        let body = format!(
+            "data: {}\n\ndata: {}\n\ndata: {}\n\ndata: [DONE]\n\n",
+            json!({"choices":[{"index":selected_index,"delta":{"content":"a"}}],"usage":{"prompt_tokens":7,"completion_tokens":2}}),
+            json!({"choices":[{"index":1,"delta":{"content":"discarded"},"finish_reason":"stop"}],"usage":Family::Chat.zero()}),
+            json!({"choices":[{"index":selected_index,"delta":{"content":"b"},"finish_reason":"stop"}]})
+        );
+        let (url, server) = serve(body, "text/event-stream").await;
+        let mut request = request();
+        request.extra_body = Some(json!({"n":2}));
+        let mut stream = Family::Chat
+            .provider(url)
+            .completion_stream(request)
+            .await
+            .unwrap();
+        let mut samples = Vec::new();
+        let mut done = None;
+        while let Some(event) = stream.next().await {
+            match event.unwrap() {
+                StreamEvent::UsageDelta(usage) => samples.push(usage),
+                StreamEvent::MessageDone { response } => done = Some(response.usage),
+                _ => {}
+            }
+        }
+        assert_eq!(samples.len(), 2);
+        assert!(!samples[1].terminal_sample);
+        assert_eq!(done.unwrap().display_total_tokens(), 9);
         server.await.unwrap();
     }
 }

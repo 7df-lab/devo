@@ -4,6 +4,7 @@ use serde_json::Value;
 #[derive(Debug, Default)]
 pub(super) struct AnthropicStreamUsage {
     reported: bool,
+    terminal_sample: bool,
     uncached_input_tokens: Option<usize>,
     output_tokens: Option<usize>,
     reasoning_output_tokens: Option<usize>,
@@ -21,7 +22,18 @@ impl AnthropicStreamUsage {
     }
 
     pub(super) fn update_from_message_delta(&mut self, data: &Value) -> Option<Usage> {
-        self.update_from_usage(data.get("usage")?)
+        let sample = self.update_from_usage(data.get("usage")?);
+        self.terminal_sample |= sample.is_some();
+        sample.map(Usage::into_terminal_sample)
+    }
+
+    pub(super) fn terminal_snapshot(&self) -> Usage {
+        let usage = self.snapshot();
+        if self.terminal_sample || crate::stream_usage::has_nonzero_counters(&usage) {
+            usage
+        } else {
+            Usage::default()
+        }
     }
 
     pub(super) fn snapshot(&self) -> Usage {

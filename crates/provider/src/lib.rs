@@ -16,6 +16,7 @@ pub mod recovery_hint;
 mod request;
 pub mod router;
 mod sse;
+mod stream_usage;
 mod text_normalization;
 pub mod timeout;
 

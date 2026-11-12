@@ -93,8 +93,22 @@ impl ChatCompletionStreamState {
             .map(completion_usage_to_usage)
             .filter(Usage::is_reported)
         {
-            self.usage = Some(usage.clone());
-            events.push(StreamEvent::UsageDelta(usage));
+            // Usage-only chunks are the protocol's final usage report. A
+            // normal content delta may instead carry placeholder zero counters.
+            let terminal_sample = chunk.choices.is_empty()
+                || self.finish_reason.is_some()
+                || chunk
+                    .choices
+                    .iter()
+                    .any(|choice| choice.index.unwrap_or(0) == 0 && choice.finish_reason.is_some());
+            if terminal_sample || crate::stream_usage::has_nonzero_counters(&usage) {
+                self.usage = Some(usage.clone());
+            }
+            events.push(StreamEvent::UsageDelta(if terminal_sample {
+                usage.into_terminal_sample()
+            } else {
+                usage
+            }));
         }
 
         if let Some(usage) = chunk.usage {

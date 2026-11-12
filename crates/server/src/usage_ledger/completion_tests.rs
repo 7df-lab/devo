@@ -247,3 +247,42 @@ async fn explicit_failed_terminal_zero_replaces_positive_progress_for_both_entry
         }
     }
 }
+
+#[tokio::test]
+async fn real_responses_initial_zero_without_final_usage_stays_unmeasured() {
+    for completion in [false, true] {
+        let f = Fixture::new();
+        let body = concat!(
+            "event: response.in_progress\ndata: {\"type\":\"response.in_progress\",\"usage\":{\"input_tokens\":0,\"output_tokens\":0}}\n\n",
+            "event: response.completed\ndata: {\"response\":{\"id\":\"r\",\"status\":\"completed\",\"output\":[]}}\n\n"
+        );
+        let url = serve_terminal_usage(body.to_owned()).await;
+        let provider = f.ledger.instrumented_provider(
+            Arc::new(devo_provider::openai::OpenAIResponsesProvider::new(url)),
+            f.session.id,
+            None,
+            UsagePurpose::Compaction,
+        );
+        let final_usage = if completion {
+            provider.completion(request()).await.unwrap().usage
+        } else {
+            let events = provider
+                .completion_stream(request())
+                .await
+                .unwrap()
+                .collect::<Vec<_>>()
+                .await;
+            events
+                .into_iter()
+                .find_map(|event| match event.unwrap() {
+                    StreamEvent::MessageDone { response } => Some(response.usage),
+                    _ => None,
+                })
+                .unwrap()
+        };
+        assert!(!final_usage.is_reported());
+        let total = f.ledger.session_usage(f.session.id).unwrap().total;
+        assert_eq!(total.call_count, 1);
+        assert_eq!(total.metered_call_count, 0);
+    }
+}
