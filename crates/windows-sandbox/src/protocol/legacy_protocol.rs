@@ -73,10 +73,7 @@ impl WritableRoot {
                 return false;
             }
         }
-        if self.path_contains_protected_metadata_name(path) {
-            return false;
-        }
-        true
+        !self.path_contains_protected_metadata_name(path)
     }
 
     fn path_contains_protected_metadata_name(&self, path: &Path) -> bool {
