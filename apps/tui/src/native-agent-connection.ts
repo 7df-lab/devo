@@ -1744,9 +1744,10 @@ export class NativeAgentConnection implements AgentConnection {
   private async refreshQueueFromServer(sessionId: string | null = this.sessionId): Promise<boolean> {
     if (!sessionId || this.disposed) return false;
     const queueRevision = this.queueRevision;
+    const transitionGeneration = this.sessionTransitionGeneration;
     try {
       const result = (await this.rpc.request("session/queue/list", { sessionId })) as { entries?: unknown[]; revision?: unknown };
-      if (this.sessionId !== sessionId || this.disposed) return false;
+      if (this.sessionId !== sessionId || transitionGeneration !== this.sessionTransitionGeneration || this.disposed) return false;
       const revision = queueWireRevision(result?.revision);
       if (revision !== undefined) {
         if (revision < (this.queueWireRevisions.get(sessionId) ?? -1)) return true;
@@ -3167,6 +3168,13 @@ export class NativeAgentConnection implements AgentConnection {
     this.cwd = String(session.cwd ?? session.directory ?? this.cwd);
     this.messages = [];
     this.streamState = createStreamState();
+    // Source-session previews and compaction chrome are invalid immediately,
+    // even when the target queue refresh is deferred or fails.
+    this.queue = { steering: [], followUp: [] };
+    this.queueEntries = [];
+    this.queueRevision += 1;
+    this.sessionActions = emptySessionActions();
+    this.isCompacting = false;
     this.isStreaming = false;
     this.expectedTurnId = null;
     const usage = session.usage as { total?: unknown; legacy?: unknown } | undefined;
