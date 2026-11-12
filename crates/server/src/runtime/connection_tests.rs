@@ -3201,14 +3201,10 @@ async fn manual_compaction_success_drains_queued_followup() -> Result<()> {
         let notification = recv_frame(&mut notifications).await?;
         match notification["method"].as_str() {
             Some("context/compactionCompleted") => compaction_completed = true,
-            Some("turn/completed")
-                if notification["params"]["turn"]["kind"] == "compaction" =>
-            {
+            Some("turn/completed") if notification["params"]["turn"]["kind"] == "compaction" => {
                 turn_completed = true;
             }
-            Some("turn/started")
-                if notification["params"]["turn"]["kind"] == "regular" =>
-            {
+            Some("turn/started") if notification["params"]["turn"]["kind"] == "regular" => {
                 assert_eq!((compaction_completed, turn_completed), (true, true));
                 break;
             }
@@ -3412,14 +3408,10 @@ async fn manual_compaction_interrupt_orphan_and_queue_push() -> Result<()> {
         let notification = recv_frame(&mut notifications).await?;
         match notification["method"].as_str() {
             Some("context/compactionFailed") => compaction_failed = true,
-            Some("turn/completed")
-                if notification["params"]["turn"]["kind"] == "compaction" =>
-            {
+            Some("turn/completed") if notification["params"]["turn"]["kind"] == "compaction" => {
                 turn_completed = true;
             }
-            Some("turn/started")
-                if notification["params"]["turn"]["kind"] == "regular" =>
-            {
+            Some("turn/started") if notification["params"]["turn"]["kind"] == "regular" => {
                 assert_eq!((compaction_failed, turn_completed), (true, true));
                 break;
             }
