@@ -447,7 +447,7 @@ pub(super) async fn completion_stream(
                                 content: dsml_healer
                                     .heal_response_content(content_blocks.into_values().collect()),
                                 stop_reason: stop_reason.clone(),
-                                usage: stream_usage.snapshot(),
+                                usage: stream_usage.terminal_snapshot(),
                                 metadata: ResponseMetadata {
                                     extras: reasoning_blocks
                                         .values()

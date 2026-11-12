@@ -105,7 +105,14 @@ pub(super) fn decode_response_stream(
                 }
 
                 if let Some(parsed_usage) = chunk.get("usage").and_then(parse_usage) {
-                    usage = Some(parsed_usage.clone());
+                    // Do not promote zero counters attached to progress events
+                    // into an authoritative terminal sample. Untyped usage-only
+                    // compatibility events retain their existing meaning.
+                    if matches!(event, "message" | "response.completed" | "response.done" | "response.incomplete")
+                        || crate::stream_usage::has_nonzero_counters(&parsed_usage)
+                    {
+                        usage = Some(parsed_usage.clone());
+                    }
                     yield StreamEvent::UsageDelta(parsed_usage);
                 }
 
