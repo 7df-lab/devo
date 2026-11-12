@@ -118,7 +118,9 @@ pub trait ModelProviderSDK: Send + Sync {
     /// The default retains the adapter's ordinary completion behavior and
     /// reports its final sample. Adapters that internally consume a stream
     /// should override this to observe partial samples before failure or
-    /// cancellation. Missing usage never invokes the observer.
+    /// cancellation. Missing usage never invokes the observer. Mark an explicit
+    /// terminal sample reported before an error with `Usage::into_terminal_sample`
+    /// so authoritative zero is not mistaken for provisional startup counters.
     async fn completion_with_usage_observer(
         &self,
         request: ModelRequest,
