@@ -1198,6 +1198,7 @@ export class NativeAgentConnection implements AgentConnection {
   async getInitialSnapshot(): Promise<AgentConnectionSnapshot> {
     const sessionId = this.sessionId;
     const navigationGeneration = this.transcriptNavigationGeneration;
+    const transitionGeneration = this.sessionTransitionGeneration;
     const pending = this.pendingInitialMessages;
     let messagesPromise: Promise<never[]>;
     if (sessionId && pending?.sessionId === sessionId) {
@@ -1223,7 +1224,9 @@ export class NativeAgentConnection implements AgentConnection {
       measureAsync("snapshot.history", () => messagesPromise),
       measureAsync("snapshot.rlm_child_snapshots", () => this.getRlmChildSnapshots()),
     ]);
-    if (this.sessionId !== sessionId || this.transcriptNavigationGeneration !== navigationGeneration) return this.getInitialSnapshot();
+    // An A → B → A switch keeps the same ID but invalidates both history and
+    // roster reads from the previous attachment. Never hydrate its stream state.
+    if (this.sessionId !== sessionId || this.sessionTransitionGeneration !== transitionGeneration || this.transcriptNavigationGeneration !== navigationGeneration) return this.getInitialSnapshot();
     void this.seedWorkspaceFileChangesRecap();
     const items = this.historySnapshotItems.get(messages) ?? [];
     const running = runningAssistantItems(items);
