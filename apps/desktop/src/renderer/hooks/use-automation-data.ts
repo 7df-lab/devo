@@ -26,19 +26,19 @@ export function useAutomationData() {
 	const setRuns = useSetAtom(setAutomationRunsAtom)
 	const [loading, setLoading] = useState(true)
 	const [error, setError] = useState<string | null>(null)
-	const mountedRef = useRef(true)
+	const mountedRef = useRef(false)
 	const fetchCountRef = useRef(0)
 	const prevRunCountRef = useRef<number | null>(null)
 	const prevRunStatusMapRef = useRef<Map<string, string>>(new Map())
 
 	const refetch = useCallback(
 		async (source = "unknown") => {
-			if (!isElectron) return
+			if (!mountedRef.current || !isElectron) return
 			const fetchId = ++fetchCountRef.current
 			log.debug(`Fetching automation data (#${fetchId}, source: ${source})`)
 			try {
 				const [automations, runs] = await Promise.all([fetchAutomations(), fetchAutomationRuns()])
-				if (!mountedRef.current) return
+				if (!mountedRef.current || fetchId !== fetchCountRef.current) return
 
 				// Log automation schedule state for debugging
 				for (const a of automations) {
@@ -90,42 +90,40 @@ export function useAutomationData() {
 				setRuns(runs)
 				setError(null)
 			} catch (err) {
-				if (!mountedRef.current) return
+				if (!mountedRef.current || fetchId !== fetchCountRef.current) return
 				const msg = err instanceof Error ? err.message : "Failed to load automations"
 				setError(msg)
 				log.error("Failed to fetch automation data", { fetchId, source, error: msg })
 			} finally {
-				if (mountedRef.current) setLoading(false)
+				if (mountedRef.current && fetchId === fetchCountRef.current) setLoading(false)
 			}
 		},
 		[setAutomations, setRuns],
 	)
 
-	// Initial fetch + polling
+	// Subscribe before the initial read so a push cannot fall into a setup gap.
 	useEffect(() => {
 		mountedRef.current = true
+		setLoading(isElectron)
+		if (!isElectron) return () => { mountedRef.current = false }
 		log.info("Automation data gateway mounted, starting polling", {
 			pollIntervalMs: POLL_INTERVAL,
+		})
+		const unsub = window.devo?.onAutomationRunsUpdated(() => {
+			log.info("Received automation:runs-updated from main process")
+			refetch("ipc-push")
 		})
 		refetch("mount")
 
 		const intervalId = setInterval(() => refetch("poll"), POLL_INTERVAL)
 		return () => {
 			mountedRef.current = false
+			// Invalidate outstanding reads even if StrictMode immediately sets up again.
+			fetchCountRef.current++
+			unsub?.()
 			clearInterval(intervalId)
 			log.info("Automation data gateway unmounted")
 		}
-	}, [refetch])
-
-	// Subscribe to push updates from the main process
-	useEffect(() => {
-		if (!isElectron) return
-		log.debug("Subscribing to automation:runs-updated IPC events")
-		const unsub = window.devo?.onAutomationRunsUpdated(() => {
-			log.info("Received automation:runs-updated from main process")
-			refetch("ipc-push")
-		})
-		return unsub
 	}, [refetch])
 
 	return { loading, error, refetch: () => refetch("manual") }
