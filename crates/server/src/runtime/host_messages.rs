@@ -1,5 +1,6 @@
 //! Typed, host-only input ingress. Existing agent and background producers use
-//! follow-up delivery: busy turns are not interrupted; idle sessions wake.
+//! follow-up delivery, except explicit self messages use safe-boundary steering.
+//! All delivery preserves inbox order; idle sessions wake.
 //! This is not an RPC and no producer can choose a human or system origin.
 use super::*;
 use devo_protocol::native::host_message::{
@@ -18,6 +19,20 @@ pub(super) struct HostMessage {
 }
 
 impl HostMessage {
+    /// Explicit self input may steer only at an eligible FIFO model boundary.
+    pub(super) fn self_steer(sender: SessionId, event_id: String, text: String) -> Self {
+        Self {
+            origin: HostMessageOrigin {
+                event_id,
+                source: HostMessageSource::Agent,
+                sender: sender.to_string(),
+                sender_name: None,
+                delivery: HostMessageDelivery::Steer,
+            },
+            text,
+        }
+    }
+
     pub(super) fn agent(sender: SessionId, event_id: String, text: String) -> Self {
         Self {
             origin: HostMessageOrigin {

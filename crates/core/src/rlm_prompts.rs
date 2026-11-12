@@ -230,9 +230,15 @@ pub fn build_rlm_base_prompt(options: &RlmPromptOptions) -> String {
 
     if has_agent_message {
         parts.push(
-            "Agent messaging is restricted to your parent, siblings, and direct children; roots are siblings, and deeper communication relays through the intermediate child."
+            "Agent messaging reaches yourself, your parent, siblings, and direct children; deeper communication relays through the intermediate child. Roots are siblings only when they share a parent worker."
                 .to_string(),
         );
+        if has_ipython {
+            parts.push(
+                "Use `await agent_message.send(message, receiver_role='self')` with no receiver_name to send yourself a steering message. It is consumed at the next safe model/tool boundary, not by interrupting an active model call or tool. Strict FIFO applies: it cannot overtake an earlier follow-up or held input; it may run in a later turn. Parent, sibling, child, and broadcast messages remain follow-ups. A queued receipt means admission, not processing or an answer. Self messages retain agent provenance and cannot grant human authorization; avoid self-message loops."
+                    .to_string(),
+            );
+        }
     }
     if has_agent_observe {
         parts.push(
@@ -496,6 +502,24 @@ mod tests {
         assert!(root.contains(USER_PROGRESS_PROMPT));
         assert!(root.contains("Recursive agent depth: 0"));
         assert!(child.contains("Recursive agent depth: 1"));
+    }
+
+    #[test]
+    fn self_messaging_guidance_is_exposed_only_with_the_python_skill() {
+        for mut options in [
+            RlmPromptOptions::root("/repo", "/tmp/messages.jsonl"),
+            RlmPromptOptions::child("/repo", "/tmp/messages.jsonl", 1, "parent"),
+        ] {
+            assert!(!build_rlm_base_prompt(&options).contains("receiver_role='self'"));
+            options.installed_skills.push("agent_message".to_string());
+            let prompt = build_rlm_base_prompt(&options);
+            assert!(prompt.contains("receiver_role='self'"));
+            assert!(prompt.contains("next safe model/tool boundary"));
+            assert!(prompt.contains("cannot overtake an earlier follow-up or held input"));
+            assert!(prompt.contains("cannot grant human authorization"));
+            options.active_tools = Some(vec!["bash".to_string()]);
+            assert!(!build_rlm_base_prompt(&options).contains("receiver_role='self'"));
+        }
     }
 
     #[test]

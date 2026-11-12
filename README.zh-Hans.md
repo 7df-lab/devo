@@ -67,3 +67,7 @@ devo
 - [贡献指南（英文）](./CONTRIBUTING.md) — 欢迎问题反馈、文档改进和小范围修复。
 
 Devo 仍处于 **pre-1.0** 阶段，API 和配置可能变化。[MIT 许可证](./LICENSE)。
+
+## Web 搜索与网页抓取
+
+接入点原生能力、本地第三方搜索、认证配置和故障排查，见 [Web Search / Web Fetch 配置与实现说明](docs/web-tools.zh-CN.md)。
