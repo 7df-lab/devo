@@ -321,6 +321,131 @@ async fn chat_stream_handles_max_tool_call_index_without_panicking() {
     );
 }
 
+
+#[tokio::test]
+async fn chat_stream_preserves_all_logprobs_and_usage_details() {
+    let first = json!({"token":"Hello","bytes":[72,101,108,108,111],"logprob":-0.2,"top_logprobs":[]});
+    let second = json!({"token":" world","bytes":null,"logprob":-0.3,"top_logprobs":[]});
+    let usage = json!({
+        "prompt_tokens": 12, "completion_tokens": 8, "total_tokens": 20,
+        "prompt_tokens_details": { "audio_tokens": 4, "cached_tokens": 2 },
+        "completion_tokens_details": {
+            "audio_tokens": 3, "reasoning_tokens": 1,
+            "accepted_prediction_tokens": 2, "rejected_prediction_tokens": 1
+        }
+    });
+    let events = collect_chat_stream_events(vec![
+        sse_data(json!({"id":"chatcmpl-logs","choices":[{
+            "index":0,"delta":{"content":"Hello"},
+            "logprobs":{"content":[first],"refusal":null}
+        }]})),
+        sse_data(json!({"choices":[{
+            "index":0,"delta":{"content":" world"},
+            "logprobs":{"content":[second],"refusal":null}
+        }]})),
+        sse_data(json!({"choices":[{
+            "index":0,"delta":{},"finish_reason":"stop","logprobs":null
+        }]})),
+        sse_data(json!({"choices":[],"usage":usage})),
+        "data: [DONE]\n\n".to_string(),
+    ]).await;
+    let response = message_done_response(&events);
+    assert_eq!(response.content, vec![ResponseContent::Text("Hello world".to_string())]);
+    assert_eq!(response.metadata.extras, vec![devo_protocol::ResponseExtra::ProviderSpecific {
+        provider: "openai".to_string(),
+        payload: json!({
+            "usage": usage,
+            "choices": [{"index":0,"logprobs":{"content":[first,second],"refusal":[]}}]
+        }),
+    }]);
+}
+
+#[tokio::test]
+async fn chat_stream_keeps_alternative_choices_and_tools_separate() {
+    let events = collect_chat_stream_events(vec![
+        sse_data(json!({"id":"chatcmpl-choice","choices":[
+            {"index":1,"delta":{"content":"Wrong alternative","tool_calls":[{
+                "index":0,"id":"call_wrong","type":"function",
+                "function":{"name":"wrong","arguments":"{\"wrong\":"}
+            }]},"finish_reason":"length"},
+            {"index":0,"delta":{"content":"Selected answer","tool_calls":[{
+                "index":0,"id":"call_read","type":"function",
+                "function":{"name":"read","arguments":"{\"path\":\"README.md\"}"}
+            }]},"finish_reason":"tool_calls"}
+        ]})),
+        "data: [DONE]\n\n".to_string(),
+    ]).await;
+    let response = message_done_response(&events);
+    assert_eq!(response.content, vec![
+        ResponseContent::Text("Selected answer".to_string()),
+        ResponseContent::ToolUse {
+            id:"call_read".to_string(),name:"read".to_string(),input:json!({"path":"README.md"}),
+        },
+    ]);
+    assert_eq!(response.stop_reason, Some(devo_protocol::StopReason::ToolUse));
+    let text: String = events.iter().filter_map(|event| match event {
+        StreamEvent::TextDelta { text, .. } => Some(text.as_str()),
+        _ => None,
+    }).collect();
+    assert_eq!(text, "Selected answer");
+}
+
+#[tokio::test]
+async fn chat_stream_emits_refusal_as_visible_text_and_preserves_metadata() {
+    let events = collect_chat_stream_events(vec![
+        sse_data(json!({"id":"chatcmpl-refusal","choices":[{
+            "index":0,"delta":{"role":"assistant","refusal":"I cannot "}
+        }]})),
+        sse_data(json!({"choices":[{
+            "index":0,"delta":{"refusal":"help with that."},"finish_reason":"stop"
+        }]})),
+        "data: [DONE]\n\n".to_string(),
+    ]).await;
+    let response = message_done_response(&events);
+    assert_eq!(response.content, vec![ResponseContent::Text("I cannot help with that.".to_string())]);
+    assert_eq!(response.metadata.extras, vec![devo_protocol::ResponseExtra::ProviderSpecific {
+        provider:"openai".to_string(),
+        payload:json!({"choices":[{"index":0,"message":{
+            "role":"assistant","refusal":"I cannot help with that."
+        }}]}),
+    }]);
+    let text: String = events.iter().filter_map(|event| match event {
+        StreamEvent::TextDelta { text, .. } => Some(text.as_str()),
+        _ => None,
+    }).collect();
+    assert_eq!(text, "I cannot help with that.");
+}
+
+#[tokio::test]
+async fn chat_stream_rejects_malformed_or_unidentified_function_calls() {
+    for tool_call in [
+        json!({"index":0,"id":"call_bad","type":"function","function":{"name":"read","arguments":"{"}}),
+        json!({"index":0,"type":"function","function":{"name":"read","arguments":"{}"}}),
+    ] {
+        let base_url = spawn_sse_server(vec![
+            sse_data(json!({"id":"chatcmpl-bad","choices":[{
+                "index":0,"delta":{"tool_calls":[tool_call]},"finish_reason":"tool_calls"
+            }]})),
+            "data: [DONE]\n\n".to_string(),
+        ]).await;
+        let provider = OpenAIProvider::new(base_url);
+        let events = provider.completion_stream(minimal_request()).await.expect("stream").collect::<Vec<_>>().await;
+        assert!(events.iter().any(Result::is_err));
+        assert!(!events.iter().any(|event| matches!(event, Ok(StreamEvent::MessageDone { .. }))));
+    }
+}
+
+#[tokio::test]
+async fn chat_stream_reports_truncation_without_done_marker() {
+    let base_url = spawn_sse_server(vec![sse_data(json!({
+        "id":"chatcmpl-truncated","choices":[{"index":0,"delta":{"content":"Partial"}}]
+    }))]).await;
+    let provider = OpenAIProvider::new(base_url);
+    let events = provider.completion_stream(minimal_request()).await.expect("stream").collect::<Vec<_>>().await;
+    assert!(events.iter().any(Result::is_err));
+    assert!(!events.iter().any(|event| matches!(event, Ok(StreamEvent::MessageDone { .. }))));
+}
+
 async fn collect_chat_stream_events(chunks: Vec<String>) -> Vec<StreamEvent> {
     let base_url = spawn_sse_server(chunks).await;
     let provider = OpenAIProvider::new(base_url);

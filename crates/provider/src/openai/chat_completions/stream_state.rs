@@ -1,5 +1,7 @@
 use std::collections::BTreeMap;
 
+use anyhow::Result;
+
 use devo_protocol::{
     ModelRequest, ModelResponse, ResponseContent, ResponseExtra, ResponseMetadata, StopReason,
     StreamEvent, Usage,
@@ -17,10 +19,7 @@ use super::{
     stop_reason_to_finish_reason,
 };
 use crate::dsml::{DsmlTextStreamFilter, DsmlToolCallHealer};
-use crate::openai::shared::{
-    OpenAICompletionTokenDetails, OpenAICompletionUsage, OpenAIPromptTokenDetails,
-    completion_usage_to_usage,
-};
+use crate::openai::shared::{OpenAICompletionUsage, completion_usage_to_usage};
 use crate::text_normalization::{TaggedTextFragment, TaggedTextParser};
 
 #[derive(Debug, Default)]
@@ -41,6 +40,7 @@ pub(super) struct ChatCompletionStreamState {
     choice_metadata: BTreeMap<u32, StreamChoiceMetadata>,
     finish_reason: Option<StopReason>,
     usage: Option<Usage>,
+    raw_usage: Option<OpenAICompletionUsage>,
     dsml_healer: DsmlToolCallHealer,
     dsml_text_filter: Option<DsmlTextStreamFilter>,
 }
@@ -97,6 +97,10 @@ impl ChatCompletionStreamState {
             events.push(StreamEvent::UsageDelta(usage));
         }
 
+        if let Some(usage) = chunk.usage {
+            self.raw_usage = Some(usage);
+        }
+
         for choice in chunk.choices {
             self.apply_choice(choice, &mut events);
         }
@@ -106,17 +110,21 @@ impl ChatCompletionStreamState {
 
     fn apply_choice(&mut self, choice: ChatCompletionStreamChoice, events: &mut Vec<StreamEvent>) {
         let choice_index = choice.index.unwrap_or(0);
-        self.choice_metadata.entry(choice_index).or_default().index = Some(choice_index);
-        self.choice_metadata
-            .entry(choice_index)
-            .or_default()
-            .logprobs = choice.logprobs.clone();
+        // ModelResponse represents one answer. Do not concatenate independent
+        // alternatives or merge their same-index tool calls when n > 1.
+        if choice_index != 0 {
+            return;
+        }
+        let metadata = self.choice_metadata.entry(choice_index).or_default();
+        metadata.index = Some(choice_index);
+        if let Some(logprobs) = choice.logprobs {
+            let accumulated = metadata.logprobs.get_or_insert_with(OpenAIChoiceLogprobs::default);
+            accumulated.content.extend(logprobs.content);
+            accumulated.refusal.extend(logprobs.refusal);
+        }
 
         if let Some(role) = choice.delta.role.as_deref() {
             self.role = Some(role.to_string());
-        }
-        if let Some(refusal) = choice.delta.refusal.filter(|refusal| !refusal.is_empty()) {
-            self.refusal.push_str(&refusal);
         }
 
         match choice.delta.reasoning_content {
@@ -140,6 +148,11 @@ impl ChatCompletionStreamState {
                     TaggedTextFragment::Reasoning(text) => self.push_reasoning_delta(text, events),
                 }
             }
+        }
+
+        if let Some(refusal) = choice.delta.refusal.filter(|refusal| !refusal.is_empty()) {
+            self.refusal.push_str(&refusal);
+            self.push_text_delta(refusal, events);
         }
 
         for (fallback_index, tool_call_delta) in choice.delta.tool_calls.into_iter().enumerate() {
@@ -359,23 +372,7 @@ impl ChatCompletionStreamState {
             object: self.object.clone(),
             service_tier: self.service_tier.clone(),
             system_fingerprint: self.system_fingerprint.clone(),
-            usage: self.usage.as_ref().map(|usage| OpenAICompletionUsage {
-                prompt_tokens: Some(usage.input_tokens),
-                completion_tokens: Some(usage.output_tokens),
-                total_tokens: usage.total_tokens,
-                prompt_tokens_details: Some(OpenAIPromptTokenDetails {
-                    audio_tokens: None,
-                    cached_tokens: usage.cache_read_input_tokens,
-                }),
-                completion_tokens_details: usage.reasoning_output_tokens.map(|reasoning_tokens| {
-                    OpenAICompletionTokenDetails {
-                        accepted_prediction_tokens: None,
-                        audio_tokens: None,
-                        reasoning_tokens: Some(reasoning_tokens),
-                        rejected_prediction_tokens: None,
-                    }
-                }),
-            }),
+            usage: self.raw_usage.clone(),
         }
     }
 
@@ -450,7 +447,7 @@ impl ChatCompletionStreamState {
     fn ordered_content(
         text: StreamTextBlock,
         tool_calls: BTreeMap<u32, PartialToolCall>,
-    ) -> Vec<ResponseContent> {
+    ) -> Result<Vec<ResponseContent>> {
         let mut content = Vec::new();
 
         if !text.value.is_empty() {
@@ -459,15 +456,15 @@ impl ChatCompletionStreamState {
 
         for tool_call in tool_calls.into_values() {
             let provider_tool_call = tool_call.into_provider_tool_call();
-            if let Some(content_block) = parse_tool_use(&provider_tool_call) {
+            if let Some(content_block) = parse_tool_use(&provider_tool_call)? {
                 content.push(content_block);
             }
         }
 
-        content
+        Ok(content)
     }
 
-    pub(super) fn into_response(self) -> ModelResponse {
+    pub(super) fn into_response(self) -> Result<ModelResponse> {
         let usage = self.usage.clone().unwrap_or_default();
         let metadata = self.metadata();
         let ChatCompletionStreamState {
@@ -478,15 +475,15 @@ impl ChatCompletionStreamState {
             dsml_healer,
             ..
         } = self;
-        let content = dsml_healer.heal_response_content(Self::ordered_content(text, tool_calls));
+        let content = dsml_healer.heal_response_content(Self::ordered_content(text, tool_calls)?);
 
-        ModelResponse {
+        Ok(ModelResponse {
             id: response_id,
             content,
             stop_reason: finish_reason,
             usage,
             metadata,
-        }
+        })
     }
 }
 

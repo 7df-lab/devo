@@ -143,14 +143,11 @@ pub(crate) fn tool_definitions(tools: &[ToolDefinition]) -> Value {
         tools
             .iter()
             .map(|tool| {
-                let mut function = json!({
+                let function = json!({
                     "name": tool.name,
                     "description": tool.description,
                     "parameters": tool.input_schema,
                 });
-                if let Some(output_schema) = &tool.output_schema {
-                    function["output_schema"] = output_schema.clone();
-                }
                 json!({
                     "type": "function",
                     "function": function

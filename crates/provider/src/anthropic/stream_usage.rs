@@ -6,6 +6,7 @@ pub(super) struct AnthropicStreamUsage {
     reported: bool,
     uncached_input_tokens: Option<usize>,
     output_tokens: Option<usize>,
+    reasoning_output_tokens: Option<usize>,
     cache_creation_input_tokens: Option<usize>,
     cache_read_input_tokens: Option<usize>,
 }
@@ -37,7 +38,7 @@ impl AnthropicStreamUsage {
             output_tokens: self.output_tokens.unwrap_or(0),
             cache_creation_input_tokens: self.cache_creation_input_tokens,
             cache_read_input_tokens: self.cache_read_input_tokens,
-            reasoning_output_tokens: None,
+            reasoning_output_tokens: self.reasoning_output_tokens,
             total_tokens: None,
         }
         .with_field_coverage(self.uncached_input_tokens, self.output_tokens)
@@ -51,6 +52,13 @@ impl AnthropicStreamUsage {
         }
         if let Some(output_tokens) = usage.get("output_tokens").and_then(Value::as_u64) {
             self.output_tokens = Some(output_tokens as usize);
+            updated = true;
+        }
+        if let Some(tokens) = usage
+            .pointer("/output_tokens_details/thinking_tokens")
+            .and_then(Value::as_u64)
+        {
+            self.reasoning_output_tokens = Some(tokens as usize);
             updated = true;
         }
         if let Some(cache_creation_input_tokens) = usage

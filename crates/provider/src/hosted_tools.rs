@@ -97,6 +97,9 @@ fn anthropic_web_fetch(options: &HostedWebFetchTool) -> Value {
         ("name".to_string(), json!("web_fetch")),
     ]);
     append_web_fetch_common_options(&mut value, options);
+    if let Some(enabled) = options.citations {
+        value.insert("citations".to_string(), json!({ "enabled": enabled }));
+    }
     Value::Object(value)
 }
 
@@ -243,7 +246,7 @@ mod tests {
                 "type": DEFAULT_ANTHROPIC_WEB_FETCH_TOOL_TYPE,
                 "name": "web_fetch",
                 "allowed_domains": ["docs.example"],
-                "citations": true
+                "citations": { "enabled": true }
             }])
         );
     }

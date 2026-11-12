@@ -28,7 +28,7 @@ export type TurnFailedPayload = { session_id: SessionId,
  */
 turn: Turn, };
 
-export type StopReason = "EndTurn" | "ToolUse" | "MaxTokens" | "StopSequence";
+export type StopReason = "EndTurn" | "ToolUse" | "MaxTokens" | "StopSequence" | "PauseTurn";
 
 export type ParsedCommand = { "type": "read", cmd: string, name: string,
 /**

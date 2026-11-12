@@ -124,7 +124,7 @@ pub(super) async fn completion_stream(
             yield stream_event;
         }
         yield StreamEvent::MessageDone {
-            response: state.into_response(),
+            response: state.into_response()?,
         };
     };
 
@@ -270,6 +270,7 @@ pub(super) fn stop_reason_to_finish_reason(reason: &StopReason) -> String {
         StopReason::MaxTokens => "length".to_string(),
         StopReason::EndTurn => "stop".to_string(),
         StopReason::StopSequence => "content_filter".to_string(),
+        StopReason::PauseTurn => "pause_turn".to_string(),
     }
 }
 
@@ -325,7 +326,7 @@ mod tests {
             ]
         })));
 
-        let response = state.into_response();
+        let response = state.into_response().expect("valid response");
         assert_eq!(response.id, "chatcmpl-123");
         assert_eq!(response.stop_reason, Some(StopReason::EndTurn));
         assert_eq!(response.usage.input_tokens, 0);
@@ -394,7 +395,7 @@ mod tests {
             } if partial_json == "{\"city\":\"Boston\"}"
         ));
 
-        let response = state.into_response();
+        let response = state.into_response().expect("valid response");
         assert_eq!(response.stop_reason, Some(StopReason::ToolUse));
         assert_eq!(response.content.len(), 1);
         match &response.content[0] {
@@ -408,7 +409,7 @@ mod tests {
     }
 
     #[test]
-    fn usage_chunks_and_malformed_tool_json_are_handled() {
+    fn usage_chunks_and_parameterless_tools_are_handled() {
         let mut state = ChatCompletionStreamState::default();
 
         let events = state.apply_chunk(parse_chunk(json!({
@@ -447,7 +448,7 @@ mod tests {
                                 "id": "call_bad",
                                 "function": {
                                     "name": "broken_tool",
-                                    "arguments": "{"
+                                    "arguments": ""
                                 }
                             }
                         ]
@@ -458,7 +459,7 @@ mod tests {
 
         assert_eq!(events.len(), 2);
 
-        let response = state.into_response();
+        let response = state.into_response().expect("valid response");
         assert_eq!(response.usage.input_tokens, 11);
         assert_eq!(response.usage.output_tokens, 7);
         assert_eq!(response.usage.cache_read_input_tokens, Some(3));
@@ -493,7 +494,7 @@ mod tests {
 
         assert!(events.is_empty());
 
-        let response = state.into_response();
+        let response = state.into_response().expect("valid response");
         assert_eq!(response.id, "chatcmpl-empty");
         assert!(response.content.is_empty());
         assert!(response.metadata.extras.iter().any(|extra| matches!(
@@ -575,7 +576,7 @@ mod tests {
             if partial_json == "{\"city\":\"Boston\"}"
         ));
 
-        let response = state.into_response();
+        let response = state.into_response().expect("valid response");
         assert_eq!(response.stop_reason, Some(StopReason::ToolUse));
         assert_eq!(response.content.len(), 2);
     }
@@ -617,7 +618,7 @@ mod tests {
             if partial_json == "select *"
         ));
 
-        let response = state.into_response();
+        let response = state.into_response().expect("valid response");
         match &response.content[0] {
             ResponseContent::ToolUse { id, name, input } => {
                 assert_eq!(id, "call_custom");
@@ -659,7 +660,7 @@ mod tests {
                 .all(|event| !matches!(event, StreamEvent::TextDelta { .. }))
         );
 
-        let response = state.into_response();
+        let response = state.into_response().expect("valid response");
         assert_eq!(
             response.content,
             vec![ResponseContent::ToolUse {
@@ -732,7 +733,7 @@ mod tests {
             ]
         );
 
-        let response = state.into_response();
+        let response = state.into_response().expect("valid response");
         assert!(response.metadata.extras.iter().any(|extra| matches!(
             extra,
             ResponseExtra::ReasoningText { text } if text == "plan via ollama"
@@ -806,7 +807,7 @@ mod tests {
             }]
         );
 
-        let response = state.into_response();
+        let response = state.into_response().expect("valid response");
         assert_eq!(
             response.content,
             vec![ResponseContent::Text("answer<th".to_string())]
@@ -857,7 +858,7 @@ mod tests {
             StreamEvent::ReasoningDone { index: 1 }
         ));
 
-        let response = state.into_response();
+        let response = state.into_response().expect("valid response");
         assert_eq!(response.id, "chatcmpl-reasoning");
         assert_eq!(
             response.content,

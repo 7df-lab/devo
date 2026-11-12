@@ -20,12 +20,13 @@ use crate::anthropic::stream_usage::AnthropicStreamUsage;
 use crate::dsml::DsmlToolCallHealer;
 use crate::error::{format_eventsource_error, stream_error};
 use crate::http::invalid_status_error;
+mod error;
 
 pub(super) async fn completion_stream(
     provider: &AnthropicProvider,
     request: ModelRequest,
 ) -> Result<Pin<Box<dyn Stream<Item = Result<StreamEvent>> + Send>>> {
-    let body = build_request(&request, true);
+    let body = build_request(&request, /*stream*/ true)?;
     debug!(
         provider = "anthropic",
         api_base = %provider.base_url,
@@ -86,9 +87,10 @@ pub(super) async fn completion_stream(
                 Event::Open => {}
                 Event::Message(message) => {
                     let data: Value = serde_json::from_str(&message.data)
-                        .map_err(|error| anyhow::anyhow!("failed to parse anthropic stream payload: {error}"))?;
+                        .map_err(|error| stream_error(format!("failed to parse anthropic stream payload: {error}")))?;
 
                     match message.event.as_str() {
+                        "error" => Err(error::from_payload(&data))?,
                         "message_start" => {
                             if let Some(id) = data
                                 .get("message")
@@ -122,11 +124,21 @@ pub(super) async fn completion_stream(
                                     }
                                     content_blocks.insert(
                                         index as usize,
-                                        ResponseContent::Text(String::new()),
+                                        ResponseContent::Text(block.text.clone().unwrap_or_default()),
                                     );
                                     yield StreamEvent::TextStart {
                                         index: index as usize,
                                     };
+                                    if let Some(text) = block.text.filter(|text| !text.is_empty()) {
+                                        let chunks = if let Some(filter) = dsml_text_filters.get_mut(&(index as usize)) {
+                                            filter.consume(&text)
+                                        } else {
+                                            vec![text]
+                                        };
+                                        for text in chunks {
+                                            yield StreamEvent::TextDelta { index: index as usize, text };
+                                        }
+                                    }
                                 }
                                 "tool_use" => {
                                     let Some(id) = block.id.clone() else {
@@ -217,7 +229,8 @@ pub(super) async fn completion_stream(
                                     };
                                 }
                                 "thinking" => {
-                                    reasoning_blocks.insert(index as usize, String::new());
+                                    let thinking = block.thinking.clone().unwrap_or_default();
+                                    reasoning_blocks.insert(index as usize, thinking.clone());
                                     provider_reasoning_blocks.insert(
                                         index as usize,
                                         anthropic_thinking_payload_map(&block),
@@ -225,6 +238,17 @@ pub(super) async fn completion_stream(
                                     yield StreamEvent::ReasoningStart {
                                         index: index as usize,
                                     };
+                                    if !thinking.is_empty() {
+                                        yield StreamEvent::ReasoningDelta { index: index as usize, text: thinking };
+                                    }
+                                }
+                                "redacted_thinking" => {
+                                    if let Some(data) = block.data {
+                                        content_blocks.insert(index as usize, ResponseContent::ProviderReasoning {
+                                            provider: "anthropic".to_string(),
+                                            payload: json!({"type": "redacted_thinking", "data": data}),
+                                        });
+                                    }
                                 }
                                 _ => {}
                             };
@@ -335,14 +359,18 @@ pub(super) async fn completion_stream(
                                 }
                             }
                             if let Some(json_str) = tool_json.remove(&index)
-                                && !json_str.is_empty()
-                                && let Ok(parsed) = serde_json::from_str(&json_str)
-                                && let Some(block) = content_blocks.get_mut(&index)
-                            {
+                                && let Some(block) = content_blocks.get_mut(&index) {
                                 match block {
                                     ResponseContent::ToolUse { input, .. }
                                     | ResponseContent::HostedToolUse { input, .. } => {
-                                        *input = parsed;
+                                        if !json_str.is_empty() {
+                                            *input = serde_json::from_str(&json_str).map_err(|error| {
+                                                stream_error(format!("invalid anthropic tool input at content block {index}: {error}"))
+                                            })?;
+                                        }
+                                        if !input.is_object() {
+                                            Err(stream_error(format!("anthropic tool input at content block {index} must be an object")))?;
+                                        }
                                     }
                                     ResponseContent::Text(_)
                                     | ResponseContent::ProviderReasoning { .. } => {}
@@ -425,37 +453,7 @@ pub(super) async fn completion_stream(
             }
         }
 
-        for (index, mut filter) in std::mem::take(&mut dsml_text_filters) {
-            for text in filter.finish() {
-                yield StreamEvent::TextDelta {
-                    index,
-                    text,
-                };
-            }
-        }
-        for index in reasoning_blocks.keys().copied().collect::<Vec<_>>() {
-            if completed_reasoning_blocks.insert(index) {
-                yield StreamEvent::ReasoningDone { index };
-            }
-        }
-        insert_provider_reasoning_blocks(
-            &mut content_blocks,
-            provider_reasoning_blocks,
-        );
-        let response = ModelResponse {
-            id: message_id,
-            content: dsml_healer.heal_response_content(content_blocks.into_values().collect()),
-            stop_reason,
-            usage: stream_usage.snapshot(),
-            metadata: ResponseMetadata {
-                extras: reasoning_blocks
-                    .into_values()
-                    .filter(|text| !text.is_empty())
-                    .map(|text| ResponseExtra::ReasoningText { text })
-                    .collect(),
-            },
-        };
-        yield StreamEvent::MessageDone { response };
+        Err(stream_error("anthropic stream ended before message_stop"))?;
     };
 
     Ok(Box::pin(stream))

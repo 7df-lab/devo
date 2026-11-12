@@ -122,6 +122,8 @@ pub enum StopReason {
     ToolUse,
     MaxTokens,
     StopSequence,
+    /// Server-side tool processing paused and requires replaying the assistant turn.
+    PauseTurn,
 }
 
 /// Optional provider-specific response data preserved alongside the shared IR.
@@ -331,6 +333,7 @@ mod tests {
             StopReason::ToolUse,
             StopReason::MaxTokens,
             StopReason::StopSequence,
+            StopReason::PauseTurn,
         ] {
             let json = serde_json::to_string(&reason).expect("serialize stop reason");
             let deserialized: StopReason =

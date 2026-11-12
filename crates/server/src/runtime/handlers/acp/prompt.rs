@@ -204,6 +204,7 @@ fn acp_stop_reason_from_terminal_turn(snapshot: TerminalTurnSnapshot) -> AcpStop
             Some(
                 devo_core::StopReason::EndTurn
                 | devo_core::StopReason::ToolUse
+                | devo_core::StopReason::PauseTurn
                 | devo_core::StopReason::StopSequence,
             )
             | None => AcpStopReason::EndTurn,
