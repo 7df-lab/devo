@@ -11,7 +11,7 @@ import {
 	ResizablePanel,
 	ResizablePanelGroup,
 } from "@devo/ui/components/resizable"
-import { Outlet } from "@tanstack/react-router"
+import { Outlet, useParams } from "@tanstack/react-router"
 import { useAtom } from "jotai"
 import { XIcon } from "lucide-react"
 import { useCallback, useState } from "react"
@@ -30,7 +30,8 @@ import { InboxToolbar } from "./inbox-toolbar"
 
 export function AutomationsPage() {
 	// Single data gateway -- fetches automations + runs, subscribes to updates
-	useAutomationData()
+	const { runId } = useParams({ strict: false }) as { runId?: string }
+	useAutomationData(runId)
 
 	const [dialogOpen, setDialogOpen] = useState(false)
 	const [editingAutomation, setEditingAutomation] = useState<Automation | null>(null)

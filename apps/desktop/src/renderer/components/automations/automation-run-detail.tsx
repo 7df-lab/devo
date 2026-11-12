@@ -13,16 +13,13 @@ import { MessageResponse } from "@devo/ui/components/ai-elements/message"
 import { useParams } from "@tanstack/react-router"
 import { useSetAtom } from "jotai"
 import { InboxIcon, Loader2Icon } from "lucide-react"
-import { useEffect, useMemo, useRef } from "react"
+import { useEffect, useMemo } from "react"
 import type { Automation, AutomationRun } from "../../../preload/api"
-import { markRunReadLocalAtom, setAutomationRunsAtom } from "../../atoms/automations"
+import { markRunReadLocalAtom } from "../../atoms/automations"
 import { useAutomationRuns, useAutomations } from "../../hooks/use-automations"
 import { formatDuration } from "../../lib/time-format"
-import { fetchAutomationRuns, markAutomationRunRead } from "../../services/backend"
+import { markAutomationRunRead } from "../../services/backend"
 import { SessionView } from "../session-view"
-
-/** Poll interval when waiting for a running run to get its sessionId. */
-const SESSION_POLL_INTERVAL = 2_000
 
 export function AutomationRunDetail() {
 	const { runId } = useParams({ strict: false }) as { runId: string }
@@ -30,7 +27,6 @@ export function AutomationRunDetail() {
 	const runs = useAutomationRuns()
 	const automations = useAutomations()
 	const markReadLocal = useSetAtom(markRunReadLocalAtom)
-	const setRuns = useSetAtom(setAutomationRunsAtom)
 
 	const run: AutomationRun | null = useMemo(
 		() => runs.find((r) => r.id === runId) ?? null,
@@ -52,36 +48,7 @@ export function AutomationRunDetail() {
 		}
 	}, [run, markReadLocal])
 
-	// --- Short-interval poll for sessionId while the run is starting up ---
-	// When a run is "running" but has no sessionId yet, the session is being
-	// created in the background (worktree + session creation). Poll every 2s
-	// so we can switch to the live SessionView as soon as it's available.
-	const needsSessionPoll = run !== null && run.status === "running" && !run.sessionId
-	const mountedRef = useRef(true)
-
-	useEffect(() => {
-		mountedRef.current = true
-		return () => {
-			mountedRef.current = false
-		}
-	}, [])
-
-	useEffect(() => {
-		if (!needsSessionPoll) return
-
-		const timer = setInterval(async () => {
-			try {
-				const freshRuns = await fetchAutomationRuns()
-				if (mountedRef.current) {
-					setRuns(freshRuns)
-				}
-			} catch {
-				// Ignore fetch errors during polling
-			}
-		}, SESSION_POLL_INTERVAL)
-
-		return () => clearInterval(timer)
-	}, [needsSessionPoll, setRuns])
+	// AutomationsPage owns fast polling through the shared data gateway.
 
 	if (!run) {
 		return (

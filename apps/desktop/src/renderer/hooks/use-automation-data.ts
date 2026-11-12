@@ -8,9 +8,9 @@
  * Mount once in AutomationsPage; everything else reads from atoms.
  */
 
-import { useSetAtom } from "jotai"
+import { useAtomValue, useSetAtom } from "jotai"
 import { useCallback, useEffect, useRef, useState } from "react"
-import { setAutomationRunsAtom, setAutomationsAtom } from "../atoms/automations"
+import { automationRunsAtom, setAutomationRunsAtom, setAutomationsAtom } from "../atoms/automations"
 import { createLogger } from "../lib/logger"
 import { fetchAutomationRuns, fetchAutomations } from "../services/backend"
 
@@ -21,19 +21,26 @@ const POLL_INTERVAL = 30_000
 
 const isElectron = typeof window !== "undefined" && "devo" in window
 
-export function useAutomationData() {
+export function useAutomationData(selectedRunId?: string) {
+	const runs = useAtomValue(automationRunsAtom)
+	const awaitingSession = runs.some((run) =>
+		run.id === selectedRunId && run.status === "running" && !run.sessionId,
+	)
+	const pollInterval = awaitingSession ? 2_000 : POLL_INTERVAL
 	const setAutomations = useSetAtom(setAutomationsAtom)
 	const setRuns = useSetAtom(setAutomationRunsAtom)
 	const [loading, setLoading] = useState(true)
 	const [error, setError] = useState<string | null>(null)
 	const mountedRef = useRef(false)
 	const fetchCountRef = useRef(0)
+	const requestPendingRef = useRef(false)
 	const prevRunCountRef = useRef<number | null>(null)
 	const prevRunStatusMapRef = useRef<Map<string, string>>(new Map())
 
 	const refetch = useCallback(
 		async (source = "unknown") => {
-			if (!mountedRef.current || !isElectron) return
+			if (!mountedRef.current || !isElectron || (source === "poll" && requestPendingRef.current)) return
+			requestPendingRef.current = true
 			const fetchId = ++fetchCountRef.current
 			log.debug(`Fetching automation data (#${fetchId}, source: ${source})`)
 			try {
@@ -95,7 +102,10 @@ export function useAutomationData() {
 				setError(msg)
 				log.error("Failed to fetch automation data", { fetchId, source, error: msg })
 			} finally {
-				if (mountedRef.current && fetchId === fetchCountRef.current) setLoading(false)
+				if (mountedRef.current && fetchId === fetchCountRef.current) {
+					requestPendingRef.current = false
+					setLoading(false)
+				}
 			}
 		},
 		[setAutomations, setRuns],
@@ -115,16 +125,22 @@ export function useAutomationData() {
 		})
 		refetch("mount")
 
-		const intervalId = setInterval(() => refetch("poll"), POLL_INTERVAL)
 		return () => {
 			mountedRef.current = false
 			// Invalidate outstanding reads even if StrictMode immediately sets up again.
 			fetchCountRef.current++
+			requestPendingRef.current = false
 			unsub?.()
-			clearInterval(intervalId)
 			log.info("Automation data gateway unmounted")
 		}
 	}, [refetch])
+
+	// The detail view uses this same gateway, not a competing runs-only writer.
+	useEffect(() => {
+		if (!isElectron) return
+		const intervalId = setInterval(() => { void refetch("poll") }, pollInterval)
+		return () => clearInterval(intervalId)
+	}, [pollInterval, refetch])
 
 	return { loading, error, refetch: () => refetch("manual") }
 }

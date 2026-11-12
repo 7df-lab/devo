@@ -7,7 +7,7 @@ import type { Automation, AutomationRun } from "../../preload/api"
 
 const dom = new Window({ url: "http://localhost" })
 Object.assign(globalThis, { window: dom, document: dom.document, navigator: dom.navigator,
-	HTMLElement: dom.HTMLElement, IS_REACT_ACT_ENVIRONMENT: true })
+	HTMLElement: dom.HTMLElement, scrollTo: () => {}, IS_REACT_ACT_ENVIRONMENT: true })
 Object.assign(window, { devo: {} })
 const { useAutomationData } = await import("./use-automation-data")
 const { automationsAtom, automationRunsAtom } = await import("../atoms/automations")
@@ -20,7 +20,8 @@ let automations: Pending<Automation[]>[]
 let runs: Pending<AutomationRun[]>[]
 let listeners: Set<() => void>
 let calls: string[]
-function Probe() { result = useAutomationData(); return <span>{String(result.loading)}</span> }
+let selectedRunId: string | undefined
+function Probe() { result = useAutomationData(selectedRunId); return <span>{String(result.loading)}</span> }
 function render(strict = false) {
 	const tree = <Provider store={store}><Probe /></Provider>
 	return act(async () => root.render(strict ? <StrictMode>{tree}</StrictMode> : tree))
@@ -42,6 +43,7 @@ function snapshot() {
 }
 const expectedFresh = { automations: [newAutomation], runs: [newRun], loading: false, error: null }
 beforeEach(() => {
+	selectedRunId = undefined
 	automations = []; runs = []; listeners = new Set(); calls = []
 	store = createStore()
 	Object.assign(window, { devo: {
@@ -109,4 +111,93 @@ test("unmount prevents global atom writes and removes subscription", async () =>
 	void refetch()
 	expect({ automations: store.get(automationsAtom), runs: store.get(automationRunsAtom), requests: automations.length })
 		.toEqual({ automations: [], runs: [], requests: 1 })
+})
+
+const originalSetInterval = globalThis.setInterval
+const originalClearInterval = globalThis.clearInterval
+function capturePolling() {
+ const timers = new Map<number, { callback: () => void; delay: number }>()
+ let id = 0
+ globalThis.setInterval = ((callback: () => void, delay: number) => {
+  timers.set(++id, { callback, delay }); return id
+ }) as typeof setInterval
+ globalThis.clearInterval = ((id: number) => { timers.delete(id) }) as typeof clearInterval
+ return timers
+}
+afterEach(() => {
+ globalThis.setInterval = originalSetInterval
+ globalThis.clearInterval = originalClearInterval
+})
+test("selected startup run accelerates the single gateway and session arrival restores cadence", async () => {
+ const timers = capturePolling()
+ selectedRunId = "r"
+ store.set(automationRunsAtom, [oldRun])
+ await render()
+ expect([...timers.values()].map(t => t.delay)).toEqual([2000])
+ await act(async () => { for (const t of timers.values()) t.callback() })
+ expect(runs.length).toBe(1)
+ await settle(0, false)
+ await act(async () => { for (const t of timers.values()) t.callback() })
+ const live = { ...oldRun, sessionId: "live-session" }
+ await act(async () => { automations[1].resolve([newAutomation]); runs[1].resolve([live]) })
+ expect(store.get(automationRunsAtom)).toEqual([live])
+ expect([...timers.values()].map(t => t.delay)).toEqual([30000])
+})
+test("push supersedes fast poll without reverting the ready session", async () => {
+ const timers = capturePolling()
+ selectedRunId = "r"; store.set(automationRunsAtom, [oldRun])
+ await render(); await settle(0, false)
+ await act(async () => { for (const t of timers.values()) t.callback() })
+ await act(async () => { for (const cb of listeners) cb() })
+ await settle(2, true); await settle(1, false)
+ expect(snapshot()).toEqual(expectedFresh)
+})
+test("switching away from startup run removes the fast timer without refetching or resubscribing", async () => {
+ const timers = capturePolling()
+ selectedRunId = "r"; store.set(automationRunsAtom, [oldRun])
+ await render(); selectedRunId = "other"; await render()
+ expect([...timers.values()].map(t => t.delay)).toEqual([30000])
+ expect(calls).toEqual(["subscribe", "fetch"])
+})
+test("StrictMode and unmount leave no active fast timer or stale writer", async () => {
+ const timers = capturePolling()
+ selectedRunId = "r"; store.set(automationRunsAtom, [oldRun])
+ await render(true)
+ expect([...timers.values()].map(t => t.delay)).toEqual([2000])
+ await act(async () => root.render(null))
+ expect(timers.size).toBe(0)
+ await settle(1, true)
+ expect(store.get(automationRunsAtom)).toEqual([oldRun])
+})
+
+test("parent route gateway sees the selected nested run and restores normal polling on navigation", async () => {
+ const { createMemoryHistory, createRootRoute, createRoute, createRouter, Outlet, RouterProvider, useParams } = await import("@tanstack/react-router")
+ const timers = capturePolling()
+ store.set(automationRunsAtom, [oldRun])
+ function Page() {
+  const { runId } = useParams({ strict: false }) as { runId?: string }
+  result = useAutomationData(runId)
+  return <Outlet />
+ }
+ const rootRoute = createRootRoute()
+ const page = createRoute({ getParentRoute: () => rootRoute, path: "/automations", component: Page })
+ const detail = createRoute({ getParentRoute: () => page, path: "$automationId/runs/$runId", component: () => <span>run</span> })
+ const index = createRoute({ getParentRoute: () => page, path: "/", component: () => <span>inbox</span> })
+ const router = createRouter({ routeTree: rootRoute.addChildren([page.addChildren([detail, index])]), history: createMemoryHistory({ initialEntries: ["/automations/a/runs/r"] }) })
+ await act(async () => { root.render(<Provider store={store}><RouterProvider router={router} /></Provider>) })
+ expect([...timers.values()].map(t => t.delay)).toEqual([2000])
+ await act(async () => { await router.navigate({ to: "/automations" }) })
+ expect([...timers.values()].map(t => t.delay)).toEqual([30000])
+ expect(runs.length).toBe(1)
+})
+test("slow requests survive multiple fast poll ticks instead of starving", async () => {
+ const timers = capturePolling()
+ selectedRunId = "r"; store.set(automationRunsAtom, [oldRun])
+ await render()
+ await act(async () => { for (let i = 0; i < 5; i++) for (const t of timers.values()) t.callback() })
+ expect(runs.length).toBe(1)
+ await settle(0, true)
+ expect(snapshot()).toEqual(expectedFresh)
+ await act(async () => { for (const t of timers.values()) t.callback() })
+ expect(runs.length).toBe(2)
 })
