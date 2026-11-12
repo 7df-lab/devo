@@ -252,6 +252,7 @@ export class NativeAgentConnection implements AgentConnection {
   private isCompacting = false;
   /** Set when a projected compaction_end carries a skip/too-short warning. */
   private lastCompactionSkipMessage: string | null = null;
+  private lastCompactionSkipItemId: string | undefined;
   private isBashRunning = false;
   /** Live provider retry attempt from model/queryRetrying (0 when idle). */
   private retryAttempt = 0;
@@ -596,11 +597,17 @@ export class NativeAgentConnection implements AgentConnection {
         params = { ...p, goal: { ...this.goal, status: p.status } };
       }
     }
+    // Skipped manual compaction ends with a failed item followed by a
+    // success-shaped protocol acknowledgement for that same item. The item
+    // already owns the warning; rebuilding on the acknowledgement erases it.
+    if (method === "context/compactionCompleted" && this.lastCompactionSkipItemId &&
+        (p.itemId ?? p.item_id) === this.lastCompactionSkipItemId) return;
     const sourceItem = notificationItemIdentity(method, params);
     for (const ev of nativeNotificationToPiEvents(method, params, this.streamState)) {
       if (ev.type === "compaction_start") {
         this.isCompacting = true;
         this.lastCompactionSkipMessage = null;
+        this.lastCompactionSkipItemId = undefined;
       }
       if (ev.type === "compaction_end") {
         // Clear before emit so waitForCompactionIdle unblocks; InteractiveMode
@@ -618,6 +625,7 @@ export class NativeAgentConnection implements AgentConnection {
           end.errorMessage.length > 0
         ) {
           this.lastCompactionSkipMessage = end.errorMessage;
+          this.lastCompactionSkipItemId = sourceItem?.id;
         }
         this.resolveIdleWaiters();
       }
@@ -2913,6 +2921,7 @@ export class NativeAgentConnection implements AgentConnection {
 
     this.isCompacting = true;
     this.lastCompactionSkipMessage = null;
+    this.lastCompactionSkipItemId = undefined;
     this.emitSessionEvent({
       type: "compaction_start",
       reason: "manual",
@@ -2929,44 +2938,10 @@ export class NativeAgentConnection implements AgentConnection {
       await this.waitForCompactionIdle(transitionGeneration);
       ensureCurrentSession();
       const skipMessage = this.lastCompactionSkipMessage;
-      // Reload server history before painting the slash result so a transcript
-      // refresh cannot wipe the durable /compact outcome row.
-      await this.getMessages();
-      ensureCurrentSession();
-      if (skipMessage) {
-        this.emitSessionEvent({
-          type: "message_start",
-          message: {
-            role: "custom",
-            customType: "session_slash_command_result",
-            content: skipMessage,
-            display: true,
-            details: {
-              command,
-              success: false,
-              severity: "warning",
-              error: skipMessage,
-            },
-            timestamp: Date.now(),
-          } as never,
-        });
-        throw new Error(skipMessage);
-      }
-      this.emitSessionEvent({
-        type: "message_start",
-        message: {
-          role: "custom",
-          customType: "session_slash_command_result",
-          content: "Compaction finished.",
-          display: true,
-          details: {
-            command,
-            success: true,
-            severity: "info",
-          },
-          timestamp: Date.now(),
-        } as never,
-      });
+      // The projected compaction_end owns both the durable summary card and
+      // error/warning UI. Do not append a slash-command outcome after waiting:
+      // a queued follow-up may already own the active transcript cell.
+      if (skipMessage) throw new Error(skipMessage);
       return {
         summary: "",
         firstKeptEntryId: "",
