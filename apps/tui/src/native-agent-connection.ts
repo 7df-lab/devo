@@ -273,6 +273,8 @@ export class NativeAgentConnection implements AgentConnection {
   private contextUsage: ReturnType<typeof occupancyToContextUsage> = emptyContextUsage();
   private cumulativeUsage: CumulativeUsage | undefined;
   private contextUsageRevision = 0;
+  private contextUsageReadSequence = 0;
+  private contextUsageAppliedReadSequence = 0;
   private contextUsageWindowSource: "bootstrap" | "model-switch" | "server" = "bootstrap";
   private permissionProfile: "default" | "autoReview" | "fullAccess" = "default";
   /** Explicit per-session auto-refine fields from the live session snapshot. */
@@ -1111,20 +1113,25 @@ export class NativeAgentConnection implements AgentConnection {
   }
 
   private async refreshContextUsage(sessionId: string | null = this.sessionId): Promise<void> {
-    if (!sessionId) return;
+    if (!sessionId || this.disposed) return;
     try {
       const revision = this.contextUsageRevision;
+      const readSequence = ++this.contextUsageReadSequence;
       const result = (await this.rpc.request("context/usage/read", { sessionId })) as { occupancy?: unknown };
-      if (this.sessionId !== sessionId || revision !== this.contextUsageRevision) return;
+      // Notifications and session transitions invalidate reads; newer successful
+      // reads also supersede older responses, which may still contain zero.
+      if (this.disposed || this.sessionId !== sessionId || revision !== this.contextUsageRevision
+        || readSequence < this.contextUsageAppliedReadSequence) return;
       const next = occupancyToContextUsage(result?.occupancy);
       if (next) {
+        this.contextUsageAppliedReadSequence = readSequence;
         this.applyNativeContextUsage(next, "snapshot");
         this.emitSessionEvent({ type: "context_usage_update", contextUsage: this.contextUsage });
       } else {
         this.ensureDefaultContextUsage();
       }
     } catch {
-      if (this.sessionId === sessionId) this.ensureDefaultContextUsage();
+      if (!this.disposed && this.sessionId === sessionId) this.ensureDefaultContextUsage();
     }
   }
 
