@@ -9,7 +9,7 @@ import { scheduledDelivered, rpcSucceeded, turnOutcome } from "./smoke-outcomes.
 
 const repo = resolve(dirname(fileURLToPath(import.meta.url)), "../../..");
 const scenario = process.argv[2] || "T1";
-const scenarios = ["T1", "T2", "T3", "goal", "bash", "agents", "schedule", "heartbeat", "activity", "effort"];
+const scenarios = ["T1", "T2", "T3", "goal", "bash", "agents", "schedule", "heartbeat", "activity", "effort", "theme"];
 const tmux = process.env.DEVO_TMUX_BIN || (process.platform === "win32" ? "psmux" : "tmux");
 const binary = resolve(process.env.DEVO_BIN || process.env.DEVO_SERVER_BIN
   || join(repo, "target/debug", process.platform === "win32" ? "devo.exe" : "devo"));
@@ -37,9 +37,9 @@ async function run() {
   let pane = "";
   try {
     for (const name of ["auth.json", "providers.json", "config.toml"]) {
-      if (scenario !== "effort" && existsSync(join(sourceHome, name))) copyFileSync(join(sourceHome, name), join(home, name));
+      if (!(["effort", "theme"].includes(scenario)) && existsSync(join(sourceHome, name))) copyFileSync(join(sourceHome, name), join(home, name));
     }
-    if (scenario === "effort") {
+    if (["effort", "theme"].includes(scenario)) {
       // Self-contained metadata fixture: selectors require no model request or credentials.
       writeFileSync(join(home, "providers.json"), JSON.stringify({
         model: "smoke/reasoner", provider: { smoke: {
@@ -54,8 +54,8 @@ async function run() {
       }));
     }
     const settingsPath = join(sourceHome, "settings.json");
-    const settings = scenario !== "effort" && existsSync(settingsPath) ? JSON.parse(readFileSync(settingsPath, "utf8")) : {};
-    writeFileSync(join(home, "settings.json"), JSON.stringify({ ...settings, onboardingShown: true }));
+    const settings = !(["effort", "theme"].includes(scenario)) && existsSync(settingsPath) ? JSON.parse(readFileSync(settingsPath, "utf8")) : {};
+    writeFileSync(join(home, "settings.json"), JSON.stringify({ ...settings, ...(scenario === "theme" ? { theme: "dark" } : {}), onboardingShown: true }));
     mux(["new-session", "-d", "-s", session, "-c", repo, "-x", "100", "-y", "30",
       "-e", `DEVO_HOME=${home}`, "-e", `DEVO_CODING_AGENT_DIR=${home}`,
       "-e", `PRIME_AGENT_CODING_AGENT_DIR=${home}`, "-e", "DEVO_PROTOCOL_TRACE=1",
@@ -91,6 +91,43 @@ async function run() {
     console.log("=== boot ===\n" + pane);
     switch (scenario) {
       case "T1": break;
+      case "theme": {
+        const screen = () => mux(["capture-pane", "-t", session, "-p"]).stdout;
+        const titleStyle = () => mux(["capture-pane", "-t", session, "-p", "-e"]).stdout
+          .split("\n").find((line) => line.includes("Theme preview"));
+        const savedTheme = () => JSON.parse(readFileSync(join(home, "settings.json"), "utf8")).theme;
+        const opened = () => {
+          const text = screen();
+          return text.includes("Theme preview") && text.includes("Enter save") && text.includes("Esc restore");
+        };
+        await send("/theme");
+        await waitFor("theme help and saved selection", () => opened() && /›.*dark/.test(screen()));
+        console.log("=== theme wide ===\n" + screen());
+        mux(["resize-window", "-t", session, "-x", "40", "-y", "24"]);
+        await waitFor("narrow theme help", () => opened() && screen().includes("light"));
+        console.log("=== theme narrow ===\n" + screen());
+        const darkTitle = titleStyle();
+        if (!darkTitle) throw new Error("Missing styled theme title");
+        mux(["send-keys", "-t", session, "Down"]);
+        await waitFor("theme preview", () => /›.*light/.test(screen()) && titleStyle() !== darkTitle);
+        const lightTitle = titleStyle();
+        console.log("=== theme preview style ===\n" + lightTitle);
+        if (savedTheme() !== "dark") throw new Error("Preview persisted the theme before confirmation");
+        mux(["send-keys", "-t", session, "Escape"]);
+        await waitFor("theme restore", () => !screen().includes("Theme preview"));
+        if (savedTheme() !== "dark") throw new Error("Cancel changed the saved theme");
+        await send("/theme");
+        await waitFor("theme reopens at original selection", () => opened() && /›.*dark/.test(screen()) && titleStyle() === darkTitle);
+        mux(["send-keys", "-t", session, "Down", "Enter"]);
+        await waitFor("theme saved", () => savedTheme() === "light" && screen().includes("Theme: light"));
+        if (screen().includes("Theme preview")) throw new Error("Theme selector did not close after save");
+        await send("/theme");
+        await waitFor("theme reopens at confirmed selection", () => opened() && /›.*light/.test(screen()) && titleStyle() === lightTitle);
+        mux(["send-keys", "-t", session, "Escape"]);
+        await waitFor("theme selector dismissed", () => !screen().includes("Theme preview"));
+        mux(["resize-window", "-t", session, "-x", "100", "-y", "30"]);
+        break;
+      }
       case "effort": {
         const changes = () => records().filter((event) => event.direction === "tui-to-server"
           && event.method === "session/metadata/update"
