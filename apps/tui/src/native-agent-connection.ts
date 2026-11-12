@@ -1113,14 +1113,14 @@ export class NativeAgentConnection implements AgentConnection {
   }
 
   private async refreshContextUsage(sessionId: string | null = this.sessionId): Promise<void> {
-    if (!sessionId) return;
+    if (!sessionId || this.disposed) return;
     try {
       const revision = this.contextUsageRevision;
       const readSequence = ++this.contextUsageReadSequence;
       const result = (await this.rpc.request("context/usage/read", { sessionId })) as { occupancy?: unknown };
       // Notifications and session transitions invalidate reads; newer successful
       // reads also supersede older responses, which may still contain zero.
-      if (this.sessionId !== sessionId || revision !== this.contextUsageRevision
+      if (this.disposed || this.sessionId !== sessionId || revision !== this.contextUsageRevision
         || readSequence < this.contextUsageAppliedReadSequence) return;
       const next = occupancyToContextUsage(result?.occupancy);
       if (next) {
@@ -1131,7 +1131,7 @@ export class NativeAgentConnection implements AgentConnection {
         this.ensureDefaultContextUsage();
       }
     } catch {
-      if (this.sessionId === sessionId) this.ensureDefaultContextUsage();
+      if (!this.disposed && this.sessionId === sessionId) this.ensureDefaultContextUsage();
     }
   }
 

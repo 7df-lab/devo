@@ -2641,3 +2641,40 @@ test("context reads accept newer zero and preserve a successful older read when 
   assert.deepEqual((await conn.getState()).contextUsage, { tokens: 80, contextWindow: 1000, percent: 8 });
   await conn.dispose();
 });
+
+
+test("disposed connection neither publishes pending context reads nor starts new ones", async () => {
+  let hold = false;
+  let usageResponse: ((value: unknown) => void) | undefined;
+  let unsubscribeResponse: ((value: unknown) => void) | undefined;
+  let usageReads = 0;
+  const { conn } = await bootConnection([(method, _params, respond) => {
+    if (method === "context/usage/read" && hold) {
+      usageReads += 1;
+      usageResponse = respond;
+      return true;
+    }
+    if (method === "subscription/unsubscribe" && hold) {
+      unsubscribeResponse = respond;
+      return true;
+    }
+    return false;
+  }]);
+  const observed: unknown[] = [];
+  conn.subscribe(event => {
+    if (event.type === "session_event" && event.event.type === "context_usage_update") observed.push(event);
+  });
+  hold = true;
+  const read = conn.getSessionStats();
+  const disposal = conn.dispose();
+  assert.ok(usageResponse);
+  usageResponse({ occupancy: { totalTokens: 0, contextWindowTokens: 1000 } });
+  await read;
+  // The connection remains alive only to finish unsubscribe, not to refresh UI.
+  await conn.getSessionStats();
+  assert.equal(usageReads, 1);
+  assert.deepEqual(observed, []);
+  assert.ok(unsubscribeResponse);
+  unsubscribeResponse({});
+  await disposal;
+});
