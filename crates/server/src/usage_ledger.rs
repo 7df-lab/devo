@@ -454,7 +454,19 @@ impl Stream for MeteredStream {
             response.usage = usage;
         }
         let result = match &item {
-            Poll::Ready(Some(Ok(StreamEvent::UsageDelta(usage)))) if usage.is_reported() => {
+            Poll::Ready(Some(Ok(StreamEvent::UsageDelta(usage))))
+                if usage.is_reported()
+                    && (usage.input_tokens > 0
+                        || usage.output_tokens > 0
+                        || usage.total_tokens.unwrap_or(0) > 0
+                        || usage.cache_read_input_tokens.unwrap_or(0) > 0
+                        || usage.cache_creation_input_tokens.unwrap_or(0) > 0
+                        || usage.reasoning_output_tokens.unwrap_or(0) > 0) =>
+            {
+                // Initial all-zero stream counters are provisional, not a
+                // measured zero. Do not promote them to terminal usage when
+                // the stream ends without an explicit final sample. Nonzero
+                // partial/cache/reasoning counters remain valid for accounting.
                 *self.attempt.last_usage.lock().expect("usage sample lock") = Some(usage.clone());
                 Ok(())
             }

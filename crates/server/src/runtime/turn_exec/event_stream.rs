@@ -364,6 +364,13 @@ pub(crate) fn spawn_turn_event_stream(
                     )
                     .await;
                 }
+                // A streaming sample is provisional: some compatible providers
+                // begin a request with zero counters before measuring its input.
+                // Keep the previous context until a nonzero sample or the final
+                // Usage event arrives. A final, explicitly reported zero remains
+                // authoritative and is handled by the arm below.
+                devo_core::QueryEvent::UsageDelta { ref usage }
+                    if usage.display_total_tokens() == 0 && usage.derived_total_tokens() == 0 => {}
                 devo_core::QueryEvent::UsageDelta { usage }
                 | devo_core::QueryEvent::Usage { usage } => {
                     let usage =
