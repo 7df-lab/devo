@@ -12,7 +12,7 @@ import {
 	RotateCcwIcon,
 	UndoIcon,
 } from "lucide-react"
-import { useCallback, useEffect, useState } from "react"
+import { useCallback, useEffect, useRef, useState } from "react"
 import type { DevoCheckResult } from "../../../preload/api"
 import { onboardingStateAtom } from "../../atoms/onboarding"
 import { SettingsHeader } from "./settings-header"
@@ -51,30 +51,40 @@ export function SetupSettings() {
 function DevoStatusSection() {
 	const [checking, setChecking] = useState(false)
 	const [result, setResult] = useState<DevoCheckResult | null>(null)
+	const [error, setError] = useState<string | null>(null)
+	const checkVersion = useRef(0)
 
 	const checkStatus = useCallback(async () => {
 		if (!isElectron) return
+		const version = ++checkVersion.current
 		setChecking(true)
+		setResult(null)
+		setError(null)
 		try {
 			const r = await window.devo.onboarding.checkDevo()
-			setResult(r)
-		} catch {
-			// ignore
+			if (version === checkVersion.current) setResult(r)
+		} catch (error) {
+			if (version === checkVersion.current) {
+				setError((error instanceof Error ? error.message.trim() : "") || "Failed to check Desktop runtime")
+			}
 		} finally {
-			setChecking(false)
+			if (version === checkVersion.current) setChecking(false)
 		}
 	}, [])
 
 	useEffect(() => {
-		checkStatus()
+		void checkStatus()
+		return () => { checkVersion.current++ }
 	}, [checkStatus])
 
 	return (
 		<SettingsSection title="Desktop Runtime">
-			<SettingsRow label="Version" description={result?.path ?? "Checking..."}>
+			<SettingsRow label="Version" description={checking ? "Checking..." : error ? "Runtime status unavailable" : result?.path ?? "Runtime path unavailable"}>
 				<div className="flex items-center gap-2">
 					{checking ? (
 						<Spinner className="size-3.5" />
+					) : error ? (
+						<span className="text-sm text-destructive">Check failed</span>
 					) : result?.installed ? (
 						<>
 							<span className="text-sm text-muted-foreground">
@@ -103,6 +113,8 @@ function DevoStatusSection() {
 					</Button>
 				</div>
 			</SettingsRow>
+
+			{error && <div role="alert" className="px-4 py-2.5 text-xs text-destructive">{error}</div>}
 
 			{result && !result.compatible && result.message && (
 				<div className="px-4 py-2.5 text-xs text-amber-500">{result.message}</div>
