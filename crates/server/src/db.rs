@@ -12,6 +12,8 @@ use devo_protocol::native::item::ContextOccupancy;
 use devo_protocol::{PendingInputItem, PendingInputKind, QueueItemId, SessionTitleState};
 
 mod inbox;
+mod inbox_consumption;
+pub(crate) use inbox_consumption::InboxConsumption;
 mod queue_steer;
 
 /// Queue type for pending messages.
@@ -876,6 +878,13 @@ impl Database {
         if has_receipts {
             conn.execute(
                 "DELETE FROM inbox_receipts WHERE session_id=?1",
+                params![id.as_str()],
+            )?;
+        }
+        let has_consumptions: bool = conn.query_row("SELECT EXISTS(SELECT 1 FROM sqlite_master WHERE type='table' AND name='inbox_consumptions')", [], |row| row.get(0))?;
+        if has_consumptions {
+            conn.execute(
+                "DELETE FROM inbox_consumptions WHERE session_id=?1",
                 params![id.as_str()],
             )?;
         }

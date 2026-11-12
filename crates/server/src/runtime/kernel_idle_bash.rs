@@ -37,17 +37,12 @@ pub(crate) fn for_session(
                     }
                 }
                 "bash.consumed" => {
-                    let Some(identity) = params
-                        .get("handle_id")
-                        .filter(|value| value.is_string())
-                        .or_else(|| params.get("pid").filter(|value| value.is_i64()))
-                    else {
-                        return json!({
-                            "status": "error",
-                            "error": "bash.consumed requires a handle_id or pid",
-                        });
-                    };
-                    super::kernel_host::consume_bash_notice(&session_key, identity);
+                    return super::bash_consumption::consume(
+                        runtime.upgrade(),
+                        session_id,
+                        &params,
+                    )
+                    .await;
                 }
                 "bash.poll" | "bash.kill" | "bash.forget" | "bash.list" | "bash.attach"
                 | "bash.read" | "bash.write" | "bash.close_stdin" | "bash.resize" => {

@@ -38,8 +38,11 @@ pub(crate) fn idle_host_request_handler(session_id: String) -> HostRequestHandle
                     devo_core::tools::host_bash::control_async(&session_id, &action, &params).await
                 }
                 // One-shot prompts have no persisted completion-notice inbox.
-                "bash.completed" | "bash.consumed" => {
-                    json!({"status":"ok", "result":{"accepted":true}})
+                "bash.completed" => json!({"status":"ok", "result":{"accepted":true}}),
+                "bash.consumed" => {
+                    let snapshot =
+                        devo_core::tools::host_bash::control(&session_id, "bash.poll", &params);
+                    consumed_reply(&params, snapshot)
                 }
                 _ => error_reply(format!("idle host request denied: {action}")),
             }
@@ -79,6 +82,11 @@ async fn dispatch_host_request(runtime: &ToolRuntime, request_id: String, data: 
     ) {
         let (_, params) = devo_kernel::parse_host_request_data(&data);
         return runtime.interact_host_bash(action, &params).await;
+    }
+    if action == "bash.consumed" {
+        let (_, params) = devo_kernel::parse_host_request_data(&data);
+        let snapshot = runtime.interact_host_bash("bash.poll", &params).await;
+        return consumed_reply(&params, snapshot);
     }
     if action == "bash.start" {
         let mut input = data.as_object().cloned().unwrap_or_default();
@@ -140,6 +148,27 @@ async fn dispatch_host_request(runtime: &ToolRuntime, request_id: String, data: 
     }
 
     json!({ "status": "ok", "result": content_as_json(result.content) })
+}
+
+/// Headless prompts have no durable completion inbox. Verify the owned terminal
+/// handle, then acknowledge that no follow-up remains to be delivered here.
+fn consumed_reply(params: &Value, snapshot: Value) -> Value {
+    if params["managed"] != true {
+        return json!({"status":"ok", "result":{"accepted":true}});
+    }
+    if snapshot["status"] != "ok" {
+        return snapshot;
+    }
+    if snapshot["result"]["running"] != false {
+        return error_reply("bash is still running");
+    }
+    if !matches!(
+        snapshot["result"]["mode"].as_str(),
+        Some("interactive" | "pty")
+    ) {
+        return error_reply("managed consumption requires an interactive bash handle");
+    }
+    json!({"status":"ok", "result":{"accepted":true, "disposition":"consumed"}})
 }
 
 fn content_as_json(content: ToolContent) -> Value {
@@ -444,6 +473,82 @@ mod tests {
         devo_core::tools::host_bash::cancel_session(session.as_str());
         let _ = kernel.shutdown().await;
         result.expect("round trip timeout").expect("round trip");
+    }
+
+    #[cfg(unix)]
+    #[tokio::test]
+    async fn prompt_managed_consumption_validates_owner_and_terminal_state() {
+        let session = devo_protocol::SessionId::new();
+        let registry = devo_core::tools::handlers::build_registry_from_plan(&Default::default());
+        let runtime = ToolRuntime::new_with_context(
+            Arc::new(registry),
+            permission_checker(),
+            devo_core::tools::ToolRuntimeContext {
+                session_id: session,
+                cwd: std::env::current_dir().expect("cwd"),
+                sandbox_profile: Some("off".into()),
+                ..Default::default()
+            },
+        );
+        let started = dispatch_host_request(
+            &runtime,
+            "start".into(),
+            json!({"type":"bash.start", "command":"cat", "mode":"interactive", "timeout_ms":10000}),
+        )
+        .await;
+        let id = started["result"]["handle_id"].as_str().expect("handle");
+        let request = json!({"type":"bash.consumed", "params":{"handle_id":id,"managed":true}});
+        assert_eq!(
+            dispatch_host_request(&runtime, "busy".into(), request.clone()).await,
+            json!({"status":"error","error":"bash is still running"})
+        );
+        let stranger =
+            super::idle_host_request_handler(devo_protocol::SessionId::new().to_string());
+        assert_eq!(
+            stranger("other".into(), request.clone()).await["status"],
+            "error"
+        );
+        tokio::time::timeout(std::time::Duration::from_secs(5), async {
+            loop {
+                if runtime
+                    .interact_host_bash("bash.poll", &json!({"handle_id":id}))
+                    .await["result"]["ready"]
+                    == true
+                {
+                    break;
+                }
+                tokio::task::yield_now().await;
+            }
+        })
+        .await
+        .expect("ready");
+        runtime
+            .interact_host_bash("bash.close_stdin", &json!({"handle_id":id}))
+            .await;
+        tokio::time::timeout(std::time::Duration::from_secs(5), async {
+            loop {
+                if runtime
+                    .interact_host_bash("bash.poll", &json!({"handle_id":id}))
+                    .await["result"]["running"]
+                    == false
+                {
+                    break;
+                }
+                tokio::task::yield_now().await;
+            }
+        })
+        .await
+        .expect("exit");
+        let expected = json!({"status":"ok","result":{"accepted":true,"disposition":"consumed"}});
+        assert_eq!(
+            dispatch_host_request(&runtime, "active".into(), request.clone()).await,
+            expected
+        );
+        let idle = super::idle_host_request_handler(session.to_string());
+        assert_eq!(idle("idle".into(), request).await, expected);
+        runtime
+            .interact_host_bash("bash.forget", &json!({"handle_id":id}))
+            .await;
     }
 
     #[test]

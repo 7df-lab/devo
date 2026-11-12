@@ -181,7 +181,7 @@ The old standalone local implementation is explicitly available as
 fallback. It runs directly in the trusted Python process's environment and does
 not provide host shell authorization.
 
-Background Bash may complete after its IPython cell ends. `bash.completed`
+Default pipe-mode Bash may complete after its IPython cell ends. `bash.completed`
 with `{handle_id, command, exitCode}` queues a follow-up; `bash.consumed` with
 `{handle_id, command}` withdraws it when a live cell consumes the result.
 Notices wait for the creating cell's completion barrier, so foreground awaits
@@ -190,6 +190,15 @@ use PID-scoped notices. Notices and handles are process-local, not recovered
 across server/kernel loss. The `application/vnd.bash-activity+json` display
 marker carries `id`, `active`, and (once available) `handle_id`; it is not part
 of a client tool result and has no TUI/Desktop consumer.
+
+Interactive and PTY tasks instead use host-managed completion messages in the
+owning session's FIFO inbox. A foreground `await h` / `await h.wait()` sends
+`bash.consumed` with `{handle_id, command, managed: true}` and waits for the durable
+acknowledgement before returning (or raising a terminal execution error). The host
+suppresses unpublished or still-pending completion messages; already-claimed turns
+are not retracted. Partial output reads and detached waiters do not consume delivery.
+This durable notification receipt does not restore processes after a server restart.
+See [shell tasks](../../docs/shell-tasks.md) for exact lifecycle and timeout boundaries.
 
 Server dispatch lives in `crates/server/src/runtime/kernel_host.rs`.
 

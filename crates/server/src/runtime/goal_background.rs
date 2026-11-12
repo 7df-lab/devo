@@ -324,6 +324,16 @@ impl ServerRuntime {
             .any(|state| state.pending.iter().any(|id| id.starts_with(&prefix)))
     }
 
+    #[cfg(test)]
+    pub(super) fn background_ticket_pending(&self, session_id: SessionId, work_id: &str) -> bool {
+        self.background_work
+            .lock()
+            .expect("background work mutex poisoned")
+            .sessions
+            .get(&session_id)
+            .is_some_and(|state| state.pending.contains(work_id))
+    }
+
     pub(super) fn clear_background_work(&self, session_id: SessionId) {
         self.background_work
             .lock()
