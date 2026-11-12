@@ -271,3 +271,55 @@ class InteractiveBashTests(unittest.IsolatedAsyncioTestCase):
                 await h
             self.assertEqual(await h.read(), rlm.BashRead(b"last", 4, False, True))
         self.assertEqual(calls, ["bash.start", "bash.poll", "bash.read"])
+
+    async def test_terminate_ack_is_independent_of_terminal_cancel_error_and_idempotent(self):
+        cancelling = asyncio.Event()
+        calls = []
+        h = None
+        async def host(kind, payload):
+            calls.append(kind)
+            if kind == "bash.start":
+                return snapshot()
+            if kind == "bash.poll":
+                await cancelling.wait()
+                return {**snapshot(running=False), "error": "command cancelled"}
+            if kind == "bash.kill":
+                cancelling.set()
+                # Force poll to install the real terminal error before the
+                # cancellation acknowledgement reaches terminate().
+                await asyncio.gather(h._task, return_exceptions=True)
+                return {"cancelled": True}
+            return {}
+        with patch.object(rlm, "host_request", host), patch.object(bash_module, "_POLL_INTERVAL", 0):
+            h = rlm.bash("test", mode="interactive")
+            await h.ready()
+            await h.terminate()
+            await h.terminate()
+            with self.assertRaisesRegex(RuntimeError, "command cancelled"):
+                await h.wait()
+        self.assertEqual(calls.count("bash.kill"), 1)
+
+    async def test_terminate_still_reports_control_failure(self):
+        finish = asyncio.Event()
+        async def host(kind, payload):
+            if kind == "bash.start":
+                return snapshot()
+            if kind == "bash.kill":
+                raise RuntimeError("cancel transport failed")
+            await finish.wait()
+            return snapshot(running=False, code=0)
+        with patch.object(rlm, "host_request", host), patch.object(bash_module, "_POLL_INTERVAL", 0):
+            h = rlm.bash("test", mode="interactive")
+            await h.ready()
+            with self.assertRaisesRegex(RuntimeError, "cancel transport failed"):
+                await h.terminate()
+            finish.set()
+            await asyncio.gather(h._task, return_exceptions=True)
+
+    async def test_terminate_still_reports_admission_failure(self):
+        async def host(kind, payload):
+            raise RuntimeError("approval denied")
+        with patch.object(rlm, "host_request", host):
+            h = rlm.bash("test", mode="interactive")
+            with self.assertRaisesRegex(RuntimeError, "approval denied"):
+                await h.terminate()

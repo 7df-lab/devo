@@ -133,4 +133,8 @@ class InteractiveBashOperations:
         """Request host cancellation and await acknowledgement; use wait() for exit."""
         self.kill()
         await asyncio.shield(self._kill_task)
-        self._raise_error()
+        # Cancellation acknowledgement and process exit are separate outcomes.
+        # Poll may already have installed its terminal cancellation/timeout error
+        # while the successful kill acknowledgement was in flight.
+        if self._error is not self._terminal_error:
+            self._raise_error()
