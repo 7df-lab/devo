@@ -570,9 +570,9 @@ export class NativeAgentConnection implements AgentConnection {
       method === "turn/statusChanged" && String(p.status ?? "").toLowerCase() === "interrupted";
     const skipDuplicateAbortChrome =
       this.localAbortChromePending && (turnCompletedInterrupted || turnStatusInterrupted);
-    // Only clear on turn/completed — statusChanged can precede it and would
-    // otherwise re-enable a second "Operation aborted" line.
-    if (skipDuplicateAbortChrome && turnCompletedInterrupted) {
+    // StatusChanged can precede completion; retain suppression until the
+    // terminal event. Even a successful completion must retire a raced abort.
+    if (method === "turn/completed") {
       this.localAbortChromePending = false;
     }
 
@@ -2615,15 +2615,22 @@ export class NativeAgentConnection implements AgentConnection {
     }
     // Clear Executing chrome immediately — session/interrupt waits up to 5s for
     // terminal turn status, which left Esc looking like a no-op mid-tool.
-    this.localAbortChromePending = true;
-    for (const ev of abortUiSessionEvents(this.streamState)) {
-      this.emitSessionEvent(ev);
+    // Esc still probes the server when local activity is stale, but an idle
+    // probe must not manufacture an aborted assistant message. Keep an earlier
+    // abort pending so repeated Esc cannot re-enable duplicate terminal chrome.
+    const hasLiveTurn = this.isStreaming || this.streamState.imAssistantStreamOpen ||
+      this.streamState.tools.pendingCalls.size > 0 || this.streamState.tools.startedCalls.size > 0;
+    if (hasLiveTurn) {
+      this.localAbortChromePending = true;
+      for (const ev of abortUiSessionEvents(this.streamState)) {
+        this.emitSessionEvent(ev);
+      }
     }
     this.isStreaming = false;
     this.expectedTurnId = null;
     this.resolveIdleWaiters();
     // Don't leave a stale/wrong turn workspace recap after Esc (D03 on interrupt).
-    void this.seedWorkspaceFileChangesRecap();
+    if (hasLiveTurn) void this.seedWorkspaceFileChangesRecap();
 
     const interrupt = this.rpc.request("session/interrupt", {
       scope: { scope: "session", sessionId: this.sessionId },
@@ -3148,6 +3155,7 @@ export class NativeAgentConnection implements AgentConnection {
     this.sessionName = session?.title as string | undefined;
     this.messages = [];
     this.streamState = createStreamState();
+    this.localAbortChromePending = false;
     this.queue = { steering: [], followUp: [] };
     this.queueEntries = [];
     this.sessionActions = emptySessionActions();
@@ -3204,6 +3212,7 @@ export class NativeAgentConnection implements AgentConnection {
     this.cwd = String(session.cwd ?? session.directory ?? this.cwd);
     this.messages = [];
     this.streamState = createStreamState();
+    this.localAbortChromePending = false;
     // Source-session previews and compaction chrome are invalid immediately,
     // even when the target queue refresh is deferred or fails.
     this.queue = { steering: [], followUp: [] };
@@ -3372,6 +3381,7 @@ export class NativeAgentConnection implements AgentConnection {
       this.pendingInitialMessages = undefined;
       this.messages = [];
       this.streamState = createStreamState();
+      this.localAbortChromePending = false;
       return {
         cancelled: false as const,
         ...(result?.editorText != null ? { editorText: String(result.editorText) } : {}),

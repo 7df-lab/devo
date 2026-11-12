@@ -752,8 +752,8 @@ test("abort emits agent_end so InteractiveMode clears isStreaming", async () => 
     }
   });
 
-  await conn.prompt("hello");
-  // Simulate mid-turn without waiting for idle completion.
+  // A server-started turn can be active without a local prompt.
+  conn.pushChunk(`${JSON.stringify({ jsonrpc: "2.0", method: "turn/started", params: { turn: { id: "active" } } })}\n`);
   events.length = 0;
   await conn.abort();
   const interrupt = fake.requests.find((r) => r.method === "session/interrupt");
@@ -2723,3 +2723,102 @@ for (const reverse of [false, true]) {
     await conn.dispose();
   });
 }
+
+test("idle abort probes server without fabricating an aborted assistant message", async () => {
+  const { conn, fake } = await bootConnection();
+  const events: unknown[] = [];
+  conn.subscribe((ev) => { if (ev.type === "session_event") events.push(ev.event); });
+  await conn.abort();
+  await conn.abort();
+  assert.deepEqual(events, []);
+  assert.equal(fake.requests.filter((r) => r.method === "session/interrupt").length, 2);
+  await conn.dispose();
+});
+
+test("repeated abort paints one cancellation and suppresses delayed terminal duplicates", async () => {
+  const { conn } = await bootConnection();
+  const events: Record<string, unknown>[] = [];
+  conn.subscribe((ev) => { if (ev.type === "session_event") events.push(ev.event as Record<string, unknown>); });
+  const notify = (method: string, params: unknown) => conn.pushChunk(`${JSON.stringify({ jsonrpc: "2.0", method, params })}\n`);
+  notify("turn/started", { turn: { id: "active" } });
+  events.length = 0;
+  await conn.abort();
+  await conn.abort();
+  notify("turn/statusChanged", { turnId: "active", status: "interrupted" });
+  notify("turn/completed", { turn: { id: "active", status: "interrupted" } });
+  assert.deepEqual(events.filter((ev) => ev.type === "message_end").map((ev) => (ev.message as {stopReason: string}).stopReason), ["aborted"]);
+  assert.equal(events.filter((ev) => ev.type === "agent_end").length, 1);
+  await conn.dispose();
+});
+
+
+test("switching sessions retires abort suppression for observed and unseen target turns", async () => {
+  for (const snapshotHasActiveTurn of [false, true]) {
+    const { conn, fake } = await bootConnection([(method, params, respond) => {
+      const selectors = params.selectors as Array<{ sessionId?: string }> | undefined;
+      if (method !== "subscription/create" || selectors?.[0]?.sessionId !== "sess_target") return false;
+      respond({
+        subscriptionId: "sub_target",
+        cursors: [],
+        snapshots: [{
+          data: {
+            session: { id: "sess_target" },
+            activeTurn: snapshotHasActiveTurn ? { id: "target_turn" } : null,
+          },
+        }],
+      });
+      return true;
+    }]);
+    const notify = (method: string, params: unknown) => conn.pushChunk(`${JSON.stringify({ jsonrpc: "2.0", method, params })}\n`);
+    notify("turn/started", { turn: { id: "source_turn", sessionId: "sess_test" } });
+    await conn.abort();
+    // Switch before the source turn acknowledges the interrupt. A target's
+    // live turn may be known only to the server when the snapshot is stale.
+    await conn.switchSession("sess_target");
+    assert.equal((await conn.getState()).isStreaming, snapshotHasActiveTurn);
+    const events: Record<string, unknown>[] = [];
+    conn.subscribe((ev) => { if (ev.type === "session_event") events.push(ev.event as Record<string, unknown>); });
+    await conn.abort();
+    if (!snapshotHasActiveTurn) assert.deepEqual(events, []);
+    notify("turn/completed", { turn: { id: "target_turn", sessionId: "sess_target", status: "interrupted" } });
+    assert.deepEqual(
+      events.filter((ev) => ev.type === "message_end" || ev.type === "agent_end").map((ev) => ({
+        type: ev.type,
+        stopReason: (ev.message as { stopReason?: string } | undefined)?.stopReason,
+      })),
+      [{ type: "message_end", stopReason: "aborted" }, { type: "agent_end", stopReason: undefined }],
+      `snapshotHasActiveTurn=${snapshotHasActiveTurn}`,
+    );
+    assert.deepEqual(fake.requests.filter((r) => r.method === "session/interrupt").map((r) => r.params), [
+      { scope: { scope: "session", sessionId: "sess_test" } },
+      { scope: { scope: "session", sessionId: "sess_target" } },
+    ]);
+    await conn.dispose();
+  }
+});
+
+test("a successful completion racing abort cannot suppress a later server-only cancellation", async () => {
+  const { conn, fake } = await bootConnection();
+  const notify = (method: string, params: unknown) => conn.pushChunk(`${JSON.stringify({ jsonrpc: "2.0", method, params })}\n`);
+  notify("turn/started", { turn: { id: "finished_turn" } });
+  await conn.abort();
+  // The server completed before processing the interrupt, so it acknowledges
+  // a normal completion instead of an interrupted one.
+  notify("turn/completed", { turn: { id: "finished_turn", status: "completed" } });
+  const events: Record<string, unknown>[] = [];
+  conn.subscribe((ev) => { if (ev.type === "session_event") events.push(ev.event as Record<string, unknown>); });
+  // No local turn/start arrived for this server-initiated turn. The idle probe
+  // still sends the interrupt, and only the server terminal event paints it.
+  await conn.abort();
+  assert.deepEqual(events.filter((ev) => ev.type === "message_end" || ev.type === "agent_end"), []);
+  notify("turn/completed", { turn: { id: "server_only_turn", status: "interrupted" } });
+  assert.deepEqual(
+    events.filter((ev) => ev.type === "message_end" || ev.type === "agent_end").map((ev) => ({
+      type: ev.type,
+      stopReason: (ev.message as { stopReason?: string } | undefined)?.stopReason,
+    })),
+    [{ type: "message_end", stopReason: "aborted" }, { type: "agent_end", stopReason: undefined }],
+  );
+  assert.equal(fake.requests.filter((r) => r.method === "session/interrupt").length, 2);
+  await conn.dispose();
+});
