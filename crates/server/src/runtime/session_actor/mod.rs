@@ -19,3 +19,10 @@ mod turn_working;
 pub(crate) use handle::SessionHandle;
 pub(crate) use state::SessionActorState;
 pub(crate) use turn_working::TurnWorkingSet;
+
+/// Whether replacing conversation state also invalidates its live Python runtime.
+#[derive(Clone, Copy)]
+pub(crate) enum KernelReplacementPolicy {
+    Preserve,
+    Reset,
+}

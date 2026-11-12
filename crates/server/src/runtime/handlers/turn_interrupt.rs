@@ -248,7 +248,6 @@ impl ServerRuntime {
         session_handle
             .set_runtime_session_idle(Some(interrupted_turn.clone()))
             .await;
-        self.clear_active_turn_runtime_handles(session_id).await;
 
         tracing::warn!(
             session_id = %session_id,
@@ -269,12 +268,6 @@ impl ServerRuntime {
         )
         .await;
         self.broadcast_notification(
-            devo_protocol::native::event::ServerNotification::TurnCompleted {
-                turn: Box::new(interrupted_turn.native.clone()),
-            },
-        )
-        .await;
-        self.broadcast_notification(
             devo_protocol::native::event::ServerNotification::session_status_changed(
                 session_id,
                 SessionStatus::Idle,
@@ -284,6 +277,8 @@ impl ServerRuntime {
         .await;
         let snapshot = TerminalTurnSnapshot::from_runtime_turn(&interrupted_turn);
         self.record_terminal_turn_status(turn_id, snapshot.clone())
+            .await;
+        self.release_manual_compaction_admission_and_drain(session_id)
             .await;
         Some(snapshot)
     }

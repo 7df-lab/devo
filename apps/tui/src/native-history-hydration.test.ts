@@ -116,3 +116,27 @@ test("mixed thinking/text queued updates and completion repair each independentl
     assert.equal(events.filter(event => event.event?.type === "message_end").length, priorEnds, "stale snapshot must not resurrect closed reasoning");
   } finally { await conn.dispose(); }
 });
+
+test("snapshot fences turn lifecycle notifications by identity without suppressing future terminal events", async () => {
+  let connection: NativeAgentConnection;
+  connection = NativeAgentConnection.create({ writeLine(line) {
+    const request = JSON.parse(line);
+    if (request.id == null) return;
+    const result = request.method === "session/turns/list"
+      ? { data: [{ id: "compact", status: "completed" }, { id: "followup", status: "inProgress" }], nextCursor: null }
+      : request.method === "session/items/list" ? { data: [], nextCursor: null } : {};
+    connection.pushChunk(JSON.stringify({ jsonrpc: "2.0", id: request.id, result }) + "\n");
+  } });
+  Object.assign(connection, { sessionId: "child", activeSessionId: "child" });
+  const events: any[] = [];
+  connection.subscribe(event => { events.push(event); });
+  try {
+    const snapshot = await connection.getInitialSnapshot();
+    assert.deepEqual(snapshot.transcriptTurns, { compact: "terminal", followup: "started" });
+    connection.pushChunk(JSON.stringify({ jsonrpc: "2.0", method: "turn/started", params: {
+      sessionId: "child", turn: { id: "followup", sessionId: "child", status: "inProgress" },
+    } }) + "\n");
+    assert.deepEqual(events.find(event => event.event?.type === "agent_start")?.sourceTurn,
+      { id: "followup", phase: "started" });
+  } finally { await connection.dispose(); }
+});

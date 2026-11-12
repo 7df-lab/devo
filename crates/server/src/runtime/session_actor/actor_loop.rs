@@ -677,9 +677,15 @@ pub(super) async fn run_session_actor(
                 let _ = reply.send(true);
             }
             SessionCommand::ReplaceState {
-                state: new_state,
+                state: mut new_state,
+                kernel_policy,
                 reply,
             } => {
+                // The journal lock belongs to the actor lifetime, not a history snapshot.
+                new_state.session_file_lock = state.session_file_lock.take();
+                if matches!(kernel_policy, super::KernelReplacementPolicy::Preserve) {
+                    new_state.kernel = state.kernel.take();
+                }
                 state = *new_state;
                 let _ = reply.send(());
             }

@@ -3110,7 +3110,7 @@ async fn manual_compaction_success_drains_queued_followup() -> Result<()> {
             open: Arc::clone(&open),
         }),
     );
-    let connection_id = initialized_connection(&runtime).await;
+    let (connection_id, mut notifications) = connect_stdio(&runtime, true, 512).await;
     let session_id = start_durable_session(&runtime, connection_id, data_root.path()).await?;
     // Two turns: the first is compacted, the second becomes the preserved
     // suffix (one turn alone is entirely preserved and compaction skips).
@@ -3118,6 +3118,26 @@ async fn manual_compaction_success_drains_queued_followup() -> Result<()> {
         start_turn(&runtime, connection_id, session_id, text).await?;
         wait_turn_idle(&runtime, session_id).await;
     }
+
+    // The live kernel is session-scoped. Compaction replaces prompt history,
+    // not the Python process (a snapshot restore would lose live resources).
+    let session_handle = runtime.session(session_id).await.expect("session");
+    let snapshot = session_handle
+        .export_runtime_session()
+        .await
+        .expect("snapshot");
+    let working = session_handle
+        .checkout_turn_working_set(snapshot.latest_turn.expect("latest turn"))
+        .await
+        .expect("working state");
+    working.state.stream.lock().await.turn_inline = None;
+    let original_kernel = working.state.kernel.expect("turn must start Python kernel");
+    let marker = original_kernel
+        .execute("compact_marker = object(); compact_marker_id = id(compact_marker)")
+        .await?;
+    assert_eq!(marker.status, "ok");
+
+    while notifications.try_recv().is_ok() {}
 
     let compact = history_request(
         &runtime,
@@ -3175,6 +3195,44 @@ async fn manual_compaction_success_drains_queued_followup() -> Result<()> {
         drained,
         "queued follow-up must run to completion after a successful compaction"
     );
+    let mut compaction_completed = false;
+    let mut turn_completed = false;
+    loop {
+        let notification = recv_frame(&mut notifications).await?;
+        match notification["method"].as_str() {
+            Some("context/compactionCompleted") => compaction_completed = true,
+            Some("turn/completed")
+                if notification["params"]["turn"]["kind"] == "compaction" =>
+            {
+                turn_completed = true;
+            }
+            Some("turn/started")
+                if notification["params"]["turn"]["kind"] == "regular" =>
+            {
+                assert_eq!((compaction_completed, turn_completed), (true, true));
+                break;
+            }
+            _ => {}
+        }
+    }
+    let snapshot = session_handle
+        .export_runtime_session()
+        .await
+        .expect("snapshot");
+    let working = session_handle
+        .checkout_turn_working_set(snapshot.latest_turn.expect("latest turn"))
+        .await
+        .expect("working state");
+    working.state.stream.lock().await.turn_inline = None;
+    let after_kernel = working.state.kernel.expect("kernel after queued turn");
+    assert!(
+        Arc::ptr_eq(&original_kernel, &after_kernel),
+        "compaction must retain the live kernel"
+    );
+    let marker = after_kernel
+        .execute("assert id(compact_marker) == compact_marker_id")
+        .await?;
+    assert_eq!(marker.status, "ok");
     Ok(())
 }
 
@@ -3183,7 +3241,7 @@ async fn manual_compaction_interrupt_orphan_and_queue_push() -> Result<()> {
     let data_root = TempDir::new()?;
     let runtime =
         build_runtime_with_provider(data_root.path(), Arc::new(TurnOkCompactHangProvider));
-    let connection_id = initialized_connection(&runtime).await;
+    let (connection_id, mut notifications) = connect_stdio(&runtime, true, 512).await;
     let session_id = start_durable_session(&runtime, connection_id, data_root.path()).await?;
     let _turn_id = start_hanging_compaction(&runtime, connection_id, session_id, 200).await?;
 
@@ -3224,6 +3282,8 @@ async fn manual_compaction_interrupt_orphan_and_queue_push() -> Result<()> {
         result,
         devo_protocol::native::rpc_turn::SessionQueuePushResult::Queued { .. }
     ));
+
+    while notifications.try_recv().is_ok() {}
 
     assert!(
         runtime
@@ -3346,6 +3406,26 @@ async fn manual_compaction_interrupt_orphan_and_queue_push() -> Result<()> {
             .get("error")
             .is_none()
     );
+    let mut compaction_failed = false;
+    let mut turn_completed = false;
+    loop {
+        let notification = recv_frame(&mut notifications).await?;
+        match notification["method"].as_str() {
+            Some("context/compactionFailed") => compaction_failed = true,
+            Some("turn/completed")
+                if notification["params"]["turn"]["kind"] == "compaction" =>
+            {
+                turn_completed = true;
+            }
+            Some("turn/started")
+                if notification["params"]["turn"]["kind"] == "regular" =>
+            {
+                assert_eq!((compaction_failed, turn_completed), (true, true));
+                break;
+            }
+            _ => {}
+        }
+    }
     Ok(())
 }
 

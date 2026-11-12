@@ -361,9 +361,9 @@ export class NativeAgentConnection implements AgentConnection {
     }
   }
 
-  private emitSessionEvent(event: Record<string, unknown>, sourceItem?: { id: string; revision?: number; missingTextBaseIds?: string[] }): void {
+  private emitSessionEvent(event: Record<string, unknown>, sourceItem?: { id: string; revision?: number; missingTextBaseIds?: string[] }, sourceTurn?: { id: string; phase: "started" | "terminal" }): void {
     if (event.type === "goal_update") this.goalRevision += 1;
-    this.emit({ type: "session_event", event: event as never, ...(sourceItem ? { sourceItem } : {}) });
+    this.emit({ type: "session_event", event: event as never, ...(sourceItem ? { sourceItem } : {}), ...(sourceTurn ? { sourceTurn } : {}) });
   }
 
   /** After workspace/changes/updated, re-read summary and feed the workspace-level recap. */
@@ -683,7 +683,12 @@ export class NativeAgentConnection implements AgentConnection {
       if (ev.type === "goal_update") {
         this.goal = (ev.goal ?? emptyGoalState()) as never;
       }
-      this.emitSessionEvent(ev, eventSource);
+      const notificationTurn = (p.turn ?? p) as { id?: string; turnId?: string };
+      const turnId = notificationTurn.id ?? notificationTurn.turnId;
+      const sourceTurn = method.startsWith("turn/") && turnId && (ev.type === "agent_start" || ev.type === "agent_end")
+        ? { id: turnId, phase: ev.type === "agent_start" ? "started" as const : "terminal" as const }
+        : undefined;
+      this.emitSessionEvent(ev, eventSource, sourceTurn);
       if (ev.type === "auto_retry_start") {
         this.retryAttempt = Number((ev as { attempt?: unknown }).attempt ?? 0);
       }
@@ -1250,6 +1255,12 @@ export class NativeAgentConnection implements AgentConnection {
       children: children as never,
       replay: { status: "complete", toSequence: 0 },
       completedItemRevisions: completedItemRevisions(this.historySnapshotItems.get(messages) ?? []),
+      transcriptTurns: Object.fromEntries((this.historySnapshotTurns.get(messages) ?? []).flatMap(raw => {
+        const turn = raw as { id?: string; status?: string };
+        if (!turn.id) return [];
+        const terminal = ["completed", "failed", "interrupted", "cancelled"].includes(String(turn.status).toLowerCase());
+        return [[turn.id, terminal ? "terminal" as const : "started" as const]];
+      })),
     };
   }
   async getMessages(): Promise<never[]> {
