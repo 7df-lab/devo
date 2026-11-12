@@ -13,7 +13,7 @@
  *         0002.dat
  *         ...
  */
-import { mkdir, readdir } from "node:fs/promises"
+import { mkdir, readdir, readFile } from "node:fs/promises"
 import { join } from "node:path"
 import { ensureDir, exists, safeReadFile, safeReadJson, writeFileSafe } from "../utils/fs"
 import { stringifyJson } from "../utils/json"
@@ -108,20 +108,22 @@ export async function createBackup(
 	for (const targetPath of targetPaths) {
 		fileIndex++
 		const backupFilename = `${fileIndex.toString().padStart(4, "0")}.dat`
-		const fileExists = await exists(targetPath)
-
-		if (fileExists) {
-			// Back up existing file content
-			const content = await safeReadFile(targetPath)
-			if (content !== undefined) {
-				await writeFileSafe(join(filesDir, backupFilename), content)
-			}
+		let content: string | undefined
+		try {
+			content = await readFile(targetPath, "utf-8")
+		} catch (error) {
+			// Only missing files are new targets. Abort before migration writes if
+			// an existing target cannot be backed up (permissions, I/O failure, etc.).
+			if ((error as NodeJS.ErrnoException).code !== "ENOENT") throw error
+		}
+		if (content !== undefined) {
+			await writeFileSafe(join(filesDir, backupFilename), content)
 		}
 
 		manifest.files.push({
 			originalPath: targetPath,
 			backupFilename,
-			existedBefore: fileExists,
+			existedBefore: content !== undefined,
 		})
 	}
 
