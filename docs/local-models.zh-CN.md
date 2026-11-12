@@ -106,7 +106,7 @@ model_reasoning_effort_selection = "off"
 | `anthropic_messages` | `http://127.0.0.1:8000` | `/v1/messages` |
 | `google_generative_ai` | Google 兼容 API 根路径 | `…/models/{model}:generateContent` |
 
-前三种常用于本地兼容网关；Google 协议也存在，但不是把普通 OpenAI 服务器切到 Google 就能工作。省略 `wire_api` 时配置层默认 Chat Completions，建议明确写出。
+前三种常用于本地兼容网关；Google 协议也存在，但不是把普通 OpenAI 服务器切到 Google 就能工作。虽然目录投影在缺省时会显示 Chat Completions，但 Native 连接要求固定协议；如果 provider 和 model 都没写 `wire_api`，运行时会报 no pinned protocol。手写可用连接必须在至少一处明确填写。
 
 - OpenAI 系列裸主机地址会补 `/v1`；显式非根路径保留。因此 `http://host:8000/api` 会请求 `/api/chat/completions`，不会自动变成 `/api/v1/chat/completions`。
 - Anthropic 的 adapter 添加 `/v1/messages`；构建时会移除 Base URL 末尾已有的 `/v1`，防止重复。
@@ -252,11 +252,11 @@ refresh_on_startup = false
 }
 ```
 
-匹配 effort variant 后，runtime 不再自动生成该次请求的 thinking/effort 参数，因此 variant 必须包含服务需要的完整控制字段。
+匹配 effort variant 后，runtime 会清空通用 thinking/effort 选择，但 adapter/profile 仍可能合成默认 wire 字段（例如部分 GLM/DeepSeek 路径默认启用 thinking）。因此 variant 必须包含服务需要的完整控制字段，必要时显式覆盖 adapter 的默认值，并检查实际请求。
 
-这不是 Ollama、vLLM 或所有 Qwen 版本通用保证。若服务要求 `thinking`、`reasoning`、`reasoning_effort` 或 token budget，应按其接口文档修改 `request`，并验证实际请求。`variants.<name>.request_model` 还可切换服务模型 ID；这仍在同一个 provider 的连接/凭据范围内。
+这不是 Ollama、vLLM 或所有 Qwen 版本通用保证。若服务要求 `thinking`、`reasoning`、`reasoning_effort` 或 token budget，应按其接口文档修改 `request`，并验证实际请求。与推理档位匹配的 `variants.<effort>.request_model` 还可切换服务模型 ID；这仍在同一个 provider 的连接/凭据范围内。
 
-命名 variant 支持 `label`、`disabled`、`request_model`、`request`、`options`、`headers`；`default_variant` 可指定默认项。variant 可以用业务名称，但不要混淆为新增 `/effort` 档位。完整引用可为 `provider/model/variant`，精确模型 ID 优先匹配，所以模型 ID 与 variant 后缀冲突时需要避免歧义。
+命名 variant 支持 `label`、`disabled`、`request_model`、`request`、`options`、`headers`；`default_variant` 可指定默认项。variant 可以用业务名称，但不要混淆为新增 `/effort` 档位。当前任意业务 variant（例如 `fast`）或 `default_variant` 的 `request_model` 并不保证参与最终模型路由；其 request/options/headers 可被合并，wire 模型却仍可能使用基础 ID。业务别名需切换模型 ID 时，推荐建独立模型条目并使用模型级 `request_model`。完整引用可为 `provider/model/variant`，精确模型 ID 优先匹配，所以模型 ID 与 variant 后缀冲突时需要避免歧义。
 
 ## 8. 高级请求选项与覆盖规则
 
@@ -266,7 +266,7 @@ provider 级支持 `name`、`description`、`base_url`、`credential`、`headers
 
 合并顺序为 provider → model → variant，每层先 `options` 再 `request`，对象内部递归合并；headers 同名项由更具体层覆盖。随后额外请求体对 adapter 生成的 body 做顶层覆盖，因此嵌套 `reasoning` 对象可能替换 adapter 自己生成的整个对象。`request` 直接放最终 body 字段，不需要包一层 `extra_body`，除非服务确实要求这个字段。避免在透传里随意写 `messages`、`tools`、`model`、`stream`、认证等核心字段。
 
-本地服务通常不支持 provider-hosted web tools，可在 provider/model 里明确写 `"web_search":{"mode":"disabled"}`、`"web_fetch":{"mode":"disabled"}`。不要混淆 provider-hosted 工具与 Devo 自己的本地工具或第三方搜索服务。
+本地服务通常不支持 provider-hosted web tools。provider/model 中的 `"web_search":{"mode":"disabled"}`、`"web_fetch":{"mode":"disabled"}` 会关闭对应 web 能力，连同 Devo 本地搜索/抓取，而不只是禁止 hosted API。若要保留 Devo 自己的工具，选择 `mode: "local"`；本地搜索还需配置支持的搜索服务及该服务要求的凭据。web_fetch 的应用默认值就是 local，不应为了“不发 hosted 参数”而无意禁用它。
 
 ## 9. 发现、验证与排错顺序
 
