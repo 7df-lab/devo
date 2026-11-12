@@ -1038,6 +1038,9 @@ export class NativeAgentConnection implements AgentConnection {
       const data = (snapshot.data ?? snapshot) as Record<string, unknown>;
       const session = (data.session ?? data) as Record<string, unknown>;
       if (session && typeof session === "object") this.applySessionSnapshot(session);
+      // Restore the target's current state before replay; a fresh attachment
+      // may never receive the statusChanged event that started compaction.
+      if (Array.isArray(session.flags)) this.isCompacting = session.flags.includes("compacting");
       const activeTurn = (data.activeTurn ?? data.active_turn) as
         | { id?: string }
         | null
@@ -1744,9 +1747,10 @@ export class NativeAgentConnection implements AgentConnection {
   private async refreshQueueFromServer(sessionId: string | null = this.sessionId): Promise<boolean> {
     if (!sessionId || this.disposed) return false;
     const queueRevision = this.queueRevision;
+    const transitionGeneration = this.sessionTransitionGeneration;
     try {
       const result = (await this.rpc.request("session/queue/list", { sessionId })) as { entries?: unknown[]; revision?: unknown };
-      if (this.sessionId !== sessionId || this.disposed) return false;
+      if (this.sessionId !== sessionId || transitionGeneration !== this.sessionTransitionGeneration || this.disposed) return false;
       const revision = queueWireRevision(result?.revision);
       if (revision !== undefined) {
         if (revision < (this.queueWireRevisions.get(sessionId) ?? -1)) return true;
@@ -2342,9 +2346,12 @@ export class NativeAgentConnection implements AgentConnection {
     const name = match[1]!.toLowerCase();
     const args = (match[2] ?? "").trim();
     if (name === "compact") {
+      const transitionGeneration = this.sessionTransitionGeneration;
       try {
         await this.compact(args || undefined);
       } catch (error) {
+        // A source-session command must not paint its cancellation in the target.
+        if (transitionGeneration !== this.sessionTransitionGeneration || this.disposed) return true;
         // Session-command path swallows errors the connection already painted
         // via compaction_end — skip warnings, and the turn-active rejection
         // compact() emits as an error outcome before rethrowing. Letting the
@@ -2817,6 +2824,13 @@ export class NativeAgentConnection implements AgentConnection {
   async setAutoRetryEnabled(): Promise<void> {}
 
   async compact(customInstructions?: string) {
+    const sessionId = this.requireSessionId();
+    const transitionGeneration = this.sessionTransitionGeneration;
+    const ensureCurrentSession = () => {
+      if (this.sessionId !== sessionId || this.sessionTransitionGeneration !== transitionGeneration || this.disposed) {
+        throw new Error("Compaction interrupted by session change");
+      }
+    };
     const tooShortMessage = "Session is too short to compact — try again once it grows";
     const commandText = customInstructions?.trim()
       ? `/compact ${customInstructions.trim()}`
@@ -2843,6 +2857,7 @@ export class NativeAgentConnection implements AgentConnection {
     // Do the same locally so /compact always paints a durable warning without
     // depending on async Native compaction-turn notifications.
     const messages = await this.getMessages();
+    ensureCurrentSession();
     if (messages.length < 4) {
       this.emitSessionEvent({
         type: "compaction_start",
@@ -2889,14 +2904,17 @@ export class NativeAgentConnection implements AgentConnection {
       // Native compact is async (admits a Compaction turn). Wait for the
       // projected compaction_end — do not treat turn/start as completion.
       await this.rpc.request("session/compact/start", {
-        sessionId: this.requireSessionId(),
+        sessionId,
         customInstructions,
       });
-      await this.waitForCompactionIdle();
+      ensureCurrentSession();
+      await this.waitForCompactionIdle(transitionGeneration);
+      ensureCurrentSession();
       const skipMessage = this.lastCompactionSkipMessage;
       // Reload server history before painting the slash result so a transcript
       // refresh cannot wipe the durable /compact outcome row.
       await this.getMessages();
+      ensureCurrentSession();
       if (skipMessage) {
         this.emitSessionEvent({
           type: "message_start",
@@ -2938,6 +2956,7 @@ export class NativeAgentConnection implements AgentConnection {
         tokensAfter: 0,
       } as never;
     } catch (error) {
+      ensureCurrentSession();
       this.isCompacting = false;
       const errorMessage = error instanceof Error ? error.message : String(error);
       const tooShort = /too short|skip|already compacted/i.test(errorMessage);
@@ -2963,12 +2982,12 @@ export class NativeAgentConnection implements AgentConnection {
     }
   }
 
-  private async waitForCompactionIdle(): Promise<void> {
+  private async waitForCompactionIdle(transitionGeneration: number): Promise<void> {
     if (!this.isCompacting) return;
     await new Promise<void>((resolve) => {
       const started = Date.now();
       const check = () => {
-        if (!this.isCompacting || Date.now() - started > 120_000) {
+        if (transitionGeneration !== this.sessionTransitionGeneration || this.disposed || !this.isCompacting || Date.now() - started > 120_000) {
           resolve();
           return;
         }
@@ -3167,6 +3186,13 @@ export class NativeAgentConnection implements AgentConnection {
     this.cwd = String(session.cwd ?? session.directory ?? this.cwd);
     this.messages = [];
     this.streamState = createStreamState();
+    // Source-session previews and compaction chrome are invalid immediately,
+    // even when the target queue refresh is deferred or fails.
+    this.queue = { steering: [], followUp: [] };
+    this.queueEntries = [];
+    this.queueRevision += 1;
+    this.sessionActions = emptySessionActions();
+    this.isCompacting = false;
     this.isStreaming = false;
     this.expectedTurnId = null;
     const usage = session.usage as { total?: unknown; legacy?: unknown } | undefined;
