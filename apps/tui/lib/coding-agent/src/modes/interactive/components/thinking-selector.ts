@@ -1,7 +1,8 @@
 import type { ThinkingLevel } from "@earendil-works/pi-agent-core";
-import { Container, type SelectItem, SelectList, type SelectListLayoutOptions } from "@earendil-works/pi-tui";
-import { getSelectListTheme } from "../theme/theme.js";
+import { Container, type SelectItem, SelectList, type SelectListLayoutOptions, Text } from "@earendil-works/pi-tui";
+import { getSelectListTheme, theme } from "../theme/theme.js";
 import { DynamicBorder } from "./dynamic-border.js";
+import { keyHint, keyText } from "./keybinding-hints.js";
 
 const THINKING_SELECT_LIST_LAYOUT: SelectListLayoutOptions = {
 	minPrimaryColumnWidth: 12,
@@ -36,6 +37,7 @@ export class ThinkingSelectorComponent extends Container {
 		}));
 
 		this.addChild(new DynamicBorder());
+		this.addChild(new Text(theme.fg("accent", "Reasoning effort"), 1, 0));
 
 		this.selectList = new SelectList(
 			thinkingLevels,
@@ -58,6 +60,13 @@ export class ThinkingSelectorComponent extends Container {
 		};
 
 		this.addChild(this.selectList);
+		this.addChild(new Text(
+			theme.fg("dim", `${keyText("tui.select.up", { primaryOnly: true })}/${keyText("tui.select.down", { primaryOnly: true })}`)
+				+ theme.fg("muted", " move  ")
+				+ keyHint("tui.select.confirm", "select", { primaryOnly: true }) + "  "
+				+ keyHint("tui.select.cancel", "cancel", { primaryOnly: true }),
+			1, 0,
+		));
 
 		this.addChild(new DynamicBorder());
 	}

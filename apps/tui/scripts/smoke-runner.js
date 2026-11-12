@@ -9,7 +9,7 @@ import { scheduledDelivered, rpcSucceeded, turnOutcome } from "./smoke-outcomes.
 
 const repo = resolve(dirname(fileURLToPath(import.meta.url)), "../../..");
 const scenario = process.argv[2] || "T1";
-const scenarios = ["T1", "T2", "T3", "goal", "bash", "agents", "schedule", "heartbeat", "activity"];
+const scenarios = ["T1", "T2", "T3", "goal", "bash", "agents", "schedule", "heartbeat", "activity", "effort"];
 const tmux = process.env.DEVO_TMUX_BIN || (process.platform === "win32" ? "psmux" : "tmux");
 const binary = resolve(process.env.DEVO_BIN || process.env.DEVO_SERVER_BIN
   || join(repo, "target/debug", process.platform === "win32" ? "devo.exe" : "devo"));
@@ -37,10 +37,24 @@ async function run() {
   let pane = "";
   try {
     for (const name of ["auth.json", "providers.json", "config.toml"]) {
-      if (existsSync(join(sourceHome, name))) copyFileSync(join(sourceHome, name), join(home, name));
+      if (scenario !== "effort" && existsSync(join(sourceHome, name))) copyFileSync(join(sourceHome, name), join(home, name));
+    }
+    if (scenario === "effort") {
+      // Self-contained metadata fixture: selectors require no model request or credentials.
+      writeFileSync(join(home, "providers.json"), JSON.stringify({
+        model: "smoke/reasoner", provider: { smoke: {
+          name: "Smoke", enabled: true, base_url: "http://127.0.0.1:9/v1",
+          wire_api: "openai_chat_completions", models: { reasoner: {
+            origin: "user", name: "Smoke reasoner", context_window: 32768,
+            max_tokens: 4096, input_modalities: ["text"],
+            reasoning_capability: { levels: ["low", "medium", "high"] },
+            default_reasoning_effort: "medium",
+          } },
+        } },
+      }));
     }
     const settingsPath = join(sourceHome, "settings.json");
-    const settings = existsSync(settingsPath) ? JSON.parse(readFileSync(settingsPath, "utf8")) : {};
+    const settings = scenario !== "effort" && existsSync(settingsPath) ? JSON.parse(readFileSync(settingsPath, "utf8")) : {};
     writeFileSync(join(home, "settings.json"), JSON.stringify({ ...settings, onboardingShown: true }));
     mux(["new-session", "-d", "-s", session, "-c", repo, "-x", "100", "-y", "30",
       "-e", `DEVO_HOME=${home}`, "-e", `DEVO_CODING_AGENT_DIR=${home}`,
@@ -77,6 +91,49 @@ async function run() {
     console.log("=== boot ===\n" + pane);
     switch (scenario) {
       case "T1": break;
+      case "effort": {
+        const changes = () => records().filter((event) => event.direction === "tui-to-server"
+          && event.method === "session/metadata/update"
+          && event.payload?.params?.settings?.reasoningEffort).length;
+        // Use only the visible pane, not scrollback: closing/reopening assertions
+        // must not accidentally match a selector from an earlier frame.
+        const screen = () => mux(["capture-pane", "-t", session, "-p"]).stdout;
+        const opened = () => {
+          const text = screen();
+          return text.includes("Reasoning effort") && text.includes("Enter select") && text.includes("Esc cancel");
+        };
+        const before = changes();
+        await send("/effort");
+        await waitFor("effort help and current selection", () => opened() && /›.*medium/.test(screen()));
+        console.log("=== effort wide ===\n" + screen());
+        mux(["resize-window", "-t", session, "-x", "40", "-y", "24"]);
+        await waitFor("narrow effort help", () => opened() && /low/.test(screen()) && /high/.test(screen()));
+        console.log("=== effort narrow ===\n" + screen());
+        mux(["send-keys", "-t", session, "Down"]);
+        await waitFor("effort highlight moves", () => /›.*high/.test(screen()));
+        mux(["send-keys", "-t", session, "Escape"]);
+        await waitFor("effort cancelled", () => !screen().includes("Reasoning effort"));
+        if (changes() !== before) throw new Error("Cancelling effort changed session settings");
+        await send("/effort");
+        await waitFor("effort reopens at unchanged selection", () => opened() && /›.*medium/.test(screen()));
+        mux(["send-keys", "-t", session, "Down", "Enter"]);
+        await waitFor("effort selection persists", (events) => {
+          const requests = events.filter((event) => event.direction === "tui-to-server"
+            && event.method === "session/metadata/update"
+            && event.payload?.params?.settings?.reasoningEffort).slice(before);
+          return requests.some((request) => request.payload.params.settings.reasoningEffort === "high"
+            && events.some((event) => event.direction === "server-to-tui" && event.kind === "response"
+              && event.id === request.id && event.payload?.result != null && !event.payload?.error))
+            && screen().includes("Thinking level: high");
+        });
+        if (screen().includes("Reasoning effort")) throw new Error("Effort selector did not close after selection");
+        await send("/effort");
+        await waitFor("effort reopens at confirmed selection", () => opened() && /›.*high/.test(screen()));
+        mux(["send-keys", "-t", session, "Escape"]);
+        await waitFor("confirmed selector dismissed", () => !screen().includes("Reasoning effort"));
+        mux(["resize-window", "-t", session, "-x", "100", "-y", "30"]);
+        break;
+      }
       case "activity": {
         // No chat keyboard event precedes these assertions: boot and background
         // reads must paint the dock after the separate startup trust prompt.
