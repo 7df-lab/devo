@@ -30,9 +30,11 @@ impl ServerRuntime {
         let Some(goal) = stores.get_mut(&session_id).and_then(GoalStore::get_mut) else {
             return;
         };
+        // A Python pause/cancel can finish its current turn normally. Charge
+        // that final usage to its original goal regardless of final status,
+        // but never charge a concurrently created replacement goal.
         if let Some(goal_id) = continuation_goal_id.as_ref()
-            && (&goal.goal_id != goal_id
-                || !matches!(goal.status, GoalStatus::Active | GoalStatus::BudgetLimited))
+            && &goal.goal_id != goal_id
         {
             return;
         }

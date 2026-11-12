@@ -10,6 +10,20 @@ impl ServerRuntime {
         request_id: serde_json::Value,
         params: serde_json::Value,
     ) -> serde_json::Value {
+        self.handle_session_goal_set(
+            request_id,
+            params,
+            super::kernel_host_goal::GoalTransitionOrigin::Client,
+        )
+        .await
+    }
+
+    pub(super) async fn handle_session_goal_set(
+        self: &Arc<Self>,
+        request_id: serde_json::Value,
+        params: serde_json::Value,
+        origin: super::kernel_host_goal::GoalTransitionOrigin,
+    ) -> serde_json::Value {
         let params: devo_protocol::native::rpc_session::SessionGoalSetParams =
             match serde_json::from_value(params) {
                 Ok(params) => params,
@@ -79,7 +93,7 @@ impl ServerRuntime {
             tracing::warn!(session_id = %session_id, error = %error, "failed to persist goal create record");
         }
         if replace_existing {
-            self.interrupt_active_goal_continuation_turn(session_id, "goal replaced")
+            self.stop_goal_continuation_for_transition(session_id, "goal replaced", origin)
                 .await;
         }
         self.sync_core_session_goal(session_id, Some(&durable_goal))
@@ -343,6 +357,22 @@ impl ServerRuntime {
         request_id: serde_json::Value,
         params: serde_json::Value,
     ) -> serde_json::Value {
+        self.handle_session_goal_transition(
+            method,
+            request_id,
+            params,
+            super::kernel_host_goal::GoalTransitionOrigin::Client,
+        )
+        .await
+    }
+
+    pub(super) async fn handle_session_goal_transition(
+        self: &Arc<Self>,
+        method: &str,
+        request_id: serde_json::Value,
+        params: serde_json::Value,
+        origin: super::kernel_host_goal::GoalTransitionOrigin,
+    ) -> serde_json::Value {
         let params: devo_protocol::native::rpc_session::SessionGoalTransitionParams =
             match serde_json::from_value(params) {
                 Ok(params) => params,
@@ -406,7 +436,7 @@ impl ServerRuntime {
                     )
                     .await;
                 }
-                self.interrupt_active_goal_continuation_turn(session_id, "goal cleared")
+                self.stop_goal_continuation_for_transition(session_id, "goal cleared", origin)
                     .await;
                 self.sync_core_session_goal(session_id, None).await;
             }
@@ -440,9 +470,10 @@ impl ServerRuntime {
                 {
                     let native_goal = goal.to_native_goal();
                     drop(stores);
-                    self.interrupt_active_goal_continuation_turn(
+                    self.stop_goal_continuation_for_transition(
                         session_id,
                         "budget-limited goal wrap-up stopped",
+                        origin,
                     )
                     .await;
                     self.sync_core_session_goal(session_id, None).await;
@@ -468,8 +499,12 @@ impl ServerRuntime {
                             tracing::warn!(session_id = %session_id, error = %error, "failed to persist goal pause record");
                         }
                         if should_interrupt_continuation {
-                            self.interrupt_active_goal_continuation_turn(session_id, "goal paused")
-                                .await;
+                            self.stop_goal_continuation_for_transition(
+                                session_id,
+                                "goal paused",
+                                origin,
+                            )
+                            .await;
                         }
                         // Resume can arrive during the bounded interrupt wait.
                         // Mirror and return the latest host state, not the pause
@@ -483,10 +518,22 @@ impl ServerRuntime {
                             .cloned();
                         self.sync_core_session_goal(session_id, latest_goal.as_ref())
                             .await;
-                        let native_goal = latest_goal
-                            .as_ref()
-                            .map(Goal::to_native_goal)
-                            .unwrap_or(native_goal);
+                        let Some(latest_goal) =
+                            latest_goal.filter(|goal| goal.goal_id == native_goal.id)
+                        else {
+                            return self.error_response(
+                                request_id,
+                                ProtocolErrorCode::GoalNotFound,
+                                "goal was cleared or replaced while pausing",
+                            );
+                        };
+                        let native_goal = latest_goal.to_native_goal();
+                        self.broadcast_notification(
+                            devo_protocol::native::event::ServerNotification::GoalUpdated {
+                                goal: native_goal.clone(),
+                            },
+                        )
+                        .await;
                         return serde_json::to_value(SuccessResponse {
                             id: request_id,
                             result:
@@ -573,12 +620,12 @@ impl ServerRuntime {
                 .await;
             }
             "session/goal/complete" => {
-                self.interrupt_active_goal_continuation_turn(session_id, "goal completed")
+                self.stop_goal_continuation_for_transition(session_id, "goal completed", origin)
                     .await;
                 self.sync_core_session_goal(session_id, None).await;
             }
             "session/goal/cancel" => {
-                self.interrupt_active_goal_continuation_turn(session_id, "goal canceled")
+                self.stop_goal_continuation_for_transition(session_id, "goal canceled", origin)
                     .await;
                 self.sync_core_session_goal(session_id, None).await;
             }
@@ -602,72 +649,6 @@ impl ServerRuntime {
     }
 
     // ── Legacy / ACP Goal Handlers (ThreadGoal wire) ──────────────────
-
-    pub(super) async fn handle_goal_create(
-        self: &Arc<Self>,
-        request_id: serde_json::Value,
-        params: serde_json::Value,
-    ) -> serde_json::Value {
-        let params: devo_protocol::GoalCreateParams = match serde_json::from_value(params) {
-            Ok(p) => p,
-            Err(e) => {
-                return self.error_response(
-                    request_id,
-                    ProtocolErrorCode::InvalidParams,
-                    format!("invalid goal/create params: {e}"),
-                );
-            }
-        };
-        let session_id = params.session_id;
-        let replace_existing = params.replace_existing;
-        let title_input = params.objective.trim().to_string();
-        if !self.sessions.lock().await.contains_key(&session_id) {
-            return self.error_response(
-                request_id,
-                ProtocolErrorCode::SessionNotFound,
-                "session does not exist",
-            );
-        }
-
-        let mut stores = self.goal_stores.lock().await;
-        let store = stores.entry(session_id).or_insert_with(GoalStore::new);
-        match store.create(params) {
-            Ok(goal) => {
-                let should_continue = goal.status == crate::goal::GoalStatus::Active;
-                let thread_goal = goal.to_thread_goal();
-                let durable_goal = goal.clone();
-                let result = serde_json::to_value(SuccessResponse {
-                    id: request_id,
-                    result: devo_protocol::GoalCreateResult { goal: thread_goal },
-                })
-                .expect("serialize goal create result");
-                drop(stores);
-                if let Err(error) = self
-                    .goal_durable_store
-                    .append_goal_created(&durable_goal)
-                    .await
-                {
-                    tracing::warn!(session_id = %session_id, error = %error, "failed to persist goal create record");
-                }
-                // Interrupt before any session-actor mailbox round-trip: the actor
-                // may be blocked inside an in-flight continuation turn.
-                if replace_existing {
-                    self.interrupt_active_goal_continuation_turn(session_id, "goal replaced")
-                        .await;
-                }
-                self.sync_core_session_goal(session_id, Some(&durable_goal))
-                    .await;
-                self.schedule_goal_followup_work(session_id, Some(title_input), should_continue)
-                    .await;
-                result
-            }
-            Err(e) => self.error_response(
-                request_id,
-                ProtocolErrorCode::InvalidParams,
-                format!("goal creation failed: {e}"),
-            ),
-        }
-    }
 
     pub(super) async fn handle_goal_set(
         self: &Arc<Self>,
@@ -990,16 +971,17 @@ impl ServerRuntime {
                           clear it before creating a new one"
             });
         }
-        let legacy = devo_protocol::GoalCreateParams {
-            session_id: sid,
-            objective,
-            token_budget,
-            replace_existing: true,
-        };
         let response = self
-            .handle_goal_create(
+            .handle_session_goal_set(
                 serde_json::Value::Null,
-                serde_json::to_value(&legacy).expect("serialize goal create"),
+                serde_json::json!({
+                    "sessionId": sid,
+                    "objective": objective,
+                    "tokenBudget": token_budget,
+                    "ifExists": "replace",
+                    "idempotencyKey": uuid::Uuid::new_v4().to_string(),
+                }),
+                super::kernel_host_goal::GoalTransitionOrigin::Kernel,
             )
             .await;
         if let Some(err) = response.get("error") {

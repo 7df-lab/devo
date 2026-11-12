@@ -127,6 +127,7 @@ mod kernel_host;
 mod kernel_host_agent_message;
 mod kernel_host_bridge;
 mod kernel_host_controls;
+mod kernel_host_goal;
 mod kernel_host_heartbeat;
 mod kernel_host_models;
 mod kernel_host_session;

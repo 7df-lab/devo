@@ -6335,7 +6335,7 @@ export class InteractiveMode {
 		const goal = this.getGoalState();
 		switch (goal.status) {
 			case "active":
-				return `Goal · active (${this.formatGoalElapsed(goal.timeUsedSeconds)})`;
+				return `Pursuing goal (${this.formatGoalElapsed(goal.timeUsedSeconds)})`;
 			case "paused":
 				return `Goal paused (${this.formatGoalElapsed(goal.timeUsedSeconds)})`;
 			case "budget_limited":

@@ -1,6 +1,6 @@
 """Agent goal skill: manage the persistent thread goal from the kernel.
 
-All goal state lives in the TypeScript host; these functions are thin typed
+All goal state lives in the Rust host; these functions are thin typed
 wrappers over the generic host bridge (`rlm.host_request`). They only work
 inside the agent Python kernel.
 """
@@ -46,7 +46,21 @@ async def complete() -> dict[str, Any]:
 
     Use only when the objective has actually been achieved and no required
     work remains — not because the budget is nearly exhausted or because you
-    are stopping work. Pause, resume, and budget-limit transitions are
-    controlled by the user and the host.
+    are stopping work. Use pause or cancel when requested instead.
     """
     return await host_request("goal.complete")
+
+
+async def pause() -> dict[str, Any]:
+    """Pause the current goal when requested, retaining it for later resumption."""
+    return await host_request("goal.pause")
+
+
+async def resume() -> dict[str, Any]:
+    """Resume the paused goal when requested; this does not reset its budget."""
+    return await host_request("goal.resume")
+
+
+async def cancel() -> dict[str, Any]:
+    """Cancel the current goal when requested without marking it achieved."""
+    return await host_request("goal.cancel")

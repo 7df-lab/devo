@@ -22,6 +22,7 @@ mod support;
 struct PythonGoalProvider {
     requests: AtomicUsize,
     started_path: std::path::PathBuf,
+    script_prefix: &'static str,
 }
 
 #[async_trait]
@@ -42,7 +43,8 @@ impl ModelProviderSDK for PythonGoalProvider {
         }
         let code = match number {
             1 => format!(
-                "import asyncio\nfrom pathlib import Path\nPath({}).write_text('started')\nawait asyncio.sleep(60)\nraise AssertionError('interrupted cell reached its end')",
+                "{}import asyncio\nfrom pathlib import Path\nPath({}).write_text('started')\nawait asyncio.sleep(60)\nraise AssertionError('interrupted cell reached its end')",
+                self.script_prefix,
                 serde_json::to_string(&self.started_path.to_string_lossy())?
             ),
             2 => "import goal; await goal.complete()".to_string(),
@@ -87,6 +89,8 @@ impl ModelProviderSDK for PythonGoalProvider {
 enum ResumeTiming {
     AfterPauseReply,
     WhilePausing,
+    AfterPythonPauseResume,
+    ClearWhilePausing,
 }
 
 #[tokio::test]
@@ -99,12 +103,27 @@ async fn concurrent_resume_is_not_overwritten_by_late_pause_reply() -> Result<()
     check_pause_resume(ResumeTiming::WhilePausing).await
 }
 
+#[tokio::test]
+async fn python_pause_resume_retains_client_interrupt_ownership() -> Result<()> {
+    check_pause_resume(ResumeTiming::AfterPythonPauseResume).await
+}
+
+#[tokio::test]
+async fn clear_during_pause_does_not_republish_a_cleared_goal() -> Result<()> {
+    check_pause_resume(ResumeTiming::ClearWhilePausing).await
+}
+
 async fn check_pause_resume(timing: ResumeTiming) -> Result<()> {
     let data_root = TempDir::new()?;
     let started_path = data_root.path().join("python-started.txt");
     let provider = Arc::new(PythonGoalProvider {
         requests: AtomicUsize::new(0),
         started_path: started_path.clone(),
+        script_prefix: if matches!(timing, ResumeTiming::AfterPythonPauseResume) {
+            "import goal\nassert (await goal.pause())['goal']['status'] == 'paused'\nassert (await goal.resume())['goal']['status'] == 'active'\n"
+        } else {
+            ""
+        },
     });
     let runtime = support::build_runtime_with_registry(
         data_root.path(),
@@ -157,7 +176,10 @@ async fn check_pause_resume(timing: ResumeTiming) -> Result<()> {
         )
         .await
     }));
-    if matches!(timing, ResumeTiming::AfterPauseReply) {
+    if matches!(
+        timing,
+        ResumeTiming::AfterPauseReply | ResumeTiming::AfterPythonPauseResume
+    ) {
         let paused = timeout(
             Duration::from_secs(/*secs*/ 10),
             pause_task.take().expect("pause task"),
@@ -184,6 +206,68 @@ async fn check_pause_resume(timing: ResumeTiming) -> Result<()> {
         })
         .await
         .context("goal did not enter paused state")??;
+    }
+    if matches!(timing, ResumeTiming::ClearWhilePausing) {
+        let clear_runtime = runtime.clone();
+        let clear_task = tokio::spawn(async move {
+            Box::pin(clear_runtime.handle_incoming(
+                connection_id,
+                serde_json::json!({
+                    "id": "clear-during-pause", "method": "session/goal/clear",
+                    "params": {"sessionId": session_id, "expectedGoalId": goal.id}
+                }),
+            ))
+            .await
+            .context("clear response")
+        });
+        // Clear is persist-first, but its notification may queue behind the
+        // deliberately stalled subscriber. Release it only after observing
+        // the cleared host state, not after awaiting that blocked delivery.
+        timeout(Duration::from_secs(/*secs*/ 5), async {
+            let mut ticks = tokio::time::interval(Duration::from_millis(/*millis*/ 20));
+            while support::read_goal(&runtime, connection_id, session_id)
+                .await?
+                .is_some()
+            {
+                ticks.tick().await;
+            }
+            Ok::<(), anyhow::Error>(())
+        })
+        .await
+        .context("goal did not clear during pause")??;
+        drop(slow_rx);
+        let clear = timeout(Duration::from_secs(/*secs*/ 10), clear_task)
+            .await
+            .context("clear reply timed out")???;
+        assert!(clear.get("error").is_none(), "{clear}");
+        let late_pause = timeout(
+            Duration::from_secs(/*secs*/ 10),
+            pause_task.take().expect("pause task"),
+        )
+        .await
+        .context("late pause reply timed out")??;
+        assert!(
+            late_pause.is_err(),
+            "a cleared goal cannot be returned as paused"
+        );
+        assert_eq!(
+            support::read_goal(&runtime, connection_id, session_id).await?,
+            None
+        );
+        let mut cleared = false;
+        while let Ok(event) = notifications_rx.try_recv() {
+            match event["method"].as_str() {
+                Some("session/goal/cleared") => cleared = true,
+                Some(
+                    "session/goal/updated" | "session/goal/created" | "session/goal/statusChanged",
+                ) => {
+                    assert!(!cleared, "goal was resurrected after clear: {event}");
+                }
+                _ => {}
+            }
+        }
+        assert!(cleared, "missing goal-cleared notification");
+        return Ok(());
     }
     let resumed = timeout(
         Duration::from_secs(/*secs*/ 10),

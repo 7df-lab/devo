@@ -258,6 +258,8 @@ export class NativeAgentConnection implements AgentConnection {
   private sessionName: string | undefined;
   private sessionVersion = 0;
   private goal = emptyGoalState();
+  private goalRevision = 0;
+  private retiredGoalIds = new Set<unknown>();
   private sessionActions = emptySessionActions();
   private queue: AgentConnectionQueueState = { steering: [], followUp: [], ordered: [] };
   /** Both delivery modes share the server-owned admission sequence. */
@@ -358,6 +360,7 @@ export class NativeAgentConnection implements AgentConnection {
   }
 
   private emitSessionEvent(event: Record<string, unknown>, sourceItem?: { id: string; revision?: number; missingTextBaseIds?: string[] }): void {
+    if (event.type === "goal_update") this.goalRevision += 1;
     this.emit({ type: "session_event", event: event as never, ...(sourceItem ? { sourceItem } : {}) });
   }
 
@@ -438,6 +441,19 @@ export class NativeAgentConnection implements AgentConnection {
     if (notificationSessionId && !appliesToActiveSession) {
       this.fanoutWatchedSession(method, params);
       return;
+    }
+    if (method.startsWith("session/goal/")) {
+      const wireGoal = p.goal as Record<string, unknown> | undefined;
+      const goalId = wireGoal?.id ?? wireGoal?.goalId ?? p.goalId ?? p.goal_id;
+      if (method === "session/goal/cleared") {
+        if (goalId) this.retiredGoalIds.add(goalId);
+        if (this.goal.goalId && goalId !== this.goal.goalId) return;
+      } else if (goalId && this.retiredGoalIds.has(goalId)) {
+        // A delayed update must not resurrect a cleared/replaced goal.
+        return;
+      } else if (method === "session/goal/created" && this.goal.goalId && goalId !== this.goal.goalId) {
+        this.retiredGoalIds.add(this.goal.goalId);
+      }
     }
     if (
       appliesToActiveSession &&
@@ -570,6 +586,14 @@ export class NativeAgentConnection implements AgentConnection {
       }
     }
 
+    // Native status notifications carry only identity and status. Preserve the
+    // matching goal's objective and usage, but never inherit a replaced goal.
+    if (method === "session/goal/statusChanged" && !p.goal) {
+      const goalId = p.goalId ?? p.goal_id;
+      if (goalId && goalId === this.goal.goalId) {
+        params = { ...p, goal: { ...this.goal, status: p.status } };
+      }
+    }
     const sourceItem = notificationItemIdentity(method, params);
     for (const ev of nativeNotificationToPiEvents(method, params, this.streamState)) {
       if (ev.type === "compaction_start") {
@@ -654,6 +678,9 @@ export class NativeAgentConnection implements AgentConnection {
         ...projectedSource,
         ...(projectedIds.length ? { missingTextBaseIds: projectedIds.filter(id => !textHydrationState(this.streamState).baseKnown.has(id)) } : {}),
       } : undefined;
+      if (ev.type === "goal_update") {
+        this.goal = (ev.goal ?? emptyGoalState()) as never;
+      }
       this.emitSessionEvent(ev, eventSource);
       if (ev.type === "auto_retry_start") {
         this.retryAttempt = Number((ev as { attempt?: unknown }).attempt ?? 0);
@@ -666,9 +693,6 @@ export class NativeAgentConnection implements AgentConnection {
         this.isBashRunning = false;
         this.activeBashItemId = null;
         this.streamState.userBashUiMounted = false;
-      }
-      if (ev.type === "goal_update") {
-        this.goal = (ev.goal ?? emptyGoalState()) as never;
       }
       if (ev.type === "session_action_update") {
         this.queueRevision += 1;
@@ -1064,10 +1088,26 @@ export class NativeAgentConnection implements AgentConnection {
     }
 
     if (transitionGeneration !== this.sessionTransitionGeneration) return;
-    if (options.supplementalRefreshMode === "deferred") return;
+    if (options.supplementalRefreshMode === "deferred") {
+      void this.refreshGoal(sessionId, transitionGeneration);
+      return;
+    }
+    await this.refreshGoal(sessionId, transitionGeneration);
     await this.refreshContextUsage(sessionId);
     await this.enrichModelFromCatalog(sessionId);
     await this.refreshQueueFromServer(sessionId).catch(() => {});
+  }
+
+  private async refreshGoal(sessionId: string, generation: number): Promise<void> {
+    const revision = this.goalRevision;
+    try {
+      const result = await this.rpc.request("session/goal/read", { sessionId }) as { goal?: unknown };
+      if (!Object.hasOwn(result, "goal") || this.sessionId !== sessionId || generation !== this.sessionTransitionGeneration || revision !== this.goalRevision) return;
+      this.goal = applyGoalFromWire(result.goal) as never;
+      this.emitSessionEvent({ type: "goal_update", goal: this.goal });
+    } catch {
+      // A goal read is supplemental; an unavailable read must not undo live state.
+    }
   }
 
   private async refreshContextUsage(sessionId: string | null = this.sessionId): Promise<void> {
@@ -3062,6 +3102,7 @@ export class NativeAgentConnection implements AgentConnection {
     this.isStreaming = false;
     this.isCompacting = false;
     this.goal = emptyGoalState();
+    this.retiredGoalIds.clear();
     // Fresh session has no occupancy yet — clear so the footer does not keep
     // the previous session's token % after /new.
     this.contextUsage = emptyContextUsage();
@@ -3103,6 +3144,9 @@ export class NativeAgentConnection implements AgentConnection {
     this.pendingInitialMessages = undefined;
     this.sessionHistoryRevision += 1;
     this.sessionId = resumedSessionId;
+    this.goal = emptyGoalState();
+    this.retiredGoalIds.clear();
+    this.goalRevision += 1;
     this.activeSessionId = this.sessionId;
     this.sessionName = (session.title ?? session.name) as string | undefined;
     this.cwd = String(session.cwd ?? session.directory ?? this.cwd);
