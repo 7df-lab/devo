@@ -3470,6 +3470,7 @@ export class NativeAgentConnection implements AgentConnection {
     const sessionId = String(activeSessionId ?? "").trim();
     if (!sessionId) return undefined;
     if (this.workspaceTrust) await requireSessionWorkspace(this.rpc, this.workspaceTrust, sessionId);
+    if (this.disposed) return undefined;
 
     const listeners = new Set<AgentConnectionEventListener>();
     let closed = false;
@@ -3493,6 +3494,7 @@ export class NativeAgentConnection implements AgentConnection {
     return {
       getMessages: async () => {
         if (this.workspaceTrust) await requireSessionWorkspace(this.rpc, this.workspaceTrust, sessionId);
+        if (closed || this.disposed) return [] as never[];
         try {
           await this.rpc.request("session/resume", { sessionId });
         } catch {

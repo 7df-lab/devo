@@ -156,3 +156,22 @@ for (const operation of ["new", "switch", "import"] as const) {
     });
   }
 }
+
+test("late watch admission cannot resume a session after dispose", async (t) => {
+  const { NativeAgentConnection } = await import("./native-agent-connection.js");
+  const { home, workspace } = await fixture(t);
+  let approve!: (value: boolean) => void;
+  let entered!: () => void;
+  const prompting = new Promise<void>(resolve => { entered = resolve; });
+  const trust = new WorkspaceTrust(home, async () => new Promise(resolve => { approve = resolve; entered(); }));
+  const methods: string[] = [];
+  let conn: ReturnType<typeof NativeAgentConnection.create>;
+  conn = NativeAgentConnection.create({ cwd: workspace, workspaceTrust: trust, writeLine(line) {
+    const request = JSON.parse(line); if (request.id == null) return; methods.push(request.method);
+    conn.pushChunk(JSON.stringify({ id: request.id, result: { session: { cwd: workspace } } }) + "\n");
+  } });
+  const watch = conn.watchSession("A");
+  await prompting; await conn.dispose(); approve(true);
+  assert.equal(await watch, undefined);
+  assert.deepEqual(methods, ["session/read"]);
+});
