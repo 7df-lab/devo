@@ -2552,7 +2552,44 @@ test("live goal notifications preserve details and update subscribers immediatel
   }
   assert.deepEqual(await Promise.all(states), observed);
   await notify("session/goal/created", { goal: { sessionId, id: "g-new", status: "active", objective: "New objective" } });
+  await notify("session/goal/cleared", { sessionId, goalId: "g-live" });
+  assert.equal((await conn.getState()).goal.goalId, "g-new");
   await notify("session/goal/cleared", { sessionId, goalId: "g-new" });
+  await notify("session/goal/updated", { goal: { sessionId, id: "g-new", status: "paused", objective: "Stale" } });
   assert.equal((await conn.getState()).goal.status, "idle");
+  await conn.dispose();
+});
+
+test("session switches restore only the owning goal and fence stale goal reads", async () => {
+  let hold: ((result: unknown) => void) | undefined;
+  const { conn } = await bootConnection([(method, params, respond) => {
+    if (method === "session/resume") {
+      respond({ session: { id: params.sessionId, cwd: "/tmp", title: "Goal session" } });
+      return true;
+    }
+    if (method === "session/goal/read") {
+      if (params.sessionId === "delayed") hold = respond;
+      else respond({ goal: params.sessionId === "saved" ? {
+        id: "saved-goal", status: "paused", objective: "Saved objective",
+      } : null });
+      return true;
+    }
+    return false;
+  }]);
+  await conn.switchSession("saved");
+  assert.equal((await conn.getState()).goal.objective, "Saved objective");
+  await conn.switchSession("empty");
+  assert.equal((await conn.getState()).goal.status, "idle");
+  await conn.switchSession("delayed", { historyLoadMode: "deferred" });
+  assert.ok(hold);
+  conn.pushChunk(`${JSON.stringify({ jsonrpc: "2.0", method: "session/goal/created", params: {
+    goal: { sessionId: "delayed", id: "live-goal", status: "active", objective: "Live objective" },
+  } })}\n`);
+  await new Promise((resolve) => setImmediate(resolve));
+  hold!({ goal: { id: "obsolete-goal", status: "paused", objective: "Obsolete" } });
+  await new Promise((resolve) => setImmediate(resolve));
+  assert.equal((await conn.getState()).goal.objective, "Live objective");
+  await conn.switchSession("saved");
+  assert.equal((await conn.getState()).goal.objective, "Saved objective");
   await conn.dispose();
 });

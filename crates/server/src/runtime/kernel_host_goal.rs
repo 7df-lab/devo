@@ -20,9 +20,10 @@ impl ServerRuntime {
                     .await;
             }
             GoalTransitionOrigin::Kernel => {
-                // A goal tool may run inside its own continuation. Preserve its
-                // host reply and final merge rather than interrupting itself.
-                self.clear_goal_continuation_registration(session_id).await;
+                // Do not interrupt this host reply, but retain turn ownership:
+                // a later client control must still be able to interrupt it,
+                // including after Python pause -> resume in the same cell.
+                self.cancel_background_goal_wait(session_id);
             }
         }
     }

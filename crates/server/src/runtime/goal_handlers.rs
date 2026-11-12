@@ -10,6 +10,20 @@ impl ServerRuntime {
         request_id: serde_json::Value,
         params: serde_json::Value,
     ) -> serde_json::Value {
+        self.handle_session_goal_set(
+            request_id,
+            params,
+            super::kernel_host_goal::GoalTransitionOrigin::Client,
+        )
+        .await
+    }
+
+    pub(super) async fn handle_session_goal_set(
+        self: &Arc<Self>,
+        request_id: serde_json::Value,
+        params: serde_json::Value,
+        origin: super::kernel_host_goal::GoalTransitionOrigin,
+    ) -> serde_json::Value {
         let params: devo_protocol::native::rpc_session::SessionGoalSetParams =
             match serde_json::from_value(params) {
                 Ok(params) => params,
@@ -79,7 +93,7 @@ impl ServerRuntime {
             tracing::warn!(session_id = %session_id, error = %error, "failed to persist goal create record");
         }
         if replace_existing {
-            self.interrupt_active_goal_continuation_turn(session_id, "goal replaced")
+            self.stop_goal_continuation_for_transition(session_id, "goal replaced", origin)
                 .await;
         }
         self.sync_core_session_goal(session_id, Some(&durable_goal))
@@ -504,10 +518,16 @@ impl ServerRuntime {
                             .cloned();
                         self.sync_core_session_goal(session_id, latest_goal.as_ref())
                             .await;
-                        let native_goal = latest_goal
-                            .as_ref()
-                            .map(Goal::to_native_goal)
-                            .unwrap_or(native_goal);
+                        let Some(latest_goal) = latest_goal
+                            .filter(|goal| goal.goal_id == native_goal.id)
+                        else {
+                            return self.error_response(
+                                request_id,
+                                ProtocolErrorCode::GoalNotFound,
+                                "goal was cleared or replaced while pausing",
+                            );
+                        };
+                        let native_goal = latest_goal.to_native_goal();
                         self.broadcast_notification(
                             devo_protocol::native::event::ServerNotification::GoalUpdated {
                                 goal: native_goal.clone(),
@@ -952,7 +972,7 @@ impl ServerRuntime {
             });
         }
         let response = self
-            .handle_native_session_goal_set(
+            .handle_session_goal_set(
                 serde_json::Value::Null,
                 serde_json::json!({
                     "sessionId": sid,
@@ -961,6 +981,7 @@ impl ServerRuntime {
                     "ifExists": "replace",
                     "idempotencyKey": uuid::Uuid::new_v4().to_string(),
                 }),
+                super::kernel_host_goal::GoalTransitionOrigin::Kernel,
             )
             .await;
         if let Some(err) = response.get("error") {
