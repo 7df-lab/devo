@@ -735,19 +735,35 @@ async fn parse_stdio_json_line(
 }
 
 #[test]
-fn stdio_fixture_binaries_follow_the_test_profile() -> Result<()> {
+fn stdio_fixture_binaries_share_the_test_output_directory() -> Result<()> {
     let executable = std::fs::canonicalize(std::env::current_exe()?)?;
-    let expected = executable
-        .parent()
-        .context("test deps directory")?
-        .parent()
-        .context("test profile directory")?
-        .to_path_buf();
+    let target_directory = std::fs::canonicalize(
+        Path::new(env!("CARGO_TARGET_TMPDIR"))
+            .parent()
+            .context("Cargo target directory")?,
+    )?;
     let mcp = cargo_test_binary::current_binary_path("test_stdio_server")?;
     let devo = cargo_test_binary::current_binary_path("devo")?;
+    let directory = mcp.parent().context("fixture output directory")?;
+    assert_eq!(devo.parent(), Some(directory));
+    // Check the real invocation without assuming Cargo creates a deps
+    // directory. Exact profile/target mapping is covered by the helper's
+    // table-driven tests; the stdio suites execute the actual built fixtures.
+    let relative = directory.strip_prefix(&target_directory)?;
+    assert!(matches!(relative.components().count(), 1 | 2));
+    assert!(executable.starts_with(directory));
     assert_eq!(
-        [mcp.parent(), devo.parent()],
-        [Some(expected.as_path()), Some(expected.as_path())],
+        [mcp.file_name(), devo.file_name()],
+        [
+            Some(std::ffi::OsStr::new(&format!(
+                "test_stdio_server{}",
+                std::env::consts::EXE_SUFFIX
+            ))),
+            Some(std::ffi::OsStr::new(&format!(
+                "devo{}",
+                std::env::consts::EXE_SUFFIX
+            ))),
+        ],
     );
     Ok(())
 }

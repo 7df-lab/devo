@@ -69,15 +69,32 @@ impl TestProfile {
     }
 
     fn from_executable(executable: &Path, target_directory: &Path) -> Result<Self> {
-        let deps = executable.parent().context("test executable directory")?;
-        ensure!(
-            deps.file_name().is_some_and(|name| name == "deps"),
-            "test executable must be under a Cargo deps directory"
-        );
-        let directory = deps
-            .parent()
-            .context("test profile directory")?
-            .to_path_buf();
+        let parent = executable.parent().context("test executable directory")?;
+        // Cargo 1.100 stores artifacts under build/<package>/<hash>/out;
+        // older Cargo versions execute integration tests directly from deps.
+        let directory = if parent.file_name().is_some_and(|name| name == "deps") {
+            parent.parent().context("test profile directory")?
+        } else {
+            let mut ancestors = parent.ancestors();
+            ensure!(
+                ancestors
+                    .next()
+                    .and_then(Path::file_name)
+                    .is_some_and(|name| name == "out"),
+                "unexpected Cargo test executable layout"
+            );
+            let fingerprint = ancestors.next().context("test artifact fingerprint")?;
+            let package = ancestors.next().context("test artifact package")?;
+            let build = ancestors.next().context("test artifact build directory")?;
+            ensure!(
+                fingerprint.file_name().is_some()
+                    && package.file_name().is_some()
+                    && build.file_name().is_some_and(|name| name == "build"),
+                "unexpected Cargo test artifact layout"
+            );
+            ancestors.next().context("test profile directory")?
+        }
+        .to_path_buf();
         let relative = directory.strip_prefix(target_directory).with_context(|| {
             format!(
                 "test profile {} is outside Cargo target directory {}",
@@ -159,45 +176,54 @@ mod tests {
                         |name| target_directory.join(name),
                     )
                     .join(output);
-                let executable = directory.join("deps").join("contract-test");
-                let profile = TestProfile::from_executable(&executable, &target_directory)?;
-                assert_eq!(
-                    profile,
-                    TestProfile {
-                        directory: directory.clone(),
-                        cargo_name: cargo_name.to_owned(),
-                        target_directory: target_directory.clone(),
-                        target: target.map(OsString::from),
+                for executable in [
+                    directory.join("deps").join("contract-test"),
+                    directory
+                        .join("build")
+                        .join("devo-server")
+                        .join("abc123")
+                        .join("out")
+                        .join("contract-test"),
+                ] {
+                    let profile = TestProfile::from_executable(&executable, &target_directory)?;
+                    assert_eq!(
+                        profile,
+                        TestProfile {
+                            directory: directory.clone(),
+                            cargo_name: cargo_name.to_owned(),
+                            target_directory: target_directory.clone(),
+                            target: target.map(OsString::from),
+                        }
+                    );
+                    assert_eq!(
+                        profile.binary_path("devo"),
+                        directory.join(format!("devo{}", std::env::consts::EXE_SUFFIX))
+                    );
+                    let command = profile.build_command("devo-cli", "devo");
+                    let mut expected = [
+                        "build",
+                        "--quiet",
+                        "--locked",
+                        "--profile",
+                        cargo_name,
+                        "--target-dir",
+                    ]
+                    .map(OsString::from)
+                    .to_vec();
+                    expected.push(target_directory.as_os_str().to_owned());
+                    expected.extend(["-p", "devo-cli", "--bin", "devo"].map(OsString::from));
+                    if let Some(target) = target {
+                        expected.extend(["--target", target].map(OsString::from));
                     }
-                );
-                assert_eq!(
-                    profile.binary_path("devo"),
-                    directory.join(format!("devo{}", std::env::consts::EXE_SUFFIX))
-                );
-                let command = profile.build_command("devo-cli", "devo");
-                let mut expected = [
-                    "build",
-                    "--quiet",
-                    "--locked",
-                    "--profile",
-                    cargo_name,
-                    "--target-dir",
-                ]
-                .map(OsString::from)
-                .to_vec();
-                expected.push(target_directory.as_os_str().to_owned());
-                expected.extend(["-p", "devo-cli", "--bin", "devo"].map(OsString::from));
-                if let Some(target) = target {
-                    expected.extend(["--target", target].map(OsString::from));
+                    assert_eq!(
+                        command
+                            .as_std()
+                            .get_args()
+                            .map(std::ffi::OsStr::to_owned)
+                            .collect::<Vec<_>>(),
+                        expected
+                    );
                 }
-                assert_eq!(
-                    command
-                        .as_std()
-                        .get_args()
-                        .map(std::ffi::OsStr::to_owned)
-                        .collect::<Vec<_>>(),
-                    expected
-                );
             }
         }
         Ok(())
@@ -207,6 +233,14 @@ mod tests {
     fn unexpected_test_executable_layout_is_rejected() {
         let root = PathBuf::from("target");
         assert!(TestProfile::from_executable(&root.join("other").join("test"), &root).is_err());
+        for path in [
+            "debug/out/test",
+            "debug/build/package/out/test",
+            "debug/not-build/package/hash/out/test",
+            "a/b/debug/build/package/hash/out/test",
+        ] {
+            assert!(TestProfile::from_executable(&root.join(path), &root).is_err());
+        }
         assert!(
             TestProfile::from_executable(
                 &root
