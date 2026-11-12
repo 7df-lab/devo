@@ -80,6 +80,12 @@ impl ServerRuntime {
                 {
                     break;
                 }
+                if reservation.ephemeral {
+                    self.ephemeral_inbox_claimed
+                        .lock()
+                        .expect("ephemeral inbox claims poisoned")
+                        .insert((session_id, item.id));
+                }
                 let item = queue.pop_front().expect("head checked");
                 reservation
                     .steer_input_queue

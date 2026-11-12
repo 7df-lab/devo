@@ -72,6 +72,19 @@ impl HostMessage {
         }
     }
 
+    pub(super) fn inbox_identity(&self, owner: SessionId) -> (devo_protocol::QueueItemId, String) {
+        let origin = &self.origin;
+        (
+            devo_protocol::QueueItemId::from_string(format!(
+                "qitem_host:{}",
+                serde_json::to_string(&(owner, &origin.sender, &origin.event_id))
+                    .expect("host inbox identity serializes")
+            )),
+            serde_json::to_string(&("host", &origin.sender, &origin.event_id))
+                .expect("host admission identity serializes"),
+        )
+    }
+
     pub(super) fn schedule(
         session_id: SessionId,
         occurrence_id: String,
@@ -142,6 +155,7 @@ impl ServerRuntime {
         message: HostMessage,
         queued_metadata: Option<serde_json::Value>,
     ) -> Result<HostDeliveryReceipt, ToolCallError> {
+        let (queue_item_id, _) = message.inbox_identity(session_id);
         let HostMessage { mut origin, text } = message;
         if origin.source == HostMessageSource::Agent
             && let Some(sender) = self
@@ -242,11 +256,7 @@ impl ServerRuntime {
             queued_metadata,
             Utc::now(),
         );
-        item.id = devo_protocol::QueueItemId::from_string(format!(
-            "qitem_host:{}",
-            serde_json::to_string(&(session_id, &origin.sender, &origin.event_id))
-                .expect("host inbox identity serializes")
-        ));
+        item.id = queue_item_id;
         item.set_delivery(origin.delivery);
         if turn_limit_reached || interrupted_owner {
             // Preserve a completed producer's result without starting another

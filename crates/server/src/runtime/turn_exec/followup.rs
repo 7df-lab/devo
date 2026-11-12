@@ -305,6 +305,12 @@ impl ServerRuntime {
                     }
                 }
             }
+            if reservation.ephemeral {
+                self.ephemeral_inbox_claimed
+                    .lock()
+                    .expect("ephemeral inbox claims poisoned")
+                    .insert((session_id, item.id));
+            }
             item
         };
         let popped = session_handle

@@ -105,7 +105,6 @@ class InteractiveBashOperations:
                 raise ValueError("invalid read metadata")
         except (KeyError, TypeError, ValueError) as exc:
             raise RuntimeError("bash host returned an invalid read") from exc
-        self._note_consumed()
         return BashRead(data, next_cursor, truncated, eof, chunks)
 
     async def close_stdin(self) -> Any:
@@ -124,16 +123,18 @@ class InteractiveBashOperations:
         return await self._interactive_request("bash.resize", {"cols": cols, "rows": rows})
 
     async def wait(self, *, timeout_ms: int | None = None):
-        """Wait for completion. A wait timeout does not terminate the task."""
+        """Wait for exit, then acknowledge its result. Timeout limits the exit wait only."""
         if timeout_ms is not None:
             _integer(timeout_ms, "timeout_ms", 0, 2**63 - 1)
         self._released = True
-        if timeout_ms is None:
-            return await self._wait()
-        return await asyncio.wait_for(self._wait(), timeout_ms / 1000)
+        return await self._wait(timeout_ms=timeout_ms)
 
     async def terminate(self) -> None:
         """Request host cancellation and await acknowledgement; use wait() for exit."""
         self.kill()
         await asyncio.shield(self._kill_task)
-        self._raise_error()
+        # Cancellation acknowledgement and process exit are separate outcomes.
+        # Poll may already have installed its terminal cancellation/timeout error
+        # while the successful kill acknowledgement was in flight.
+        if self._error is not self._terminal_error:
+            self._raise_error()

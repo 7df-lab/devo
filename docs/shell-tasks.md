@@ -173,8 +173,25 @@ as “waiting for input” without application-specific protocol knowledge.
 
 The host emits one managed terminal notification through the owning agent's existing
 inbox. Interactive Python proxies do not emit a second completion event, including
-when multiple proxies attach to the same handle. Reading or awaiting the retained
-result does not currently withdraw an already published managed notification:
-a synchronous waiter may therefore also see that notification later. Coordinating
-synchronous consumption with durable inbox delivery is a separate follow-up; this
-API does not promise exactly-once observation across both channels or process crashes.
+when multiple proxies attach to the same handle.
+
+A foreground Python cell that executes `await h` or `await h.wait()` acknowledges
+the terminal result before the cell finishes. This suppresses a notification not
+yet published or removes its still-queued copy, without reordering other messages.
+It also applies to a terminal cancellation, execution timeout, or launch failure
+that the wait reports as an exception. A retry of the acknowledgement is idempotent.
+If acknowledgement fails, the wait reports an error rather than silently claiming
+suppression; the process result remains retained and the wait can be retried.
+
+`read()`, `output()`, `tail()`, `poll()`, listing, and attaching do not acknowledge
+interactive completion. A detached Python task awaiting a process is not a
+foreground result delivery and does not suppress the owning agent's notification.
+A wait timeout does not terminate the process or acknowledge a result. `timeout_ms`
+on `wait()` limits waiting for exit; once exit is observed, committing the delivery
+acknowledgement can take additional time.
+
+If the agent has already started processing the completion message, a later wait
+cannot retract that turn or its history. The host reports `already_delivered` and
+the retained process result is still available. This is not a promise of exactly-once
+model execution or side effects across crashes. Persistence of notification receipts
+does not mean that running processes survive a server restart.

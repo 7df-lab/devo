@@ -43,6 +43,8 @@ class BashHandle(InteractiveBashOperations):
         self._terminal_error: Exception | None = None
         self._released = False
         self._consumed = False
+        self._consumption_lock = asyncio.Lock()
+        self._consumption_status: str | None = None
         self._notice_accepted = False
         self._awaited_by_creating_cell = False
         self._started = asyncio.Event()
@@ -186,15 +188,38 @@ class BashHandle(InteractiveBashOperations):
                     pass  # Host TTL is the backstop; cached results remain usable.
 
     def _note_consumed(self, awaiter: asyncio.Task[Any] | None = None) -> None:
+        # Interactive notifications are acknowledged only by a foreground
+        # asynchronous result wait, never by a partial/cached output inspection.
+        if self._mode != "pipe":
+            return
         owner = _live_cell_owner()
         if self._result is None or self._consumed or owner is None:
             return
         if awaiter is not None and not _creating_cell_waits_for(owner, awaiter):
             return
         self._consumed = True
-        if self._notice_accepted or self._mode != "pipe":
+        if self._notice_accepted:
             task = asyncio.create_task(self._withdraw_notice())
             task.add_done_callback(_consume_notice_task)
+
+    async def _consume_interactive_result(self, awaiter: asyncio.Task[Any] | None) -> None:
+        """Acknowledge delivery before the foreground cell can finish its turn."""
+        owner = _live_cell_owner()
+        if (self._mode == "pipe" or owner is None
+                or not _creating_cell_waits_for(owner, awaiter)):
+            return
+        from . import host_request
+        async with self._consumption_lock:
+            if self._consumed:
+                return
+            # Do not swallow failure or mark the result consumed before the host
+            # commits it. Retrying await reuses the result and retries this ack.
+            ack = await host_request("bash.consumed", {**self._notice_payload(), "managed": True})
+            status = ack.get("disposition") if isinstance(ack, dict) and ack.get("accepted") is True else None
+            if status not in ("consumed", "already_consumed", "already_delivered"):
+                raise RuntimeError("bash host returned an invalid consumption acknowledgement")
+            self._consumption_status = status
+            self._consumed = True
 
     def _notice_payload(self) -> dict[str, Any]:
         command = self.command
@@ -232,12 +257,21 @@ class BashHandle(InteractiveBashOperations):
                 **self._activity, "handle_id": self._handle_id, "active": False,
             }})
 
-    async def _wait(self) -> BashResult:
+    async def _wait(self, *, timeout_ms: int | None = None) -> BashResult:
         owned = not self._released
         self._released = True
         awaiter = asyncio.current_task()
         try:
-            result = await asyncio.shield(self._task)
+            try:
+                if timeout_ms is None:
+                    result = await asyncio.shield(self._task)
+                else:
+                    result = await asyncio.wait_for(asyncio.shield(self._task), timeout_ms / 1000)
+            except Exception as exc:
+                if exc is self._terminal_error:
+                    await self._consume_interactive_result(awaiter)
+                raise
+            await self._consume_interactive_result(awaiter)
             self._note_consumed(awaiter)
             if _creating_cell_waits_for(self._cell_task, awaiter):
                 self._awaited_by_creating_cell = True

@@ -239,15 +239,7 @@ pub async fn dispatch_host_request_with_bridge(bridge: &HostBridge, data: Value)
             ok_result(json!({ "accepted": true }))
         }
         "bash.consumed" => {
-            let Some(identity) = params
-                .get("handle_id")
-                .filter(|value| value.is_string())
-                .or_else(|| params.get("pid").filter(|value| value.is_i64()))
-            else {
-                return error_reply("bash.consumed requires a handle_id or pid");
-            };
-            consume_bash_notice(session_id, identity);
-            ok_result(json!({ "accepted": true }))
+            super::bash_consumption::consume(bridge.runtime(), bridge.session_id, &params).await
         }
         "write" => crate::runtime::kernel_host_bridge::handle_write(bridge, &params).await,
         "edit" => crate::runtime::kernel_host_bridge::handle_edit(bridge, &params).await,

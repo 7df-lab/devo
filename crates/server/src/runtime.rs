@@ -101,6 +101,7 @@ pub(crate) use compaction_persist::build_compaction_snapshot_line;
 pub(crate) use compaction_persist::compaction_persisted_turn_item;
 pub(crate) use compaction_persist::preserved_item_ids_from_compacted;
 pub(crate) use compaction_persist::summary_item_from_compacted;
+mod bash_consumption;
 mod catalog_refresh;
 pub(crate) mod compact_host;
 mod connection;
@@ -248,6 +249,9 @@ pub struct ServerRuntime {
         Mutex<HashMap<(SessionId, String), devo_protocol::native::rpc_turn::TurnResumeResult>>,
     recovery_gates: Mutex<HashMap<SessionId, Arc<Mutex<()>>>>,
     queue_snapshot_revision: std::sync::atomic::AtomicU64,
+    ephemeral_inbox_claimed:
+        std::sync::Mutex<std::collections::HashSet<(SessionId, devo_protocol::QueueItemId)>>,
+    ephemeral_inbox_consumed: std::sync::Mutex<std::collections::HashSet<(SessionId, String)>>,
     ephemeral_inbox_receipts: std::sync::Mutex<std::collections::HashSet<(SessionId, String)>>,
     turn_start_idempotency: Mutex<HashMap<(SessionId, String), devo_protocol::native::turn::Turn>>,
     /// In-process idempotency for canonical `session/new`
@@ -490,6 +494,8 @@ impl ServerRuntime {
             recovery_gates: Mutex::new(HashMap::new()),
             queue_snapshot_revision: std::sync::atomic::AtomicU64::new(0),
             ephemeral_inbox_receipts: std::sync::Mutex::default(),
+            ephemeral_inbox_consumed: std::sync::Mutex::default(),
+            ephemeral_inbox_claimed: std::sync::Mutex::default(),
             turn_start_idempotency: Mutex::new(HashMap::new()),
             session_new_idempotency: Mutex::new(HashMap::new()),
             goal_set_idempotency: Mutex::new(HashMap::new()),
