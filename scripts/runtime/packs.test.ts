@@ -10,6 +10,9 @@ import { WINDOWS_SANDBOX_HELPERS } from "./backend";
 const target = `${process.arch === "arm64" ? "aarch64" : "x86_64"}-${process.platform === "win32" ? "pc-windows-msvc" : process.platform === "darwin" ? "apple-darwin" : "unknown-linux-musl"}`;
 
 const assetTarget = target.replace("-unknown-linux-", "-linux-");
+// Windows ZIP integration tests launch PowerShell/.NET; allow cold starts on
+// hosted runners without removing the bounded timeout or archive assertions.
+const WINDOWS_ZIP_TEST_TIMEOUT_MS = 30_000;
 const WINDOWS_LONG_FILE_NAME = `${"long path ".repeat(10)}unicode-路径.txt`;
 const WINDOWS_LONG_APP_FILE = `runtime/python-site/${WINDOWS_LONG_FILE_NAME}`;
 const WINDOWS_HIDDEN_APP_FILE = "runtime/python-site/.hidden-unicode-payload";
@@ -58,7 +61,7 @@ test.skipIf(process.platform !== "win32")("Windows ZIP rejects reparse points", 
     }
     await expect(archiveTreeZip(source, ["runtime/python"], join(root, "out.zip"))).rejects.toThrow("reparse point");
   } finally { rmSync(root, { recursive: true, force: true }); }
-});
+}, WINDOWS_ZIP_TEST_TIMEOUT_MS);
 
 test.skipIf(process.platform !== "win32")("Windows ZIP pack handles zero, one and multiple paths", async () => {
   const root = mkdtempSync(join(tmpdir(), "devo Windows zip path counts "));
@@ -70,7 +73,7 @@ test.skipIf(process.platform !== "win32")("Windows ZIP pack handles zero, one an
     await archiveTreeZip(source, ["runtime/python", "runtime/node"], join(root, "many.zip"));
     expect(existsSync(join(root, "many.zip"))).toBe(true);
   } finally { rmSync(root, { recursive: true, force: true }); }
-});
+}, WINDOWS_ZIP_TEST_TIMEOUT_MS);
 
 test.skipIf(process.platform !== "win32")("Windows ZIP default reader preserves UTF8 names", async () => {
   const root = mkdtempSync(join(tmpdir(), "devo Windows zip utf8 "));
@@ -100,7 +103,7 @@ test.skipIf(process.platform !== "win32")("Windows ZIP default reader preserves 
     // decode as ANSI mojibake instead of the expected Unicode path.
     expect(readFileSync(listedFile, "utf8").split(/\r?\n/)).toContain(WINDOWS_LONG_FILE_NAME);
   } finally { rmSync(root, { recursive: true, force: true }); }
-}, 30_000);
+}, WINDOWS_ZIP_TEST_TIMEOUT_MS);
 
 test("Linux public pack names omit the vendor while retaining canonical manifest targets", async () => {
   const root = mkdtempSync(join(tmpdir(), "devo Linux asset names "));
