@@ -253,11 +253,7 @@ impl ServerRuntime {
                 message.to_string(),
             )
         } else {
-            super::host_messages::HostMessage::agent(
-                from_session_id,
-                event_id,
-                message.to_string(),
-            )
+            super::host_messages::HostMessage::agent(from_session_id, event_id, message.to_string())
         };
         let accepted = self
             .deliver_host_message(target, message, metadata)
