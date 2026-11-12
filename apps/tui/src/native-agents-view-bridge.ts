@@ -367,14 +367,31 @@ export async function subscribeAgentRoster(
   let refreshQueued = false;
   let subscriptionId: string | null = null;
 
-  const refresh = async () => {
-    if (disposed) return;
-    try {
-      current = await measureAsync("roster.refresh_summaries", () => fetchAgentRosterSummaries(client, { cwd }));
-    } catch {
-      // Keep last good roster on transient failures.
-    }
-    if (!disposed) listener();
+  let pendingRefresh: Promise<void> | undefined;
+  let refreshAgain = false;
+
+  const refresh = (): Promise<void> => {
+    if (disposed) return Promise.resolve();
+    refreshAgain = true;
+    if (pendingRefresh) return pendingRefresh;
+    // Each caller waits for the current read, not for an unbounded stream of
+    // notifications to become quiet. A dirty flight schedules one trailing read.
+    pendingRefresh = Promise.resolve().then(async () => {
+      refreshAgain = false;
+      try {
+        const next = await measureAsync("roster.refresh_summaries", () => fetchAgentRosterSummaries(client, { cwd }));
+        if (!disposed) {
+          current = next;
+          listener();
+        }
+      } catch {
+        // Keep last good roster on transient failures.
+      }
+    }).finally(() => {
+      pendingRefresh = undefined;
+      if (refreshAgain && !disposed) void refresh();
+    });
+    return pendingRefresh;
   };
 
   const scheduleRefresh = () => {
