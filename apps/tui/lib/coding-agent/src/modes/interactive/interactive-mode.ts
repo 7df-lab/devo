@@ -2898,11 +2898,18 @@ export class InteractiveMode {
 		// Replacement events own the session-scoped command catalog. The daemon
 		// sends that event before its command response, but its handler may still
 		// be refreshing commands when the response resolves.
-		await this.sessionEventQueue;
-		this.resetCurrentSessionRenderState();
-		await this.renderInitialMessages();
-		this.updatePendingMessagesDisplay();
-		this.syncWorkingLoader();
+		const generation = this.sessionEventGeneration;
+		const render = this.sessionEventQueue.then(async () => {
+			if (generation !== this.sessionEventGeneration) return;
+			this.resetCurrentSessionRenderState();
+			await this.renderInitialMessages();
+			if (generation !== this.sessionEventGeneration) return;
+			this.updatePendingMessagesDisplay();
+			this.syncWorkingLoader();
+		});
+		// Fence events arriving during the read too, not only those already queued.
+		this.sessionEventQueue = render.catch(() => {});
+		await render;
 	}
 
 	private async refreshCommandCatalogForCurrentSession(): Promise<void> {

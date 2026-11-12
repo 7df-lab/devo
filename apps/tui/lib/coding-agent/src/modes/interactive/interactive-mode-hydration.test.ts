@@ -96,3 +96,36 @@ test("queued pre-snapshot deltas receive the birth prefix exactly once without c
   event.sourceItem.missingTextBaseIds = [];
   assert.equal(hydrateQueuedTextEvent(event, prefixes), event.event);
 });
+
+test("command-triggered transcript rebuild fences live events until history is rendered", async () => {
+  const { mode, rows, emit } = harness();
+  const history = deferred(), loading = deferred();
+  mode.subscribeToAgent();
+  mode.resetCurrentSessionRenderState = () => { rows.length = 0; };
+  mode.renderInitialMessages = async () => { loading.resolve(); await history.promise; rows.push("history"); };
+  mode.updatePendingMessagesDisplay = () => {};
+  mode.syncWorkingLoader = () => {};
+  const render = mode.renderCurrentSessionState();
+  await loading.promise;
+  const live = emit("live");
+  await new Promise(resolve => setImmediate(resolve));
+  assert.deepEqual(rows, []);
+  history.resolve();
+  await Promise.all([render, live]);
+  assert.deepEqual(rows, ["history", "live"]);
+});
+
+test("obsolete command rebuild cannot reset a newly selected session", async () => {
+  const { mode, rows } = harness();
+  const pending = deferred();
+  mode.sessionEventQueue = pending.promise;
+  mode.resetCurrentSessionRenderState = () => { rows.push("reset"); };
+  mode.renderInitialMessages = async () => { rows.push("render"); };
+  mode.updatePendingMessagesDisplay = () => {};
+  mode.syncWorkingLoader = () => {};
+  const render = mode.renderCurrentSessionState();
+  mode.sessionEventGeneration++;
+  pending.resolve();
+  await render;
+  assert.deepEqual(rows, []);
+});
