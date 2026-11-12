@@ -1,3 +1,4 @@
+import { resolveUserInputQuestions } from "./user-input-questions.js";
 import { hydrateQueuedTextEvent } from "./transcript-hydration.js";
 import { ActivityMonitor, type ActivitySnapshot } from "./activity-monitor.js";
 import { ShellActivityPanel } from "./components/shell-activity-panel.js";
@@ -5286,6 +5287,7 @@ export class InteractiveMode {
 
 	private expectsConnectionExtensionUiResponse(request: AgentConnectionExtensionUiRequest): boolean {
 		return (
+			request.method === "user_input" ||
 			request.method === "select" ||
 			request.method === "confirm" ||
 			request.method === "input" ||
@@ -5342,6 +5344,11 @@ export class InteractiveMode {
 	): Promise<AgentConnectionExtensionUiResponse | undefined> {
 		const { payload } = request;
 		switch (request.method) {
+			case "user_input":
+				return resolveUserInputQuestions(payload.questions, {
+					select: (title, options) => this.showExtensionSelector(title, options, dialogOpts),
+					input: (title) => this.showExtensionInput(title, "", dialogOpts),
+				}, dialogOpts?.signal);
 			case "select": {
 				const title = getPayloadString(payload, "title");
 				const options = getPayloadStringArray(payload, "options");
