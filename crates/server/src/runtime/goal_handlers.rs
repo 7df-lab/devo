@@ -485,8 +485,12 @@ impl ServerRuntime {
                             tracing::warn!(session_id = %session_id, error = %error, "failed to persist goal pause record");
                         }
                         if should_interrupt_continuation {
-                            self.stop_goal_continuation_for_transition(session_id, "goal paused", origin)
-                                .await;
+                            self.stop_goal_continuation_for_transition(
+                                session_id,
+                                "goal paused",
+                                origin,
+                            )
+                            .await;
                         }
                         // Resume can arrive during the bounded interrupt wait.
                         // Mirror and return the latest host state, not the pause
@@ -625,72 +629,6 @@ impl ServerRuntime {
     }
 
     // ── Legacy / ACP Goal Handlers (ThreadGoal wire) ──────────────────
-
-    pub(super) async fn handle_goal_create(
-        self: &Arc<Self>,
-        request_id: serde_json::Value,
-        params: serde_json::Value,
-    ) -> serde_json::Value {
-        let params: devo_protocol::GoalCreateParams = match serde_json::from_value(params) {
-            Ok(p) => p,
-            Err(e) => {
-                return self.error_response(
-                    request_id,
-                    ProtocolErrorCode::InvalidParams,
-                    format!("invalid goal/create params: {e}"),
-                );
-            }
-        };
-        let session_id = params.session_id;
-        let replace_existing = params.replace_existing;
-        let title_input = params.objective.trim().to_string();
-        if !self.sessions.lock().await.contains_key(&session_id) {
-            return self.error_response(
-                request_id,
-                ProtocolErrorCode::SessionNotFound,
-                "session does not exist",
-            );
-        }
-
-        let mut stores = self.goal_stores.lock().await;
-        let store = stores.entry(session_id).or_insert_with(GoalStore::new);
-        match store.create(params) {
-            Ok(goal) => {
-                let should_continue = goal.status == crate::goal::GoalStatus::Active;
-                let thread_goal = goal.to_thread_goal();
-                let durable_goal = goal.clone();
-                let result = serde_json::to_value(SuccessResponse {
-                    id: request_id,
-                    result: devo_protocol::GoalCreateResult { goal: thread_goal },
-                })
-                .expect("serialize goal create result");
-                drop(stores);
-                if let Err(error) = self
-                    .goal_durable_store
-                    .append_goal_created(&durable_goal)
-                    .await
-                {
-                    tracing::warn!(session_id = %session_id, error = %error, "failed to persist goal create record");
-                }
-                // Interrupt before any session-actor mailbox round-trip: the actor
-                // may be blocked inside an in-flight continuation turn.
-                if replace_existing {
-                    self.interrupt_active_goal_continuation_turn(session_id, "goal replaced")
-                        .await;
-                }
-                self.sync_core_session_goal(session_id, Some(&durable_goal))
-                    .await;
-                self.schedule_goal_followup_work(session_id, Some(title_input), should_continue)
-                    .await;
-                result
-            }
-            Err(e) => self.error_response(
-                request_id,
-                ProtocolErrorCode::InvalidParams,
-                format!("goal creation failed: {e}"),
-            ),
-        }
-    }
 
     pub(super) async fn handle_goal_set(
         self: &Arc<Self>,

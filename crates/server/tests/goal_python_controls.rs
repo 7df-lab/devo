@@ -148,17 +148,24 @@ async fn python_goal_controls_broadcast_without_aborting_their_own_turn() -> Res
         )
     })??;
     wait_for_captured_request_count(&provider.captured_requests, /*expected*/ 2).await?;
-    let mut lifecycle = observed.iter().filter_map(|event| {
-        let params = &event["params"];
-        match event["method"].as_str()? {
-            "session/goal/created" | "session/goal/updated" => params["goal"]["status"].as_str(),
-            "session/goal/statusChanged" => params["status"].as_str(),
-            _ => None,
-        }
-    }).collect::<Vec<_>>();
+    let mut lifecycle = observed
+        .iter()
+        .filter_map(|event| {
+            let params = &event["params"];
+            match event["method"].as_str()? {
+                "session/goal/created" | "session/goal/updated" => {
+                    params["goal"]["status"].as_str()
+                }
+                "session/goal/statusChanged" => params["status"].as_str(),
+                _ => None,
+            }
+        })
+        .collect::<Vec<_>>();
     lifecycle.dedup();
-    assert_eq!(lifecycle, vec!["active", "paused", "active", "canceled", "active", "paused"]);
-
+    assert_eq!(
+        lifecycle,
+        vec!["active", "paused", "active", "canceled", "active", "paused"]
+    );
 
     let response = read_goal(&runtime, connection_id, session_id).await?;
     assert_eq!(
