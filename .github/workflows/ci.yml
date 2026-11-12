@@ -188,7 +188,7 @@ jobs:
       - name: Boot and outcome scenarios (no provider credentials)
         working-directory: apps/tui
         run: |
-          for scenario in T1 goal heartbeat effort; do
+          for scenario in T1 goal heartbeat effort permissions; do
             echo "::group::tmux smoke: $scenario"
             node scripts/run-tmux-smoke.js "$scenario"
             echo "::endgroup::"

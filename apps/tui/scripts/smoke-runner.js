@@ -9,7 +9,8 @@ import { scheduledDelivered, rpcSucceeded, turnOutcome } from "./smoke-outcomes.
 
 const repo = resolve(dirname(fileURLToPath(import.meta.url)), "../../..");
 const scenario = process.argv[2] || "T1";
-const scenarios = ["T1", "T2", "T3", "goal", "bash", "agents", "schedule", "heartbeat", "activity", "effort"];
+const scenarios = ["T1", "T2", "T3", "goal", "bash", "agents", "schedule", "heartbeat", "activity", "effort", "permissions"];
+const selectorFixture = scenario === "effort" || scenario === "permissions";
 const tmux = process.env.DEVO_TMUX_BIN || (process.platform === "win32" ? "psmux" : "tmux");
 const binary = resolve(process.env.DEVO_BIN || process.env.DEVO_SERVER_BIN
   || join(repo, "target/debug", process.platform === "win32" ? "devo.exe" : "devo"));
@@ -37,9 +38,9 @@ async function run() {
   let pane = "";
   try {
     for (const name of ["auth.json", "providers.json", "config.toml"]) {
-      if (scenario !== "effort" && existsSync(join(sourceHome, name))) copyFileSync(join(sourceHome, name), join(home, name));
+      if (!selectorFixture && existsSync(join(sourceHome, name))) copyFileSync(join(sourceHome, name), join(home, name));
     }
-    if (scenario === "effort") {
+    if (selectorFixture) {
       // Self-contained metadata fixture: selectors require no model request or credentials.
       writeFileSync(join(home, "providers.json"), JSON.stringify({
         model: "smoke/reasoner", provider: { smoke: {
@@ -54,7 +55,7 @@ async function run() {
       }));
     }
     const settingsPath = join(sourceHome, "settings.json");
-    const settings = scenario !== "effort" && existsSync(settingsPath) ? JSON.parse(readFileSync(settingsPath, "utf8")) : {};
+    const settings = !selectorFixture && existsSync(settingsPath) ? JSON.parse(readFileSync(settingsPath, "utf8")) : {};
     writeFileSync(join(home, "settings.json"), JSON.stringify({ ...settings, onboardingShown: true }));
     mux(["new-session", "-d", "-s", session, "-c", repo, "-x", "100", "-y", "30",
       "-e", `DEVO_HOME=${home}`, "-e", `DEVO_CODING_AGENT_DIR=${home}`,
@@ -132,6 +133,46 @@ async function run() {
         mux(["send-keys", "-t", session, "Escape"]);
         await waitFor("confirmed selector dismissed", () => !screen().includes("Reasoning effort"));
         mux(["resize-window", "-t", session, "-x", "100", "-y", "30"]);
+        break;
+      }
+      case "permissions": {
+        const screen = () => mux(["capture-pane", "-t", session, "-p"]).stdout;
+        const updates = () => records().filter((event) => event.direction === "tui-to-server"
+          && event.method === "session/metadata/update"
+          && event.payload?.params?.settings?.permissionProfile);
+        const succeeded = (events, request) => events.some((event) => event.direction === "server-to-tui"
+          && event.kind === "response" && event.id === request.id
+          && event.payload?.result != null && !event.payload?.error);
+        const initial = updates().length;
+        await send("/permissions default");
+        await waitFor("permission baseline", events => updates().slice(initial).some(request =>
+          request.payload.params.settings.permissionProfile === "default" && succeeded(events, request)));
+        const before = updates().length;
+        await send("/permissions");
+        await waitFor("permission pre-execution explanation", () => /›.*default/.test(screen())
+          && screen().includes("Review before approval; may ask you"));
+        if (screen().includes("review afterwards")) throw new Error("Misleading permission copy remains");
+        console.log("=== permissions wide ===\n" + screen());
+        mux(["resize-window", "-t", session, "-x", "40", "-y", "24"]);
+        await waitFor("narrow permission choices", () => /›.*default/.test(screen()) && screen().includes("autoReview"));
+        mux(["send-keys", "-t", session, "Down"]);
+        await waitFor("permission navigation", () => /›.*autoReview/.test(screen()));
+        console.log("=== permissions narrow ===\n" + screen());
+        mux(["send-keys", "-t", session, "Escape"]);
+        await waitFor("permission cancelled", () => !/›.*autoReview/.test(screen()));
+        if (updates().length !== before) throw new Error("Cancelling permission changed settings");
+        await send("/permissions");
+        await waitFor("permission unchanged after cancel", () => /›.*default/.test(screen()));
+        mux(["send-keys", "-t", session, "Down", "Enter"]);
+        await waitFor("autoReview confirmed", events => updates().slice(before).some(request =>
+          request.payload.params.settings.permissionProfile === "autoReview" && succeeded(events, request))
+          && screen().includes("Permission profile: autoReview"));
+        mux(["resize-window", "-t", session, "-x", "100", "-y", "30"]);
+        await send("/permissions");
+        await waitFor("confirmed permission and description", () => /›.*autoReview/.test(screen())
+          && screen().includes("Review before approval; may ask you"));
+        mux(["send-keys", "-t", session, "Escape"]);
+        await waitFor("permission selector dismissed", () => !/›.*autoReview/.test(screen()));
         break;
       }
       case "activity": {
