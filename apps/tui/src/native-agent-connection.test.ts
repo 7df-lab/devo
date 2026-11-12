@@ -2593,3 +2593,51 @@ test("session switches restore only the owning goal and fence stale goal reads",
   assert.equal((await conn.getState()).goal.objective, "Saved objective");
   await conn.dispose();
 });
+
+
+test("older context read cannot overwrite a newer read with zero", async () => {
+  let hold = false;
+  const responses: Array<(value: unknown) => void> = [];
+  const { conn } = await bootConnection([(method, _params, respond) => {
+    if (method !== "context/usage/read" || !hold) return false;
+    responses.push(respond);
+    return true;
+  }]);
+  hold = true;
+  const older = conn.getSessionStats();
+  const newer = conn.getSessionStats();
+  assert.equal(responses.length, 2);
+  responses[1]({ occupancy: { totalTokens: 230, contextWindowTokens: 1000 } });
+  await newer;
+  responses[0]({ occupancy: { totalTokens: 0, contextWindowTokens: 1000 } });
+  await older;
+  assert.deepEqual((await conn.getState()).contextUsage, { tokens: 230, contextWindow: 1000, percent: 23 });
+  await conn.dispose();
+});
+
+
+test("context reads accept newer zero and preserve a successful older read when newer fails", async () => {
+  let hold = false;
+  const responses: Array<{ ok: (value: unknown) => void; fail: (message: string) => void }> = [];
+  const { conn } = await bootConnection([(method, _params, respond, reject) => {
+    if (method !== "context/usage/read" || !hold) return false;
+    responses.push({ ok: respond, fail: reject });
+    return true;
+  }]);
+  hold = true;
+  const first = conn.getSessionStats();
+  const second = conn.getSessionStats();
+  responses[0].ok({ occupancy: { totalTokens: 250, contextWindowTokens: 1000 } });
+  await first;
+  responses[1].ok({ occupancy: { totalTokens: 0, contextWindowTokens: 1000 } });
+  await second;
+  assert.deepEqual((await conn.getState()).contextUsage, { tokens: 0, contextWindow: 1000, percent: 0 });
+  const third = conn.getSessionStats();
+  const fourth = conn.getSessionStats();
+  responses[3].fail("temporarily unavailable");
+  await fourth;
+  responses[2].ok({ occupancy: { totalTokens: 80, contextWindowTokens: 1000 } });
+  await third;
+  assert.deepEqual((await conn.getState()).contextUsage, { tokens: 80, contextWindow: 1000, percent: 8 });
+  await conn.dispose();
+});
