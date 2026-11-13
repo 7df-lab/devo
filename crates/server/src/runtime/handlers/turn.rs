@@ -3,7 +3,7 @@ use super::image_input::write_data_uri_image_to_temp;
 
 /// Immutable admission result, captured before releasing the session gate.
 pub(crate) enum TurnAdmissionSnapshot {
-    Started(devo_protocol::native::turn::Turn),
+    Started(Box<devo_protocol::native::turn::Turn>),
     Queued(devo_protocol::native::queue::QueueEntry),
 }
 
@@ -191,6 +191,7 @@ impl ServerRuntime {
                 "started turn has no admission snapshot",
             );
         };
+        let turn = *turn;
         self.turn_start_idempotency
             .lock()
             .await
@@ -744,7 +745,9 @@ impl ServerRuntime {
         #[cfg(test)]
         self.pause_turn_admission_response_for_test(params.session_id)
             .await;
-        *accepted_turn = Some(TurnAdmissionSnapshot::Started(runtime_turn.native.clone()));
+        *accepted_turn = Some(TurnAdmissionSnapshot::Started(Box::new(
+            runtime_turn.native.clone(),
+        )));
         serde_json::to_value(SuccessResponse {
             id: request_id,
             result: TurnStartResult::Started {

@@ -118,9 +118,7 @@ impl ServerRuntime {
                 };
                 serde_json::to_value(SuccessResponse {
                     id: request_id,
-                    result: SessionQueuePushResult::Started {
-                        turn: Box::new(turn),
-                    },
+                    result: SessionQueuePushResult::Started { turn },
                 })
                 .expect("serialize session/queue/push response")
             }
