@@ -252,6 +252,12 @@ impl ServerRuntime {
                 event_id,
                 message.to_string(),
             )
+        } else if role == "parent" {
+            super::host_messages::HostMessage::parent_steer(
+                from_session_id,
+                event_id,
+                message.to_string(),
+            )
         } else {
             super::host_messages::HostMessage::agent(from_session_id, event_id, message.to_string())
         };
