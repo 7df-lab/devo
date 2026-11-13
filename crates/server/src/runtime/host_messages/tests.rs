@@ -51,7 +51,7 @@ impl ModelProviderSDK for GatedProvider {
 }
 
 #[tokio::test]
-async fn host_followups_keep_origin_in_queue_live_model_and_replay() -> Result<()> {
+async fn host_inputs_keep_origin_in_queue_live_model_and_replay() -> Result<()> {
     let home = tempfile::TempDir::new()?;
     let provider = Arc::new(GatedProvider {
         requests: StdMutex::new(Vec::new()),
@@ -250,7 +250,8 @@ async fn host_followups_keep_origin_in_queue_live_model_and_replay() -> Result<(
                 && event["params"]["turn"]["sessionId"] == json!(session)
             {
                 completed += 1;
-                if completed == 3 {
+                // The background completion steers the agent follow-up turn.
+                if completed == 2 {
                     return Ok::<_, anyhow::Error>(());
                 }
             }
@@ -258,7 +259,7 @@ async fn host_followups_keep_origin_in_queue_live_model_and_replay() -> Result<(
         anyhow::bail!("notifications closed")
     })
     .await
-    .context("follow-up turns did not complete")??;
+    .context("human and host turns did not complete")??;
     // A producer retry after consumption must not schedule another model turn.
     runtime
         .deliver_host_message(
