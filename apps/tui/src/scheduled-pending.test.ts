@@ -23,7 +23,7 @@ for (const fails of [false, true]) test(`pending operation survives close and re
   await flush();
   assert.equal(state.pending,undefined);
   // The old panel must not navigate the new one into its detail/action mode.
-  assert.match(plain(second), /Select a scheduled task to manage/);
+  assert.match(plain(second), /Enter details/);
   if (fails) assert.match(plain(second), /Pausing scheduled task failed: offline/);
   else assert.match(plain(second), /paused/);
   second.handleInput("\r"); second.handleInput("\r"); assert.equal(calls,2); resolve(); await flush();
