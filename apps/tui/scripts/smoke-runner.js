@@ -73,8 +73,17 @@ async function run() {
       ...(scenario === "clipboard" ? [
         "-e", `DEVO_CLIPBOARD_SMOKE_DIR=${home}`,
         "-e", `PATH=${home}:${process.env.PATH}`,
-      ] : []), "--", binary]);
+      ] : []), "--", ...(scenario === "clipboard" ? ["env", `PATH=${home}:${process.env.PATH}`] : []), binary]);
     ownedSession = true;
+    if (scenario === "clipboard") {
+      // A multi-argument tmux command executes directly, avoiding login-shell
+      // startup files replacing PATH and silently bypassing the node wrapper.
+      const deadline = Date.now() + 15000;
+      while (!existsSync(join(home, "preload.ready"))) {
+        if (Date.now() > deadline) throw new Error("Clipboard smoke node preload did not start");
+        await sleep(100);
+      }
+    }
 
     function records() {
       if (!existsSync(trace)) return [];

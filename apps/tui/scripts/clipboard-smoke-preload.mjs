@@ -39,3 +39,5 @@ mock.module(new URL("image-resize.ts", source).href, {
     return { data: image.data, mimeType: image.mimeType };
   } },
 });
+
+writeFileSync(join(root, "preload.ready"), "ready");
