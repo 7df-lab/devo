@@ -263,7 +263,7 @@ pub fn build_rlm_base_prompt(options: &RlmPromptOptions) -> String {
                 .to_string(),
         );
         parts.push(
-            "`name` is required: choose a stable child name that is unique among siblings."
+            "Pass the full assignment as `rlm.spawn`'s `prompt`; do not spawn a placeholder and send the task later. `name` is required and must be unique among siblings."
                 .to_string(),
         );
         parts.push(
@@ -457,6 +457,22 @@ mod tests {
         assert!(!prompt.contains("daemon-backed depth-0 session"));
         assert!(prompt.contains("Recursive agent depth: 0"));
         assert!(prompt.contains("await refine.run()"));
+    }
+
+    #[test]
+    fn spawn_guidance_assigns_the_task_at_creation() {
+        for mut options in [
+            RlmPromptOptions::root("/repo", "/tmp/messages.jsonl"),
+            RlmPromptOptions::child("/repo", "/tmp/messages.jsonl", 1, "parent"),
+        ] {
+            let guidance = "Pass the full assignment as `rlm.spawn`'s `prompt`; do not spawn a placeholder and send the task later.";
+            assert!(build_rlm_base_prompt(&options).contains(guidance));
+            options.allow_recursion = false;
+            assert!(!build_rlm_base_prompt(&options).contains(guidance));
+            options.allow_recursion = true;
+            options.active_tools = Some(vec!["read".to_string()]);
+            assert!(!build_rlm_base_prompt(&options).contains(guidance));
+        }
     }
 
     #[test]
