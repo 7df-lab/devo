@@ -198,3 +198,87 @@ async fn queue_push_keeps_snapshot_after_completion() -> Result<()> {
 async fn queue_push_keeps_snapshot_after_replacement() -> Result<()> {
     response_survives_terminalization("session/queue/push", AfterCompletion::NewTurn).await
 }
+
+#[tokio::test]
+async fn queued_response_keeps_its_admitted_position_when_another_input_arrives() -> Result<()> {
+    let home = tempfile::tempdir()?;
+    let provider = Arc::new(ResponseProvider {
+        release: Semaphore::new(0),
+    });
+    let runtime = crate::test_support::TestRuntime::new(provider.clone())
+        .with_test_model()
+        .runtime(home.path());
+    let (tx, mut rx) = crate::test_outbound_channel(512);
+    let connection = runtime
+        .register_connection(ClientTransportKind::Stdio, tx)
+        .await;
+    let drain = tokio::spawn(async move { while rx.recv().await.is_some() {} });
+    Box::pin(runtime.handle_incoming(connection,json!({"id":1,"method":"initialize","params":{"protocolVersion":1,"clientCapabilities":{},"_meta":{"devo":{"protocol":"native"}},"clientInfo":{"name":"queue-position","title":"test","version":"1"}}}))).await;
+    let created = Box::pin(runtime.handle_incoming(connection,json!({"id":2,"method":"session/new","params":{"cwd":home.path(),"idempotencyKey":"queue-position-session"}}))).await.context("new session")?;
+    let session = SessionId::from(
+        created["result"]["session"]["id"]
+            .as_str()
+            .context("session id")?,
+    );
+    let active = Box::pin(runtime.handle_incoming(connection,json!({"id":3,"method":"turn/start","params":{"sessionId":session,"input":[{"type":"text","text":"active"}],"idempotencyKey":"active"}}))).await.context("active response")?;
+    assert!(active.get("error").is_none(), "{active}");
+    let arrived = Arc::new(Semaphore::new(0));
+    let release = Arc::new(Semaphore::new(0));
+    *runtime
+        .turn_admission_response_gate
+        .lock()
+        .expect("response gate") = Some(ResponseGate {
+        session_id: session,
+        arrived: arrived.clone(),
+        release: release.clone(),
+    });
+    let first = {
+        let runtime = runtime.clone();
+        tokio::spawn(async move {
+            Box::pin(runtime.handle_incoming(connection,json!({"id":4,"method":"session/queue/push","params":{"sessionId":session,"input":[{"type":"text","text":"first queued"}],"idempotencyKey":"first queued"}}))).await
+        })
+    };
+    tokio::time::timeout(Duration::from_secs(20), arrived.acquire())
+        .await??
+        .forget();
+    let second = Box::pin(runtime.handle_incoming(connection,json!({"id":5,"method":"session/queue/push","params":{"sessionId":session,"input":[{"type":"text","text":"second queued"}],"idempotencyKey":"second queued"}}))).await.context("second queued response")?;
+    release.add_permits(1);
+    let first = tokio::time::timeout(Duration::from_secs(20), first)
+        .await??
+        .context("first queued response")?;
+    let listed = Box::pin(runtime.handle_incoming(
+        connection,
+        json!({"id":6,"method":"session/queue/list","params":{"sessionId":session}}),
+    ))
+    .await
+    .context("queue list")?;
+    // Capture before cleanup, but do not leak blocked turns when a regression fails.
+    let actual = json!({"first":first["result"]["entry"]["position"],"second":second["result"]["entry"]["position"]});
+    let expected = json!({"first":listed["result"]["entries"][0]["position"],"second":listed["result"]["entries"][1]["position"]});
+    provider.release.add_permits(3);
+    tokio::time::timeout(Duration::from_secs(20), async {
+        loop {
+            let Some(snapshot) = runtime.session_turn_reservation_snapshot(session).await else {
+                tokio::task::yield_now().await;
+                continue;
+            };
+            if snapshot.active_turn.is_none()
+                && snapshot
+                    .pending_turn_queue
+                    .lock()
+                    .expect("queue")
+                    .is_empty()
+            {
+                break;
+            }
+            tokio::task::yield_now().await;
+        }
+    })
+    .await
+    .context("all turns complete")?;
+    runtime.unregister_connection(connection).await;
+    drain.abort();
+    assert_eq!(expected, json!({"first":1,"second":2}));
+    assert_eq!(actual, expected);
+    Ok(())
+}

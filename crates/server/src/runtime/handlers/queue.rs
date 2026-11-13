@@ -109,7 +109,7 @@ impl ServerRuntime {
         }
         match response["result"]["disposition"].as_str() {
             Some("started") => {
-                let Some(turn) = accepted_turn else {
+                let Some(super::turn::TurnAdmissionSnapshot::Started(turn)) = accepted_turn else {
                     return self.error_response(
                         request_id,
                         ProtocolErrorCode::InternalError,
@@ -125,34 +125,28 @@ impl ServerRuntime {
                 .expect("serialize session/queue/push response")
             }
             Some("queued") => {
+                #[cfg(test)]
+                self.pause_turn_admission_response_for_test(legacy_session_id)
+                    .await;
                 let queued_id = response["result"]["queued_input_id"]
                     .as_str()
                     .expect("queued result carries queued_input_id")
                     .to_owned();
-                let position = self
-                    .session_turn_reservation_snapshot(legacy_session_id)
-                    .await
-                    .map(|reservation| {
-                        // turn/start enqueues into the shared queue
-                        // synchronously (appending to the back), so the
-                        // entry's position is the current length.
-                        reservation
-                            .pending_turn_queue
-                            .lock()
-                            .expect("pending turn queue mutex should not be poisoned")
-                            .len() as u32
-                    })
-                    .unwrap_or(1);
-                // turn/start enqueues into the shared queue synchronously
-                // now, but the response entry is still built from the
-                // accepted input directly (session/queue/list reflects the
-                // queue truth immediately after). `enqueued_at` is
-                // approximate.
+                let Some(super::turn::TurnAdmissionSnapshot::Queued(admitted)) = accepted_turn
+                else {
+                    return self.error_response(
+                        request_id,
+                        ProtocolErrorCode::InternalError,
+                        "queued input has no admission snapshot",
+                    );
+                };
+                // Preserve the original wire input/preview, but use admission-time
+                // position and timestamp rather than a later mutable queue length.
                 let entry = QueueEntry {
                     delivery: devo_protocol::native::host_message::HostMessageDelivery::FollowUp,
                     origin: None,
                     queue_item_id: QueueItemId::from_string(queued_id.clone()),
-                    position,
+                    position: admitted.position,
                     input: params.input.clone(),
                     preview: params
                         .input
@@ -169,7 +163,7 @@ impl ServerRuntime {
                             _ => None,
                         })
                         .unwrap_or_default(),
-                    enqueued_at: chrono::Utc::now(),
+                    enqueued_at: admitted.enqueued_at,
                     recovery_required: false,
                 };
                 self.broadcast_queue_updated(
