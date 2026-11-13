@@ -209,6 +209,7 @@ jobs:
           chmod 600 "$home/auth.json"
           DEVO_HOME="$home" node scripts/run-tmux-smoke.js T2
           DEVO_HOME="$home" node scripts/run-tmux-smoke.js fork
+          DEVO_HOME="$home" node scripts/run-tmux-smoke.js clipboard
 
   check:
     needs: changes
