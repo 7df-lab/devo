@@ -6,6 +6,7 @@
  */
 
 import { IPYTHON_STATE_RESTORED_CUSTOM_TYPE } from "@earendil-works/pi-coding-agent/messages";
+import { agentCompletionDisplay } from "./agent-display.js";
 import { shapeHostedToolResult } from "./tool-results.js";
 import {
   bashResultFromCommandExecution,
@@ -186,10 +187,12 @@ export function nativeItemToAgentMessages(envelope: unknown): AgentMessageLike[]
         backgroundTask: "Background notification",
         schedule: "Scheduled notification",
       };
+      const display = agentCompletionDisplay(origin, String(content[0]?.text ?? ""));
+      const visibleContent = [{ ...content[0], text: display.text }, ...content.slice(1)];
       return [{
         role: "custom",
         customType: labels[String(origin.source)] ?? "Host notification",
-        content: [{ type: "text", text: `From: ${String(origin.senderName ?? origin.sender_name ?? origin.sender ?? "Host")}` }, ...content],
+        content: [{ type: "text", text: `From: ${String(origin.senderName ?? origin.sender_name ?? origin.sender ?? "Host")}${display.status ? ` · ${display.status}` : ""}` }, ...visibleContent],
         display: true,
         details: { origin: item.origin },
         timestamp: ts,
