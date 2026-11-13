@@ -144,6 +144,7 @@ impl ServerRuntime {
             collaboration_mode,
             execution_mode: Default::default(),
         };
+        let mut accepted_turn = None;
         let response = self
             .handle_turn_start_with_queue_policy_and_client_message_id(
                 connection_id,
@@ -156,6 +157,7 @@ impl ServerRuntime {
                         .clone()
                         .unwrap_or_else(|| format!("turn:{}", params.idempotency_key)),
                 ),
+                &mut accepted_turn,
             )
             .await;
         let Ok(success) =
@@ -172,15 +174,14 @@ impl ServerRuntime {
                 "session already has an active prompt turn",
             );
         };
-        // Prefer runtime registry metadata over a mailbox reservation read:
-        // `spawn_active_runtime_turn_task` registers before the turn task checkouts.
-        let Some(turn) = self
-            .active_turns
-            .active_turn(session_id)
-            .await
-            .filter(|turn| turn.id.as_str() == turn_id.to_string())
-        else {
-            return response;
+        // Admission owns the response snapshot. The background turn may already
+        // have ended (or been replaced) before this wrapper resumes.
+        let Some(turn) = accepted_turn.filter(|turn| turn.id == turn_id) else {
+            return self.error_response(
+                request_id,
+                ProtocolErrorCode::InternalError,
+                "started turn has no admission snapshot",
+            );
         };
         self.turn_start_idempotency
             .lock()
@@ -200,16 +201,21 @@ impl ServerRuntime {
         params: TurnStartParams,
         queue_policy: TurnStartQueuePolicy,
     ) -> serde_json::Value {
+        let mut accepted_turn = None;
         self.handle_turn_start_with_queue_policy_and_client_message_id(
             connection_id,
             request_id,
             params,
             queue_policy,
             /*client_user_message_id*/ None,
+            &mut accepted_turn,
         )
         .await
     }
 
+    /// Return the accepted Native snapshot alongside the internal compatibility
+    /// response, without consulting mutable active-turn state after execution starts.
+    #[allow(clippy::too_many_arguments)]
     pub(crate) async fn handle_turn_start_with_queue_policy_and_client_message_id(
         self: &Arc<Self>,
         connection_id: Option<u64>,
@@ -217,7 +223,9 @@ impl ServerRuntime {
         params: TurnStartParams,
         queue_policy: TurnStartQueuePolicy,
         client_user_message_id: Option<String>,
+        accepted_turn: &mut Option<devo_protocol::native::turn::Turn>,
     ) -> serde_json::Value {
+        *accepted_turn = None;
         if params.input.is_empty() {
             return self.error_response(
                 request_id,
@@ -719,6 +727,10 @@ impl ServerRuntime {
         )
         .await;
 
+        #[cfg(test)]
+        self.pause_turn_admission_response_for_test(params.session_id)
+            .await;
+        *accepted_turn = Some(runtime_turn.native.clone());
         serde_json::to_value(SuccessResponse {
             id: request_id,
             result: TurnStartResult::Started {
