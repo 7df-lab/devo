@@ -1,4 +1,5 @@
 /** Product TTY smoke: assert outcomes without changing product behavior. */
+import { createServer } from "node:http";
 import { spawnSync } from "node:child_process";
 import { copyFileSync, existsSync, mkdtempSync, readFileSync, rmSync, writeFileSync } from "node:fs";
 import { homedir, tmpdir } from "node:os";
@@ -13,7 +14,7 @@ import { startWaitTimerProvider, checkWaitTimer } from "./wait-timer-smoke.mjs";
 
 const repo = resolve(dirname(fileURLToPath(import.meta.url)), "../../..");
 const scenario = process.argv[2] || "T1";
-const scenarios = ["wait-timer", "resize-status", "T1", "T2", "T3", "goal", "bash", "agents", "schedule", "heartbeat", "activity", "effort", "theme", "fork", "clipboard", "resume", "scheduled-timezone", "scheduled-pending", "export", "share"];
+const scenarios = ["wait-timer", "resize-status", "T1", "T2", "T3", "goal", "bash", "agents", "schedule", "heartbeat", "activity", "effort", "theme", "fork", "clipboard", "resume", "scheduled-timezone", "scheduled-pending", "export", "share", "steering"];
 const preloaded = ["clipboard", "scheduled-pending"].includes(scenario);
 const tmux = process.env.DEVO_TMUX_BIN || (process.platform === "win32" ? "psmux" : "tmux");
 const binary = resolve(process.env.DEVO_BIN || process.env.DEVO_SERVER_BIN
@@ -38,6 +39,9 @@ async function run() {
   const home = mkdtempSync(join(tmpdir(), "devo-tui-smoke-"));
   const trace = join(home, "protocol.ndjsonl");
   const sourceHome = process.env.DEVO_HOME || join(homedir(), ".devo");
+  let steeringServer;
+  let finishFirstReply;
+  let steeringRequests = 0;
   let resizeProvider;
   let waitTimerProvider;
   let ownedSession = false;
@@ -59,6 +63,43 @@ async function run() {
           } },
         } },
       }));
+    }
+    if (scenario === "steering") {
+      steeringServer = createServer(async (request, response) => {
+        const chunks = [];
+        for await (const chunk of request) chunks.push(chunk);
+        const body = JSON.parse(Buffer.concat(chunks).toString("utf8"));
+        // Idle title polish uses the same provider after the turn. It is not a
+        // third conversational response and must not invalidate the exact count.
+        const titleRequest = (body.messages ?? []).some(message => message.role === "system"
+          && JSON.stringify(message.content).includes("Generate a short session title."));
+        if (titleRequest) {
+          console.log("steering mock request: title");
+          response.writeHead(200, { "Content-Type": "application/json" });
+          response.end(JSON.stringify({ id: "steering-title", object: "chat.completion", created: 0,
+            model: "deepseek-v4-flash", choices: [{ index: 0,
+              message: { role: "assistant", content: "Steering smoke session" }, finish_reason: "stop" }],
+          }));
+          return;
+        }
+        const index = ++steeringRequests;
+        console.log(`steering mock request: response ${index}`);
+        response.writeHead(200, { "Content-Type": "text/event-stream" });
+        const chunk = (delta, finish_reason = null) => response.write(`data: ${JSON.stringify({
+          id: `steering-${index}`, object: "chat.completion.chunk", created: 0, model: "deepseek-v4-flash",
+          choices: [{ index: 0, delta, finish_reason }],
+        })}\n\n`);
+        chunk({ role: "assistant", content: index === 1 ? "FIRST_REPLY_MARKER" : "SECOND_REPLY_MARKER" });
+        const finish = () => { chunk({}, "stop"); response.end("data: [DONE]\n\n"); };
+        if (index === 1) finishFirstReply = finish;
+        else finish();
+      });
+      await new Promise(resolve => steeringServer.listen(0, "127.0.0.1", resolve));
+      writeFileSync(join(home, "providers.json"), JSON.stringify({ model: "deepseek/deepseek-v4-flash", provider: {
+        deepseek: { credential: "deepseek", enabled: true,
+          base_url: `http://127.0.0.1:${steeringServer.address().port}`, wire_api: "openai_chat_completions" },
+      } }));
+      writeFileSync(join(home, "auth.json"), JSON.stringify({ deepseek: { type: "api_key", key: "isolated-smoke" } }), { mode: 0o600 });
     }
     if (scenario === "resize-status") resizeProvider = await startResizeProvider(home);
     if (scenario === "wait-timer") waitTimerProvider = await startWaitTimerProvider(home);
@@ -131,6 +172,29 @@ async function run() {
     console.log("=== boot ===\n" + pane);
     switch (scenario) {
       case "T1": break;
+      case "steering": {
+        await send("steering first request");
+        await waitFor("first live reply", (_events, text) => !!finishFirstReply && text.includes("FIRST_REPLY_MARKER"));
+        await send("steering second request");
+        await waitFor("steering accepted while first reply is active", events => rpcSucceeded(events, "turn/steer"));
+        finishFirstReply();
+        await waitFor("steered response completed", (events, text) => steeringRequests === 2
+          && turnOutcome(events, "completed") && text.includes("SECOND_REPLY_MARKER"));
+        // A real key and visible editor probe put the assertion after queued UI events.
+        mux(["send-keys", "-t", session, "-l", "steering-render-barrier"]);
+        await waitFor("render barrier", (_events, text) => text.includes("steering-render-barrier"));
+        for (const marker of ["FIRST_REPLY_MARKER", "SECOND_REPLY_MARKER"]) {
+          if (pane.split(marker).length - 1 !== 1) throw new Error(`Repeated assistant cell: ${marker}`);
+        }
+        const timeline = records().filter(event => ["item/started", "item/completed"].includes(event.method));
+        const steer = timeline.findIndex(event => event.method === "item/started"
+          && event.payload?.params?.item?.item?.entry === "steer");
+        const firstEnd = timeline.findIndex(event => event.method === "item/completed"
+          && event.payload?.params?.item?.item?.text === "FIRST_REPLY_MARKER");
+        if (steer < 0 || firstEnd <= steer) throw new Error("Did not exercise steer-before-assistant-completion ordering");
+        break;
+      }
+
       case "wait-timer":
         await checkWaitTimer({ provider: waitTimerProvider, mux, session, send, waitFor, records, turnOutcome });
         break;
@@ -499,6 +563,8 @@ async function run() {
     resizeProvider?.close();
     waitTimerProvider?.close();
     if (ownedSession) mux(["kill-session", "-t", session], false);
+    steeringServer?.closeAllConnections();
+    steeringServer?.close();
     // The target is our own mkdtemp child, never the source credential folder.
     if (dirname(home) !== resolve(tmpdir())) throw new Error("Unexpected smoke home location");
     // The killed product can flush session files for a few beats after

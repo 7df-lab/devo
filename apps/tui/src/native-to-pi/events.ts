@@ -323,7 +323,9 @@ function projectItemStarted(
   const type = item.type;
 
   if (type === "userMessage" || type === "subAgent" || type === "subagent" || type === "sub_agent") {
-    events.push(...closeImAssistantStreamIfOpen(state));
+    // Inbox admission can precede the previous model response's completion.
+    // Keep its component alive so the authoritative item/completed updates it,
+    // rather than creating a second assistant cell after this user message.
     events.push({
       type: "message_start",
       message: nativeItemToAgentMessages(envelope)[0],
