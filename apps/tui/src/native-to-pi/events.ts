@@ -323,7 +323,9 @@ function projectItemStarted(
   const type = item.type;
 
   if (type === "userMessage" || type === "subAgent" || type === "subagent" || type === "sub_agent") {
-    events.push(...closeImAssistantStreamIfOpen(state));
+    // Inbox admission can precede the previous model response's completion.
+    // Keep its component alive so the authoritative item/completed updates it,
+    // rather than creating a second assistant cell after this user message.
     events.push({
       type: "message_start",
       message: nativeItemToAgentMessages(envelope)[0],
@@ -504,6 +506,10 @@ function projectItemCompleted(
           : undefined,
       errorSeverity: tooShort ? "warning" : failed ? "error" : undefined,
     });
+  } else if (type === "refinement" || (type === "warning" && item.code === "refinement_not_applied")) {
+    for (const message of nativeItemToAgentMessages(envelope)) {
+      events.push({ type: "message_start", message });
+    }
   } else if (type === "warning") {
     const kernelStateMessage = pythonKernelStateMessageFromNativeItem(item);
     if (kernelStateMessage) {

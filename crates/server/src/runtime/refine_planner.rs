@@ -254,8 +254,8 @@ impl ServerRuntime {
         {
             // A valid empty edit list is a deliberate no-op, never overridden.
             Some(proposal) => Ok(proposal),
-            None if !pending.trajectory_item_ids.is_empty() => Err(
-                "selected trajectory was unavailable, unsupported, or produced no valid plan"
+            None if !pending.autonomous => Err(
+                "Refinement could not obtain a valid model plan; no edits were applied. Please retry."
                     .into(),
             ),
             None => Ok(plan_refine_proposal(pending, harness_path)),
@@ -269,7 +269,11 @@ impl ServerRuntime {
         harness_path: &std::path::Path,
     ) -> Option<RefineProposal> {
         let _permit = match tokio::time::timeout(
-            Duration::from_millis(50),
+            if pending.autonomous {
+                Duration::from_millis(50)
+            } else {
+                REFINE_AUX_TIMEOUT
+            },
             self.auxiliary_model_slots.acquire(),
         )
         .await

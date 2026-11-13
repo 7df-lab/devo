@@ -18,6 +18,18 @@ import {
 
 export type AgentMessageLike = Record<string, unknown>;
 
+const historyTurnIds = new WeakMap<object, string>();
+
+/** Projection-only ownership; never sent to the model or serialized as content. */
+export function nativeHistoryMessageTurnId(message: AgentMessageLike): string | undefined {
+  return historyTurnIds.get(message);
+}
+
+/** Give synthetic terminal markers the same non-serialized turn ownership. */
+export function setNativeHistoryMessageTurnId(message: AgentMessageLike, turnId: string): void {
+  historyTurnIds.set(message, turnId);
+}
+
 const IPYTHON_KERNEL_STATE_RESTORED_CODE = "ipythonKernelStateRestored";
 const IPYTHON_KERNEL_STATE_FRESH_CODE = "ipythonKernelStateFresh";
 
@@ -328,6 +340,24 @@ export function nativeItemToAgentMessages(envelope: unknown): AgentMessageLike[]
     ];
   }
 
+  // Refinement is auxiliary work, not an assistant turn. Keep both successful
+  // no-op results and failures visible without touching the active stream.
+  if (type === "refinement" || (type === "warning" && item.code === "refinement_not_applied")) {
+    const failed = type === "warning";
+    const changes = Array.isArray(item.changes) ? item.changes.map(String) : [];
+    const summary = failed
+      ? String(item.message ?? "Refinement failed; no edits were applied.")
+      : `Refinement complete${changes.length ? ` (${changes.length} changes)` : ": no changes needed"}. ${String(item.summary ?? "")}`;
+    return [{
+      role: "custom",
+      customType: "Refinement",
+      content: summary,
+      display: true,
+      details: { refinementId: item.refinementId, changes, failed },
+      timestamp: ts,
+    }];
+  }
+
   // RLM namespace state is a durable, informational notice rendered by the
   // existing injected-message component, not terminal warning chrome.
   if (type === "warning") {
@@ -394,11 +424,13 @@ export function nativeItemsToAgentMessages(items: unknown): AgentMessageLike[] {
   const callsWithResults = new Set<string>();
   const callMeta = new Map<
     string,
-    { toolName: string; args: Record<string, unknown>; ts: number }
+    { toolName: string; args: Record<string, unknown>; ts: number; message?: AgentMessageLike; turnId?: string }
   >();
 
   for (const envelope of items) {
     for (const msg of nativeItemToAgentMessages(envelope)) {
+      const turnId = envelope?.turnId ?? envelope?.turn_id;
+      if (typeof turnId === "string") historyTurnIds.set(msg, turnId);
       if (msg.role === "assistant" && Array.isArray(msg.content)) {
         for (const part of msg.content as Array<{
           type?: string;
@@ -412,6 +444,8 @@ export function nativeItemsToAgentMessages(items: unknown): AgentMessageLike[] {
               toolName: String(part.name ?? "tool"),
               args: (part.arguments ?? {}) as Record<string, unknown>,
               ts: Number(msg.timestamp ?? Date.now()),
+              message: msg,
+              turnId: typeof turnId === "string" ? turnId : undefined,
             });
           }
         }
@@ -421,14 +455,14 @@ export function nativeItemsToAgentMessages(items: unknown): AgentMessageLike[] {
         if (callId) callsWithResults.add(callId);
         if (callId && !seenCalls.has(callId)) {
           // Orphan result (e.g. toolCall pruned) — synthesize the call so IM keeps the row.
-          out.push(
-            assistantToolCallMessage(
-              callId,
-              String(msg.toolName ?? "tool"),
-              {},
-              Number(msg.timestamp ?? Date.now()),
-            ),
+          const call = assistantToolCallMessage(
+            callId,
+            String(msg.toolName ?? "tool"),
+            {},
+            Number(msg.timestamp ?? Date.now()),
           );
+          if (typeof turnId === "string") historyTurnIds.set(call, turnId);
+          out.push(call);
           seenCalls.add(callId);
         }
       }
@@ -443,18 +477,19 @@ export function nativeItemsToAgentMessages(items: unknown): AgentMessageLike[] {
       args: {},
       ts: Date.now(),
     };
-    out.push(
-      toolResultMessage(
-        callId,
-        meta.toolName,
-        {
-          content: [{ type: "text", text: "Interrupted" }],
-          details: { status: "aborted" },
-        },
-        /*isError*/ true,
-        meta.ts,
-      ),
+    const result = toolResultMessage(
+      callId,
+      meta.toolName,
+      {
+        content: [{ type: "text", text: "Interrupted" }],
+        details: { status: "aborted" },
+      },
+      /*isError*/ true,
+      meta.ts,
     );
+    if (meta.turnId) historyTurnIds.set(result, meta.turnId);
+    const callIndex = meta.message ? out.indexOf(meta.message) : -1;
+    out.splice(callIndex >= 0 ? callIndex + 1 : out.length, 0, result);
   }
   return out;
 }
@@ -468,7 +503,7 @@ export function applyFailedTurnsToAgentMessages(
   turns: unknown,
 ): AgentMessageLike[] {
   if (!Array.isArray(turns) || turns.length === 0) return messages;
-  const failures: Array<{ message: string; completedAt?: number }> = [];
+  const failures: Array<{ message: string; completedAt?: number; id?: string; sequence?: number }> = [];
   for (const turn of turns) {
     if (!turn || typeof turn !== "object") continue;
     const t = turn as Record<string, unknown>;
@@ -488,7 +523,7 @@ export function applyFailedTurnsToAgentMessages(
     } else if (typeof completedRaw === "number") {
       completedAt = completedRaw;
     }
-    failures.push({ message, completedAt });
+    failures.push({ message, completedAt, id: typeof t.id === "string" ? t.id : undefined, sequence: typeof t.sequence === "number" ? t.sequence : undefined });
   }
   if (failures.length === 0) return messages;
 
@@ -505,31 +540,48 @@ export function applyFailedTurnsToAgentMessages(
 
   const out = [...messages];
   for (const failure of failures) {
-    if (already.has(failure.message)) continue;
+    // Legacy imported fixtures may lack all item ownership. Preserve that
+    // fallback, but never borrow another turn's reply in Native histories.
+    const scopedId = failure.id && messages.some(message => historyTurnIds.has(message)) ? failure.id : undefined;
+    if (scopedId ? out.some(message => historyTurnIds.get(message) === scopedId && message.errorMessage === failure.message) : already.has(failure.message)) continue;
     // Prefer annotating the last assistant text message when it has no error yet.
     let annotated = false;
     for (let i = out.length - 1; i >= 0; i--) {
       const msg = out[i];
       if (msg?.role !== "assistant") continue;
-      if (msg.stopReason === "toolUse") continue;
+      if (scopedId && historyTurnIds.get(msg) !== scopedId) continue;
+      if (msg.stopReason === "toolUse" || msg.stopReason === "aborted") continue;
       if (msg.stopReason === "error" && msg.errorMessage) continue;
       out[i] = {
         ...msg,
         stopReason: "error",
         errorMessage: failure.message,
       };
+      if (failure.id) historyTurnIds.set(out[i], failure.id);
       annotated = true;
       break;
     }
     if (!annotated) {
-      out.push({
+      const marker: AgentMessageLike = {
         role: "assistant",
         content: [{ type: "text", text: "" }],
         timestamp: failure.completedAt ?? Date.now(),
         stopReason: "error",
         errorMessage: failure.message,
         usage: emptyUsage(),
-      });
+      };
+      let at = out.length;
+      if (failure.id) {
+        historyTurnIds.set(marker, failure.id);
+        const own = out.flatMap((message, index) => historyTurnIds.get(message) === failure.id ? [index] : []);
+        if (own.length) at = own[own.length - 1] + 1;
+        else if (failure.sequence !== undefined) {
+          const later = new Set(turns.filter(turn => turn && typeof turn === "object" && Number(turn.sequence) > failure.sequence!).map(turn => turn.id));
+          const next = out.findIndex(message => later.has(historyTurnIds.get(message)));
+          if (next >= 0) at = next;
+        }
+      }
+      out.splice(at, 0, marker);
     }
     already.add(failure.message);
   }

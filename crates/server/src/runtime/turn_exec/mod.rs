@@ -114,14 +114,9 @@ pub(crate) fn spawn_post_turn_scheduling(
 
         // (2) Apply pending refine (never mid-ipython) then maybe schedule auto.
         if let Some(dir) = session_dir.as_deref() {
-            if let Some(applied) = runtime
+            runtime
                 .apply_pending_refine_at_boundary(session_id, &native_session_id, dir, plan_mode)
-                .await
-            {
-                runtime
-                    .persist_applied_refinement(session_id, &applied)
-                    .await;
-            }
+                .await;
             let auto_settings = match runtime.native_session_snapshot(session_id).await {
                 Ok(Some(session)) => super::refine::auto_refine_settings_from_session(
                     session.settings.auto_refine_enabled,
