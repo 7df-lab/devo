@@ -474,15 +474,34 @@ async function run() {
         const screen = () => mux(["capture-pane", "-t", session, "-p"]).stdout;
         for (const width of [100, 40]) {
           mux(["resize-window", "-t", session, "-x", String(width), "-y", "24"]);
+          // tmux can expose its reflow of the old frame before Node handles SIGWINCH.
+          // Prove a fresh product keyboard/render round trip at the new size first.
+          const probe = `scheduled-resize-${width}`;
+          mux(["send-keys", "-t", session, "-l", probe]);
+          await waitFor("resized editor rendered", () => screen().includes(probe));
+          mux(["send-keys", "-t", session, "C-u"]);
+          await waitFor("resized editor cleared", () => !screen().includes(probe));
           mux(["send-keys", "-t", session, "C-r"]);
           await waitFor("scheduled list", () => screen().replace(/\s+/g, " ").includes("Enter details"));
-          const before = screen().split("\n");
+          // Capture the baseline only after the list and width repaint settle.
+          // This is an equality gate, not a delay or a weakened preservation assertion.
+          let previousFrame;
+          await waitFor("stable resized scheduled list", () => {
+            const frame = screen();
+            const stable = frame.includes("Enter details") && frame === previousFrame;
+            previousFrame = frame;
+            return stable;
+          });
+          const before = previousFrame.split("\n");
           if (before.findIndex(line => line.includes("Scheduled ·")) < 12) throw new Error("Scheduled covered the upper conversation");
           mux(["send-keys", "-t", session, "Enter"]);
           await waitFor(`local next run at ${width} columns`, () => screen().includes("Next: " + expected)
             && screen().includes("Pause scheduled task") && screen().includes("Stop scheduled task"));
           const after = screen().split("\n");
-          if (before.slice(0, 12).join("\n") !== after.slice(0, 12).join("\n")) throw new Error("Scheduled details changed upper conversation");
+          if (before.slice(0, 12).join("\n") !== after.slice(0, 12).join("\n")) {
+            console.error(`=== Scheduled before ${width} ===\n${before.join("\n")}\n=== Scheduled after ${width} ===\n${after.join("\n")}`);
+            throw new Error("Scheduled details changed upper conversation");
+          }
           console.log(`=== Scheduled ${width} columns ===\n${screen()}`);
           mux(["send-keys", "-t", session, "Left"]);
           await waitFor("Scheduled left returns to list", () => screen().includes("Enter details"));

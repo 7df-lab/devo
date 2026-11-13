@@ -338,7 +338,7 @@ export function nativeItemToAgentMessages(envelope: unknown): AgentMessageLike[]
       : `Refinement complete${changes.length ? ` (${changes.length} changes)` : ": no changes needed"}. ${String(item.summary ?? "")}`;
     return [{
       role: "custom",
-      customType: "native_refinement_result",
+      customType: "Refinement",
       content: summary,
       display: true,
       details: { refinementId: item.refinementId, changes, failed },

@@ -19,7 +19,7 @@ for (const item of [
     assert.equal(events[0].type, "message_start");
     const restored = nativeItemsToAgentMessages([envelope]);
     assert.deepEqual(events[0].message, restored[0]);
-    assert.equal(restored[0].customType, "native_refinement_result");
+    assert.equal(restored[0].customType, "Refinement");
     assert.match(String(restored[0].content), item.type === "warning" ? /provider failed/ : item.changes?.length ? /1 changes/ : /no changes needed/);
     assert.equal(state.imAssistantStreamOpen, true);
     assert.equal(state.openAssistantItem, "ongoing");
