@@ -9,7 +9,7 @@ import { scheduledDelivered, rpcSucceeded, turnOutcome } from "./smoke-outcomes.
 
 const repo = resolve(dirname(fileURLToPath(import.meta.url)), "../../..");
 const scenario = process.argv[2] || "T1";
-const scenarios = ["T1", "T2", "T3", "goal", "bash", "agents", "schedule", "heartbeat", "activity", "effort", "theme", "fork", "clipboard", "resume", "scheduled-timezone", "export"];
+const scenarios = ["T1", "T2", "T3", "goal", "bash", "agents", "schedule", "heartbeat", "activity", "effort", "theme", "fork", "clipboard", "resume", "scheduled-timezone", "export", "share"];
 const tmux = process.env.DEVO_TMUX_BIN || (process.platform === "win32" ? "psmux" : "tmux");
 const binary = resolve(process.env.DEVO_BIN || process.env.DEVO_SERVER_BIN
   || join(repo, "target/debug", process.platform === "win32" ? "devo.exe" : "devo"));
@@ -66,15 +66,22 @@ async function run() {
       // cannot drop our explicit test flags; CLI/server/TUI sources stay unchanged.
       writeFileSync(join(home, "node"), `#!/bin/sh\ncase "$1" in */tsx/dist/cli.mjs) shift ;; esac\nexec ${quote(process.execPath)} --experimental-test-module-mocks --import=${quote(String(loader))} --import=${quote(String(preload))} "$@"\n`, { mode: 0o700 });
     }
+    if (scenario === "share") {
+      if (process.platform === "win32") throw new Error("share smoke substitute currently requires Unix tmux");
+      const quote = value => "'" + value.replaceAll("'", "'\\''") + "'";
+      writeFileSync(join(home, "gh"), `#!/bin/sh\nexec ${quote(process.execPath)} ${quote(join(repo, "apps/tui/scripts/share-smoke-gh.mjs"))} "$@"\n`, { mode: 0o700 });
+      writeFileSync(join(home, "session.html"), "stale unrelated file");
+    }
     mux(["new-session", "-d", "-s", session, "-c", scenario === "export" ? home : repo, "-x", "100", "-y", "30",
       "-e", `DEVO_HOME=${home}`, "-e", `DEVO_CODING_AGENT_DIR=${home}`,
       "-e", `PRIME_AGENT_CODING_AGENT_DIR=${home}`, "-e", "DEVO_PROTOCOL_TRACE=1",
       "-e", `DEVO_PROTOCOL_TRACE_FILE=${trace}`,
+      ...(scenario === "share" ? ["-e", `DEVO_SHARE_SMOKE_DIR=${home}`, "-e", `TMPDIR=${home}`] : []),
       ...(scenario === "scheduled-timezone" ? ["-e", "TZ=Asia/Shanghai", "-e", "LANG=en_US.UTF-8"] : []),
       ...(scenario === "clipboard" ? [
         "-e", `DEVO_CLIPBOARD_SMOKE_DIR=${home}`,
         "-e", `PATH=${home}:${process.env.PATH}`,
-      ] : []), "--", ...(scenario === "clipboard" ? ["env", `PATH=${home}:${process.env.PATH}`] : []), binary]);
+      ] : []), "--", ...(["clipboard", "share"].includes(scenario) ? ["env", `PATH=${home}:${process.env.PATH}`] : []), binary]);
     ownedSession = true;
     if (scenario === "clipboard") {
       // A multi-argument tmux command executes directly, avoiding login-shell
@@ -115,6 +122,19 @@ async function run() {
     console.log("=== boot ===\n" + pane);
     switch (scenario) {
       case "T1": break;
+      case "share": {
+        await send("share-seed: say hello briefly.");
+        await waitFor("share seed", events => turnOutcome(events, "completed"));
+        const start = records().length;
+        await send("/share");
+        await waitFor("share through offline gh", (events, text) => rpcSucceeded(events.slice(start), "session/export")
+          && text.includes("Share URL:") && existsSync(join(home, "share-upload.json")));
+        const uploaded = JSON.parse(readFileSync(join(home, "share-upload.json"), "utf8"));
+        if (existsSync(uploaded.path)) throw new Error("Share export was not cleaned up");
+        if (readFileSync(join(home, "session.html"), "utf8") !== "stale unrelated file") throw new Error("Share touched stale file");
+        console.log("=== offline share returned-path ===\n" + pane);
+        break;
+      }
       case "export": {
         await send("export-seed: say hello briefly.");
         await waitFor("export seed", events => turnOutcome(events, "completed"));

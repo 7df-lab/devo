@@ -211,6 +211,7 @@ jobs:
           DEVO_HOME="$home" node scripts/run-tmux-smoke.js fork
           DEVO_HOME="$home" node scripts/run-tmux-smoke.js clipboard
           DEVO_HOME="$home" node scripts/run-tmux-smoke.js resume
+          DEVO_HOME="$home" node scripts/run-tmux-smoke.js share
           DEVO_HOME="$home" node scripts/run-tmux-smoke.js export
 
   check:
