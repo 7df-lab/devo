@@ -500,7 +500,11 @@ export class NativeAgentConnection implements AgentConnection {
         void this.refreshQueueFromServer();
       }
     }
-    if (method === "turn/completed") {
+    // The current subscription snapshot is newer than historical replay. A
+    // previous turn's terminal event must not retire its active successor.
+    const replayedPreviousTurnEnd = method === "turn/completed" && this.subscriptionReplayDepth > 0 &&
+      this.expectedTurnId !== null && String(((p.turn ?? p) as { id?: string }).id ?? "") !== this.expectedTurnId;
+    if (method === "turn/completed" && !replayedPreviousTurnEnd) {
       this.isStreaming = false;
       this.retryAttempt = 0;
       this.expectedTurnId = null;
@@ -680,7 +684,8 @@ export class NativeAgentConnection implements AgentConnection {
           this.turnSawFileMutation = true;
         }
       }
-      if (this.subscriptionReplayDepth > 0 && ev.type === "agent_start") {
+      if ((this.subscriptionReplayDepth > 0 && ev.type === "agent_start") ||
+        (replayedPreviousTurnEnd && ev.type === "agent_end")) {
         continue;
       }
       if (ev.type === "session_usage_update") {

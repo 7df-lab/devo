@@ -197,3 +197,37 @@ test("subscription clock is available before transcript hydration and cannot lea
     assert.equal((await conn.getState()).activeTurnStartedAt, undefined);
   } finally { await conn.dispose(); }
 });
+
+
+test("historical completion cannot retire the active subscription turn", async () => {
+  let conn: NativeAgentConnection;
+  conn = NativeAgentConnection.create({ writeLine(line) {
+    const request = JSON.parse(line); if (request.id == null) return;
+    const result = request.method === "subscription/create" ? {
+      subscriptionId: "sub",
+      snapshots: [{ data: { session: { id: "child" }, activeTurn: {
+        id: "current", startedAt: "2026-11-13T10:00:00Z",
+      } } }],
+      replay: [{ notification: { method: "turn/completed", params: { turn: {
+        id: "previous", sessionId: "child", status: "completed",
+      } } } }],
+    } : {};
+    conn.pushChunk(JSON.stringify({ jsonrpc: "2.0", id: request.id, result }) + "\n");
+  } });
+  Object.assign(conn, { sessionId: "child" });
+  const events: any[] = [];
+  conn.subscribe(event => events.push(event));
+  try {
+    await (conn as unknown as { createSubscription(): Promise<void> }).createSubscription();
+    const state = await conn.getState();
+    assert.equal(state.isStreaming, true);
+    assert.equal(state.activeTurnStartedAt, Date.parse("2026-11-13T10:00:00Z"));
+    assert.equal(events.some(event => event.event?.type === "agent_end"), false);
+    conn.pushChunk(JSON.stringify({ jsonrpc: "2.0", method: "turn/completed", params: { turn: {
+      id: "current", sessionId: "child", status: "completed",
+    } } }) + "\n");
+    assert.equal((await conn.getState()).isStreaming, false);
+    assert.equal((await conn.getState()).activeTurnStartedAt, undefined);
+    assert.equal(events.filter(event => event.event?.type === "agent_end").length, 1);
+  } finally { await conn.dispose(); }
+});
