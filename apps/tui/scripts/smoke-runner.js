@@ -9,7 +9,7 @@ import { scheduledDelivered, rpcSucceeded, turnOutcome } from "./smoke-outcomes.
 
 const repo = resolve(dirname(fileURLToPath(import.meta.url)), "../../..");
 const scenario = process.argv[2] || "T1";
-const scenarios = ["T1", "T2", "T3", "goal", "bash", "agents", "schedule", "heartbeat", "activity", "effort", "theme", "fork"];
+const scenarios = ["T1", "T2", "T3", "goal", "bash", "agents", "schedule", "heartbeat", "activity", "effort", "theme", "fork", "resume"];
 const tmux = process.env.DEVO_TMUX_BIN || (process.platform === "win32" ? "psmux" : "tmux");
 const binary = resolve(process.env.DEVO_BIN || process.env.DEVO_SERVER_BIN
   || join(repo, "target/debug", process.platform === "win32" ? "devo.exe" : "devo"));
@@ -91,6 +91,34 @@ async function run() {
     console.log("=== boot ===\n" + pane);
     switch (scenario) {
       case "T1": break;
+      case "resume": {
+        const screen = () => mux(["capture-pane", "-t", session, "-p"]).stdout;
+        const seedStart = records().length;
+        await send("resume-native-seed: say hello briefly.");
+        await waitFor("resume seed", events => turnOutcome(events.slice(seedStart), "completed"));
+        const original = records().slice(seedStart).find(event => event.method === "turn/started")?.payload?.params?.turn?.sessionId;
+        if (!original) throw new Error("Missing original native session ID");
+        const cloneStart = records().length;
+        await send("/clone");
+        await waitFor("clone before resume", events => rpcSucceeded(events.slice(cloneStart), "session/fork") && screen().includes("Cloned to new session"));
+        const cloneRecords = records().slice(cloneStart);
+        const cloneRequest = cloneRecords.find(event => event.direction === "tui-to-server" && event.method === "session/fork");
+        const cloned = cloneRecords.find(event => event.direction === "server-to-tui" && event.kind === "response" && event.id === cloneRequest?.id)?.payload?.result?.session?.id;
+        if (!cloned || cloned === original) throw new Error("Clone did not create a distinct session");
+        const resumeStart = records().length;
+        await send(`/resume ${original}`);
+        await waitFor("native resume RPC and restored transcript", events => rpcSucceeded(events.slice(resumeStart), "session/resume")
+          && screen().includes("Resumed session") && screen().includes("resume-native-seed"));
+        const requests = records().slice(resumeStart).filter(event => event.direction === "tui-to-server" && event.method === "session/resume");
+        if (requests.length !== 1 || requests[0].payload.params.sessionId !== original) throw new Error("Resumed wrong native session");
+        const followUpStart = records().length;
+        await send("resume-native-followup: say hello briefly.");
+        await waitFor("turn after resume", events => turnOutcome(events.slice(followUpStart), "completed"));
+        const followUp = records().slice(followUpStart).find(event => event.method === "turn/started")?.payload?.params?.turn;
+        if (followUp?.sessionId !== original) throw new Error("Follow-up sent to wrong session");
+        console.log("=== native resume ===\n" + screen());
+        break;
+      }
       case "fork": {
         const screen = () => mux(["capture-pane", "-t", session, "-p"]).stdout;
         const forkRequests = () => records().filter((event) => event.direction === "tui-to-server" && event.method === "session/fork");
