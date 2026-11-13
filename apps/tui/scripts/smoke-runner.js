@@ -1,3 +1,4 @@
+import { createServer } from "node:http";
 /** Product TTY smoke: assert outcomes without changing product behavior. */
 import { spawnSync } from "node:child_process";
 import { copyFileSync, existsSync, mkdtempSync, readFileSync, rmSync, writeFileSync } from "node:fs";
@@ -9,7 +10,7 @@ import { scheduledDelivered, rpcSucceeded, turnOutcome } from "./smoke-outcomes.
 
 const repo = resolve(dirname(fileURLToPath(import.meta.url)), "../../..");
 const scenario = process.argv[2] || "T1";
-const scenarios = ["T1", "T2", "T3", "goal", "bash", "agents", "schedule", "heartbeat", "activity", "effort", "theme", "fork", "clipboard", "resume", "scheduled-timezone", "scheduled-pending", "export", "share"];
+const scenarios = ["T1", "T2", "T3", "goal", "bash", "agents", "schedule", "heartbeat", "activity", "effort", "theme", "fork", "clipboard", "resume", "scheduled-timezone", "scheduled-pending", "export", "share", "abort-history"];
 const preloaded = ["clipboard", "scheduled-pending"].includes(scenario);
 const tmux = process.env.DEVO_TMUX_BIN || (process.platform === "win32" ? "psmux" : "tmux");
 const binary = resolve(process.env.DEVO_BIN || process.env.DEVO_SERVER_BIN
@@ -34,6 +35,7 @@ async function run() {
   const home = mkdtempSync(join(tmpdir(), "devo-tui-smoke-"));
   const trace = join(home, "protocol.ndjsonl");
   const sourceHome = process.env.DEVO_HOME || join(homedir(), ".devo");
+  let abortServer;
   let ownedSession = false;
   let pane = "";
   try {
@@ -53,6 +55,19 @@ async function run() {
           } },
         } },
       }));
+    }
+    if (scenario === "abort-history") {
+      abortServer = createServer((request, response) => {
+        request.resume();
+        response.writeHead(200, { "Content-Type": "text/event-stream" });
+        response.write(`data: ${JSON.stringify({ id: "abort-test", object: "chat.completion.chunk", created: 0, model: "deepseek-v4-flash", choices: [{ index: 0, delta: { role: "assistant", content: "ABORT_PARTIAL_MARKER" }, finish_reason: null }] })}\n\n`);
+        // Deliberately keep the real provider stream open until Esc aborts it.
+      });
+      await new Promise(resolve => abortServer.listen(0, "127.0.0.1", resolve));
+      writeFileSync(join(home, "providers.json"), JSON.stringify({ model: "deepseek/deepseek-v4-flash", provider: {
+        deepseek: { credential: "deepseek", enabled: true, base_url: `http://127.0.0.1:${abortServer.address().port}`, wire_api: "openai_chat_completions" },
+      } }));
+      writeFileSync(join(home, "auth.json"), JSON.stringify({ deepseek: { type: "api_key", key: "isolated-smoke" } }), { mode: 0o600 });
     }
     const settingsPath = join(sourceHome, "settings.json");
     const settings = !(["effort", "theme"].includes(scenario)) && existsSync(settingsPath) ? JSON.parse(readFileSync(settingsPath, "utf8")) : {};
@@ -207,6 +222,31 @@ async function run() {
           mux(["send-keys", "-t", session, "C-u"]);
           await waitFor("normal paste cleared", () => !/\[image #\d+\]/.test(screen()));
         }
+        break;
+      }
+      case "abort-history": {
+        const screen = () => mux(["capture-pane", "-t", session, "-p"]).stdout;
+        await send("abort-history seed");
+        await waitFor("partial assistant streaming", () => screen().includes("ABORT_PARTIAL_MARKER"));
+        const original = records().find(event => event.method === "turn/started")?.payload?.params?.turn;
+        if (!original?.id || !original?.sessionId) throw new Error("Missing interrupted turn identity");
+        mux(["send-keys", "-t", session, "-l", "queued after abort"]);
+        mux(["send-keys", "-t", session, "M-Enter"]);
+        await waitFor("queued follow-up", events => rpcSucceeded(events, "queue/push"));
+        mux(["send-keys", "-t", session, "Escape"]);
+        await waitFor("own turn interrupted and live abort visible", events => events.some(event => event.method === "turn/completed"
+          && event.payload?.params?.turn?.id === original.id && event.payload.params.turn.status === "interrupted")
+          && screen().includes("Operation aborted"));
+        const cloneStart = records().length;
+        await send("/clone");
+        await waitFor("clone clears original UI", events => rpcSucceeded(events.slice(cloneStart), "session/fork") && screen().includes("Cloned to new session"));
+        const resumeStart = records().length;
+        await send(`/resume ${original.sessionId}`);
+        await waitFor("restored interrupted transcript", events => rpcSucceeded(events.slice(resumeStart), "session/resume")
+          && screen().includes("Resumed session") && screen().includes("ABORT_PARTIAL_MARKER") && screen().includes("Operation aborted"));
+        mux(["send-keys", "-t", session, "-l", "abort-render-barrier"]);
+        await waitFor("render barrier", () => screen().includes("abort-render-barrier"));
+        if ((screen().match(/Operation aborted/g) ?? []).length !== 1) throw new Error("Abort marker duplicated on restore");
         break;
       }
       case "resume": {
@@ -464,6 +504,8 @@ async function run() {
     throw error;
   } finally {
     if (ownedSession) mux(["kill-session", "-t", session], false);
+    abortServer?.closeAllConnections();
+    abortServer?.close();
     // The target is our own mkdtemp child, never the source credential folder.
     if (dirname(home) !== resolve(tmpdir())) throw new Error("Unexpected smoke home location");
     // The killed product can flush session files for a few beats after
