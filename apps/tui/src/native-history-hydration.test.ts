@@ -199,7 +199,8 @@ test("subscription clock is available before transcript hydration and cannot lea
 });
 
 
-test("historical completion cannot retire the active subscription turn", async () => {
+for (const status of ["completed", "interrupted", "failed"]) {
+test(`historical ${status} lifecycle cannot retire the active subscription turn`, async () => {
   let conn: NativeAgentConnection;
   conn = NativeAgentConnection.create({ writeLine(line) {
     const request = JSON.parse(line); if (request.id == null) return;
@@ -208,9 +209,10 @@ test("historical completion cannot retire the active subscription turn", async (
       snapshots: [{ data: { session: { id: "child" }, activeTurn: {
         id: "current", startedAt: "2026-11-13T10:00:00Z",
       } } }],
-      replay: [{ notification: { method: "turn/completed", params: { turn: {
-        id: "previous", sessionId: "child", status: "completed",
-      } } } }],
+      replay: [
+        { notification: { method: "turn/statusChanged", params: { turnId: "previous", sessionId: "child", status } } },
+        { notification: { method: "turn/completed", params: { turn: { id: "previous", sessionId: "child", status } } } },
+      ],
     } : {};
     conn.pushChunk(JSON.stringify({ jsonrpc: "2.0", id: request.id, result }) + "\n");
   } });
@@ -231,3 +233,5 @@ test("historical completion cannot retire the active subscription turn", async (
     assert.equal(events.filter(event => event.event?.type === "agent_end").length, 1);
   } finally { await conn.dispose(); }
 });
+
+}

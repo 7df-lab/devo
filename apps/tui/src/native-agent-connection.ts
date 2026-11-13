@@ -502,8 +502,11 @@ export class NativeAgentConnection implements AgentConnection {
     }
     // The current subscription snapshot is newer than historical replay. A
     // previous turn's terminal event must not retire its active successor.
-    const replayedPreviousTurnEnd = method === "turn/completed" && this.subscriptionReplayDepth > 0 &&
-      this.expectedTurnId !== null && String(((p.turn ?? p) as { id?: string }).id ?? "") !== this.expectedTurnId;
+    const terminalTurn = (p.turn ?? p) as { id?: string; turnId?: string; status?: string };
+    const isTerminalNotification = method === "turn/completed" ||
+      (method === "turn/statusChanged" && ["completed", "interrupted", "failed"].includes(String(terminalTurn.status).toLowerCase()));
+    const replayedPreviousTurnEnd = isTerminalNotification && this.subscriptionReplayDepth > 0 &&
+      this.expectedTurnId !== null && String(terminalTurn.id ?? terminalTurn.turnId ?? "") !== this.expectedTurnId;
     if (method === "turn/completed" && !replayedPreviousTurnEnd) {
       this.isStreaming = false;
       this.retryAttempt = 0;
