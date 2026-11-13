@@ -232,14 +232,31 @@ async fn goal_waits_for_every_background_task_and_receives_terminal_results() ->
 #[tokio::test]
 async fn completion_before_wait_is_armed_is_not_lost() -> Result<()> {
     let mut test = WaitingGoal::new().await?;
+    // Queue snapshots use the new subscription API, as in the TUI.
+    let subscribed = test
+        .runtime
+        .handle_incoming(
+            test.connection_id,
+            serde_json::json!({
+                "id": "subscribe-background-admission", "method": "subscription/create",
+                "params": {
+                    "selectors": [{"kind": "session", "sessionId": test.session_id}],
+                    "includeSnapshot": false
+                }
+            }),
+        )
+        .await
+        .context("subscribe to queue updates")?;
+    assert!(subscribed.get("error").is_none(), "{subscribed}");
     test.start_work("fast-command");
     test.finish_work("fast-command", "fast command finished before parent turn");
     // The coordinator publishes asynchronously. Wait for durable admission
     // before releasing the request, so this really exercises the busy boundary.
     timeout(Duration::from_secs(/*secs*/ 5), async {
         loop {
-            let update =
-                support::wait_for_notification(&mut test.notifications, "queue/updated").await?;
+            let update = support::wait_for_notification(&mut test.notifications, "queue/updated")
+                .await
+                .context("await background admission notification")?;
             if update["params"]["queue"]
                 .to_string()
                 .contains("fast command finished before parent turn")
@@ -268,7 +285,8 @@ async fn completion_before_wait_is_armed_is_not_lost() -> Result<()> {
         test.initial_turn_id
     );
     test.wait_for_turn(/*expected_requests*/ 3, "goalContinuation")
-        .await?;
+        .await
+        .context("await goal continuation after same-turn result")?;
     {
         let requests = test.provider.requests.lock().expect("lock requests");
         assert!(support::request_contains_text(
