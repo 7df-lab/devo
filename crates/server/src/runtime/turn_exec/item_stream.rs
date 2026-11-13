@@ -239,6 +239,22 @@ pub(super) async fn handle_proposed_plan_segments(
                 .await;
             }
             ProposedPlanSegment::PlanStart => {
+                // A plan is a separate visible item. Complete the preceding prose
+                // authoritatively before clients open the plan row; otherwise the
+                // TUI closes it here and repeats it at the final completion.
+                if let (Some(item_id), Some(item_seq)) =
+                    (assistant_item_id.take(), assistant_item_seq.take())
+                {
+                    complete_assistant_item(
+                        runtime,
+                        session_id,
+                        turn_id,
+                        item_id,
+                        item_seq,
+                        std::mem::take(assistant_text),
+                    )
+                    .await;
+                }
                 leading_normal_buffer.clear();
                 proposed_plan_item.start(runtime, session_id, turn_id).await;
             }
