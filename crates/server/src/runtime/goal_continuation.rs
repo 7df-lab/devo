@@ -440,7 +440,7 @@ fn contains_ascii_case_insensitive(haystack: &str, needle: &str) -> bool {
         .any(|window| window.eq_ignore_ascii_case(needle))
 }
 
-fn goal_failure_blocker_summary(message: Option<&str>) -> String {
+pub(super) fn goal_failure_blocker_summary(message: Option<&str>) -> String {
     match classify_goal_failure(message) {
         GoalFailureClass::ToolCallAdjacency => {
             "Goal continuation paused after an unrecoverable provider/protocol error: the provider rejected a tool-call transcript because assistant tool_calls were not followed by matching tool messages."

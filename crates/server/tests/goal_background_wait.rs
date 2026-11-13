@@ -63,6 +63,60 @@ impl ModelProviderSDK for ControlledProvider {
     }
 }
 
+// Diagnostics are collected only after the unchanged request deadline expires.
+// Never print model requests, message bodies, provider errors, or session IDs.
+async fn wait_for_request_with_state(
+    runtime: &Arc<ServerRuntime>,
+    connection_id: u64,
+    session_id: SessionId,
+    provider: &ControlledProvider,
+    expected: usize,
+    phase: &str,
+) -> Result<()> {
+    if let Err(error) = support::wait_for_captured_request_count(&provider.requests, expected).await
+    {
+        let actual = provider.requests.lock().expect("requests").len();
+        let mut states = Vec::new();
+        for (method, key) in [
+            ("session/turns/list", "data"),
+            ("session/queue/list", "entries"),
+        ] {
+            let response = timeout(
+                Duration::from_millis(250),
+                runtime.handle_incoming(
+                    connection_id,
+                    serde_json::json!({
+                        "id": "background-wait-diagnostic",
+                        "method": method,
+                        "params": {"sessionId": session_id}
+                    }),
+                ),
+            )
+            .await;
+            let summary = match response {
+                Ok(Some(value)) => match value["result"][key].as_array() {
+                    Some(entries) => {
+                        let statuses: Vec<_> = entries
+                            .iter()
+                            .map(|entry| entry["status"].as_str().unwrap_or("unspecified"))
+                            .collect();
+                        format!("count={} statuses={statuses:?}", entries.len())
+                    }
+                    None => "unavailable (unexpected RPC response)".to_owned(),
+                },
+                Ok(None) => "unavailable (no RPC response)".to_owned(),
+                Err(_) => "unavailable (diagnostic deadline)".to_owned(),
+            };
+            states.push(format!("{method}: {summary}"));
+        }
+        return Err(error.context(format!(
+            "{phase}: expected_requests={expected}, captured_requests={actual}; {}",
+            states.join("; ")
+        )));
+    }
+    Ok(())
+}
+
 struct WaitingGoal {
     _data_root: TempDir,
     runtime: Arc<ServerRuntime>,
@@ -96,7 +150,15 @@ impl WaitingGoal {
             .as_str()
             .context("initial turn id")?
             .to_owned();
-        support::wait_for_captured_request_count(&provider.requests, /*expected*/ 1).await?;
+        wait_for_request_with_state(
+            &runtime,
+            connection_id,
+            session_id,
+            &provider,
+            1,
+            "initial goal turn",
+        )
+        .await?;
         Ok(Self {
             _data_root: data_root,
             runtime,
@@ -155,7 +217,15 @@ impl WaitingGoal {
         let started =
             support::wait_for_notification(&mut self.notifications, "turn/started").await?;
         assert_eq!(started["params"]["turn"]["kind"], kind);
-        support::wait_for_captured_request_count(&self.provider.requests, expected_requests).await
+        wait_for_request_with_state(
+            &self.runtime,
+            self.connection_id,
+            self.session_id,
+            &self.provider,
+            expected_requests,
+            &format!("after turn/started kind={kind}"),
+        )
+        .await
     }
 
     async fn stop(&self) -> Result<()> {
