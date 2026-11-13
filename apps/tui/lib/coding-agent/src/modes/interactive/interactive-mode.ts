@@ -2635,7 +2635,7 @@ export class InteractiveMode {
 				break;
 			}
 			case "agent_end":
-				this.patchConnectionState({ isStreaming: false, activeToolNames: [] });
+				this.patchConnectionState({ isStreaming: false, activeToolNames: [], activeTurnStartedAt: undefined });
 				break;
 			case "session_action_update":
 				this.patchConnectionState({ sessionActions: event.actions });
@@ -3248,7 +3248,7 @@ export class InteractiveMode {
 
 	private startWorkingLoader(): void {
 		this.stopWorkingLoader();
-		this.workingStartedAt = this.turnStartedAt ?? Date.now();
+		this.workingStartedAt = this.connectionState?.activeTurnStartedAt ?? this.turnStartedAt ?? Date.now();
 		this.loadingAnimation = this.createWorkingLoader();
 		this.statusContainer.addChild(this.loadingAnimation);
 		this.startWorkingTimer();

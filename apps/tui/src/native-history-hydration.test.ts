@@ -168,3 +168,32 @@ test("active turn clock survives reattachment after intermediate responses and s
     assert.equal((await connection.getInitialSnapshot()).activeTurnStartedAt, undefined);
   } finally { await connection.dispose(); }
 });
+
+test("subscription clock is available before transcript hydration and cannot leak to another turn", async () => {
+  let conn: NativeAgentConnection;
+  let activeTurn: unknown = { id: "current", startedAt: "2026-11-13T10:00:00Z" };
+  const requests: string[] = [];
+  conn = NativeAgentConnection.create({ writeLine(line) {
+    const request = JSON.parse(line); if (request.id == null) return;
+    requests.push(request.method);
+    const result = request.method === "subscription/create"
+      ? { subscriptionId: "sub", snapshots: [{ data: { session: { id: "child" }, activeTurn } }] }
+      : {};
+    conn.pushChunk(JSON.stringify({ jsonrpc: "2.0", id: request.id, result }) + "\n");
+  } });
+  Object.assign(conn, { sessionId: "child" });
+  const internal = conn as unknown as { createSubscription(): Promise<void> };
+  try {
+    await internal.createSubscription();
+    assert.equal((await conn.getState()).activeTurnStartedAt, Date.parse("2026-11-13T10:00:00Z"));
+    assert.equal(requests.includes("session/items/list"), false, "clock must not wait for history hydration");
+    Object.assign(conn, { expectedTurnId: "newer" });
+    assert.equal((await conn.getState()).activeTurnStartedAt, undefined);
+    Object.assign(conn, { expectedTurnId: "current", sessionId: "other" });
+    assert.equal((await conn.getState()).activeTurnStartedAt, undefined);
+    Object.assign(conn, { sessionId: "child" });
+    activeTurn = null;
+    await internal.createSubscription();
+    assert.equal((await conn.getState()).activeTurnStartedAt, undefined);
+  } finally { await conn.dispose(); }
+});

@@ -236,6 +236,7 @@ export class NativeAgentConnection implements AgentConnection {
   private sessionTransitionGeneration = 0;
   private activeSessionId: string | undefined;
   private expectedTurnId: string | null = null;
+  private activeTurnClock: { id: string; sessionId: string; startedAt: number } | undefined;
   private subscriptionId: string | null = null;
   private subscriptionCursors: Array<{ streamId: string; seq: number }> = [];
   /** >0 while applying subscription/create replay (not live events). */
@@ -486,8 +487,13 @@ export class NativeAgentConnection implements AgentConnection {
         this.retryAttempt = 0;
         this.localAbortChromePending = false;
         this.turnSawFileMutation = false;
-        const turn = p.turn as { id?: string } | undefined;
-        if (turn?.id) this.expectedTurnId = String(turn.id);
+        const turn = p.turn as { id?: string; startedAt?: string } | undefined;
+        if (turn?.id) {
+          this.expectedTurnId = String(turn.id);
+          const startedAt = typeof turn.startedAt === "string" ? Date.parse(turn.startedAt) : NaN;
+          this.activeTurnClock = Number.isFinite(startedAt) && this.sessionId
+            ? { id: this.expectedTurnId, sessionId: this.sessionId, startedAt } : undefined;
+        }
       }
       if (this.subscriptionReplayDepth === 0) {
         // Drain notifications can race the UI; re-list so Follow-up/Steering banners clear.
@@ -953,6 +959,8 @@ export class NativeAgentConnection implements AgentConnection {
       serviceTier: "default",
       availableThinkingLevels: this.availableThinkingLevels,
       isStreaming: this.isStreaming,
+      activeTurnStartedAt: this.isStreaming && this.activeTurnClock?.id === this.expectedTurnId &&
+        this.activeTurnClock?.sessionId === this.sessionId ? this.activeTurnClock.startedAt : undefined,
       isCompacting: this.isCompacting,
       isBashRunning: this.isBashRunning,
       retryAttempt: this.retryAttempt,
@@ -1063,13 +1071,16 @@ export class NativeAgentConnection implements AgentConnection {
       // may never receive the statusChanged event that started compaction.
       if (Array.isArray(session.flags)) this.isCompacting = session.flags.includes("compacting");
       const activeTurn = (data.activeTurn ?? data.active_turn) as
-        | { id?: string }
+        | { id?: string; startedAt?: string }
         | null
         | undefined;
       if (activeTurn && typeof activeTurn === "object" && activeTurn.id) {
         snapshotHasActiveTurn = true;
         this.isStreaming = true;
         this.expectedTurnId = String(activeTurn.id);
+        const startedAt = typeof activeTurn.startedAt === "string" ? Date.parse(activeTurn.startedAt) : NaN;
+        this.activeTurnClock = Number.isFinite(startedAt)
+          ? { id: this.expectedTurnId, sessionId, startedAt } : undefined;
       }
       const items = (data.items ?? data.recentItems) as unknown[] | undefined;
       if (Array.isArray(items)) {

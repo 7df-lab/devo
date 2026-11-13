@@ -346,6 +346,8 @@ export interface AgentConnectionState {
 	serviceTier: ServiceTier;
 	availableThinkingLevels: ThinkingLevel[];
 	isStreaming: boolean;
+	/** Available before transcript hydration when the backend supplies an active turn snapshot. */
+	activeTurnStartedAt?: number;
 	isCompacting: boolean;
 	isBashRunning: boolean;
 	retryAttempt: number;
