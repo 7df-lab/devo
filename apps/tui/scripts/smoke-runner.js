@@ -122,7 +122,7 @@ async function run() {
         const start = records().length;
         await send("clipboard-smoke seed: say hello briefly.");
         await waitFor("clipboard seed turn", events => turnOutcome(events.slice(start), "completed"));
-        const originalSession = records().find(event => event.method === "turn/started")?.payload?.params?.sessionId;
+        const originalSession = records().find(event => event.method === "turn/started")?.payload?.params?.turn?.sessionId;
         if (!originalSession) throw new Error("Missing original session identity");
         for (const stage of ["read", "resize"]) {
           for (const action of ["send", "clone", "resume"]) {
