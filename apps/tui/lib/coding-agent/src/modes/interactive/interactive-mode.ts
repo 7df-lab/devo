@@ -221,7 +221,7 @@ import { ExtensionEditorComponent } from "./components/extension-editor.js";
 import { ExtensionInputComponent } from "./components/extension-input.js";
 import { ExtensionSelectorComponent } from "./components/extension-selector.js";
 import { FooterComponent } from "./components/footer.js";
-import { ScheduledManagerComponent } from "./components/scheduled-manager.js";
+import { type ScheduledManagerActionState, ScheduledManagerComponent } from "./components/scheduled-manager.js";
 import { InjectedPromptMessageComponent, isInjectedPromptMessage } from "./components/injected-prompt-message.js";
 import {
 	formatConversationDetailStatus,
@@ -824,6 +824,7 @@ export class InteractiveMode {
 	private scheduledRefreshGeneration: number | undefined;
 	private scheduledRefreshRequested = false;
 	private scheduledManager: ScheduledManagerComponent | undefined;
+	private readonly scheduledManagerActionState: ScheduledManagerActionState = {};
 	private scheduledManagerHandle: OverlayHandle | undefined;
 	private scheduledManagerRefreshTimer: ReturnType<typeof setTimeout> | undefined;
 	private scheduledManagerRefreshAt: number | undefined;
@@ -10081,6 +10082,7 @@ export class InteractiveMode {
 			return;
 		}
 		const manager = new ScheduledManagerComponent({
+			actionState: this.scheduledManagerActionState,
 			getScheduledTasks: () => this.getScopedScheduledTasks(),
 			getRows: () => this.ui.terminal.rows,
 			onAction: (scheduled, action) => this.manageScheduledTask(scheduled, action),

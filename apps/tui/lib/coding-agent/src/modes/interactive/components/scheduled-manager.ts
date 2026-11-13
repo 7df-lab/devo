@@ -13,7 +13,14 @@ const SCHEDULED_SCROLL_INDICATOR_ROWS = 1;
 
 type ScheduledManagerMode = { type: "list" } | { type: "actions"; scheduledId: string; selectedIndex: number };
 
+export interface ScheduledManagerActionState {
+	pending?: string;
+	error?: string;
+}
+
 export interface ScheduledManagerOptions {
+	/** Shared across reopened panels; closing does not cancel an accepted operation. */
+	actionState?: ScheduledManagerActionState;
 	getScheduledTasks: () => readonly AgentConnectionScheduledTask[];
 	getRows: () => number;
 	onAction: (scheduled: AgentConnectionScheduledTask, action: AgentScheduledManagementAction) => Promise<void>;
@@ -24,11 +31,12 @@ export interface ScheduledManagerOptions {
 export class ScheduledManagerComponent implements Component, Focusable {
 	private selectedScheduledId: string | undefined;
 	private mode: ScheduledManagerMode = { type: "list" };
-	private busy = false;
-	private error: string | undefined;
+	private readonly actionState: ScheduledManagerActionState;
 	private _focused = false;
 
-	constructor(private readonly options: ScheduledManagerOptions) {}
+	constructor(private readonly options: ScheduledManagerOptions) {
+		this.actionState = options.actionState ?? {};
+	}
 
 	get focused(): boolean {
 		return this._focused;
@@ -50,18 +58,18 @@ export class ScheduledManagerComponent implements Component, Focusable {
 	}
 
 	handleInput(data: string): void {
-		if (this.busy) return;
 		const keybindings = getKeybindings();
 		if (keybindings.matches(data, "tui.select.cancel") || keybindings.matches(data, "app.heartbeats.open")) {
 			this.options.onClose();
 			return;
 		}
+		if (this.actionState.pending) return;
 		if (shouldTreatAsBack(data)) {
 			if (this.mode.type === "list") {
 				this.options.onClose();
 			} else {
 				this.mode = { type: "list" };
-				this.error = undefined;
+				this.actionState.error = undefined;
 				this.options.requestRender();
 			}
 			return;
@@ -111,9 +119,13 @@ export class ScheduledManagerComponent implements Component, Focusable {
 		const list = new MenuList({ compact: this.getListLayout().compact });
 		this.populateScheduledList(list);
 		panel.addChild(list);
-		if (this.error) {
+		if (this.actionState.pending) {
+			panel.addChild(new TruncatedText(theme.fg("accent", `${this.actionState.pending}…`)));
+			panel.addChild(new TruncatedText(theme.fg("muted", "Closing does not cancel this operation.")));
+		}
+		if (this.actionState.error) {
 			panel.addChild(new Spacer(1));
-			panel.addChild(new TruncatedText(theme.fg("error", `Error: ${this.error}`)));
+			panel.addChild(new TruncatedText(theme.fg("error", `Error: ${this.actionState.error}`)));
 		}
 		panel.addChild(new Spacer(1));
 		panel.addChild(new TruncatedText(this.closeHint()));
@@ -172,8 +184,8 @@ export class ScheduledManagerComponent implements Component, Focusable {
 		const next = scheduled.job.nextRunAt ? this.formatTimestamp(scheduled.job.nextRunAt) : "—";
 		panel.addChild(new TruncatedText(theme.fg("muted", `Next: ${next}`)));
 		panel.addChild(new Spacer(1));
-		if (this.error) {
-			panel.addChild(new TruncatedText(theme.fg("error", `Error: ${this.error}`)));
+		if (this.actionState.error) {
+			panel.addChild(new TruncatedText(theme.fg("error", `Error: ${this.actionState.error}`)));
 			panel.addChild(new Spacer(1));
 		}
 		const list = new MenuList();
@@ -187,6 +199,10 @@ export class ScheduledManagerComponent implements Component, Focusable {
 			);
 		}
 		panel.addChild(list);
+		if (this.actionState.pending) {
+			panel.addChild(new TruncatedText(theme.fg("accent", `${this.actionState.pending}…`)));
+			panel.addChild(new TruncatedText(theme.fg("muted", "Closing does not cancel this operation.")));
+		}
 		panel.addChild(new Spacer(1));
 		panel.addChild(new TruncatedText(this.detailHint()));
 		return panel;
@@ -228,16 +244,18 @@ export class ScheduledManagerComponent implements Component, Focusable {
 	}
 
 	private async runAction(scheduled: AgentConnectionScheduledTask, action: AgentScheduledManagementAction): Promise<void> {
-		this.busy = true;
-		this.error = undefined;
+		if (this.actionState.pending) return;
+		const label = action === "pause" ? "Pausing scheduled task" : action === "resume" ? "Resuming scheduled task" : "Stopping scheduled task";
+		this.actionState.pending = label;
+		this.actionState.error = undefined;
 		this.options.requestRender();
 		try {
 			await this.options.onAction(scheduled, action);
 			this.mode = { type: "list" };
 		} catch (error) {
-			this.error = error instanceof Error ? error.message : String(error);
+			this.actionState.error = `${label} failed: ${error instanceof Error ? error.message : String(error)}`;
 		} finally {
-			this.busy = false;
+			this.actionState.pending = undefined;
 			this.options.requestRender();
 		}
 	}
@@ -272,7 +290,7 @@ export class ScheduledManagerComponent implements Component, Focusable {
 			getRows: this.options.getRows,
 			preferredVisibleItems: PREFERRED_VISIBLE_SCHEDULEDS,
 			totalItems: this.scheduledTasks.length,
-			reservedRows: SCHEDULED_LIST_RESERVED_ROWS + (this.error ? 2 : 0),
+			reservedRows: SCHEDULED_LIST_RESERVED_ROWS + (this.actionState.error ? 2 : 0) + (this.actionState.pending ? 2 : 0),
 			comfortableItemRows: 3,
 			compactItemRows: 2,
 			scrollIndicatorRows: SCHEDULED_SCROLL_INDICATOR_ROWS,
