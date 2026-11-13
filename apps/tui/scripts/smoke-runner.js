@@ -9,11 +9,12 @@ import { fileURLToPath, pathToFileURL } from "node:url";
 import { setTimeout as sleep } from "node:timers/promises";
 import { scheduledDelivered, rpcSucceeded, turnOutcome } from "./smoke-outcomes.js";
 
+import { assertInterruptedHistory } from "./abort-history-outcome.mjs";
 import { startResizeProvider, checkResizeStatus } from "./resize-status-smoke.mjs";
 
 const repo = resolve(dirname(fileURLToPath(import.meta.url)), "../../..");
 const scenario = process.argv[2] || "T1";
-const scenarios = ["resize-status", "T1", "T2", "T3", "goal", "bash", "agents", "schedule", "heartbeat", "activity", "effort", "theme", "fork", "clipboard", "resume", "scheduled-timezone", "scheduled-pending", "export", "share", "refine", "steering"];
+const scenarios = ["resize-status", "T1", "T2", "T3", "goal", "bash", "agents", "schedule", "heartbeat", "activity", "effort", "theme", "fork", "clipboard", "resume", "scheduled-timezone", "scheduled-pending", "export", "share", "refine", "steering", "abort-history"];
 const preloaded = ["clipboard", "scheduled-pending"].includes(scenario);
 const tmux = process.env.DEVO_TMUX_BIN || (process.platform === "win32" ? "psmux" : "tmux");
 const binary = resolve(process.env.DEVO_BIN || process.env.DEVO_SERVER_BIN
@@ -38,6 +39,7 @@ async function run() {
   const home = mkdtempSync(join(tmpdir(), "devo-tui-smoke-"));
   const trace = join(home, "protocol.ndjsonl");
   const sourceHome = process.env.DEVO_HOME || join(homedir(), ".devo");
+  let abortServer;
   let steeringServer;
   let finishFirstReply;
   let steeringRequests = 0;
@@ -104,6 +106,19 @@ async function run() {
       writeFileSync(join(home, "providers.json"), JSON.stringify({ model: "deepseek/deepseek-v4-flash", provider: {
         deepseek: { credential: "deepseek", enabled: true,
           base_url: `http://127.0.0.1:${steeringServer.address().port}`, wire_api: "openai_chat_completions" },
+      } }));
+      writeFileSync(join(home, "auth.json"), JSON.stringify({ deepseek: { type: "api_key", key: "isolated-smoke" } }), { mode: 0o600 });
+    }
+    if (scenario === "abort-history") {
+      abortServer = createServer((request, response) => {
+        request.resume();
+        response.writeHead(200, { "Content-Type": "text/event-stream" });
+        response.write(`data: ${JSON.stringify({ id: "abort-test", object: "chat.completion.chunk", created: 0, model: "deepseek-v4-flash", choices: [{ index: 0, delta: { role: "assistant", content: "ABORT_PARTIAL_MARKER" }, finish_reason: null }] })}\n\n`);
+        // Deliberately keep the real provider stream open until Esc aborts it.
+      });
+      await new Promise(resolve => abortServer.listen(0, "127.0.0.1", resolve));
+      writeFileSync(join(home, "providers.json"), JSON.stringify({ model: "deepseek/deepseek-v4-flash", provider: {
+        deepseek: { credential: "deepseek", enabled: true, base_url: `http://127.0.0.1:${abortServer.address().port}`, wire_api: "openai_chat_completions" },
       } }));
       writeFileSync(join(home, "auth.json"), JSON.stringify({ deepseek: { type: "api_key", key: "isolated-smoke" } }), { mode: 0o600 });
     }
@@ -305,6 +320,32 @@ async function run() {
           mux(["send-keys", "-t", session, "C-u"]);
           await waitFor("normal paste cleared", () => !/\[image #\d+\]/.test(screen()));
         }
+        break;
+      }
+      case "abort-history": {
+        const screen = () => mux(["capture-pane", "-t", session, "-p"]).stdout;
+        await send("abort-history seed");
+        await waitFor("partial assistant streaming", () => screen().includes("ABORT_PARTIAL_MARKER"));
+        const original = records().find(event => event.method === "turn/started")?.payload?.params?.turn;
+        if (!original?.id || !original?.sessionId) throw new Error("Missing interrupted turn identity");
+        mux(["send-keys", "-t", session, "-l", "queued after abort"]);
+        mux(["send-keys", "-t", session, "M-Enter"]);
+        await waitFor("queued follow-up", events => rpcSucceeded(events, "session/queue/push"));
+        mux(["send-keys", "-t", session, "Escape"]);
+        await waitFor("own turn interrupted and live abort visible", events => events.some(event => event.method === "turn/completed"
+          && event.payload?.params?.turn?.id === original.id && event.payload.params.turn.status === "interrupted")
+          && screen().includes("Operation aborted"));
+        const cloneStart = records().length;
+        await send("/clone");
+        await waitFor("clone clears original UI", events => rpcSucceeded(events.slice(cloneStart), "session/fork") && screen().includes("Cloned to new session"));
+        const resumeStart = records().length;
+        await send(`/resume ${original.sessionId}`);
+        await waitFor("restored interrupted transcript", events => rpcSucceeded(events.slice(resumeStart), "session/resume")
+          && screen().includes("Resumed session") && screen().includes("ABORT_PARTIAL_MARKER") && screen().includes("Operation aborted"));
+        mux(["send-keys", "-t", session, "-l", "abort-render-barrier"]);
+        await waitFor("render barrier", () => screen().includes("abort-render-barrier"));
+        const restoredAborts = assertInterruptedHistory(screen(), records().slice(resumeStart), original.sessionId, original.id);
+        console.log(`Restored ${restoredAborts} distinct interrupted turns, each with exactly one owned abort marker.`);
         break;
       }
       case "resume": {
@@ -600,6 +641,8 @@ async function run() {
     throw error;
   } finally {
     resizeProvider?.close();
+    abortServer?.closeAllConnections();
+    abortServer?.close();
     if (ownedSession) mux(["kill-session", "-t", session], false);
     refineProvider?.close();
     steeringServer?.closeAllConnections();

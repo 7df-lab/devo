@@ -1,3 +1,4 @@
+import { applyInterruptedTurnsToAgentMessages } from "./native-to-pi/interrupted-history.js";
 import { requireSessionWorkspace, type WorkspaceTrust } from "./workspace-trust.js";
 import { textHydrationState } from "./native-to-pi/stream-hydration-state.js";
 import { completedItemRevisions, notificationItemIdentity, runningAssistantItems, normalizeHistoryItems, hydrateRunningText } from "./native-history-hydration.js";
@@ -1265,7 +1266,7 @@ export class NativeAgentConnection implements AgentConnection {
       content: runningMessages.flatMap(message => Array.isArray(message.content) ? message.content : []),
     } : undefined;
     const transcript = running.length
-      ? applyFailedTurnsToAgentMessages(nativeItemsToAgentMessages(items.filter(item => !running.includes(item as Record<string, unknown>))), this.historySnapshotTurns.get(messages) ?? [])
+      ? applyFailedTurnsToAgentMessages(applyInterruptedTurnsToAgentMessages(nativeItemsToAgentMessages(items.filter(item => !running.includes(item as Record<string, unknown>))), this.historySnapshotTurns.get(messages) ?? []), this.historySnapshotTurns.get(messages) ?? [])
       : messages;
     return {
       state: this.buildState(),
@@ -1317,7 +1318,7 @@ export class NativeAgentConnection implements AgentConnection {
           turnCursor = page?.nextCursor ?? undefined;
         } while (turnCursor);
         historyTurns = turns;
-        messages = applyFailedTurnsToAgentMessages(messages, turns);
+        messages = applyFailedTurnsToAgentMessages(applyInterruptedTurnsToAgentMessages(messages, turns), turns);
       } catch {
         // best-effort — items alone still restore chat text
       }

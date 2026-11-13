@@ -188,7 +188,7 @@ jobs:
       - name: Boot and outcome scenarios (no provider credentials)
         working-directory: apps/tui
         run: |
-          for scenario in T1 resize-status goal heartbeat effort theme scheduled-timezone scheduled-pending refine steering; do
+          for scenario in T1 resize-status goal heartbeat effort theme scheduled-timezone scheduled-pending refine steering abort-history; do
             echo "::group::tmux smoke: $scenario"
             node scripts/run-tmux-smoke.js "$scenario"
             echo "::endgroup::"

@@ -1,5 +1,5 @@
-//! Typed, host-only input ingress. Existing agent and background producers use
-//! follow-up delivery, except explicit self messages use safe-boundary steering.
+//! Typed, host-only input ingress. Background completions and explicit self
+//! messages use safe-boundary steering; other agent messages use follow-up delivery.
 //! All delivery preserves inbox order; idle sessions wake.
 //! This is not an RPC and no producer can choose a human or system origin.
 use super::*;
@@ -66,7 +66,7 @@ impl HostMessage {
                 source: HostMessageSource::BackgroundTask,
                 sender: format!("{owner}:{work_id}"),
                 sender_name: None,
-                delivery: HostMessageDelivery::FollowUp,
+                delivery: HostMessageDelivery::Steer,
             },
             text,
         }
@@ -141,7 +141,7 @@ impl HostMessage {
                 source: HostMessageSource::BackgroundTask,
                 sender: format!("{session_id}:{kind}:{identity}"),
                 sender_name: None,
-                delivery: HostMessageDelivery::FollowUp,
+                delivery: HostMessageDelivery::Steer,
             },
             text,
         }
@@ -315,3 +315,6 @@ impl ServerRuntime {
 
 #[cfg(test)]
 mod tests;
+
+#[cfg(test)]
+mod background_steering_tests;
