@@ -25,6 +25,8 @@ use devo_protocol::ResponseExtra;
 use devo_protocol::StopReason;
 use devo_protocol::StreamEvent;
 use devo_provider::ModelProviderSDK;
+use devo_provider::error::ProviderError;
+use devo_provider::timeout::response_idle_timeout;
 
 use super::event::EventCallback;
 use super::event::QueryEvent;
@@ -52,6 +54,12 @@ pub(crate) enum ProviderAttemptError {
 
 type ProviderEventStream = Pin<Box<dyn Stream<Item = anyhow::Result<StreamEvent>> + Send>>;
 
+struct ProviderStreamContext<'a> {
+    provider_name: &'a str,
+    model_slug: &'a str,
+    deadline: tokio::time::Instant,
+}
+
 /// Create a provider stream and assemble the model turn.
 pub(crate) async fn run_provider_attempt(
     provider: &dyn ModelProviderSDK,
@@ -61,7 +69,17 @@ pub(crate) async fn run_provider_attempt(
     cancel_token: Option<&CancellationToken>,
     model_slug: &str,
 ) -> Result<AssembledModelTurn, ProviderAttemptError> {
-    let stream = match provider.completion_stream(request).await {
+    // HTTP headers are not model progress: stream creation and the first
+    // normalized event share one deadline.
+    let deadline = tokio::time::Instant::now() + response_idle_timeout();
+    let stream = match tokio::time::timeout_at(deadline, provider.completion_stream(request))
+        .await
+        .unwrap_or_else(|_| {
+            Err(response_timeout_error(
+                provider.name(),
+                "creating the response stream",
+            ))
+        }) {
         Ok(stream) => stream,
         Err(error) => {
             warn!(
@@ -80,8 +98,11 @@ pub(crate) async fn run_provider_attempt(
         session,
         on_event,
         cancel_token,
-        provider.name(),
-        model_slug,
+        ProviderStreamContext {
+            provider_name: provider.name(),
+            model_slug,
+            deadline,
+        },
     )
     .await
 }
@@ -104,9 +125,13 @@ async fn consume_provider_stream(
     session: &mut SessionState,
     on_event: &Option<EventCallback>,
     cancel_token: Option<&CancellationToken>,
-    provider_name: &str,
-    model_slug: &str,
+    context: ProviderStreamContext<'_>,
 ) -> Result<AssembledModelTurn, ProviderAttemptError> {
+    let ProviderStreamContext {
+        provider_name,
+        model_slug,
+        mut deadline,
+    } = context;
     let mut acc = StreamAccumulation {
         assistant_text: String::new(),
         reasoning_text: String::new(),
@@ -132,7 +157,12 @@ async fn consume_provider_stream(
             } => {
                 break;
             }
-            event = stream.next() => {
+            event = async {
+                match tokio::time::timeout_at(deadline, stream.next()).await {
+                    Ok(event) => event,
+                    Err(_) => Some(Err(response_timeout_error(provider_name, "waiting for the next model event"))),
+                }
+            } => {
                 let Some(event) = event else { break; };
                 match event {
                     Ok(StreamEvent::TextStart { .. }) => {}
@@ -306,6 +336,9 @@ async fn consume_provider_stream(
                         return Err(ProviderAttemptError::Retryable(error));
                     }
                 }
+                // Start the next idle period after local callbacks finish.
+                // Raw bytes, headers and SSE keepalives never reach this point.
+                deadline = tokio::time::Instant::now() + response_idle_timeout();
             }
         }
     }
@@ -701,3 +734,18 @@ fn hosted_tool_status_is_error(status: Option<&str>) -> bool {
         .map(str::to_ascii_lowercase)
         .is_some_and(|status| matches!(status.as_str(), "error" | "errored" | "failed"))
 }
+
+fn response_timeout_error(provider: &str, phase: &str) -> anyhow::Error {
+    ProviderError::ProviderTimeoutError {
+        message: format!(
+            "No model response for {} seconds while {phase}",
+            response_idle_timeout().as_secs()
+        ),
+        provider_name: Some(provider.to_owned()),
+    }
+    .into()
+}
+
+#[cfg(test)]
+#[path = "stream_timeout_tests.rs"]
+mod timeout_tests;
