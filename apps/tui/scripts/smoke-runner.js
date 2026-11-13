@@ -9,7 +9,7 @@ import { scheduledDelivered, rpcSucceeded, turnOutcome } from "./smoke-outcomes.
 
 const repo = resolve(dirname(fileURLToPath(import.meta.url)), "../../..");
 const scenario = process.argv[2] || "T1";
-const scenarios = ["T1", "T2", "T3", "goal", "bash", "agents", "schedule", "heartbeat", "activity", "effort", "theme", "fork", "clipboard", "resume", "export"];
+const scenarios = ["T1", "T2", "T3", "goal", "bash", "agents", "schedule", "heartbeat", "activity", "effort", "theme", "fork", "clipboard", "resume", "scheduled-timezone", "export"];
 const tmux = process.env.DEVO_TMUX_BIN || (process.platform === "win32" ? "psmux" : "tmux");
 const binary = resolve(process.env.DEVO_BIN || process.env.DEVO_SERVER_BIN
   || join(repo, "target/debug", process.platform === "win32" ? "devo.exe" : "devo"));
@@ -70,6 +70,7 @@ async function run() {
       "-e", `DEVO_HOME=${home}`, "-e", `DEVO_CODING_AGENT_DIR=${home}`,
       "-e", `PRIME_AGENT_CODING_AGENT_DIR=${home}`, "-e", "DEVO_PROTOCOL_TRACE=1",
       "-e", `DEVO_PROTOCOL_TRACE_FILE=${trace}`,
+      ...(scenario === "scheduled-timezone" ? ["-e", "TZ=Asia/Shanghai", "-e", "LANG=en_US.UTF-8"] : []),
       ...(scenario === "clipboard" ? [
         "-e", `DEVO_CLIPBOARD_SMOKE_DIR=${home}`,
         "-e", `PATH=${home}:${process.env.PATH}`,
@@ -368,6 +369,30 @@ async function run() {
         await send("/heartbeat status");
         await waitFor("heartbeat status", (_events, text) => /No active scheduled task|Scheduled task\s+Status:/i.test(text));
         break;
+      case "scheduled-timezone": {
+        await send("/heartbeat every 1h timezone-smoke");
+        await waitFor("scheduled creation", (events) => events.some(r => r.payload?.result?.action === "set" && r.payload.result.job?.nextRunAt));
+        const job = records().find(r => r.payload?.result?.action === "set" && r.payload.result.job?.nextRunAt).payload.result.job;
+        const expected = new Date(job.nextRunAt).toLocaleString("en-US", {
+          timeZone: "Asia/Shanghai", year: "numeric", month: "2-digit", day: "2-digit",
+          hour: "2-digit", minute: "2-digit", timeZoneName: "short",
+        });
+        const screen = () => mux(["capture-pane", "-t", session, "-p"]).stdout;
+        for (const width of [100, 40]) {
+          mux(["resize-window", "-t", session, "-x", String(width), "-y", "24"]);
+          mux(["send-keys", "-t", session, "C-r"]);
+          await waitFor("scheduled list", () => screen().replace(/\s+/g, " ").includes("Select a scheduled task to manage"));
+          mux(["send-keys", "-t", session, "Enter"]);
+          await waitFor(`local next run at ${width} columns`, () => screen().includes("Next: " + expected)
+            && screen().includes("Pause scheduled task") && screen().includes("Stop scheduled task"));
+          console.log(`=== Scheduled ${width} columns ===\n${screen()}`);
+          mux(["send-keys", "-t", session, "Escape"]);
+          await waitFor("scheduled close", () => !screen().includes("Pause scheduled task"));
+        }
+        await send("/heartbeat clear");
+        await waitFor("scheduled cleanup", (_events, text) => text.includes("Scheduled task cleared"));
+        break;
+      }
       case "heartbeat": {
         const marker = `hb-tui-fire-${Date.now()}`;
         await send(`/heartbeat every 1s ${marker}`);

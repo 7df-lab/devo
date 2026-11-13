@@ -169,6 +169,8 @@ export class ScheduledManagerComponent implements Component, Focusable {
 			subtitle: this.singleLine(scheduled.job.prompt),
 		});
 		panel.addChild(new TruncatedText(theme.fg("muted", this.formatScheduledDetails(scheduled))));
+		const next = scheduled.job.nextRunAt ? this.formatTimestamp(scheduled.job.nextRunAt) : "—";
+		panel.addChild(new TruncatedText(theme.fg("muted", `Next: ${next}`)));
 		panel.addChild(new Spacer(1));
 		if (this.error) {
 			panel.addChild(new TruncatedText(theme.fg("error", `Error: ${this.error}`)));
@@ -283,8 +285,7 @@ export class ScheduledManagerComponent implements Component, Focusable {
 
 	private formatScheduledDetails(scheduled: AgentConnectionScheduledTask): string {
 		const delivery = scheduled.job.deliveryMode === "follow_up" ? "follow-up" : "steer";
-		const next = scheduled.job.nextRunAt ? this.formatTimestamp(scheduled.job.nextRunAt) : "—";
-		return `${this.sourceLabel(scheduled)} · ${this.sessionLabel(scheduled)} · ${scheduled.job.status} · ${scheduled.job.schedule.expression} · ${delivery} · next ${next} · ${scheduled.job.runCount} runs`;
+		return `${this.sourceLabel(scheduled)} · ${this.sessionLabel(scheduled)} · ${scheduled.job.status} · ${scheduled.job.schedule.expression} · ${delivery} · ${scheduled.job.runCount} runs`;
 	}
 
 	private sourceLabel(scheduled: AgentConnectionScheduledTask): string {
@@ -321,6 +322,9 @@ export class ScheduledManagerComponent implements Component, Focusable {
 	private formatTimestamp(value: string): string {
 		const parsed = new Date(value);
 		if (!Number.isFinite(parsed.getTime())) return value;
-		return parsed.toISOString().slice(0, 16).replace("T", " ");
+		return parsed.toLocaleString(undefined, {
+			year: "numeric", month: "2-digit", day: "2-digit",
+			hour: "2-digit", minute: "2-digit", timeZoneName: "short",
+		});
 	}
 }
