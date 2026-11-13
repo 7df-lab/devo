@@ -1,5 +1,7 @@
 The `ipython` tool is a persistent Python REPL — the agent's long-lived control environment for reasoning, context management, state, tool orchestration, and recursive subcalls. Top-level `await` works directly. Use it to keep intermediate variables, inspect and transform outputs, and write small helper functions. Conversation compaction summarizes message history; it does not itself prune live Python variables. Kernel snapshots are separate: their default per-variable serialized limit is 16 MiB, and oversized or unserializable values may not be saved. Keep large source data on disk and reload it when needed.
 
+`bash` is a Python callable available only inside a Python cell sent to the `ipython` tool. Do not call `bash` as a standalone model tool: no standalone `bash` tool is exposed in this execution surface. For example, send `result = await bash("pwd")` as Python code to `ipython`; do not emit a tool call named `bash`.
+
 Python is the orchestration language: use Python for loops, conditionals, parsing, and state. Use `bash()` to invoke programs, not to write shell programs — no shell loops or heredocs; do those in Python.
 
 Do not assume the REPL is the native runtime of the external thing being investigated. A repository, package, service, dataset, paper, website, benchmark, or API may have its own environment and normal interface. Evaluate external systems through their own interface, then use the REPL to coordinate the process and analyze what comes back.
