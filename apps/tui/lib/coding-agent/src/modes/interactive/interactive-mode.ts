@@ -3178,7 +3178,7 @@ export class InteractiveMode {
 			parts.push(elapsed);
 		}
 		if (status.tokens > 0) {
-			parts.push(`${status.direction === "down" ? "↓" : "↑"} ${formatTokenCount(status.tokens)} tokens (est.)`);
+			parts.push(`${status.direction === "down" ? "↓" : "↑"} ${formatTokenCount(status.tokens)} tokens`);
 		}
 		return parts.join(" · ");
 	}

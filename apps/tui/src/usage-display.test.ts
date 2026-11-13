@@ -46,7 +46,7 @@ test("InteractiveMode applies live context and cumulative events immediately wit
   assert.deepEqual(mode.getConnectionContextUsage(), context);
   assert.deepEqual(mode.connectionState.cumulativeUsage, cumulativeUsage);
   assert.equal(renders, 1);
-  assert.equal(mode.getWorkingLoaderMessage(), "Writing · ↓ 99 tokens (est.)");
+  assert.equal(mode.getWorkingLoaderMessage(), "Writing · ↓ 99 tokens");
 });
 
 test("live renderer updates invalidate a slow end-of-turn context refresh", async () => {
@@ -63,4 +63,17 @@ test("live renderer updates invalidate a slow end-of-turn context refresh", asyn
   resolveStats({ contextUsage: { tokens: 120, contextWindow: 1000, percent: 12 } });
   await refresh;
   assert.deepEqual(mode.getConnectionContextUsage(), latest);
+});
+
+test("working token labels preserve counts and directions without an estimate suffix", () => {
+  const mode = Object.create(InteractiveMode.prototype) as any;
+  mode.connectionState = { isStreaming: true };
+  for (const [activity, direction, tokens, expected] of [
+    ["writing", "down", 99, "Writing · ↓ 99 tokens"],
+    ["executing", "up", 99, "Executing · ↑ 99 tokens"],
+    ["waiting", "up", 0, "Waiting"],
+  ]) {
+    mode.activityTracker = { getStatus: () => ({ activity, direction, tokens }) };
+    assert.equal(mode.getWorkingLoaderMessage(), expected);
+  }
 });
