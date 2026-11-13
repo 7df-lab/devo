@@ -460,6 +460,40 @@ mod tests {
     }
 
     #[test]
+    fn bash_guidance_requires_a_python_cell_for_root_and_child() {
+        for mut options in [
+            RlmPromptOptions::root("/repo", "/tmp/messages.jsonl"),
+            RlmPromptOptions::child("/repo", "/tmp/messages.jsonl", 1, "parent"),
+        ] {
+            for active_tools in [None, Some(vec!["ipython".to_string()])] {
+                options.active_tools = active_tools;
+                let prompt = build_rlm_base_prompt(&options);
+                assert!(prompt.contains("Inside an `ipython` Python cell"));
+                assert!(prompt.contains("Neither is a standalone model tool"));
+                assert!(
+                    prompt.contains("`r = await rlm.shell(command)` for short one-shot commands")
+                );
+                assert!(prompt.contains("first get a handle with `h = bash(command)`"));
+                assert!(prompt.contains("then use `r = await h`"));
+                assert!(prompt.contains("Native sessions return a dict with `stdout` and `exit`"));
+                assert!(!prompt.contains("await bash("));
+                assert!(prompt.contains(
+                    r#"`h = bash(command, mode="interactive")` for ongoing input/output"#
+                ));
+                assert_eq!(
+                    prompt.matches("Neither is a standalone model tool").count(),
+                    1
+                );
+            }
+            for active_tools in [vec![], vec!["bash".to_string()]] {
+                options.active_tools = Some(active_tools);
+                let prompt = build_rlm_base_prompt(&options);
+                assert!(!prompt.contains("Neither is a standalone model tool"));
+            }
+        }
+    }
+
+    #[test]
     fn built_in_python_skills_are_not_assumed_to_be_shell_commands() {
         let mut options = RlmPromptOptions::root("/repo", "/tmp/messages.jsonl");
         options.installed_skills = vec!["refine".into(), "goal".into()];
