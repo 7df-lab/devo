@@ -51,7 +51,7 @@ impl ModelProviderSDK for GatedProvider {
 }
 
 #[tokio::test]
-async fn host_followups_keep_origin_in_queue_live_model_and_replay() -> Result<()> {
+async fn host_inputs_keep_origin_in_queue_live_model_and_replay() -> Result<()> {
     let home = tempfile::TempDir::new()?;
     let provider = Arc::new(GatedProvider {
         requests: StdMutex::new(Vec::new()),
@@ -250,7 +250,8 @@ async fn host_followups_keep_origin_in_queue_live_model_and_replay() -> Result<(
                 && event["params"]["turn"]["sessionId"] == json!(session)
             {
                 completed += 1;
-                if completed == 3 {
+                // The background completion steers the agent follow-up turn.
+                if completed == 2 {
                     return Ok::<_, anyhow::Error>(());
                 }
             }
@@ -258,7 +259,7 @@ async fn host_followups_keep_origin_in_queue_live_model_and_replay() -> Result<(
         anyhow::bail!("notifications closed")
     })
     .await
-    .context("follow-up turns did not complete")??;
+    .context("human and host turns did not complete")??;
     // A producer retry after consumption must not schedule another model turn.
     runtime
         .deliver_host_message(
@@ -274,7 +275,7 @@ async fn host_followups_keep_origin_in_queue_live_model_and_replay() -> Result<(
             .list_pending(&session, QueueType::Turn)?
             .is_empty()
     );
-    assert_eq!(provider.requests.lock().expect("requests").len(), 3);
+    assert_eq!(provider.requests.lock().expect("requests").len(), 2);
     let history = runtime
         .load_canonical_history(&json!(6), session)
         .await
@@ -373,10 +374,11 @@ async fn host_followups_keep_origin_in_queue_live_model_and_replay() -> Result<(
     assert!(host_previews[0]["text"].as_str().unwrap().ends_with('…'));
     assert!(host_previews[0]["text"].as_str().unwrap().chars().count() <= 81);
     let requests = provider.requests.lock().expect("requests").clone();
-    assert_eq!(requests.len(), 3);
+    // The queued background steer is consumed before the host turn's first request.
+    assert_eq!(requests.len(), 2);
     for (request, origin, body) in [
         (&requests[1], &agent_origin, AGENT_BODY),
-        (&requests[2], &background_origin, "background complete"),
+        (&requests[1], &background_origin, "background complete"),
     ] {
         let wrapped = devo_core::render_host_message(origin, body);
         assert!(
@@ -441,7 +443,7 @@ async fn host_followups_keep_origin_in_queue_live_model_and_replay() -> Result<(
         .await
         .map_err(|error| anyhow::anyhow!("{error}"))?;
     assert_eq!(after_rejection.items, history.items);
-    assert_eq!(provider.requests.lock().expect("requests").len(), 3);
+    assert_eq!(provider.requests.lock().expect("requests").len(), 2);
     // Turn addresses and counts include host inputs, independently of human
     // authorship. In particular atTurnId must work for visible host fork rows.
     let turn_inputs = history
@@ -501,7 +503,24 @@ async fn host_followups_keep_origin_in_queue_live_model_and_replay() -> Result<(
                     _ => None,
                 })
                 .collect::<Vec<_>>();
-            assert_eq!(cut_inputs, inputs[..kept_count]);
+            // Cutting through a turn retains its steered inputs too, not just
+            // the input that started it.
+            let kept_turn_ids = turn_inputs[..kept_count]
+                .iter()
+                .map(|item| item.turn_id)
+                .collect::<Vec<_>>();
+            let expected_cut_inputs = history
+                .items
+                .iter()
+                .filter(|item| kept_turn_ids.contains(&item.turn_id))
+                .filter_map(|item| match &item.item {
+                    Item::UserMessage {
+                        origin, content, ..
+                    } => Some((origin.clone(), content.clone())),
+                    _ => None,
+                })
+                .collect::<Vec<_>>();
+            assert_eq!(cut_inputs, expected_cut_inputs);
             let cut_state = runtime
                 .session(fork_id)
                 .await
@@ -573,7 +592,7 @@ async fn host_followups_keep_origin_in_queue_live_model_and_replay() -> Result<(
             connection,
             json!({
                 "id":34,"method":"session/rollback/preview","params":{
-                    "sessionId":fork_id,"userTurnIndex":1,"mode":"throughUserTurn"
+                    "sessionId":fork_id,"userTurnIndex":1,"mode":"beforeUserTurn"
                 }
             }),
         )
@@ -601,7 +620,7 @@ async fn host_followups_keep_origin_in_queue_live_model_and_replay() -> Result<(
         .export_runtime_session()
         .await
         .context("rollback state")?;
-    assert_eq!(rolled_back.core_session.lock().await.turn_count, 2);
+    assert_eq!(rolled_back.core_session.lock().await.turn_count, 1);
     // A fresh runtime has no original actor/turn state: history comes from disk.
     let restored = crate::test_support::TestRuntime::noop()
         .with_test_model()
@@ -620,7 +639,7 @@ async fn host_followups_keep_origin_in_queue_live_model_and_replay() -> Result<(
             _ => None,
         })
         .collect::<Vec<_>>();
-    assert_eq!(rolled_back_inputs, inputs[..2]);
+    assert_eq!(rolled_back_inputs, inputs[..1]);
     let restored_history = restored
         .load_canonical_history(&json!(9), session)
         .await
