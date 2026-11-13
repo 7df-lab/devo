@@ -18,7 +18,19 @@ let response;
 let requestCount = 0;
 const chunk = delta => response.write(`data: ${JSON.stringify({ id: "code-stream", object: "chat.completion.chunk", model: "deepseek-v4-flash", choices: [{ index: 0, delta, finish_reason: null }] })}\n\n`);
 const server = createServer(async (req, res) => {
-  for await (const _ of req) { /* drain request */ }
+  const chunks = [];
+  for await (const part of req) chunks.push(part);
+  const body = JSON.parse(Buffer.concat(chunks).toString("utf8"));
+  // Idle title polish must neither replace the gated tool response nor satisfy
+  // the next turn's request barrier after Escape.
+  if ((body.messages ?? []).some(message => message.role === "system"
+    && JSON.stringify(message.content).includes("Generate a short session title."))) {
+    res.writeHead(200, { "Content-Type": "application/json" });
+    res.end(JSON.stringify({ id: "code-title", object: "chat.completion", model: "deepseek-v4-flash",
+      choices: [{ index: 0, message: { role: "assistant", content: "Python streaming smoke" }, finish_reason: "stop" }],
+    }));
+    return;
+  }
   requestCount++;
   response = res;
   res.writeHead(200, { "Content-Type": "text/event-stream" });
@@ -59,8 +71,11 @@ try {
     const before = requestCount;
     const traceStart = records().length;
     await send("Show a small Python cell");
-    await waitFor("model request", () => requestCount > before);
-    const turnId = records().slice(traceStart).find(row => row.method === "turn/started")?.payload?.params?.turn?.id;
+    let turnId;
+    await waitFor("current turn and model request", (_text, events) => {
+      turnId = events.slice(traceStart).find(row => row.method === "turn/started")?.payload?.params?.turn?.id;
+      return !!turnId && requestCount === before + 1;
+    });
     assert.ok(turnId, "current turn must start before argument deltas");
     chunk({ tool_calls: [{ index: 0, function: { arguments: '{"code":"stream_first = 1' } }] });
     await waitFor("first partial source", text => text.includes("╰─ stream_first = 1"));
