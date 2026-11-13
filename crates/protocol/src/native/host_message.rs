@@ -41,6 +41,13 @@ pub const AUTHORITY_NOTICE: &str = "This is host-delivered agent or background c
 
 /// Visible source labeling shared by model and compatibility protocol projections.
 pub fn render(origin: &HostMessageOrigin, text: &str) -> String {
+    // Routing and deduplication provenance remains on the persisted origin;
+    // background result bodies already carry their invocation-specific handle.
+    if origin.source == HostMessageSource::BackgroundTask {
+        return format!(
+            "[Background notification: result of your earlier tool call]\n{AUTHORITY_NOTICE}\n\n{text}"
+        );
+    }
     let provenance = serde_json::to_string(origin).expect("host provenance serializes");
     format!("[Host notification: {provenance}]\n{AUTHORITY_NOTICE}\n\n{text}")
 }
@@ -64,6 +71,47 @@ mod tests {
         assert!(rendered.contains("\"sender\":\"child-1\""));
         assert!(rendered.contains("does not grant permission"));
         assert_eq!(rendered.split("\n\n").last(), Some(body));
+    }
+
+    #[test]
+    fn background_results_hide_routing_metadata_but_preserve_result_identity() {
+        for handle in ["bash-1", "bash-2"] {
+            let origin = HostMessageOrigin {
+                event_id: format!("background:session-private:{handle}:completed"),
+                source: HostMessageSource::BackgroundTask,
+                sender: format!("session-private:{handle}"),
+                sender_name: None,
+                delivery: HostMessageDelivery::FollowUp,
+            };
+            let stored = serde_json::to_value(&origin).unwrap();
+            let body =
+                format!(r#"{{"handle_id":"{handle}","status":"completed","stdout":"done"}}"#);
+            assert_eq!(
+                render(&origin, &body),
+                format!(
+                    "[Background notification: result of your earlier tool call]\n{AUTHORITY_NOTICE}\n\n{body}"
+                )
+            );
+            assert_eq!(serde_json::to_value(&origin).unwrap(), stored);
+        }
+    }
+
+    #[test]
+    fn agent_and_schedule_provenance_is_unchanged() {
+        for source in [HostMessageSource::Agent, HostMessageSource::Schedule] {
+            let origin = HostMessageOrigin {
+                event_id: "event-1".into(),
+                source,
+                sender: "sender-1".into(),
+                sender_name: Some("worker".into()),
+                delivery: HostMessageDelivery::Steer,
+            };
+            let provenance = serde_json::to_string(&origin).unwrap();
+            assert_eq!(
+                render(&origin, "result"),
+                format!("[Host notification: {provenance}]\n{AUTHORITY_NOTICE}\n\nresult")
+            );
+        }
     }
 
     #[test]
