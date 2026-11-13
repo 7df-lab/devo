@@ -34,3 +34,37 @@ for (const [name, state] of Object.entries<IPythonCellState>({
 		assert.match(plain(cell.render(80)), /waiting for code/);
 	});
 }
+
+test("Python source streams before arguments or output complete in compact view", () => {
+	initTheme();
+	const state: IPythonCellState = { code: "first = 1", expanded: false, isPartial: true, argsComplete: false };
+	const cell = new IPythonCellComponent(state);
+	for (const width of [40, 100]) assert.match(plain(cell.render(width)), /╰─ first = 1/);
+	state.code += "\nsecond = 2\nprint(first + second)";
+	cell.update(state);
+	for (const width of [40, 100]) {
+		const rendered = plain(cell.render(width));
+		assert.match(rendered, /second = 2/);
+		assert.match(rendered, /print\(first \+ second\)/);
+		assert.doesNotMatch(rendered, /waiting for output/);
+	}
+	cell.update({ ...state, argsComplete: true });
+	assert.doesNotMatch(plain(cell.render(100)), /second = 2/);
+	cell.update({ ...state, argsComplete: true, expanded: true });
+	assert.match(plain(cell.render(100)), /second = 2/);
+});
+
+for (const [name, overrides] of Object.entries<Partial<IPythonCellState>>({
+	restored: { isPartial: undefined, argsComplete: undefined },
+	completed: { isPartial: false },
+	running: { executionStarted: true },
+	aborted: { details: { status: "aborted" } },
+	failed: { isError: true },
+})) {
+	test(`${name} Python source keeps the compact preference`, () => {
+		initTheme();
+		const cell = new IPythonCellComponent({ code: "first = 1\nsecond = 2", expanded: false,
+			isPartial: true, argsComplete: false, ...overrides });
+		assert.doesNotMatch(plain(cell.render(100)), /second = 2/);
+	});
+}

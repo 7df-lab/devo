@@ -798,9 +798,9 @@ export class InteractiveMode {
 	private rosterBar: { summaries(): SessionSummary[]; dispose(): Promise<void> } | undefined;
 
 	private toolOutputExpanded = false;
-	private editDiffsExpanded = false;
+	private editDiffsExpanded = true;
 
-	private hideThinkingBlock = true;
+	private hideThinkingBlock = false;
 	private readonly mermaidMarkdownTransform = createMermaidMarkdownTransform({
 		getMode: () => this.settingsManager.getMermaidRenderingMode(),
 		theme,
@@ -6802,6 +6802,8 @@ export class InteractiveMode {
 							this.ui,
 							this.getCurrentCwd(),
 						);
+						// Historical inputs are snapshots, not live argument streams.
+						component.setArgsComplete();
 						component.setExpanded(this.toolOutputExpanded);
 						component.setEditDiffsExpanded(this.editDiffsExpanded);
 						selectLatestToolExpandHint(this.chatContainer.children, component);

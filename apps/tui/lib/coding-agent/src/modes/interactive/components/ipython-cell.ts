@@ -374,7 +374,13 @@ export class IPythonCellComponent implements Component {
 		// Cached by state version so unrelated repaints don't re-render (flicker).
 		const lines = [truncateToWidth(` ${this.collapsedLine(details)}`, safeWidth, "")];
 
-		const hasCode = this.state.expanded ? this.renderCode(lines, safeWidth, details) : false;
+		// Argument deltas are display-only. Show the code while it is being
+		// generated, even in the compact view; completed/history cells retain
+		// the user's expansion preference. Never infer streaming from missing
+		// result metadata, which also occurs in restored sessions.
+		const streamingCode = this.state.isPartial === true && this.state.argsComplete === false &&
+			!this.state.executionStarted && !this.state.isError && details.status !== "aborted";
+		const hasCode = this.state.expanded || streamingCode ? this.renderCode(lines, safeWidth, details) : false;
 		if ((details.diffs?.length ?? 0) > 0) {
 			this.renderDiffs(lines, safeWidth, details.diffs ?? [], hasCode);
 		}
