@@ -538,6 +538,66 @@ async fn chat_stream_reports_truncation_without_done_marker() {
     );
 }
 
+#[tokio::test]
+async fn chat_function_arguments_report_output_limit_without_accepting_empty_calls() {
+    for arguments in ["", "   ", "{\"private\":"] {
+        for streaming in [false, true] {
+            let call = json!({"index":0,"id":"call_limit","type":"function",
+                "function":{"name":"read","arguments":arguments}});
+            let body = if streaming {
+                sse_data(json!({"id":"chatcmpl-limit","choices":[{
+                    "index":0,"delta":{"tool_calls":[call]},"finish_reason":null
+                }]}))
+                    + &sse_data(json!({"id":"chatcmpl-limit","choices":[{
+                        "index":0,"delta":{},"finish_reason":"length"
+                    }]}))
+                    + "data: [DONE]\n\n"
+            } else {
+                json!({"id":"chatcmpl-limit","choices":[{
+                    "index":0,"message":{"role":"assistant","tool_calls":[call]},
+                    "finish_reason":"length"
+                }]})
+                .to_string()
+            };
+            let content_type = if streaming {
+                "text/event-stream"
+            } else {
+                "application/json"
+            };
+            let provider =
+                OpenAIProvider::new(spawn_http_server("200 OK", content_type, body).await);
+            let error = if streaming {
+                let events = provider
+                    .completion_stream(minimal_request())
+                    .await
+                    .expect("stream")
+                    .collect::<Vec<_>>()
+                    .await;
+                assert!(
+                    !events
+                        .iter()
+                        .any(|event| matches!(event, Ok(StreamEvent::MessageDone { .. })))
+                );
+                events
+                    .into_iter()
+                    .find_map(Result::err)
+                    .expect("invalid call rejected")
+            } else {
+                provider
+                    .completion(minimal_request())
+                    .await
+                    .expect_err("invalid call rejected")
+            };
+            let message = error.to_string();
+            assert!(message.contains("finish_reason=length"), "{message}");
+            assert!(
+                !message.contains("private"),
+                "arguments must not leak into diagnostics"
+            );
+        }
+    }
+}
+
 async fn collect_chat_stream_events(chunks: Vec<String>) -> Vec<StreamEvent> {
     let base_url = spawn_sse_server(chunks).await;
     let provider = OpenAIProvider::new(base_url);

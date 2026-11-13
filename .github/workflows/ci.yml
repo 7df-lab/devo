@@ -193,6 +193,9 @@ jobs:
             node scripts/run-tmux-smoke.js "$scenario"
             echo "::endgroup::"
           done
+      - name: Incremental Python code and default Details in real TTY
+        working-directory: apps/tui
+        run: node scripts/python-code-stream-smoke.mjs
       - name: Completed-turn scenario against the local mock provider
         working-directory: apps/tui
         env:

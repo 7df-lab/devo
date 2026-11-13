@@ -11,3 +11,8 @@ This is component browser verification, not full Electron or backend E2E.
 
 The standalone GitHub workflow uploads traces on failure and layout screenshots.
 Do not interpret test enumeration or fixture build success as browser test success.
+
+Search picker scenarios mount the production shared popover/search/list components
+and the real ModelPickerList with controlled catalog data. They cover clear via
+Enter/Space, selection, close/reopen, and 360/1000px popup geometry. The branch
+fixture uses the shared composition, not Electron Git IPC or branch mutation.

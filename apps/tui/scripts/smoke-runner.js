@@ -59,9 +59,25 @@ async function run() {
       }));
     }
     if (scenario === "steering") {
-      steeringServer = createServer((request, response) => {
-        request.resume();
+      steeringServer = createServer(async (request, response) => {
+        const chunks = [];
+        for await (const chunk of request) chunks.push(chunk);
+        const body = JSON.parse(Buffer.concat(chunks).toString("utf8"));
+        // Idle title polish uses the same provider after the turn. It is not a
+        // third conversational response and must not invalidate the exact count.
+        const titleRequest = (body.messages ?? []).some(message => message.role === "system"
+          && JSON.stringify(message.content).includes("Generate a short session title."));
+        if (titleRequest) {
+          console.log("steering mock request: title");
+          response.writeHead(200, { "Content-Type": "application/json" });
+          response.end(JSON.stringify({ id: "steering-title", object: "chat.completion", created: 0,
+            model: "deepseek-v4-flash", choices: [{ index: 0,
+              message: { role: "assistant", content: "Steering smoke session" }, finish_reason: "stop" }],
+          }));
+          return;
+        }
         const index = ++steeringRequests;
+        console.log(`steering mock request: response ${index}`);
         response.writeHead(200, { "Content-Type": "text/event-stream" });
         const chunk = (delta, finish_reason = null) => response.write(`data: ${JSON.stringify({
           id: `steering-${index}`, object: "chat.completion.chunk", created: 0, model: "deepseek-v4-flash",
@@ -407,6 +423,19 @@ async function run() {
         const initialReads = records().filter((r) => r.method === "task/list").length;
         await waitFor("automatic activity polling without input", (events) =>
           events.filter((r) => r.method === "task/list").length > initialReads);
+        const screen = () => mux(["capture-pane", "-t", session, "-p"]).stdout;
+        for (const width of [100, 40]) {
+          mux(["resize-window", "-t", session, "-x", String(width), "-y", "24"]);
+          mux(["send-keys", "-t", session, "M-a", ...(width === 100 ? ["Down", "Down"] : []), "Enter"]);
+          await waitFor("bottom Shells panel", () => screen().includes("No background shell tasks"));
+          const lines = screen().split("\n");
+          if (lines.findIndex(line => line.trim() === "Shells") < 12) throw new Error("Shells covered the upper conversation");
+          console.log(`=== bottom Shells ${width} ===\n${screen()}`);
+          mux(["send-keys", "-t", session, "Left"]);
+          await waitFor("Shells left close", () => !screen().includes("No background shell tasks"));
+          // Overlay restores footer focus and retains selection; next iteration reopens Shells directly.
+          mux(["send-keys", "-t", session, "Escape"]);
+        }
         break;
       }
       case "T2":
@@ -444,14 +473,14 @@ async function run() {
         const screen = () => mux(["capture-pane", "-t", session, "-p"]).stdout;
         const open = async () => {
           mux(["send-keys", "-t", session, "C-r"]);
-          await waitFor("list", () => screen().replace(/\s+/g," ").includes("Select a scheduled task to manage"));
+          await waitFor("list", () => screen().replace(/\s+/g," ").includes("Enter details"));
         };
         for (const [n,width,fails] of [[1,100,false],[2,40,true]]) {
           mux(["resize-window","-t",session,"-x",String(width),"-y","24"]);
           await open(); mux(["send-keys","-t",session,"Enter","Enter"]);
           await waitFor("action started", () => existsSync(join(home,`action-${n}.started`)) && /(?:Pausing|Resuming) scheduled task/.test(screen()));
           mux(["send-keys","-t",session,"Enter","Enter","Escape"]);
-          await waitFor("closed pending", () => !screen().includes("Closing does not cancel"));
+          await waitFor("closed pending", () => !screen().includes("scheduled task…"));
           await open();
           await waitFor("pending after reopen", () => /(?:Pausing|Resuming) scheduled task/.test(screen()));
           const processed = Number(readFileSync(join(home,"inputs"),"utf8"));
@@ -459,13 +488,13 @@ async function run() {
           await waitFor("repeated inputs processed", () => Number(readFileSync(join(home,"inputs"),"utf8")) >= processed + 2);
           if (readFileSync(join(home,"calls"),"utf8") !== String(n)) throw new Error("duplicate scheduled mutation");
           writeFileSync(join(home,`action-${n}.release`),fails ? "fail" : "ok");
-          await waitFor("settled in reopened list", () => !screen().includes("Closing does not cancel")
-            && screen().replace(/\s+/g," ").includes("Select a scheduled task to manage")
+          await waitFor("settled in reopened list", () => !screen().includes("scheduled task…")
+            && screen().replace(/\s+/g," ").includes("Enter details")
             && (fails ? screen().includes("Error:") : screen().includes("paused")));
           if (readFileSync(join(home,"calls"),"utf8") !== String(n)) throw new Error("late duplicate scheduled mutation");
           console.log(`=== scheduled pending ${width} ===\n${screen()}`);
           mux(["send-keys","-t",session,"Escape"]);
-          await waitFor("close", () => !screen().includes("Select a scheduled"));
+          await waitFor("close", () => !screen().includes("Enter details"));
         }
         await send("/heartbeat clear");
         await waitFor("clear", (_events,text) => text.includes("Scheduled task cleared"));
@@ -483,13 +512,19 @@ async function run() {
         for (const width of [100, 40]) {
           mux(["resize-window", "-t", session, "-x", String(width), "-y", "24"]);
           mux(["send-keys", "-t", session, "C-r"]);
-          await waitFor("scheduled list", () => screen().replace(/\s+/g, " ").includes("Select a scheduled task to manage"));
+          await waitFor("scheduled list", () => screen().replace(/\s+/g, " ").includes("Enter details"));
+          const before = screen().split("\n");
+          if (before.findIndex(line => line.includes("Scheduled ·")) < 12) throw new Error("Scheduled covered the upper conversation");
           mux(["send-keys", "-t", session, "Enter"]);
           await waitFor(`local next run at ${width} columns`, () => screen().includes("Next: " + expected)
             && screen().includes("Pause scheduled task") && screen().includes("Stop scheduled task"));
+          const after = screen().split("\n");
+          if (before.slice(0, 12).join("\n") !== after.slice(0, 12).join("\n")) throw new Error("Scheduled details changed upper conversation");
           console.log(`=== Scheduled ${width} columns ===\n${screen()}`);
-          mux(["send-keys", "-t", session, "Escape"]);
-          await waitFor("scheduled close", () => !screen().includes("Pause scheduled task"));
+          mux(["send-keys", "-t", session, "Left"]);
+          await waitFor("Scheduled left returns to list", () => screen().includes("Enter details"));
+          mux(["send-keys", "-t", session, "Left"]);
+          await waitFor("scheduled close", () => !screen().includes("Enter details"));
         }
         await send("/heartbeat clear");
         await waitFor("scheduled cleanup", (_events, text) => text.includes("Scheduled task cleared"));
