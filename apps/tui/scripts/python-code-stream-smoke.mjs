@@ -69,6 +69,8 @@ try {
     await waitFor("second partial source before closing JSON", text => text.includes("stream_second = 2"));
     assert.ok(!records().slice(traceStart).some(row => row.method === "tool_call/status_updated" &&
       row.payload?.params?.toolCallId === `call-${requestCount}` && row.payload.params.status === "in_progress"), "must not execute incomplete code");
+    await waitFor("live token count without estimate suffix", text => /↓ \d+ tokens/.test(text));
+    assert.ok(!pane.includes("(est.)"), "working token label must not include the estimate suffix");
     console.log(`Python argument stream visible at ${width} columns before JSON completion:\n${pane}`);
     mux(["send-keys", "-t", session, "Escape"]);
     await waitFor("abort closes pending cell", (text, events) => events.slice(traceStart).some(row => row.method === "turn/completed" && row.payload?.params?.turn?.id === turnId && row.payload.params.turn.status === "interrupted") && !text.includes("╰─ stream_first = 1"));
