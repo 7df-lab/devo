@@ -3,7 +3,7 @@ import { createRoot } from "react-dom/client"
 import { Toaster } from "sonner"
 import { InboxRunRow } from "../src/renderer/components/automations/inbox-run-row"
 import type { AutomationRun } from "../src/preload/api"
-import "../src/renderer/index.css"
+import "./fixture.css"
 const base: AutomationRun = {
 	id: "run",
 	automationId: "automation",

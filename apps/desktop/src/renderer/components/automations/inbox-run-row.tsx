@@ -137,20 +137,20 @@ export const InboxRunRow = memo(function InboxRunRow({
 			<ContextMenuTrigger render={row} tabIndex={-1} />
 			<ContextMenuContent finalFocus={menuReturnFocus}>
 				{onMarkRead && !isArchived && (
-					<ContextMenuItem onSelect={() => onMarkRead(run.id)}>
+					<ContextMenuItem onClick={() => onMarkRead(run.id)}>
 						<CircleIcon className="size-4" />
 						{isUnread ? "Mark as read" : "Mark as read"}
 					</ContextMenuItem>
 				)}
 				{run.sessionId && (
-					<ContextMenuItem onSelect={onClick}>
+					<ContextMenuItem onClick={onClick}>
 						<ExternalLinkIcon className="size-4" />
 						Open thread
 					</ContextMenuItem>
 				)}
 				{(onMarkRead || run.sessionId) && onArchive && !isArchived && <ContextMenuSeparator />}
 				{onArchive && !isArchived && (
-					<ContextMenuItem onSelect={() => onArchive(run.id)}>
+					<ContextMenuItem onClick={() => onArchive(run.id)}>
 						<ArchiveIcon className="size-4" />
 						Archive
 					</ContextMenuItem>
