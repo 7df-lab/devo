@@ -8,6 +8,7 @@ import { fileURLToPath, pathToFileURL } from "node:url";
 import { setTimeout as sleep } from "node:timers/promises";
 import { scheduledDelivered, rpcSucceeded, turnOutcome } from "./smoke-outcomes.js";
 
+import { assertInterruptedHistory } from "./abort-history-outcome.mjs";
 import { startResizeProvider, checkResizeStatus } from "./resize-status-smoke.mjs";
 
 const repo = resolve(dirname(fileURLToPath(import.meta.url)), "../../..");
@@ -253,7 +254,8 @@ async function run() {
           && screen().includes("Resumed session") && screen().includes("ABORT_PARTIAL_MARKER") && screen().includes("Operation aborted"));
         mux(["send-keys", "-t", session, "-l", "abort-render-barrier"]);
         await waitFor("render barrier", () => screen().includes("abort-render-barrier"));
-        if ((screen().match(/Operation aborted/g) ?? []).length !== 1) throw new Error("Abort marker duplicated on restore");
+        const restoredAborts = assertInterruptedHistory(screen(), records().slice(resumeStart), original.sessionId, original.id);
+        console.log(`Restored ${restoredAborts} distinct interrupted turns, each with exactly one owned abort marker.`);
         break;
       }
       case "resume": {
