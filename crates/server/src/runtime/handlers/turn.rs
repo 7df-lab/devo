@@ -1,6 +1,12 @@
 use super::super::*;
 use super::image_input::write_data_uri_image_to_temp;
 
+/// Immutable admission result, captured before releasing the session gate.
+pub(crate) enum TurnAdmissionSnapshot {
+    Started(Box<devo_protocol::native::turn::Turn>),
+    Queued(devo_protocol::native::queue::QueueEntry),
+}
+
 fn pending_turn_metadata(
     collaboration_mode: devo_protocol::CollaborationMode,
     model: Option<String>,
@@ -176,13 +182,16 @@ impl ServerRuntime {
         };
         // Admission owns the response snapshot. The background turn may already
         // have ended (or been replaced) before this wrapper resumes.
-        let Some(turn) = accepted_turn.filter(|turn| turn.id == turn_id) else {
+        let Some(TurnAdmissionSnapshot::Started(turn)) = accepted_turn.filter(|snapshot| {
+            matches!(snapshot, TurnAdmissionSnapshot::Started(turn) if turn.id == turn_id)
+        }) else {
             return self.error_response(
                 request_id,
                 ProtocolErrorCode::InternalError,
                 "started turn has no admission snapshot",
             );
         };
+        let turn = *turn;
         self.turn_start_idempotency
             .lock()
             .await
@@ -213,7 +222,7 @@ impl ServerRuntime {
         .await
     }
 
-    /// Return the accepted Native snapshot alongside the internal compatibility
+    /// Return the accepted Native turn or queue snapshot alongside the internal compatibility
     /// response, without consulting mutable active-turn state after execution starts.
     #[allow(clippy::too_many_arguments)]
     pub(crate) async fn handle_turn_start_with_queue_policy_and_client_message_id(
@@ -223,7 +232,7 @@ impl ServerRuntime {
         params: TurnStartParams,
         queue_policy: TurnStartQueuePolicy,
         client_user_message_id: Option<String>,
-        accepted_turn: &mut Option<devo_protocol::native::turn::Turn>,
+        accepted_turn: &mut Option<TurnAdmissionSnapshot>,
     ) -> serde_json::Value {
         *accepted_turn = None;
         if params.input.is_empty() {
@@ -417,11 +426,17 @@ impl ServerRuntime {
                     format!("failed to persist inbox input: {error}"),
                 );
             }
-            let queue_len_after = reservation
-                .pending_turn_queue
-                .lock()
-                .expect("pending queue mutex poisoned")
-                .len();
+            let queue_len_after = {
+                let queue = reservation
+                    .pending_turn_queue
+                    .lock()
+                    .expect("pending queue mutex poisoned");
+                *accepted_turn = super::queue::native_queue_entries(&queue)
+                    .into_iter()
+                    .find(|entry| entry.queue_item_id == queued_input_id)
+                    .map(TurnAdmissionSnapshot::Queued);
+                queue.len()
+            };
             tracing::info!(
                 session_id = %params.session_id,
                 queued_input_id = %queued_input_id,
@@ -730,7 +745,9 @@ impl ServerRuntime {
         #[cfg(test)]
         self.pause_turn_admission_response_for_test(params.session_id)
             .await;
-        *accepted_turn = Some(runtime_turn.native.clone());
+        *accepted_turn = Some(TurnAdmissionSnapshot::Started(Box::new(
+            runtime_turn.native.clone(),
+        )));
         serde_json::to_value(SuccessResponse {
             id: request_id,
             result: TurnStartResult::Started {

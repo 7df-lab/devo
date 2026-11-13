@@ -572,7 +572,11 @@ export class TUI extends Container {
 		this.stopped = false;
 		this.terminal.start(
 			(data) => this.handleInput(data),
-			() => this.requestRender(),
+			// Resize may discard terminal cells even if a burst ends at the old
+			// dimensions before the next frame. Invalidate the painted frame, not
+			// the viewport position, so unchanged live status is repainted too.
+			// Preserve the inline Termux keyboard-height special case below.
+			() => this.requestRender(this.fullscreen !== null || !isTermuxSession()),
 		);
 		this.terminal.hideCursor();
 		this.queryCellSize();

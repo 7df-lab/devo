@@ -1,4 +1,5 @@
 import React, { useState } from "react"
+import { SearchFixture } from "./search-fixture"
 import { createRoot } from "react-dom/client"
 import { Toaster } from "sonner"
 import { InboxRunRow } from "../src/renderer/components/automations/inbox-run-row"
@@ -56,4 +57,4 @@ function Fixture() {
 		</main>
 	)
 }
-createRoot(document.getElementById("root")!).render(<Fixture />)
+createRoot(document.getElementById("root")!).render(new URLSearchParams(location.search).has("picker") ? <SearchFixture /> : <Fixture />)

@@ -14,16 +14,19 @@ function createViewport(t: TestContext, bindings: KeybindingsConfig = {}) {
   const previous = getKeybindings();
   setKeybindings(new KeybindingsManager(TUI_KEYBINDINGS, bindings));
   let send = (_data: string) => {};
+  let resize = () => {};
   let output = "";
   let draft = "";
   const lines = Array.from({ length: 50 }, (_, index) => `Transcript ${index + 1}`);
+  let columns = 80;
+  let rows = 12;
   const terminal: Terminal = {
-    columns: 80,
-    rows: 12,
+    get columns() { return columns; },
+    get rows() { return rows; },
     kittyProtocolActive: false,
     altScreenActive: true,
     mouseTrackingActive: true,
-    start(onInput) { send = onInput; },
+    start(onInput, onResize) { send = onInput; resize = onResize; },
     stop() {},
     async drainInput() {},
     write(data) { output += data; },
@@ -55,6 +58,16 @@ function createViewport(t: TestContext, bindings: KeybindingsConfig = {}) {
   return {
     ui,
     lines,
+    resize(width: number, height: number) {
+      columns = width;
+      rows = height;
+      resize();
+    },
+    clearOutput() { output = ""; },
+    async settle() {
+      await new Promise((resolve) => setTimeout(resolve, 50));
+      return output;
+    },
     send(data: string) { send(data); },
     draft: () => draft,
     async render() {
@@ -127,4 +140,39 @@ test("disabling the follow binding does not advertise an inactive shortcut", asy
   viewport.send("\x1b[5~");
   assert.equal(viewport.ui.getScrollInfo()?.following, false);
   assert.doesNotMatch(await viewport.render(), /to follow/);
+});
+
+// A terminal can discard rows while resizing even when its final dimensions
+// match the last painted frame. No model event should be needed to restore it.
+test("resize round trip repaints unchanged working status without a new turn", async (t) => {
+  const viewport = createViewport(t);
+  viewport.lines.push("Thinking · 12s");
+  await viewport.render();
+  viewport.clearOutput();
+  viewport.resize(40, 5);
+  viewport.resize(80, 12);
+  assert.match(await viewport.settle(), /Thinking · 12s/);
+  assert.equal(viewport.ui.getScrollInfo()?.following, true);
+});
+
+test("resize repaint preserves paused transcript and does not resurrect ended status", async (t) => {
+  const viewport = createViewport(t);
+  viewport.lines.push("Working · 12s");
+  await viewport.render();
+  viewport.send("\x1b[5~");
+  await viewport.render();
+  const before = viewport.ui.getScrollInfo();
+  viewport.clearOutput();
+  viewport.resize(40, 5);
+  viewport.resize(80, 12);
+  const paused = await viewport.settle();
+  assert.match(paused, /Transcript/);
+  assert.deepEqual(viewport.ui.getScrollInfo(), before);
+  viewport.lines.pop();
+  viewport.send("\x1b[1;5F");
+  await viewport.render();
+  viewport.clearOutput();
+  viewport.resize(40, 5);
+  viewport.resize(80, 12);
+  assert.doesNotMatch(await viewport.settle(), /Working/);
 });
