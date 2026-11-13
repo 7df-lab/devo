@@ -10052,14 +10052,14 @@ export class InteractiveMode {
 		}
 		const panel = new ShellActivityPanel({
 			getTasks: () => this.shellActivity.status === "ready" ? this.shellActivity.items : [],
-			getRows: () => this.ui.terminal.rows,
+			getRows: () => Math.max(1, Math.min(12, Math.floor(this.ui.terminal.rows / 2))),
 			getError: () => this.shellActivity.status === "error" ? this.shellActivity.message : undefined,
 			getState: () => this.shellActivity.status,
 			onClose: () => this.closeShellActivity(),
 			requestRender: () => this.ui.requestRender(),
 		});
-		this.shellActivityHandle = this.showFullPaneOverlay(panel, {
-			fullWidth: true,
+		this.shellActivityHandle = this.ui.showOverlay(panel, {
+			width: "100%", anchor: "bottom-center",
 			suspendFullscreenMouse: true,
 		});
 	}
@@ -10084,14 +10084,14 @@ export class InteractiveMode {
 		const manager = new ScheduledManagerComponent({
 			actionState: this.scheduledManagerActionState,
 			getScheduledTasks: () => this.getScopedScheduledTasks(),
-			getRows: () => this.ui.terminal.rows,
+			getRows: () => Math.max(1, Math.min(12, Math.floor(this.ui.terminal.rows / 2))),
 			onAction: (scheduled, action) => this.manageScheduledTask(scheduled, action),
 			onClose: () => this.closeScheduledManager(),
 			requestRender: () => this.ui.requestRender(),
 		});
 		this.scheduledManager = manager;
-		this.scheduledManagerHandle = this.showFullPaneOverlay(manager, {
-			fullWidth: true,
+		this.scheduledManagerHandle = this.ui.showOverlay(manager, {
+			width: "100%", anchor: "bottom-center",
 			suspendFullscreenMouse: true,
 		});
 		this.scheduleScheduledManagerRefresh();
