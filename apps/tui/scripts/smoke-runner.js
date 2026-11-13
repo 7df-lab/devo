@@ -9,7 +9,8 @@ import { scheduledDelivered, rpcSucceeded, turnOutcome } from "./smoke-outcomes.
 
 const repo = resolve(dirname(fileURLToPath(import.meta.url)), "../../..");
 const scenario = process.argv[2] || "T1";
-const scenarios = ["T1", "T2", "T3", "goal", "bash", "agents", "schedule", "heartbeat", "activity", "effort", "theme", "fork", "clipboard", "resume", "scheduled-timezone", "export"];
+const scenarios = ["T1", "T2", "T3", "goal", "bash", "agents", "schedule", "heartbeat", "activity", "effort", "theme", "fork", "clipboard", "resume", "scheduled-timezone", "scheduled-pending", "export"];
+const preloaded = ["clipboard", "scheduled-pending"].includes(scenario);
 const tmux = process.env.DEVO_TMUX_BIN || (process.platform === "win32" ? "psmux" : "tmux");
 const binary = resolve(process.env.DEVO_BIN || process.env.DEVO_SERVER_BIN
   || join(repo, "target/debug", process.platform === "win32" ? "devo.exe" : "devo"));
@@ -56,11 +57,11 @@ async function run() {
     const settingsPath = join(sourceHome, "settings.json");
     const settings = !(["effort", "theme"].includes(scenario)) && existsSync(settingsPath) ? JSON.parse(readFileSync(settingsPath, "utf8")) : {};
     writeFileSync(join(home, "settings.json"), JSON.stringify({ ...settings, ...(scenario === "theme" ? { theme: "dark" } : {}), onboardingShown: true }));
-    if (scenario === "clipboard") {
+    if (preloaded) {
       if (process.platform === "win32") throw new Error("clipboard substitute smoke currently requires Unix tmux");
       const quote = value => "'" + value.replaceAll("'", "'\\''") + "'";
       const loader = pathToFileURL(join(repo, "apps/tui/node_modules/tsx/dist/loader.mjs"));
-      const preload = pathToFileURL(join(repo, "apps/tui/scripts/clipboard-smoke-preload.mjs"));
+      const preload = pathToFileURL(join(repo, scenario === "clipboard" ? "apps/tui/scripts/clipboard-smoke-preload.mjs" : "apps/tui/scripts/scheduled-pending-preload.mjs"));
       // NODE_OPTIONS disallows the test-module-mocks flag. Scope a node wrapper
       // to this tmux child instead. Load tsx directly so its CLI subprocess
       // cannot drop our explicit test flags; CLI/server/TUI sources stay unchanged.
@@ -71,12 +72,12 @@ async function run() {
       "-e", `PRIME_AGENT_CODING_AGENT_DIR=${home}`, "-e", "DEVO_PROTOCOL_TRACE=1",
       "-e", `DEVO_PROTOCOL_TRACE_FILE=${trace}`,
       ...(scenario === "scheduled-timezone" ? ["-e", "TZ=Asia/Shanghai", "-e", "LANG=en_US.UTF-8"] : []),
-      ...(scenario === "clipboard" ? [
+      ...(preloaded ? [
         "-e", `DEVO_CLIPBOARD_SMOKE_DIR=${home}`,
         "-e", `PATH=${home}:${process.env.PATH}`,
-      ] : []), "--", ...(scenario === "clipboard" ? ["env", `PATH=${home}:${process.env.PATH}`] : []), binary]);
+      ] : []), "--", ...(preloaded ? ["env", `PATH=${home}:${process.env.PATH}`] : []), binary]);
     ownedSession = true;
-    if (scenario === "clipboard") {
+    if (preloaded) {
       // A multi-argument tmux command executes directly, avoiding login-shell
       // startup files replacing PATH and silently bypassing the node wrapper.
       const deadline = Date.now() + 15000;
@@ -369,6 +370,39 @@ async function run() {
         await send("/heartbeat status");
         await waitFor("heartbeat status", (_events, text) => /No active scheduled task|Scheduled task\s+Status:/i.test(text));
         break;
+      case "scheduled-pending": {
+        await send("/heartbeat every 1h pending-smoke");
+        await waitFor("created", events => events.some(r => r.payload?.result?.action === "set"));
+        const screen = () => mux(["capture-pane", "-t", session, "-p"]).stdout;
+        const open = async () => {
+          mux(["send-keys", "-t", session, "C-r"]);
+          await waitFor("list", () => screen().replace(/\s+/g," ").includes("Select a scheduled task to manage"));
+        };
+        for (const [n,width,fails] of [[1,100,false],[2,40,true]]) {
+          mux(["resize-window","-t",session,"-x",String(width),"-y","24"]);
+          await open(); mux(["send-keys","-t",session,"Enter","Enter"]);
+          await waitFor("action started", () => existsSync(join(home,`action-${n}.started`)) && /(?:Pausing|Resuming) scheduled task/.test(screen()));
+          mux(["send-keys","-t",session,"Enter","Enter","Escape"]);
+          await waitFor("closed pending", () => !screen().includes("Closing does not cancel"));
+          await open();
+          await waitFor("pending after reopen", () => /(?:Pausing|Resuming) scheduled task/.test(screen()));
+          const processed = Number(readFileSync(join(home,"inputs"),"utf8"));
+          mux(["send-keys","-t",session,"Enter","Enter"]);
+          await waitFor("repeated inputs processed", () => Number(readFileSync(join(home,"inputs"),"utf8")) >= processed + 2);
+          if (readFileSync(join(home,"calls"),"utf8") !== String(n)) throw new Error("duplicate scheduled mutation");
+          writeFileSync(join(home,`action-${n}.release`),fails ? "fail" : "ok");
+          await waitFor("settled in reopened list", () => !screen().includes("Closing does not cancel")
+            && screen().replace(/\s+/g," ").includes("Select a scheduled task to manage")
+            && (fails ? screen().includes("Error:") : screen().includes("paused")));
+          if (readFileSync(join(home,"calls"),"utf8") !== String(n)) throw new Error("late duplicate scheduled mutation");
+          console.log(`=== scheduled pending ${width} ===\n${screen()}`);
+          mux(["send-keys","-t",session,"Escape"]);
+          await waitFor("close", () => !screen().includes("Select a scheduled"));
+        }
+        await send("/heartbeat clear");
+        await waitFor("clear", (_events,text) => text.includes("Scheduled task cleared"));
+        break;
+      }
       case "scheduled-timezone": {
         await send("/heartbeat every 1h timezone-smoke");
         await waitFor("scheduled creation", (events) => events.some(r => r.payload?.result?.action === "set" && r.payload.result.job?.nextRunAt));
