@@ -12,6 +12,7 @@ use serde::Serialize;
 use serde_json::Value;
 use serde_json::json;
 use tracing::debug;
+mod function_arguments;
 mod stream;
 use devo_protocol::ModelProfileKey;
 use devo_protocol::ModelRequest;
@@ -494,6 +495,7 @@ fn parse_response(value: Value, dsml_healer: &DsmlToolCallHealer) -> Result<Mode
         .find(|choice| choice.index == Some(0))
         .or_else(|| response.choices.first())
     {
+        stop_reason = choice.finish_reason.as_deref().map(parse_finish_reason);
         if let Some(message) = &choice.message {
             if let Some(reasoning_content) = &message.reasoning_content {
                 metadata.extras.push(ResponseExtra::ReasoningText {
@@ -515,13 +517,10 @@ fn parse_response(value: Value, dsml_healer: &DsmlToolCallHealer) -> Result<Mode
                 content.push(ResponseContent::Text(refusal.clone()));
             }
             for tool_call in &message.tool_calls {
-                if let Some(parsed) = parse_tool_use(tool_call)? {
+                if let Some(parsed) = parse_tool_use(tool_call, stop_reason.as_ref())? {
                     content.push(parsed);
                 }
             }
-        }
-        if let Some(reason) = &choice.finish_reason {
-            stop_reason = Some(parse_finish_reason(reason));
         }
     }
     let content = dsml_healer.heal_response_content(content);
@@ -550,6 +549,7 @@ fn parse_response(value: Value, dsml_healer: &DsmlToolCallHealer) -> Result<Mode
 
 pub(super) fn parse_tool_use(
     value: &OpenAIChatCompletionMessageToolCall,
+    stop_reason: Option<&StopReason>,
 ) -> Result<Option<ResponseContent>> {
     match value.kind.as_str() {
         "function" => {
@@ -561,14 +561,7 @@ pub(super) fn parse_tool_use(
                 !value.id.is_empty() && !function.name.is_empty(),
                 "openai tool call is missing its id or function name"
             );
-            // Some compatible servers omit arguments for a parameterless tool.
-            // Never turn nonempty, malformed arguments into an executable {}.
-            let input = if function.arguments.trim().is_empty() {
-                json!({})
-            } else {
-                serde_json::from_str(&function.arguments)
-                    .context("invalid JSON in openai function call arguments")?
-            };
+            let input = function_arguments::parse(&function.arguments, stop_reason)?;
             Ok(Some(ResponseContent::ToolUse {
                 id: value.id.clone(),
                 name: function.name.clone(),

@@ -463,6 +463,7 @@ impl ChatCompletionStreamState {
     fn ordered_content(
         text: StreamTextBlock,
         tool_calls: BTreeMap<u32, PartialToolCall>,
+        stop_reason: Option<&StopReason>,
     ) -> Result<Vec<ResponseContent>> {
         let mut content = Vec::new();
 
@@ -472,7 +473,7 @@ impl ChatCompletionStreamState {
 
         for tool_call in tool_calls.into_values() {
             let provider_tool_call = tool_call.into_provider_tool_call();
-            if let Some(content_block) = parse_tool_use(&provider_tool_call)? {
+            if let Some(content_block) = parse_tool_use(&provider_tool_call, stop_reason)? {
                 content.push(content_block);
             }
         }
@@ -491,7 +492,11 @@ impl ChatCompletionStreamState {
             dsml_healer,
             ..
         } = self;
-        let content = dsml_healer.heal_response_content(Self::ordered_content(text, tool_calls)?);
+        let content = dsml_healer.heal_response_content(Self::ordered_content(
+            text,
+            tool_calls,
+            finish_reason.as_ref(),
+        )?);
 
         Ok(ModelResponse {
             id: response_id,
