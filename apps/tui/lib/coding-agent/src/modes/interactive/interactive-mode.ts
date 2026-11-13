@@ -709,6 +709,7 @@ export class InteractiveMode {
 	private latestEditorPromptStash: PromptStash | undefined;
 	private pendingSubmittedPromptStash: PromptStash | undefined;
 	private inputSubmissionGeneration = 0;
+	private clipboardPasteGeneration = 0;
 	private inputSubmissionsPending = 0;
 	private pendingPromptStashReleases: { sessionId: string; state: PromptStashState }[] = [];
 	private readonly retainedSubmissionGenerations = new WeakMap<PromptStash, number>();
@@ -2843,6 +2844,7 @@ export class InteractiveMode {
 	}
 
 	private resetCurrentSessionRenderState(options?: { clearPromptStash?: boolean }): void {
+		this.clipboardPasteGeneration++;
 		this.chatContainer.clear();
 		this.shortcutGuideContainer.clear();
 		this.pendingMessagesContainer.clear();
@@ -4226,6 +4228,7 @@ export class InteractiveMode {
 			return;
 		}
 		this.promptStash = this.snapshotPromptStash(text);
+		this.clipboardPasteGeneration++;
 		this.editor.setText("");
 		this.showStatus("Stashed prompt");
 	}
@@ -4241,6 +4244,7 @@ export class InteractiveMode {
 		if (this.promptStashState?.queuedStashes?.length === 0) this.promptStashState.queuedStashes = undefined;
 		const canRestorePasteSnapshot =
 			stash.pasteSnapshot === undefined || this.editor.restorePasteSnapshot !== undefined;
+		this.clipboardPasteGeneration++;
 		this.editor.setText(canRestorePasteSnapshot ? stash.text : (stash.expandedText ?? stash.text));
 		if (stash.pasteSnapshot && this.editor.restorePasteSnapshot) {
 			this.editor.restorePasteSnapshot(stash.pasteSnapshot);
@@ -4338,9 +4342,19 @@ export class InteractiveMode {
 	}
 
 	private async handleClipboardImagePaste(): Promise<void> {
+		const editor = this.editor;
+		const submissionGeneration = this.inputSubmissionGeneration;
+		const sessionGeneration = this.sessionEventGeneration;
+		const pasteGeneration = this.clipboardPasteGeneration;
+		// Clipboard access and image conversion can finish after a send, session
+		// replacement, or shutdown. Never attach an old paste to the new draft.
+		const isCurrent = () => !this.activityStopped && !this.isShuttingDown && this.editor === editor &&
+			this.inputSubmissionGeneration === submissionGeneration &&
+			this.sessionEventGeneration === sessionGeneration &&
+			this.clipboardPasteGeneration === pasteGeneration;
 		try {
 			const image = await readClipboardImage();
-			if (!image) {
+			if (!image || !isCurrent()) {
 				return;
 			}
 
@@ -4353,6 +4367,7 @@ export class InteractiveMode {
 				mimeType: image.mimeType,
 			};
 			const resized = await resizeImage(raw);
+			if (!isCurrent()) return;
 			const attachment: ImageContent = resized
 				? { type: "image", data: resized.data, mimeType: resized.mimeType }
 				: raw;
@@ -4638,6 +4653,7 @@ export class InteractiveMode {
 			await this.renderInitialMessages();
 			if (generation !== this.treeNavigationRenderGeneration || sessionGeneration !== this.sessionEventGeneration) return;
 			if (result.editorText && !this.editor.getText().trim()) {
+				this.clipboardPasteGeneration++;
 				this.editor.setText(result.editorText);
 			}
 			this.showStatus("Navigated to selected point");
@@ -7516,6 +7532,7 @@ export class InteractiveMode {
 	}
 
 	private setEditorTextFromQueueSelection(text: string): void {
+		this.clipboardPasteGeneration++;
 		this.isApplyingQueueSelectionText = true;
 		try {
 			this.editor.setText(text);
@@ -7692,6 +7709,7 @@ export class InteractiveMode {
 	}
 
 	private clearInputBar(): void {
+		this.clipboardPasteGeneration++;
 		this.clearEscapeRepeat();
 		this.clearCtrlCExitHint({ render: false });
 		// Leaving browse mode restores the stashed draft instead of arming an

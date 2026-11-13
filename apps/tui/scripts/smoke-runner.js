@@ -3,13 +3,13 @@ import { spawnSync } from "node:child_process";
 import { copyFileSync, existsSync, mkdtempSync, readFileSync, rmSync, writeFileSync } from "node:fs";
 import { homedir, tmpdir } from "node:os";
 import { dirname, join, resolve } from "node:path";
-import { fileURLToPath } from "node:url";
+import { fileURLToPath, pathToFileURL } from "node:url";
 import { setTimeout as sleep } from "node:timers/promises";
 import { scheduledDelivered, rpcSucceeded, turnOutcome } from "./smoke-outcomes.js";
 
 const repo = resolve(dirname(fileURLToPath(import.meta.url)), "../../..");
 const scenario = process.argv[2] || "T1";
-const scenarios = ["T1", "T2", "T3", "goal", "bash", "agents", "schedule", "heartbeat", "activity", "effort", "theme", "fork", "resume"];
+const scenarios = ["T1", "T2", "T3", "goal", "bash", "agents", "schedule", "heartbeat", "activity", "effort", "theme", "fork", "clipboard", "resume"];
 const tmux = process.env.DEVO_TMUX_BIN || (process.platform === "win32" ? "psmux" : "tmux");
 const binary = resolve(process.env.DEVO_BIN || process.env.DEVO_SERVER_BIN
   || join(repo, "target/debug", process.platform === "win32" ? "devo.exe" : "devo"));
@@ -56,11 +56,34 @@ async function run() {
     const settingsPath = join(sourceHome, "settings.json");
     const settings = !(["effort", "theme"].includes(scenario)) && existsSync(settingsPath) ? JSON.parse(readFileSync(settingsPath, "utf8")) : {};
     writeFileSync(join(home, "settings.json"), JSON.stringify({ ...settings, ...(scenario === "theme" ? { theme: "dark" } : {}), onboardingShown: true }));
+    if (scenario === "clipboard") {
+      if (process.platform === "win32") throw new Error("clipboard substitute smoke currently requires Unix tmux");
+      const quote = value => "'" + value.replaceAll("'", "'\\''") + "'";
+      const loader = pathToFileURL(join(repo, "apps/tui/node_modules/tsx/dist/loader.mjs"));
+      const preload = pathToFileURL(join(repo, "apps/tui/scripts/clipboard-smoke-preload.mjs"));
+      // NODE_OPTIONS disallows the test-module-mocks flag. Scope a node wrapper
+      // to this tmux child instead. Load tsx directly so its CLI subprocess
+      // cannot drop our explicit test flags; CLI/server/TUI sources stay unchanged.
+      writeFileSync(join(home, "node"), `#!/bin/sh\ncase "$1" in */tsx/dist/cli.mjs) shift ;; esac\nexec ${quote(process.execPath)} --experimental-test-module-mocks --import=${quote(String(loader))} --import=${quote(String(preload))} "$@"\n`, { mode: 0o700 });
+    }
     mux(["new-session", "-d", "-s", session, "-c", repo, "-x", "100", "-y", "30",
       "-e", `DEVO_HOME=${home}`, "-e", `DEVO_CODING_AGENT_DIR=${home}`,
       "-e", `PRIME_AGENT_CODING_AGENT_DIR=${home}`, "-e", "DEVO_PROTOCOL_TRACE=1",
-      "-e", `DEVO_PROTOCOL_TRACE_FILE=${trace}`, "--", binary]);
+      "-e", `DEVO_PROTOCOL_TRACE_FILE=${trace}`,
+      ...(scenario === "clipboard" ? [
+        "-e", `DEVO_CLIPBOARD_SMOKE_DIR=${home}`,
+        "-e", `PATH=${home}:${process.env.PATH}`,
+      ] : []), "--", ...(scenario === "clipboard" ? ["env", `PATH=${home}:${process.env.PATH}`] : []), binary]);
     ownedSession = true;
+    if (scenario === "clipboard") {
+      // A multi-argument tmux command executes directly, avoiding login-shell
+      // startup files replacing PATH and silently bypassing the node wrapper.
+      const deadline = Date.now() + 15000;
+      while (!existsSync(join(home, "preload.ready"))) {
+        if (Date.now() > deadline) throw new Error("Clipboard smoke node preload did not start");
+        await sleep(100);
+      }
+    }
 
     function records() {
       if (!existsSync(trace)) return [];
@@ -91,6 +114,62 @@ async function run() {
     console.log("=== boot ===\n" + pane);
     switch (scenario) {
       case "T1": break;
+      case "clipboard": {
+        const screen = () => mux(["capture-pane", "-t", session, "-p"]).stdout;
+        let requestId = 0;
+        async function begin(stage) {
+          const id = ++requestId;
+          writeFileSync(join(home, "request.json"), JSON.stringify({ id, stage }));
+          mux(["send-keys", "-t", session, process.platform === "win32" ? "M-v" : "C-v"]);
+          await waitFor(`clipboard ${stage} started`, () => existsSync(join(home, `${id}-${stage}.started`)));
+          return async () => {
+            writeFileSync(join(home, `${id}-${stage}.release`), "release");
+            await waitFor(`clipboard ${stage} finished`, () => existsSync(join(home, `${id}-${stage}.finished`)));
+            await sleep(400); // Let the resolved promise and scheduled render finish.
+          };
+        }
+        const start = records().length;
+        await send("clipboard-smoke seed: say hello briefly.");
+        await waitFor("clipboard seed turn", events => turnOutcome(events.slice(start), "completed"));
+        const originalSession = records().find(event => event.method === "turn/started")?.payload?.params?.turn?.sessionId;
+        if (!originalSession) throw new Error("Missing original session identity");
+        for (const stage of ["read", "resize"]) {
+          for (const action of ["send", "clone", "resume"]) {
+            const release = await begin(stage);
+            const offset = records().length;
+            if (action === "send") {
+              await send(`clipboard-${stage}: say hello briefly.`);
+              await waitFor("clipboard intervening turn", events => turnOutcome(events.slice(offset), "completed"));
+            } else {
+              await send(action === "clone" ? "/clone" : `/resume ${originalSession}`);
+              // RPC success precedes transcript replacement. Release only after
+              // its final UI status, or stale insertion could be hidden by reset.
+              await waitFor(`clipboard ${action}`, events =>
+                rpcSucceeded(events.slice(offset), action === "clone" ? "session/fork" : "session/resume") &&
+                screen().includes(action === "clone" ? "Cloned to new session" : "Resumed session"));
+            }
+            await release();
+            // A later real keyboard/render event fences the resolved completion;
+            // absence alone on an old captured frame would be a false positive.
+            const probe = `clipboard-probe-${stage}-${action}`;
+            mux(["send-keys", "-t", session, "-l", probe]);
+            await waitFor("post-completion editor frame", () => screen().includes(probe));
+            if (/\[image #\d+\]/.test(screen())) throw new Error(`Late ${stage} paste leaked after ${action}`);
+            mux(["send-keys", "-t", session, "C-u"]);
+            await waitFor("probe cleared", () => !screen().includes(probe));
+            console.log(`clipboard substitute ${stage}/${action}: no stale marker`);
+          }
+        }
+        for (const stage of ["read", "resize"]) {
+          const release = await begin(stage);
+          await release();
+          await waitFor(`normal ${stage} paste`, () => /\[image #\d+\]/.test(screen()));
+          console.log(`=== normal clipboard substitute ${stage} ===\n${screen()}`);
+          mux(["send-keys", "-t", session, "C-u"]);
+          await waitFor("normal paste cleared", () => !/\[image #\d+\]/.test(screen()));
+        }
+        break;
+      }
       case "resume": {
         const screen = () => mux(["capture-pane", "-t", session, "-p"]).stdout;
         const seedStart = records().length;
