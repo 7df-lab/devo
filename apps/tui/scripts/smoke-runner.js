@@ -1,3 +1,4 @@
+import { startQueueOutputProvider, checkQueueOutput } from "./queue-output-smoke.mjs";
 import { startSubagentRosterProvider, checkSubagentRoster } from "./subagent-roster-smoke.mjs";
 /** Product TTY smoke: assert outcomes without changing product behavior. */
 import { createRefineSmokeProvider } from "./refine-smoke-provider.mjs";
@@ -17,7 +18,7 @@ import { startWaitTimerProvider, checkWaitTimer } from "./wait-timer-smoke.mjs";
 
 const repo = resolve(dirname(fileURLToPath(import.meta.url)), "../../..");
 const scenario = process.argv[2] || "T1";
-const scenarios = ["wait-timer", "subagent-roster", "resize-status", "T1", "T2", "T3", "goal", "bash", "agents", "schedule", "heartbeat", "activity", "effort", "theme", "fork", "clipboard", "resume", "scheduled-timezone", "scheduled-pending", "export", "share", "refine", "steering", "abort-history"];
+const scenarios = ["queue-output", "wait-timer", "subagent-roster", "resize-status", "T1", "T2", "T3", "goal", "bash", "agents", "schedule", "heartbeat", "activity", "effort", "theme", "fork", "clipboard", "resume", "scheduled-timezone", "scheduled-pending", "export", "share", "refine", "steering", "abort-history"];
 const preloaded = ["clipboard", "scheduled-pending"].includes(scenario);
 const tmux = process.env.DEVO_TMUX_BIN || (process.platform === "win32" ? "psmux" : "tmux");
 const binary = resolve(process.env.DEVO_BIN || process.env.DEVO_SERVER_BIN
@@ -48,6 +49,7 @@ async function run() {
   let steeringRequests = 0;
   let resizeProvider;
   let waitTimerProvider;
+  let queueOutputProvider;
   let subagentRosterProvider;
   let ownedSession = false;
   let pane = "";
@@ -129,6 +131,7 @@ async function run() {
     }
     if (scenario === "subagent-roster") subagentRosterProvider = await startSubagentRosterProvider(home);
     if (scenario === "resize-status") resizeProvider = await startResizeProvider(home);
+    if (scenario === "queue-output") queueOutputProvider = await startQueueOutputProvider(home);
     if (scenario === "wait-timer") waitTimerProvider = await startWaitTimerProvider(home);
     const settingsPath = join(sourceHome, "settings.json");
     const settings = !(["effort", "theme"].includes(scenario)) && existsSync(settingsPath) ? JSON.parse(readFileSync(settingsPath, "utf8")) : {};
@@ -199,6 +202,9 @@ async function run() {
     console.log("=== boot ===\n" + pane);
     switch (scenario) {
       case "T1": break;
+      case "queue-output":
+        await checkQueueOutput({ provider: queueOutputProvider, mux, session, send, waitFor, records, rpcSucceeded });
+        break;
       case "refine": {
         const completed = (events, type) => events.some(r => r.method === "item/completed" && r.payload?.params?.item?.item?.type === type);
         await send("/refine");
@@ -655,6 +661,7 @@ async function run() {
   } finally {
     resizeProvider?.close();
     waitTimerProvider?.close();
+    queueOutputProvider?.close();
     abortServer?.closeAllConnections();
     abortServer?.close();
     if (ownedSession) mux(["kill-session", "-t", session], false);

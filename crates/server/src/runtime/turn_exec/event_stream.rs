@@ -581,6 +581,32 @@ async fn handle_tool_use_start(
     event_tool_registry: &Arc<devo_core::tools::ToolRegistry>,
 ) {
     tool_names_by_id.insert(id.clone(), name.clone());
+    // The provider may emit prose after its early empty-input tool start.
+    // Settle that prose before the full-input refresh as well as a new call.
+    if let (Some(item_id), Some(item_seq)) = (reasoning_item_id.take(), reasoning_item_seq.take()) {
+        complete_reasoning_item(
+            runtime,
+            session_id,
+            turn_id,
+            item_id,
+            item_seq,
+            reasoning_text.clone(),
+        )
+        .await;
+        reasoning_text.clear();
+    }
+    if let (Some(item_id), Some(item_seq)) = (assistant_item_id.take(), assistant_item_seq.take()) {
+        complete_assistant_item(
+            runtime,
+            session_id,
+            turn_id,
+            item_id,
+            item_seq,
+            assistant_text.clone(),
+        )
+        .await;
+        assistant_text.clear();
+    }
     if let Some(mut pending) = pending_tool_calls.remove(&id) {
         let input_is_empty = |value: &serde_json::Value| {
             value.is_null() || matches!(value, serde_json::Value::Object(map) if map.is_empty())
@@ -618,30 +644,6 @@ async fn handle_tool_use_start(
         }
         pending_tool_calls.insert(id, pending);
         return;
-    }
-    if let (Some(item_id), Some(item_seq)) = (reasoning_item_id.take(), reasoning_item_seq.take()) {
-        complete_reasoning_item(
-            runtime,
-            session_id,
-            turn_id,
-            item_id,
-            item_seq,
-            reasoning_text.clone(),
-        )
-        .await;
-        reasoning_text.clear();
-    }
-    if let (Some(item_id), Some(item_seq)) = (assistant_item_id.take(), assistant_item_seq.take()) {
-        complete_assistant_item(
-            runtime,
-            session_id,
-            turn_id,
-            item_id,
-            item_seq,
-            assistant_text.clone(),
-        )
-        .await;
-        assistant_text.clear();
     }
     let display_kind = ToolDisplayKind::for_tool_name(&name);
     let command = command_display_from_input(&name, &input);
@@ -997,3 +999,7 @@ mod usage_delivery_tests {
         sender.await.unwrap();
     }
 }
+
+#[cfg(test)]
+#[path = "item_boundary_tests.rs"]
+mod item_boundary_tests;
