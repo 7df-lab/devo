@@ -141,12 +141,13 @@ async fn partial_content_or_tool_start_timeout_is_fatal_not_replayed() {
 
 #[tokio::test(start_paused = true)]
 async fn ongoing_output_resets_idle_deadline_without_overall_limit() {
-    let events = async_stream::stream! {
-        for _ in 0..4 {
-            tokio::time::sleep(Duration::from_secs(250)).await;
-            yield Ok(StreamEvent::TextDelta { index: 0, text: "x".into() });
-        }
-    };
+    let events = stream::iter(0..4).then(|_| async {
+        tokio::time::sleep(Duration::from_secs(250)).await;
+        Ok(StreamEvent::TextDelta {
+            index: 0,
+            text: "x".into(),
+        })
+    });
     let start = tokio::time::Instant::now();
     let result =
         consume_provider_stream(Box::pin(events), &mut session(), &None, None, context()).await;
@@ -273,12 +274,13 @@ async fn stream_creation_and_first_event_share_one_deadline() {
 
 #[tokio::test(start_paused = true)]
 async fn slow_local_callbacks_do_not_consume_the_next_idle_budget() {
-    let events = async_stream::stream! {
-        for _ in 0..2 {
-            tokio::time::sleep(Duration::from_secs(250)).await;
-            yield Ok(StreamEvent::TextDelta { index: 0, text: "x".into() });
-        }
-    };
+    let events = stream::iter(0..2).then(|_| async {
+        tokio::time::sleep(Duration::from_secs(250)).await;
+        Ok(StreamEvent::TextDelta {
+            index: 0,
+            text: "x".into(),
+        })
+    });
     let callback: EventCallback = std::sync::Arc::new(|event| {
         Box::pin(async move {
             if matches!(event, QueryEvent::TextDelta(_)) {
