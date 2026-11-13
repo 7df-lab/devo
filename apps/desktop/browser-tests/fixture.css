@@ -1,0 +1,5 @@
+@import "../src/renderer/index.css";
+
+/* Vite runs from browser-tests, unlike the Desktop build. Include the real
+   renderer sources so Tailwind emits their utilities, not just fixture classes. */
+@source "../src/renderer";
