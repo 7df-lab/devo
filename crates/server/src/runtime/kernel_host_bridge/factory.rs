@@ -14,6 +14,7 @@ use devo_safety::ResourceKind;
 mod effects;
 mod files;
 mod store;
+mod store_lock;
 
 #[derive(Deserialize)]
 #[serde(deny_unknown_fields)]
