@@ -1,4 +1,5 @@
 /** Product TTY smoke: assert outcomes without changing product behavior. */
+import { createRefineSmokeProvider } from "./refine-smoke-provider.mjs";
 import { spawnSync } from "node:child_process";
 import { copyFileSync, existsSync, mkdtempSync, readFileSync, rmSync, writeFileSync } from "node:fs";
 import { homedir, tmpdir } from "node:os";
@@ -9,7 +10,7 @@ import { scheduledDelivered, rpcSucceeded, turnOutcome } from "./smoke-outcomes.
 
 const repo = resolve(dirname(fileURLToPath(import.meta.url)), "../../..");
 const scenario = process.argv[2] || "T1";
-const scenarios = ["T1", "T2", "T3", "goal", "bash", "agents", "schedule", "heartbeat", "activity", "effort", "theme", "fork", "clipboard", "resume", "scheduled-timezone", "scheduled-pending", "export", "share"];
+const scenarios = ["T1", "T2", "T3", "goal", "bash", "agents", "schedule", "heartbeat", "activity", "effort", "theme", "fork", "clipboard", "resume", "scheduled-timezone", "scheduled-pending", "export", "share", "refine"];
 const preloaded = ["clipboard", "scheduled-pending"].includes(scenario);
 const tmux = process.env.DEVO_TMUX_BIN || (process.platform === "win32" ? "psmux" : "tmux");
 const binary = resolve(process.env.DEVO_BIN || process.env.DEVO_SERVER_BIN
@@ -36,6 +37,7 @@ async function run() {
   const sourceHome = process.env.DEVO_HOME || join(homedir(), ".devo");
   let ownedSession = false;
   let pane = "";
+  let refineProvider;
   try {
     for (const name of ["auth.json", "providers.json", "config.toml"]) {
       if (!(["effort", "theme"].includes(scenario)) && existsSync(join(sourceHome, name))) copyFileSync(join(sourceHome, name), join(home, name));
@@ -53,6 +55,13 @@ async function run() {
           } },
         } },
       }));
+    }
+    if (scenario === "refine") {
+      refineProvider = await createRefineSmokeProvider();
+      writeFileSync(join(home, "providers.json"), JSON.stringify({ model: "deepseek/deepseek-v4-flash", provider: { deepseek: {
+        credential: "deepseek", enabled: true, base_url: `http://127.0.0.1:${refineProvider.port}`, wire_api: "openai_chat_completions",
+      } } }));
+      writeFileSync(join(home, "auth.json"), JSON.stringify({ deepseek: { type: "api_key", key: "local-fixture-only" } }), { mode: 0o600 });
     }
     const settingsPath = join(sourceHome, "settings.json");
     const settings = !(["effort", "theme"].includes(scenario)) && existsSync(settingsPath) ? JSON.parse(readFileSync(settingsPath, "utf8")) : {};
@@ -123,6 +132,24 @@ async function run() {
     console.log("=== boot ===\n" + pane);
     switch (scenario) {
       case "T1": break;
+      case "refine": {
+        const completed = (events, type) => events.some(r => r.method === "item/completed" && r.payload?.params?.item?.item?.type === type);
+        await send("/refine");
+        await waitFor("idle refine no-op", (events, text) => refineProvider.calls === 1 && completed(events, "refinement") && text.includes("no changes needed"));
+        const failedStart = records().length;
+        await send("/refine");
+        await waitFor("refine failure visible", (events, text) => refineProvider.calls === 2 && completed(events.slice(failedStart), "warning") && text.includes("was not applied"));
+        await send("Hold this turn for deferred refine.");
+        await waitFor("held active turn", events => refineProvider.turnStarted && events.some(r => r.method === "turn/started"));
+        const queuedStart = records().length;
+        await send("/refine");
+        await waitFor("deferred refine admitted", events => rpcSucceeded(events.slice(queuedStart), "session/refine/run"));
+        if (refineProvider.calls !== 2) throw new Error("Refine ran before the current turn ended");
+        refineProvider.releaseTurn();
+        await waitFor("deferred refine result", events => refineProvider.calls === 3 && completed(events.slice(queuedStart), "refinement"));
+        console.log("refine: idle no-op, explicit failure, deferred model execution verified");
+        break;
+      }
       case "share": {
         await send("share-seed: say hello briefly.");
         await waitFor("share seed", events => turnOutcome(events, "completed"));
@@ -464,6 +491,7 @@ async function run() {
     throw error;
   } finally {
     if (ownedSession) mux(["kill-session", "-t", session], false);
+    refineProvider?.close();
     // The target is our own mkdtemp child, never the source credential folder.
     if (dirname(home) !== resolve(tmpdir())) throw new Error("Unexpected smoke home location");
     // The killed product can flush session files for a few beats after

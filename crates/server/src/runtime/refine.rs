@@ -19,7 +19,7 @@ use devo_harness::{
     RefineEditOp, RefineProposal, append_refinement, apply_proposal_re_read, rollback_refinement,
     should_auto_refine,
 };
-use devo_protocol::native::item::{Item, ItemEnvelope, ItemState};
+use devo_protocol::native::item::Item;
 use devo_protocol::native::rpc_session::{SessionRefineRunParams, SessionRefineRunResult};
 
 /// Last-write-wins pending refine requests keyed by session id (in-memory).
@@ -501,11 +501,11 @@ impl ServerRuntime {
             Ok(Ok(path)) => path,
             Ok(Err(error)) => {
                 tracing::warn!(%error, "refine apply skipped: harness unavailable");
-                return None;
+                return Some(AppliedRefine::failed(&pending, error));
             }
             Err(error) => {
                 tracing::warn!(%error, "refine initialization worker failed");
-                return None;
+                return Some(AppliedRefine::failed(&pending, error.to_string()));
             }
         };
         let proposal = if pending.rollback_id.is_some() {
@@ -531,6 +531,7 @@ impl ServerRuntime {
             return None;
         }
         let session_dir = session_dir.to_path_buf();
+        let failed_pending = pending.clone();
         // Planning holds no store lock. The blocking worker acquires the shared
         // transaction lock only for re-read/drift-check/apply/atomic commit.
         match tokio::task::spawn_blocking(move || {
@@ -541,7 +542,7 @@ impl ServerRuntime {
             Ok(applied) => applied,
             Err(error) => {
                 tracing::warn!(%error, "refine apply worker failed");
-                None
+                Some(AppliedRefine::failed(&failed_pending, error.to_string()))
             }
         }
     }
@@ -650,7 +651,14 @@ impl ServerRuntime {
                 }
             }
         };
-        let result = schedule_refine_run_inner(
+        if session_dir.is_none() {
+            return self.error_response(
+                request_id,
+                ProtocolErrorCode::InvalidParams,
+                "Refinement requires a persistent session directory",
+            );
+        }
+        let mut result = schedule_refine_run_inner(
             &params.session_id,
             &params,
             is_root,
@@ -658,8 +666,21 @@ impl ServerRuntime {
             /*autonomous*/ false,
             trajectory_evidence,
         );
+        let idle = self.runtime_active_turn_id(legacy_id).await.is_none();
+        if result.scheduled {
+            result.note = Some(
+                if plan_mode {
+                    "Refinement queued until Plan Mode ends."
+                } else if idle {
+                    "Refinement started; the result will appear when it finishes."
+                } else {
+                    "Refinement queued until the current turn ends."
+                }
+                .into(),
+            );
+        }
         if result.scheduled
-            && self.runtime_active_turn_id(legacy_id).await.is_none()
+            && idle
             && let Some(session_dir) = session_dir
         {
             // The promised contract is "applies immediately when idle", but
@@ -704,9 +725,6 @@ impl ServerRuntime {
         let Some(handle) = self.session(session_id).await else {
             return;
         };
-        let Some(rollout_path) = handle.rollout_path().await.flatten() else {
-            return;
-        };
         let resume_snapshot = handle.resume_snapshot().await;
         let native_session_id = if let Some(snap) = resume_snapshot.as_ref() {
             snap.summary.native.id
@@ -723,22 +741,17 @@ impl ServerRuntime {
                 TurnId::new()
             });
         let seq = handle.allocate_item_seq().await.unwrap_or(0);
-        let now = Utc::now();
-        let envelope = ItemEnvelope {
-            id: devo_protocol::native::ids::ItemId::new(),
-            session_id: native_session_id,
-            turn_id: native_turn_id,
-            seq,
-            revision: 1,
-            created_at: now,
-            updated_at: now,
-            state: ItemState::Completed,
-            item: applied.native_item(),
-            parent_id: None,
-        };
+        // Use the normal item transaction so the result is on the active
+        // transcript path, in the actor snapshot, durable, and broadcast.
         if let Err(error) = self
-            .rollout_store
-            .append_canonical_item_at(&rollout_path, envelope)
+            .complete_native_item_checked(
+                native_session_id,
+                native_turn_id,
+                devo_protocol::native::ids::ItemId::new(),
+                seq,
+                applied.native_item(),
+            )
+            .await
         {
             tracing::warn!(%error, "failed to persist Item::Refinement");
         }

@@ -425,3 +425,76 @@ fn trajectory_cannot_be_global_autonomous_or_combined_with_rollback() {
             .is_empty()
     );
 }
+
+#[tokio::test]
+async fn idle_manual_refine_broadcasts_failure_instead_of_silent_noop() {
+    let temp = tempfile::TempDir::new().unwrap();
+    let runtime = crate::test_support::TestRuntime::noop().runtime(temp.path());
+    let (out, mut rx) = super::super::outbound::test_outbound_channel(128);
+    let connection = runtime
+        .register_connection(ClientTransportKind::Stdio, out)
+        .await;
+    runtime
+        .handle_acp_initialize(
+            connection,
+            Some(json!(1)),
+            json!({
+                "protocolVersion": 1, "clientCapabilities": { "terminal": false },
+                "_meta": { "devo": { "protocol": "native" } }
+            }),
+        )
+        .await;
+    let created = runtime.handle_incoming(connection, json!({
+        "id": 2, "method": "session/new", "params": { "cwd": temp.path(), "idempotencyKey": "refine-idle" }
+    })).await.unwrap();
+    let session_id: SessionId =
+        serde_json::from_value(created["result"]["session"]["id"].clone()).unwrap();
+    runtime
+        .subscribe_connection_to_session(connection, session_id, None)
+        .await;
+    let response = runtime
+        .handle_incoming(
+            connection,
+            json!({
+                "id": 3, "method": "session/refine/run", "params": { "sessionId": session_id }
+            }),
+        )
+        .await
+        .unwrap();
+    assert_eq!(response["result"]["scheduled"], json!(true));
+    let notification = tokio::time::timeout(std::time::Duration::from_secs(10), async {
+        loop {
+            let notification = rx.recv().await.expect("connection open");
+            if notification["method"] == "item/completed"
+                && notification["params"]["item"]["item"]["code"] == "refinement_not_applied"
+            {
+                break notification;
+            }
+        }
+    })
+    .await
+    .expect("idle refine must publish outcome without a user turn");
+    assert_eq!(
+        notification["params"]["item"]["sessionId"],
+        json!(session_id)
+    );
+    assert!(!peek_pending_refine(&session_id));
+    let result_id = notification["params"]["item"]["id"].clone();
+    let history = runtime
+        .handle_incoming(
+            connection,
+            json!({
+                "id": 4, "method": "session/items/list", "params": { "sessionId": session_id }
+            }),
+        )
+        .await
+        .unwrap();
+    assert!(
+        history["result"]["data"]
+            .as_array()
+            .unwrap()
+            .iter()
+            .any(|item| item["id"] == result_id),
+        "refine result must survive history projection: {history}"
+    );
+}

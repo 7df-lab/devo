@@ -328,6 +328,24 @@ export function nativeItemToAgentMessages(envelope: unknown): AgentMessageLike[]
     ];
   }
 
+  // Refinement is auxiliary work, not an assistant turn. Keep both successful
+  // no-op results and failures visible without touching the active stream.
+  if (type === "refinement" || (type === "warning" && item.code === "refinement_not_applied")) {
+    const failed = type === "warning";
+    const changes = Array.isArray(item.changes) ? item.changes.map(String) : [];
+    const summary = failed
+      ? String(item.message ?? "Refinement failed; no edits were applied.")
+      : `Refinement complete${changes.length ? ` (${changes.length} changes)` : ": no changes needed"}. ${String(item.summary ?? "")}`;
+    return [{
+      role: "custom",
+      customType: "native_refinement_result",
+      content: summary,
+      display: true,
+      details: { refinementId: item.refinementId, changes, failed },
+      timestamp: ts,
+    }];
+  }
+
   // RLM namespace state is a durable, informational notice rendered by the
   // existing injected-message component, not terminal warning chrome.
   if (type === "warning") {
