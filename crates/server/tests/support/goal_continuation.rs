@@ -227,6 +227,9 @@ impl ModelProviderSDK for FailingProvider {
         _request: ModelRequest,
     ) -> Result<Pin<Box<dyn Stream<Item = Result<StreamEvent>> + Send>>> {
         self.requests.fetch_add(1, Ordering::SeqCst);
+        // Exercise completion accounting with a nonzero whole-second duration.
+        // Fast errors skip accounting and cannot reveal its updated_at race.
+        tokio::time::sleep(Duration::from_millis(1100)).await;
         Err(anyhow::anyhow!(self.message.clone()))
     }
 

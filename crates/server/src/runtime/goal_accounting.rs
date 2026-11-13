@@ -38,7 +38,8 @@ impl ServerRuntime {
         {
             return;
         }
-        let previous_status = apply_goal_usage_delta(goal, token_delta, duration_delta_seconds);
+        let previous_status =
+            apply_goal_usage_delta(goal, turn, token_delta, duration_delta_seconds);
         let durable_goal = goal.clone();
         drop(stores);
 
@@ -59,7 +60,11 @@ impl ServerRuntime {
         if previous_status != durable_goal.status {
             if let Err(error) = self
                 .goal_durable_store
-                .append_status_changed(&durable_goal, previous_status, None)
+                .append_status_changed(
+                    &durable_goal,
+                    previous_status,
+                    durable_goal.blocker_summary.clone(),
+                )
                 .await
             {
                 tracing::warn!(%session_id, %turn_id, error = %error, "failed to persist goal budget status record");
@@ -97,10 +102,23 @@ fn turn_duration_seconds(turn: &devo_protocol::native::turn::Turn) -> u64 {
 
 fn apply_goal_usage_delta(
     goal: &mut crate::goal::Goal,
+    turn: &devo_protocol::native::turn::Turn,
     token_delta: i64,
     duration_delta_seconds: u64,
 ) -> GoalStatus {
     let previous_status = goal.status;
+    // Accounting advances updated_at too. Apply failure suppression before that
+    // bookkeeping update can masquerade as an explicit resume after the failure.
+    // A newer owner change (or a non-active goal) must still win.
+    if goal.status == GoalStatus::Active
+        && turn.status == devo_protocol::native::turn::TurnStatus::Failed
+        && turn.completed_at.unwrap_or(turn.started_at) > goal.updated_at
+    {
+        goal.status = GoalStatus::Paused;
+        goal.blocker_summary = Some(super::goal_continuation::goal_failure_blocker_summary(
+            turn.error.as_ref().map(|error| error.message.as_str()),
+        ));
+    }
     if token_delta > 0 {
         goal.usage.record_tokens(token_delta);
     }
@@ -127,6 +145,77 @@ mod tests {
         .expect("goal")
     }
 
+    fn completed_turn(
+        status: devo_protocol::native::turn::TurnStatus,
+        completed_at: chrono::DateTime<Utc>,
+    ) -> devo_protocol::native::turn::Turn {
+        devo_protocol::native::turn::Turn {
+            id: TurnId::new(),
+            session_id: SessionId::new(),
+            sequence: 1,
+            kind: devo_protocol::native::turn::TurnKind::GoalContinuation,
+            status,
+            model: devo_protocol::native::model::ModelBinding {
+                provider: "test".into(),
+                model: "test".into(),
+                variant: None,
+                reasoning_effort: None,
+            },
+            collaboration_mode: None,
+            started_at: completed_at - chrono::Duration::seconds(2),
+            completed_at: Some(completed_at),
+            error: Some(devo_protocol::native::error::AgentError::new(
+                "PROVIDER_ERROR",
+                "400 Bad Request",
+            )),
+            usage: None,
+        }
+    }
+
+    #[test]
+    fn failed_turn_accounting_pauses_before_advancing_updated_at() {
+        let mut goal = goal_with_budget(100);
+        let completed_at = goal.updated_at + chrono::Duration::seconds(1);
+        let turn = completed_turn(
+            devo_protocol::native::turn::TurnStatus::Failed,
+            completed_at,
+        );
+        let previous = apply_goal_usage_delta(&mut goal, &turn, 0, 2);
+        assert_eq!(previous, GoalStatus::Active);
+        assert_eq!(goal.status, GoalStatus::Paused);
+        assert_eq!(goal.usage.time_used_seconds, 2);
+        assert_eq!(
+            goal.blocker_summary,
+            Some(
+                super::super::goal_continuation::goal_failure_blocker_summary(Some(
+                    "400 Bad Request"
+                ))
+            )
+        );
+    }
+
+    #[test]
+    fn failed_turn_accounting_preserves_newer_owner_resume_and_inactive_status() {
+        let mut goal = goal_with_budget(100);
+        let turn = completed_turn(
+            devo_protocol::native::turn::TurnStatus::Failed,
+            goal.updated_at - chrono::Duration::seconds(1),
+        );
+        apply_goal_usage_delta(&mut goal, &turn, 3, 2);
+        assert_eq!(goal.status, GoalStatus::Active);
+        assert_eq!(goal.usage.tokens_used, 3);
+        for status in [
+            GoalStatus::Paused,
+            GoalStatus::Canceled,
+            GoalStatus::Completed,
+        ] {
+            goal.status = status;
+            goal.updated_at = turn.started_at;
+            apply_goal_usage_delta(&mut goal, &turn, 0, 2);
+            assert_eq!(goal.status, status);
+        }
+    }
+
     #[test]
     fn goal_token_delta_counts_non_cached_input_and_output() {
         let usage = devo_protocol::native::usage::TurnUsage {
@@ -150,7 +239,13 @@ mod tests {
         goal.usage.tokens_used = 75;
 
         let previous_status = apply_goal_usage_delta(
-            &mut goal, /*token_delta*/ 25, /*duration_delta_seconds*/ 3,
+            &mut goal,
+            &completed_turn(
+                devo_protocol::native::turn::TurnStatus::Completed,
+                Utc::now(),
+            ),
+            /*token_delta*/ 25,
+            /*duration_delta_seconds*/ 3,
         );
 
         assert_eq!(previous_status, GoalStatus::Active);
