@@ -99,11 +99,21 @@ async fn plan_stream_queue_admission_keeps_prose_items_unique_and_complete() -> 
         });
         let (runtime, session, connection, mut receiver) =
             fixture_with_provider(home.path(), provider.clone()).await?;
+        let snapshot = runtime
+            .handle_incoming(
+                connection,
+                json!({"id": 30, "method": "session/read", "params": {"sessionId": session}}),
+            )
+            .await
+            .context("read session version")?;
+        let version = snapshot["result"]["session"]["version"]
+            .as_u64()
+            .context("session version")?;
         let configured = runtime
             .handle_incoming(
                 connection,
                 json!({"id": 3, "method": "session/metadata/update", "params": {
-                    "sessionId": session, "settings": {"mode": "plan"}
+                    "sessionId": session, "expectedVersion": version, "settings": {"mode": "plan"}
                 }}),
             )
             .await
