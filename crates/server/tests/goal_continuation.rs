@@ -364,7 +364,19 @@ async fn provider_400_tool_call_adjacency_failure_pauses_goal_without_looping() 
         "goal-provider-failure",
     )
     .await?;
-    collect_until_turn_completed(&mut notifications_rx).await?;
+    let notifications = collect_until_turn_completed(&mut notifications_rx).await?;
+    let turn: devo_protocol::native::turn::Turn = serde_json::from_value(
+        notifications
+            .last()
+            .context("turn/completed notification")?["params"]["turn"]
+            .clone(),
+    )?;
+    assert_eq!(turn.status, devo_protocol::native::turn::TurnStatus::Failed);
+    assert!((turn.completed_at.context("completion time")? - turn.started_at).num_seconds() >= 1);
+    assert!(
+        turn.usage.is_some(),
+        "duration accounting needs terminal usage"
+    );
     // turn/completed precedes the independently spawned post-turn scheduler.
     // Wait for its observable state transition, not an assumed scheduling delay.
     tokio::time::timeout(Duration::from_secs(5), async {
@@ -386,6 +398,10 @@ async fn provider_400_tool_call_adjacency_failure_pauses_goal_without_looping() 
     .await
     .context("failed-turn scheduler did not pause the goal")??;
     assert_eq!(provider.requests.load(Ordering::SeqCst), 1);
+    let paused = read_goal(&runtime, connection_id, session_id)
+        .await?
+        .context("paused goal")?;
+    assert!(paused.time_used_seconds >= 1);
     Ok(())
 }
 
