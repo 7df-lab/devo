@@ -2,6 +2,8 @@ import { matchesSavedSessionSelector, normalizeSessionId } from "./session-id.js
 import type { SessionInfo } from "./session-manager.js";
 import { SessionManager } from "./session-manager.js";
 
+type SessionSelectorInfo = Pick<SessionInfo, "id" | "path" | "cwd" | "name">;
+
 export type ResolvedSession =
 	| { type: "path"; path: string }
 	| { type: "local"; path: string }
@@ -30,7 +32,7 @@ export class SessionSelectorNotFoundError extends SessionSelectorError {
 export class SessionSelectorAmbiguousError extends SessionSelectorError {
 	constructor(
 		selector: string,
-		readonly matches: readonly SessionInfo[],
+		readonly matches: readonly SessionSelectorInfo[],
 	) {
 		super(
 			`Ambiguous saved session "${selector}": matches ${matches
@@ -46,18 +48,23 @@ export function looksLikeSessionPath(selector: string): boolean {
 	return selector.includes("/") || selector.includes("\\") || selector.endsWith(".jsonl");
 }
 
-export async function resolveSessionPath(selector: string, cwd: string, sessionDir?: string): Promise<ResolvedSession> {
+export async function resolveSessionPath(
+	selector: string,
+	cwd: string,
+	sessionDir?: string,
+	listSessions?: (scope: "current" | "all") => Promise<readonly SessionSelectorInfo[]>,
+): Promise<ResolvedSession> {
 	if (looksLikeSessionPath(selector)) {
 		return { type: "path", path: selector };
 	}
 
-	const localSessions = await SessionManager.list(cwd, sessionDir);
+	const localSessions = listSessions ? await listSessions("current") : await SessionManager.list(cwd, sessionDir);
 	const localExactMatch = resolveExactMatch(selector, localSessions);
 	if (localExactMatch) {
 		return { type: "local", path: localExactMatch.path };
 	}
 
-	const allSessions = await SessionManager.listAll(undefined, sessionDir);
+	const allSessions = listSessions ? await listSessions("all") : await SessionManager.listAll(undefined, sessionDir);
 	const globalExactMatch = resolveExactMatch(selector, allSessions);
 	if (globalExactMatch) {
 		return { type: "global", path: globalExactMatch.path, cwd: globalExactMatch.cwd };
@@ -108,7 +115,7 @@ export function findClosestSessionId(
 	return closest && !tied && closest.distance <= maximumDistance ? closest.id : undefined;
 }
 
-function resolveExactMatch(selector: string, sessions: readonly SessionInfo[]): SessionInfo | undefined {
+function resolveExactMatch(selector: string, sessions: readonly SessionSelectorInfo[]): SessionSelectorInfo | undefined {
 	const normalizedSelector = normalizeSessionId(selector);
 	return resolveUniqueMatch(
 		selector,
@@ -116,12 +123,12 @@ function resolveExactMatch(selector: string, sessions: readonly SessionInfo[]): 
 	);
 }
 
-function resolvePartialMatch(selector: string, sessions: readonly SessionInfo[]): SessionInfo | undefined {
+function resolvePartialMatch(selector: string, sessions: readonly SessionSelectorInfo[]): SessionSelectorInfo | undefined {
 	const matches = sessions.filter((session) => matchesSavedSessionSelector(session.id, selector));
 	return resolveUniqueMatch(selector, matches);
 }
 
-function resolveUniqueMatch(selector: string, matches: readonly SessionInfo[]): SessionInfo | undefined {
+function resolveUniqueMatch(selector: string, matches: readonly SessionSelectorInfo[]): SessionSelectorInfo | undefined {
 	if (matches.length > 1) {
 		throw new SessionSelectorAmbiguousError(selector, matches);
 	}
