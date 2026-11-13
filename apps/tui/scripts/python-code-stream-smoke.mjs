@@ -62,6 +62,11 @@ try {
     await waitFor("model request", () => requestCount > before);
     const turnId = records().slice(traceStart).find(row => row.method === "turn/started")?.payload?.params?.turn?.id;
     assert.ok(turnId, "current turn must start before argument deltas");
+    // Argument-only deltas do not feed the activity tracker. Exercise the
+    // working count with a real assistant text delta before streaming code.
+    chunk({ content: "Preparing the requested Python example." });
+    await waitFor("live token count without estimate suffix", text => /↓ \d+ tokens/.test(text));
+    assert.ok(!pane.includes("(est.)"), "working token label must not include the estimate suffix");
     chunk({ tool_calls: [{ index: 0, function: { arguments: '{"code":"stream_first = 1' } }] });
     await waitFor("first partial source", text => text.includes("╰─ stream_first = 1"));
     assert.ok(!pane.includes("stream_second"));
@@ -69,8 +74,6 @@ try {
     await waitFor("second partial source before closing JSON", text => text.includes("stream_second = 2"));
     assert.ok(!records().slice(traceStart).some(row => row.method === "tool_call/status_updated" &&
       row.payload?.params?.toolCallId === `call-${requestCount}` && row.payload.params.status === "in_progress"), "must not execute incomplete code");
-    await waitFor("live token count without estimate suffix", text => /↓ \d+ tokens/.test(text));
-    assert.ok(!pane.includes("(est.)"), "working token label must not include the estimate suffix");
     console.log(`Python argument stream visible at ${width} columns before JSON completion:\n${pane}`);
     mux(["send-keys", "-t", session, "Escape"]);
     await waitFor("abort closes pending cell", (text, events) => events.slice(traceStart).some(row => row.method === "turn/completed" && row.payload?.params?.turn?.id === turnId && row.payload.params.turn.status === "interrupted") && !text.includes("╰─ stream_first = 1"));
