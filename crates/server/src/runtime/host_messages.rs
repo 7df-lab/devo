@@ -1,5 +1,5 @@
 //! Typed, host-only input ingress. Background completions and explicit self
-//! messages use safe-boundary steering; other agent messages use follow-up delivery.
+//! messages and child reports use safe-boundary steering; other agent messages use follow-up delivery.
 //! All delivery preserves inbox order; idle sessions wake.
 //! This is not an RPC and no producer can choose a human or system origin.
 use super::*;
@@ -33,6 +33,13 @@ impl HostMessage {
         }
     }
 
+    /// A child report can reach its active parent at the next safe FIFO boundary.
+    pub(super) fn parent_steer(sender: SessionId, event_id: String, text: String) -> Self {
+        let mut message = Self::agent(sender, event_id, text);
+        message.origin.delivery = HostMessageDelivery::Steer;
+        message
+    }
+
     pub(super) fn agent(sender: SessionId, event_id: String, text: String) -> Self {
         Self {
             origin: HostMessageOrigin {
@@ -52,7 +59,7 @@ impl HostMessage {
         status: &str,
         text: String,
     ) -> Self {
-        Self::agent(
+        Self::parent_steer(
             child_id,
             format!("child:{child_id}:{turn_id}:{status}"),
             text,

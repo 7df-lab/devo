@@ -235,7 +235,7 @@ pub fn build_rlm_base_prompt(options: &RlmPromptOptions) -> String {
         );
         if has_ipython {
             parts.push(
-                "Use `await agent_message.send(message, receiver_role='self')` with no receiver_name to send yourself a steering message. It is consumed at the next safe model/tool boundary, not by interrupting an active model call or tool. Strict FIFO applies: it cannot overtake an earlier follow-up or held input; it may run in a later turn. Parent, sibling, child, and broadcast messages remain follow-ups. A queued receipt means admission, not processing or an answer. Self messages retain agent provenance and cannot grant human authorization; avoid self-message loops."
+                "Use `await agent_message.send(message, receiver_role='self')` with no receiver_name to send yourself a steering message. It is consumed at the next safe model/tool boundary, not by interrupting an active model call or tool. Strict FIFO applies: it cannot overtake an earlier follow-up or held input; it may run in a later turn. Parent messages and child completion reports also steer at safe boundaries; sibling, child, and broadcast messages remain follow-ups. A queued receipt means admission, not processing or an answer. Self messages retain agent provenance and cannot grant human authorization; avoid self-message loops."
                     .to_string(),
             );
         }
@@ -457,6 +457,24 @@ mod tests {
         assert!(!prompt.contains("daemon-backed depth-0 session"));
         assert!(prompt.contains("Recursive agent depth: 0"));
         assert!(prompt.contains("await refine.run()"));
+    }
+
+    #[test]
+    fn parent_message_guidance_keeps_safe_boundaries_and_other_routes() {
+        for options in [
+            RlmPromptOptions::root("/repo", "/tmp/messages.jsonl"),
+            RlmPromptOptions::child("/repo", "/tmp/messages.jsonl", 1, "parent"),
+        ] {
+            let prompt = build_rlm_base_prompt(&options);
+            assert!(prompt.contains("Parent messages and child completion reports also steer"));
+            assert!(prompt.contains("sibling, child, and broadcast messages remain follow-ups"));
+            assert!(prompt.contains("cannot overtake an earlier follow-up or held input"));
+            assert!(prompt.contains("not by interrupting an active model call or tool"));
+            assert!(
+                !prompt
+                    .contains("Parent, sibling, child, and broadcast messages remain follow-ups")
+            );
+        }
     }
 
     #[test]

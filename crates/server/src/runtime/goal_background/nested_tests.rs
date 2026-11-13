@@ -146,6 +146,10 @@ async fn nested_completion_targets_busy_and_idle_direct_parent_only() -> Result<
     )
     .await??
     .forget();
+    let original_child_turn = runtime
+        .active_turn_id_for_session(child)
+        .await
+        .context("active child")?;
     provider.grandchild.release.add_permits(1);
     tokio::time::timeout(Duration::from_secs(20), async {
         loop {
@@ -198,6 +202,21 @@ async fn nested_completion_targets_busy_and_idle_direct_parent_only() -> Result<
     let second =
         serde_json::to_string(&provider.child.requests.lock().expect("child requests")[1])?;
     assert!(second.contains("grandchild-result-marker"), "{second}");
+    assert_eq!(
+        runtime.active_turn_id_for_session(child).await,
+        Some(original_child_turn)
+    );
+    assert!(
+        provider
+            .root
+            .requests
+            .lock()
+            .expect("root requests")
+            .is_empty()
+    );
+    // The busy child consumes the result in its existing turn, then reports
+    // completion to the idle root only after the second request completes.
+    provider.child.release.add_permits(1);
     tokio::time::timeout(Duration::from_secs(20), provider.root.started.acquire())
         .await??
         .forget();
@@ -207,9 +226,6 @@ async fn nested_completion_targets_busy_and_idle_direct_parent_only() -> Result<
         !root_input.contains(grandchild.as_str()),
         "grandchild sent directly to root: {root_input}"
     );
-
-    // Let child settle. Root remains busy in its own request, independently.
-    provider.child.release.add_permits(1);
     tokio::time::timeout(Duration::from_secs(20), async {
         while runtime.active_turn_id_for_session(child).await.is_some() {
             tokio::task::yield_now().await;
@@ -267,3 +283,6 @@ async fn nested_completion_targets_busy_and_idle_direct_parent_only() -> Result<
     provider.root.release.add_permits(8);
     Ok(())
 }
+
+#[path = "parent_report_tests.rs"]
+mod parent_report_tests;

@@ -546,7 +546,7 @@ async fn self_send_after_owner_interrupt_stays_held_until_explicit_retry() -> Re
 }
 
 #[tokio::test]
-async fn self_at_turn_limit_is_held_while_parent_send_remains_followup() -> Result<()> {
+async fn self_at_turn_limit_is_held_while_parent_send_steers() -> Result<()> {
     let home = tempfile::tempdir()?;
     let env = SelfMessageEnv::new(home.path()).await?;
     env.start().await?;
@@ -602,7 +602,7 @@ async fn self_at_turn_limit_is_held_while_parent_send_remains_followup() -> Resu
             .iter()
             .map(PendingInputItem::delivery)
             .collect::<Vec<_>>(),
-        vec![HostMessageDelivery::FollowUp]
+        vec![HostMessageDelivery::Steer]
     );
     let child_turn = env
         .runtime

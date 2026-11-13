@@ -379,7 +379,7 @@ impl ServerRuntime {
                     self.publish_background_completion(
                         parent,
                         event_id.clone(),
-                        super::super::host_messages::HostMessage::agent(
+                        super::super::host_messages::HostMessage::parent_steer(
                             session_id,
                             event_id,
                             message.clone(),

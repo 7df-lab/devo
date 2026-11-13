@@ -214,7 +214,7 @@ impl ServerRuntime {
                             let _ = runtime
                                 .deliver_host_message(
                                     parent,
-                                    super::super::host_messages::HostMessage::agent(
+                                    super::super::host_messages::HostMessage::parent_steer(
                                         session_id,
                                         format!("goal:{}:invalid-model", held.id),
                                         format!("Child goal cannot start: {error_message}"),

@@ -133,7 +133,7 @@ impl ServerRuntime {
         self.publish_background_completion(
             parent_session_id,
             format!("agent:{child_session_id}:startup"),
-            super::super::host_messages::HostMessage::agent(
+            super::super::host_messages::HostMessage::parent_steer(
                 child_session_id,
                 format!("agent:{child_session_id}:startup:failed"),
                 format!("Child agent {child_session_id} failed to start: {error_message}"),
