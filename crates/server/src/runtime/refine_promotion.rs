@@ -153,9 +153,8 @@ impl Candidates {
         scope: HarnessScope,
     ) -> Result<(), &'static str> {
         let mut sources = HashSet::new();
-        let mut promoted = 0;
         let mut edits = Vec::new();
-        for mut edit in proposal.edits.drain(..) {
+        for (promoted, mut edit) in proposal.edits.drain(..).enumerate() {
             let source = edit
                 .after
                 .as_ref()
@@ -176,7 +175,6 @@ impl Candidates {
             if !sources.insert(source.clone()) || promoted >= 4 {
                 return Err("too many or repeated session memory sources");
             }
-            promoted += 1;
             let after = edit.after.as_mut().ok_or("missing promoted memory")?;
             let applicability = after
                 .metadata

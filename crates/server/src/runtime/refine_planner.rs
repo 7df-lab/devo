@@ -350,7 +350,7 @@ impl ServerRuntime {
                 promotion::Candidates::load(
                     local_dir.as_deref(),
                     &global_baseline,
-                    &session_id.to_string(),
+                    session_id.as_str(),
                 )
             })
             .await
