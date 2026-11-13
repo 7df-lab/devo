@@ -11,6 +11,7 @@ fn pending(instructions: Option<&str>) -> PendingRefine {
         trajectory_evidence: None,
         requested_at: Utc::now(),
         autonomous: false,
+        prepared: None,
     }
 }
 

@@ -1,4 +1,5 @@
 /** Product TTY smoke: assert outcomes without changing product behavior. */
+import { createRefineSmokeProvider } from "./refine-smoke-provider.mjs";
 import { createServer } from "node:http";
 import { spawnSync } from "node:child_process";
 import { copyFileSync, existsSync, mkdtempSync, readFileSync, rmSync, writeFileSync } from "node:fs";
@@ -13,7 +14,7 @@ import { startResizeProvider, checkResizeStatus } from "./resize-status-smoke.mj
 
 const repo = resolve(dirname(fileURLToPath(import.meta.url)), "../../..");
 const scenario = process.argv[2] || "T1";
-const scenarios = ["resize-status", "T1", "T2", "T3", "goal", "bash", "agents", "schedule", "heartbeat", "activity", "effort", "theme", "fork", "clipboard", "resume", "scheduled-timezone", "scheduled-pending", "export", "share", "steering", "abort-history"];
+const scenarios = ["resize-status", "T1", "T2", "T3", "goal", "bash", "agents", "schedule", "heartbeat", "activity", "effort", "theme", "fork", "clipboard", "resume", "scheduled-timezone", "scheduled-pending", "export", "share", "refine", "steering", "abort-history"];
 const preloaded = ["clipboard", "scheduled-pending"].includes(scenario);
 const tmux = process.env.DEVO_TMUX_BIN || (process.platform === "win32" ? "psmux" : "tmux");
 const binary = resolve(process.env.DEVO_BIN || process.env.DEVO_SERVER_BIN
@@ -45,6 +46,7 @@ async function run() {
   let resizeProvider;
   let ownedSession = false;
   let pane = "";
+  let refineProvider;
   try {
     for (const name of ["auth.json", "providers.json", "config.toml"]) {
       if (!(["effort", "theme"].includes(scenario)) && existsSync(join(sourceHome, name))) copyFileSync(join(sourceHome, name), join(home, name));
@@ -62,6 +64,13 @@ async function run() {
           } },
         } },
       }));
+    }
+    if (scenario === "refine") {
+      refineProvider = await createRefineSmokeProvider();
+      writeFileSync(join(home, "providers.json"), JSON.stringify({ model: "deepseek/deepseek-v4-flash", provider: { deepseek: {
+        credential: "deepseek", enabled: true, base_url: `http://127.0.0.1:${refineProvider.port}`, wire_api: "openai_chat_completions",
+      } } }));
+      writeFileSync(join(home, "auth.json"), JSON.stringify({ deepseek: { type: "api_key", key: "local-fixture-only" } }), { mode: 0o600 });
     }
     if (scenario === "steering") {
       steeringServer = createServer(async (request, response) => {
@@ -183,6 +192,24 @@ async function run() {
     console.log("=== boot ===\n" + pane);
     switch (scenario) {
       case "T1": break;
+      case "refine": {
+        const completed = (events, type) => events.some(r => r.method === "item/completed" && r.payload?.params?.item?.item?.type === type);
+        await send("/refine");
+        await waitFor("idle refine no-op", (events, text) => refineProvider.calls === 1 && completed(events, "refinement") && text.includes("no changes needed"));
+        const failedStart = records().length;
+        await send("/refine");
+        await waitFor("refine failure visible", (events, text) => refineProvider.calls === 2 && completed(events.slice(failedStart), "warning") && text.includes("was not applied"));
+        await send("Hold this turn for deferred refine.");
+        await waitFor("held active turn", events => refineProvider.turnStarted && events.some(r => r.method === "turn/started"));
+        const queuedStart = records().length;
+        await send("/refine");
+        await waitFor("deferred refine admitted", events => rpcSucceeded(events.slice(queuedStart), "session/refine/run"));
+        if (refineProvider.calls !== 2) throw new Error("Refine ran before the current turn ended");
+        refineProvider.releaseTurn();
+        await waitFor("deferred refine result", events => refineProvider.calls === 3 && completed(events.slice(queuedStart), "refinement"));
+        console.log("refine: idle no-op, explicit failure, deferred model execution verified");
+        break;
+      }
       case "steering": {
         await send("steering first request");
         await waitFor("first live reply", (_events, text) => !!finishFirstReply && text.includes("FIRST_REPLY_MARKER"));
@@ -559,15 +586,34 @@ async function run() {
         const screen = () => mux(["capture-pane", "-t", session, "-p"]).stdout;
         for (const width of [100, 40]) {
           mux(["resize-window", "-t", session, "-x", String(width), "-y", "24"]);
+          // tmux can expose its reflow of the old frame before Node handles SIGWINCH.
+          // Prove a fresh product keyboard/render round trip at the new size first.
+          const probe = `scheduled-resize-${width}`;
+          mux(["send-keys", "-t", session, "-l", probe]);
+          await waitFor("resized editor rendered", () => screen().includes(probe));
+          mux(["send-keys", "-t", session, "C-u"]);
+          await waitFor("resized editor cleared", () => !screen().includes(probe));
           mux(["send-keys", "-t", session, "C-r"]);
           await waitFor("scheduled list", () => screen().replace(/\s+/g, " ").includes("Enter details"));
-          const before = screen().split("\n");
+          // Capture the baseline only after the list and width repaint settle.
+          // This is an equality gate, not a delay or a weakened preservation assertion.
+          let previousFrame;
+          await waitFor("stable resized scheduled list", () => {
+            const frame = screen();
+            const stable = frame.includes("Enter details") && frame === previousFrame;
+            previousFrame = frame;
+            return stable;
+          });
+          const before = previousFrame.split("\n");
           if (before.findIndex(line => line.includes("Scheduled ·")) < 12) throw new Error("Scheduled covered the upper conversation");
           mux(["send-keys", "-t", session, "Enter"]);
           await waitFor(`local next run at ${width} columns`, () => screen().includes("Next: " + expected)
             && screen().includes("Pause scheduled task") && screen().includes("Stop scheduled task"));
           const after = screen().split("\n");
-          if (before.slice(0, 12).join("\n") !== after.slice(0, 12).join("\n")) throw new Error("Scheduled details changed upper conversation");
+          if (before.slice(0, 12).join("\n") !== after.slice(0, 12).join("\n")) {
+            console.error(`=== Scheduled before ${width} ===\n${before.join("\n")}\n=== Scheduled after ${width} ===\n${after.join("\n")}`);
+            throw new Error("Scheduled details changed upper conversation");
+          }
           console.log(`=== Scheduled ${width} columns ===\n${screen()}`);
           mux(["send-keys", "-t", session, "Left"]);
           await waitFor("Scheduled left returns to list", () => screen().includes("Enter details"));
@@ -598,6 +644,7 @@ async function run() {
     abortServer?.closeAllConnections();
     abortServer?.close();
     if (ownedSession) mux(["kill-session", "-t", session], false);
+    refineProvider?.close();
     steeringServer?.closeAllConnections();
     steeringServer?.close();
     // The target is our own mkdtemp child, never the source credential folder.

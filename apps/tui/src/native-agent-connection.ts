@@ -3061,15 +3061,8 @@ export class NativeAgentConnection implements AgentConnection {
         err.painted = true;
         throw err;
       }
-      this.emitSessionEvent({
-        type: "refine_complete",
-        result: {
-          id: result.refinementId ?? "",
-          summary,
-          scope: options?.global ? "global" : "local",
-          appliedEdits: [],
-        } as never,
-      });
+      // Admission is not completion. The server publishes the durable
+      // refinement result (including no-op/failure) as an item notification.
       return {
         id: result.refinementId ?? "",
         summary,

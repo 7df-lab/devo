@@ -143,6 +143,7 @@ fn plan_refine_proposal_with_instructions_emits_memory_create() {
         trajectory_evidence: None,
         requested_at: Utc::now(),
         autonomous: false,
+        prepared: None,
     };
     let proposal = plan_refine_proposal(&pending, &path);
     assert_eq!(proposal.id, "refine_test");
@@ -174,6 +175,7 @@ fn plan_refine_proposal_without_instructions_is_noop() {
         trajectory_evidence: None,
         requested_at: Utc::now(),
         autonomous: false,
+        prepared: None,
     };
     let proposal = plan_refine_proposal(&pending, &path);
     assert!(proposal.edits.is_empty());
@@ -201,6 +203,7 @@ fn plan_refine_proposal_auto_sentinel_is_noop() {
         trajectory_evidence: None,
         requested_at: Utc::now(),
         autonomous: true,
+        prepared: None,
     };
     let proposal = plan_refine_proposal(&pending, &path);
     assert!(
@@ -276,6 +279,7 @@ fn global_refine_targets_global_store() {
         trajectory_evidence: None,
         requested_at: Utc::now(),
         autonomous: false,
+        prepared: None,
     };
     assert_eq!(refine_target_scope(&global_pending), HarnessScope::Global);
     assert_eq!(refine_scope_label(&global_pending), "global");
@@ -292,6 +296,7 @@ fn global_refine_targets_global_store() {
         trajectory_evidence: None,
         requested_at: Utc::now(),
         autonomous: false,
+        prepared: None,
     };
     assert_eq!(refine_target_scope(&local_pending), HarnessScope::Local);
     let session_dir = tempfile::tempdir().expect("session dir");
@@ -424,4 +429,339 @@ fn trajectory_cannot_be_global_autonomous_or_combined_with_rollback() {
             .edits
             .is_empty()
     );
+}
+
+#[tokio::test]
+async fn idle_manual_refine_broadcasts_failure_instead_of_silent_noop() {
+    let (_temp, runtime, connection, session_id, mut rx) = refine_test_session().await;
+    let response = runtime
+        .handle_incoming(
+            connection,
+            json!({
+                "id": 3, "method": "session/refine/run", "params": { "sessionId": session_id }
+            }),
+        )
+        .await
+        .unwrap();
+    assert_eq!(response["result"]["scheduled"], json!(true));
+    let notification = tokio::time::timeout(std::time::Duration::from_secs(10), async {
+        loop {
+            let notification = rx.recv().await.expect("connection open");
+            if notification["method"] == "item/completed"
+                && notification["params"]["item"]["item"]["code"] == "refinement_not_applied"
+            {
+                break notification;
+            }
+        }
+    })
+    .await
+    .expect("idle refine must publish outcome without a user turn");
+    assert_eq!(
+        notification["params"]["item"]["sessionId"],
+        json!(session_id)
+    );
+    assert!(!peek_pending_refine(&session_id));
+    let result_id = notification["params"]["item"]["id"].clone();
+    let history = runtime
+        .handle_incoming(
+            connection,
+            json!({
+                "id": 4, "method": "session/items/list", "params": { "sessionId": session_id }
+            }),
+        )
+        .await
+        .unwrap();
+    assert!(
+        history["result"]["data"]
+            .as_array()
+            .unwrap()
+            .iter()
+            .any(|item| item["id"] == result_id),
+        "refine result must survive history projection: {history}"
+    );
+}
+
+#[tokio::test]
+async fn manual_refine_waits_for_busy_auxiliary_slot_instead_of_empty_success() {
+    let temp = tempfile::TempDir::new().unwrap();
+    let runtime = crate::test_support::TestRuntime::noop().runtime(temp.path());
+    let session_id = SessionId::new();
+    let params = SessionRefineRunParams {
+        session_id,
+        instructions: None,
+        global: false,
+        rollback_id: None,
+        trajectory_item_ids: Vec::new(),
+    };
+    schedule_refine_run(
+        &session_id,
+        &params,
+        /*is_root*/ true,
+        Some(temp.path()),
+    );
+    let pending = take_pending_refine(&session_id).unwrap();
+    let permit = runtime.auxiliary_model_slots.acquire().await.unwrap();
+    let path = ensure_session_harness(temp.path()).unwrap();
+    // Old code returned a successful empty proposal after only 50ms. This
+    // manual request must remain pending while the other auxiliary task owns
+    // the slot, not silently claim that it inspected a clean harness.
+    assert!(
+        tokio::time::timeout(
+            std::time::Duration::from_millis(150),
+            runtime.plan_refine_proposal_llm(session_id, &pending, &path),
+        )
+        .await
+        .is_err()
+    );
+    drop(permit);
+    // This fixture has no model session. Once admitted, an unavailable model
+    // must be an explicit failure rather than the old empty-proposal fallback.
+    assert!(
+        runtime
+            .plan_refine_proposal_llm(session_id, &pending, &path)
+            .await
+            .is_err()
+    );
+}
+
+async fn refine_test_session() -> (
+    tempfile::TempDir,
+    Arc<ServerRuntime>,
+    u64,
+    SessionId,
+    tokio::sync::mpsc::Receiver<serde_json::Value>,
+) {
+    let temp = tempfile::TempDir::new().unwrap();
+    let runtime = crate::test_support::TestRuntime::noop().runtime(temp.path());
+    let (out, rx) = super::super::outbound::test_outbound_channel(128);
+    let connection = runtime
+        .register_connection(ClientTransportKind::Stdio, out)
+        .await;
+    runtime
+        .handle_acp_initialize(
+            connection,
+            Some(json!(1)),
+            json!({
+                "protocolVersion": 1, "clientCapabilities": { "terminal": false },
+                "_meta": { "devo": { "protocol": "native" } }
+            }),
+        )
+        .await;
+    let created = runtime.handle_incoming(connection, json!({
+        "id": 2, "method": "session/new", "params": { "cwd": temp.path(), "idempotencyKey": "refine-idle" }
+    })).await.unwrap();
+    let session_id: SessionId =
+        serde_json::from_value(created["result"]["session"]["id"].clone()).unwrap();
+    runtime
+        .subscribe_connection_to_session(connection, session_id, None)
+        .await;
+    (temp, runtime, connection, session_id, rx)
+}
+
+#[tokio::test]
+async fn prepared_refine_defers_across_missing_inline_then_commits_once() {
+    let (temp, runtime, connection, session_id, mut rx) = refine_test_session().await;
+    let params = SessionRefineRunParams {
+        session_id,
+        instructions: Some("Check git status before committing".into()),
+        global: false,
+        rollback_id: None,
+        trajectory_item_ids: Vec::new(),
+    };
+    schedule_refine_run(
+        &session_id,
+        &params,
+        /*is_root*/ true,
+        Some(temp.path()),
+    );
+    let mut pending = take_pending_refine(&session_id).unwrap();
+    let path = ensure_session_harness(temp.path()).unwrap();
+    pending.prepared = Some(Ok((path.clone(), plan_refine_proposal(&pending, &path))));
+    PENDING_REFINES
+        .lock()
+        .unwrap()
+        .insert(session_id.to_string(), pending);
+    // Exact production finalization window: inline was taken for MergeTurn,
+    // but the active stream has not yet been unregistered.
+    runtime
+        .register_active_stream(
+            session_id,
+            Arc::new(tokio::sync::Mutex::new(
+                super::super::session_actor::state::SessionStreamState::default(),
+            )),
+        )
+        .await;
+    assert!(
+        runtime
+            .apply_pending_refine_at_boundary(
+                session_id,
+                &session_id,
+                temp.path(),
+                /*plan_mode*/ false
+            )
+            .await
+            .is_none()
+    );
+    assert!(peek_pending_refine(&session_id));
+    assert!(
+        HarnessState::load(&path)
+            .unwrap()
+            .refinement_history
+            .is_empty()
+    );
+    runtime.unregister_active_stream(session_id).await;
+    // No model is available in this fixture: success proves the completed plan
+    // survived deferral rather than rerunning planning or applying twice.
+    let applied = runtime
+        .apply_pending_refine_at_boundary(
+            session_id,
+            &session_id,
+            temp.path(),
+            /*plan_mode*/ false,
+        )
+        .await
+        .unwrap();
+    assert!(applied.failure.is_none());
+    assert_eq!(applied.proposal.edits.len(), 1);
+    assert!(!peek_pending_refine(&session_id));
+    assert_eq!(
+        HarnessState::load(&path).unwrap().refinement_history.len(),
+        1
+    );
+    assert!(
+        runtime
+            .apply_pending_refine_at_boundary(
+                session_id,
+                &session_id,
+                temp.path(),
+                /*plan_mode*/ false
+            )
+            .await
+            .is_none()
+    );
+    let notification = tokio::time::timeout(std::time::Duration::from_secs(2), async {
+        loop {
+            let event = rx.recv().await.unwrap();
+            if event["method"] == "item/completed"
+                && event["params"]["item"]["item"]["type"] == "refinement"
+            {
+                break event;
+            }
+        }
+    })
+    .await
+    .unwrap();
+    let history = runtime
+        .handle_incoming(
+            connection,
+            json!({
+                "id": 8, "method": "session/items/list", "params": { "sessionId": session_id }
+            }),
+        )
+        .await
+        .unwrap();
+    assert!(
+        history["result"]["data"]
+            .as_array()
+            .unwrap()
+            .iter()
+            .any(|item| item["id"] == notification["params"]["item"]["id"])
+    );
+    assert_eq!(
+        HarnessState::load(&path).unwrap().refinement_history.len(),
+        1
+    );
+}
+
+#[tokio::test]
+async fn refine_requeue_recovers_boundary_that_already_observed_empty_pending() {
+    let (temp, runtime, _connection, session_id, mut rx) = refine_test_session().await;
+    let params = SessionRefineRunParams {
+        session_id,
+        instructions: None,
+        global: false,
+        rollback_id: None,
+        trajectory_item_ids: Vec::new(),
+    };
+    schedule_refine_run(
+        &session_id,
+        &params,
+        /*is_root*/ true,
+        Some(temp.path()),
+    );
+    let mut pending = take_pending_refine(&session_id).unwrap();
+    pending.prepared = Some(Err("controlled planner failure".into()));
+    PENDING_REFINES
+        .lock()
+        .unwrap()
+        .insert(session_id.to_string(), pending);
+    runtime
+        .register_active_stream(
+            session_id,
+            Arc::new(tokio::sync::Mutex::new(
+                super::super::session_actor::state::SessionStreamState::default(),
+            )),
+        )
+        .await;
+    let entered = Arc::new(tokio::sync::Notify::new());
+    let release = Arc::new(tokio::sync::Notify::new());
+    REFINE_REQUEUE_TEST_GATES.lock().unwrap().insert(
+        session_id.to_string(),
+        RefineRequeueTestGate {
+            entered: Arc::clone(&entered),
+            release: Arc::clone(&release),
+        },
+    );
+    let task_runtime = Arc::clone(&runtime);
+    let dir = temp.path().to_path_buf();
+    let task = tokio::spawn(async move {
+        task_runtime
+            .apply_pending_refine_at_boundary(
+                session_id,
+                &session_id,
+                &dir,
+                /*plan_mode*/ false,
+            )
+            .await
+    });
+    tokio::time::timeout(std::time::Duration::from_secs(2), entered.notified())
+        .await
+        .unwrap();
+    // New turn finishes and its post-turn scheduler checks before the old
+    // planner publishes prepared work. There will be no further turn to wake it.
+    runtime.unregister_active_stream(session_id).await;
+    assert!(
+        runtime
+            .apply_pending_refine_at_boundary(
+                session_id,
+                &session_id,
+                temp.path(),
+                /*plan_mode*/ false
+            )
+            .await
+            .is_none()
+    );
+    release.notify_one();
+    let applied = tokio::time::timeout(std::time::Duration::from_secs(2), task)
+        .await
+        .unwrap()
+        .unwrap()
+        .expect("must self-drain after missed boundary");
+    assert_eq!(
+        applied.failure.as_deref(),
+        Some("controlled planner failure")
+    );
+    assert!(!peek_pending_refine(&session_id));
+    tokio::time::timeout(std::time::Duration::from_secs(2), async {
+        loop {
+            let event = rx.recv().await.unwrap();
+            if event["method"] == "item/completed"
+                && event["params"]["item"]["item"]["code"] == "refinement_not_applied"
+            {
+                break;
+            }
+        }
+    })
+    .await
+    .unwrap();
 }
