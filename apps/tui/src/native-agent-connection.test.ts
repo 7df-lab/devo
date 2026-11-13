@@ -1102,6 +1102,31 @@ test("getContextTree does not invent spend from context occupancy", async () => 
   await conn.dispose();
 });
 
+test("exports preserve explicit paths inside a temporary session workspace", async () => {
+  const cwd = path.join(os.tmpdir(), "devo-export-workspace");
+  const { conn, fake } = await bootConnection([(method, _params, respond) => {
+    if (method !== "session/new") return false;
+    respond({ session: { id: "sess_test", title: "Test", cwd,
+      model: { provider: "openai", id: "gpt-test", input: ["text"] }, version: 1 } });
+    return true;
+  }]);
+  try {
+    for (const output of ["out.jsonl", path.join(cwd, "nested", "out.jsonl")]) {
+      const expected = path.resolve(cwd, output);
+      assert.equal(await conn.exportToJsonl(output), expected);
+      assert.equal(fake.requests.at(-1)?.params.path, expected);
+    }
+    const shared = await conn.exportToHtml(path.join(os.tmpdir(), "session.html"));
+    assert.equal(shared, "export.html");
+    assert.equal(fake.requests.at(-1)?.params.path, undefined);
+    const sibling = await conn.exportToHtml(path.join(`${cwd}-other`, "share.html"));
+    assert.equal(sibling, "export.html");
+    assert.equal(fake.requests.at(-1)?.params.path, undefined);
+  } finally {
+    await conn.dispose();
+  }
+});
+
 test("schedule heartbeat and export use Native session/heartbeat/command + session/export", async () => {
   const { conn, fake } = await bootConnection();
   const hb = await conn.setScheduledTask("every 1h", "ping status", "steer");
