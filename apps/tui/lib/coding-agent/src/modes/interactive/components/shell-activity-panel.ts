@@ -1,6 +1,7 @@
 import { stripVTControlCharacters } from "node:util";
 import { type Component, type Focusable, getKeybindings, truncateToWidth } from "@earendil-works/pi-tui";
 import type { AgentConnectionShellTask } from "../../agent-connection/types.js";
+import { shouldTreatAsBack } from "./modal-back.js";
 import { theme } from "../theme/theme.js";
 import type { ActivityLoadState } from "./subagent-summary-line.js";
 
@@ -26,7 +27,7 @@ export class ShellActivityPanel implements Component, Focusable {
 
 	handleInput(data: string): void {
 		const keys = getKeybindings();
-		if (keys.matches(data, "tui.select.cancel")) {
+		if (keys.matches(data, "tui.select.cancel") || shouldTreatAsBack(data)) {
 			if (this.details) {
 				this.details = false;
 				this.outputOffset = 0;
@@ -94,8 +95,9 @@ export class ShellActivityPanel implements Component, Focusable {
 				lines.push(theme.fg(task.id === this.selectedId ? "accent" : "muted", text));
 			}
 		}
-		lines.push(theme.fg("dim", this.details ? "↑/↓ scroll · esc back" : "↑/↓ select · enter details · esc close"));
-		return lines.slice(0, rows).map((line) => truncateToWidth(line, width, "…"));
+		lines.push(theme.fg("dim", this.details ? "↑/↓ scroll · ←/esc back" : "←/esc close · ↑/↓ select · enter details"));
+		const bounded = lines.length > rows ? [...lines.slice(0, Math.max(0, rows - 1)), lines[lines.length - 1]!] : lines;
+		return bounded.map((line) => truncateToWidth(line, width, "…"));
 	}
 
 	private outputLines(task: AgentConnectionShellTask | undefined): string[] {
