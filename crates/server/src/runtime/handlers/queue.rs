@@ -19,7 +19,6 @@ use devo_protocol::native::rpc_turn::{
     SessionQueueRemoveResult, SessionQueueUpdateParams, SessionQueueUpdateResult, TurnSteerParams,
     TurnSteerResult,
 };
-use devo_protocol::native::turn::Turn as NativeTurn;
 
 use super::super::*;
 
@@ -78,6 +77,7 @@ impl ServerRuntime {
         // new turn when the session is idle and queues otherwise. The
         // request itself stays Native; the internal domain params are not a
         // second wire protocol.
+        let mut accepted_turn = None;
         let response = self
             .handle_turn_start_with_queue_policy_and_client_message_id(
                 Some(connection_id),
@@ -101,6 +101,7 @@ impl ServerRuntime {
                         .clone()
                         .unwrap_or_else(|| format!("queue:{}", params.idempotency_key)),
                 ),
+                &mut accepted_turn,
             )
             .await;
         if response.get("error").is_some() {
@@ -108,10 +109,13 @@ impl ServerRuntime {
         }
         match response["result"]["disposition"].as_str() {
             Some("started") => {
-                let turn = self
-                    .active_native_turn(legacy_session_id)
-                    .await
-                    .expect("a turn just started");
+                let Some(turn) = accepted_turn else {
+                    return self.error_response(
+                        request_id,
+                        ProtocolErrorCode::InternalError,
+                        "started turn has no admission snapshot",
+                    );
+                };
                 serde_json::to_value(SuccessResponse {
                     id: request_id,
                     result: SessionQueuePushResult::Started {
@@ -873,13 +877,6 @@ impl ServerRuntime {
             )
             .await;
         }
-    }
-
-    /// The running turn as a canonical `Turn` (for queue/push Started).
-    async fn active_native_turn(&self, session_id: SessionId) -> Option<NativeTurn> {
-        let reservation = self.session_turn_reservation_snapshot(session_id).await?;
-        let turn = reservation.active_turn.as_ref()?;
-        Some(turn.native.clone())
     }
 }
 

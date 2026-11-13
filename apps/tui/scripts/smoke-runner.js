@@ -9,7 +9,7 @@ import { scheduledDelivered, rpcSucceeded, turnOutcome } from "./smoke-outcomes.
 
 const repo = resolve(dirname(fileURLToPath(import.meta.url)), "../../..");
 const scenario = process.argv[2] || "T1";
-const scenarios = ["T1", "T2", "T3", "goal", "bash", "agents", "schedule", "heartbeat", "activity", "effort", "theme", "fork", "clipboard", "resume", "scheduled-timezone", "share"];
+const scenarios = ["T1", "T2", "T3", "goal", "bash", "agents", "schedule", "heartbeat", "activity", "effort", "theme", "fork", "clipboard", "resume", "scheduled-timezone", "export", "share"];
 const tmux = process.env.DEVO_TMUX_BIN || (process.platform === "win32" ? "psmux" : "tmux");
 const binary = resolve(process.env.DEVO_BIN || process.env.DEVO_SERVER_BIN
   || join(repo, "target/debug", process.platform === "win32" ? "devo.exe" : "devo"));
@@ -72,7 +72,7 @@ async function run() {
       writeFileSync(join(home, "gh"), `#!/bin/sh\nexec ${quote(process.execPath)} ${quote(join(repo, "apps/tui/scripts/share-smoke-gh.mjs"))} "$@"\n`, { mode: 0o700 });
       writeFileSync(join(home, "session.html"), "stale unrelated file");
     }
-    mux(["new-session", "-d", "-s", session, "-c", repo, "-x", "100", "-y", "30",
+    mux(["new-session", "-d", "-s", session, "-c", scenario === "export" ? home : repo, "-x", "100", "-y", "30",
       "-e", `DEVO_HOME=${home}`, "-e", `DEVO_CODING_AGENT_DIR=${home}`,
       "-e", `PRIME_AGENT_CODING_AGENT_DIR=${home}`, "-e", "DEVO_PROTOCOL_TRACE=1",
       "-e", `DEVO_PROTOCOL_TRACE_FILE=${trace}`,
@@ -133,6 +133,23 @@ async function run() {
         if (existsSync(uploaded.path)) throw new Error("Share export was not cleaned up");
         if (readFileSync(join(home, "session.html"), "utf8") !== "stale unrelated file") throw new Error("Share touched stale file");
         console.log("=== offline share returned-path ===\n" + pane);
+        break;
+      }
+      case "export": {
+        await send("export-seed: say hello briefly.");
+        await waitFor("export seed", events => turnOutcome(events, "completed"));
+        for (const name of ["relative.jsonl", "absolute.jsonl", "absolute.html"]) {
+          const destination = join(home, name);
+          const output = name === "relative.jsonl" ? name : destination;
+          const start = records().length;
+          await send(`/export ${output}`);
+          await waitFor(`export ${name}`, (events, text) => rpcSucceeded(events.slice(start), "session/export")
+            && existsSync(destination) && text.includes("Session exported to:"));
+          const request = records().slice(start).find(event => event.direction === "tui-to-server" && event.method === "session/export");
+          if (request?.payload?.params?.path !== destination) throw new Error(`Export path changed for ${name}`);
+          if (!readFileSync(destination, "utf8").includes("export-seed")) throw new Error(`Export content missing for ${name}`);
+        }
+        console.log("=== explicit temporary workspace exports ===\n" + pane);
         break;
       }
       case "clipboard": {

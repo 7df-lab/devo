@@ -162,6 +162,8 @@ mod session_model_config;
 mod session_title;
 mod skills;
 mod subagent_usage;
+#[cfg(test)]
+mod turn_admission_response_tests;
 mod turn_exec;
 mod turn_lifecycle;
 mod turn_reservation;
@@ -253,6 +255,9 @@ pub struct ServerRuntime {
         std::sync::Mutex<std::collections::HashSet<(SessionId, devo_protocol::QueueItemId)>>,
     ephemeral_inbox_consumed: std::sync::Mutex<std::collections::HashSet<(SessionId, String)>>,
     ephemeral_inbox_receipts: std::sync::Mutex<std::collections::HashSet<(SessionId, String)>>,
+    #[cfg(test)]
+    turn_admission_response_gate:
+        std::sync::Mutex<Option<turn_admission_response_tests::ResponseGate>>,
     turn_start_idempotency: Mutex<HashMap<(SessionId, String), devo_protocol::native::turn::Turn>>,
     /// In-process idempotency for canonical `session/new`
     /// (`idempotencyKey -> session`). Same process-scope caveat as
@@ -497,6 +502,8 @@ impl ServerRuntime {
             ephemeral_inbox_consumed: std::sync::Mutex::default(),
             ephemeral_inbox_claimed: std::sync::Mutex::default(),
             turn_start_idempotency: Mutex::new(HashMap::new()),
+            #[cfg(test)]
+            turn_admission_response_gate: std::sync::Mutex::new(None),
             session_new_idempotency: Mutex::new(HashMap::new()),
             goal_set_idempotency: Mutex::new(HashMap::new()),
             goal_update_idempotency: Mutex::new(HashMap::new()),
