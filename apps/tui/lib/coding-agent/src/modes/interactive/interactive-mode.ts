@@ -221,7 +221,7 @@ import { ExtensionEditorComponent } from "./components/extension-editor.js";
 import { ExtensionInputComponent } from "./components/extension-input.js";
 import { ExtensionSelectorComponent } from "./components/extension-selector.js";
 import { FooterComponent } from "./components/footer.js";
-import { ScheduledManagerComponent } from "./components/scheduled-manager.js";
+import { type ScheduledManagerActionState, ScheduledManagerComponent } from "./components/scheduled-manager.js";
 import { InjectedPromptMessageComponent, isInjectedPromptMessage } from "./components/injected-prompt-message.js";
 import {
 	formatConversationDetailStatus,
@@ -709,6 +709,7 @@ export class InteractiveMode {
 	private latestEditorPromptStash: PromptStash | undefined;
 	private pendingSubmittedPromptStash: PromptStash | undefined;
 	private inputSubmissionGeneration = 0;
+	private clipboardPasteGeneration = 0;
 	private inputSubmissionsPending = 0;
 	private pendingPromptStashReleases: { sessionId: string; state: PromptStashState }[] = [];
 	private readonly retainedSubmissionGenerations = new WeakMap<PromptStash, number>();
@@ -823,6 +824,7 @@ export class InteractiveMode {
 	private scheduledRefreshGeneration: number | undefined;
 	private scheduledRefreshRequested = false;
 	private scheduledManager: ScheduledManagerComponent | undefined;
+	private readonly scheduledManagerActionState: ScheduledManagerActionState = {};
 	private scheduledManagerHandle: OverlayHandle | undefined;
 	private scheduledManagerRefreshTimer: ReturnType<typeof setTimeout> | undefined;
 	private scheduledManagerRefreshAt: number | undefined;
@@ -2843,6 +2845,7 @@ export class InteractiveMode {
 	}
 
 	private resetCurrentSessionRenderState(options?: { clearPromptStash?: boolean }): void {
+		this.clipboardPasteGeneration++;
 		this.chatContainer.clear();
 		this.shortcutGuideContainer.clear();
 		this.pendingMessagesContainer.clear();
@@ -4226,6 +4229,7 @@ export class InteractiveMode {
 			return;
 		}
 		this.promptStash = this.snapshotPromptStash(text);
+		this.clipboardPasteGeneration++;
 		this.editor.setText("");
 		this.showStatus("Stashed prompt");
 	}
@@ -4241,6 +4245,7 @@ export class InteractiveMode {
 		if (this.promptStashState?.queuedStashes?.length === 0) this.promptStashState.queuedStashes = undefined;
 		const canRestorePasteSnapshot =
 			stash.pasteSnapshot === undefined || this.editor.restorePasteSnapshot !== undefined;
+		this.clipboardPasteGeneration++;
 		this.editor.setText(canRestorePasteSnapshot ? stash.text : (stash.expandedText ?? stash.text));
 		if (stash.pasteSnapshot && this.editor.restorePasteSnapshot) {
 			this.editor.restorePasteSnapshot(stash.pasteSnapshot);
@@ -4338,9 +4343,19 @@ export class InteractiveMode {
 	}
 
 	private async handleClipboardImagePaste(): Promise<void> {
+		const editor = this.editor;
+		const submissionGeneration = this.inputSubmissionGeneration;
+		const sessionGeneration = this.sessionEventGeneration;
+		const pasteGeneration = this.clipboardPasteGeneration;
+		// Clipboard access and image conversion can finish after a send, session
+		// replacement, or shutdown. Never attach an old paste to the new draft.
+		const isCurrent = () => !this.activityStopped && !this.isShuttingDown && this.editor === editor &&
+			this.inputSubmissionGeneration === submissionGeneration &&
+			this.sessionEventGeneration === sessionGeneration &&
+			this.clipboardPasteGeneration === pasteGeneration;
 		try {
 			const image = await readClipboardImage();
-			if (!image) {
+			if (!image || !isCurrent()) {
 				return;
 			}
 
@@ -4353,6 +4368,7 @@ export class InteractiveMode {
 				mimeType: image.mimeType,
 			};
 			const resized = await resizeImage(raw);
+			if (!isCurrent()) return;
 			const attachment: ImageContent = resized
 				? { type: "image", data: resized.data, mimeType: resized.mimeType }
 				: raw;
@@ -4638,6 +4654,7 @@ export class InteractiveMode {
 			await this.renderInitialMessages();
 			if (generation !== this.treeNavigationRenderGeneration || sessionGeneration !== this.sessionEventGeneration) return;
 			if (result.editorText && !this.editor.getText().trim()) {
+				this.clipboardPasteGeneration++;
 				this.editor.setText(result.editorText);
 			}
 			this.showStatus("Navigated to selected point");
@@ -7516,6 +7533,7 @@ export class InteractiveMode {
 	}
 
 	private setEditorTextFromQueueSelection(text: string): void {
+		this.clipboardPasteGeneration++;
 		this.isApplyingQueueSelectionText = true;
 		try {
 			this.editor.setText(text);
@@ -7692,6 +7710,7 @@ export class InteractiveMode {
 	}
 
 	private clearInputBar(): void {
+		this.clipboardPasteGeneration++;
 		this.clearEscapeRepeat();
 		this.clearCtrlCExitHint({ render: false });
 		// Leaving browse mode restores the stashed draft instead of arming an
@@ -8967,7 +8986,10 @@ export class InteractiveMode {
 		}
 		let sessionPath: string;
 		try {
-			sessionPath = (await resolveSessionPath(selector, this.getCurrentCwd(), this.connectionState?.sessionDir))
+			sessionPath = (await resolveSessionPath(
+				selector, this.getCurrentCwd(), this.connectionState?.sessionDir,
+				(scope) => this.agentConnection.listSavedSessions(scope),
+			))
 				.path;
 		} catch (error) {
 			if (error instanceof SessionSelectorError) {
@@ -9490,11 +9512,26 @@ export class InteractiveMode {
 			return;
 		}
 
-		// Export to a temp file
-		const tmpFile = path.join(os.tmpdir(), "session.html");
+		// Keep the viewer's session.html filename in an isolated share directory.
+		// Native backends may redirect exports, so stage the returned file here.
+		let shareDir: string | undefined;
+		let exportedFile: string | undefined;
+		let tmpFile: string;
+		const cleanupExport = () => {
+			if (exportedFile) {
+				try { fs.unlinkSync(exportedFile); } catch { /* Ignore cleanup errors. */ }
+			}
+			if (shareDir) {
+				try { fs.rmSync(shareDir, { recursive: true, force: true }); } catch { /* Ignore cleanup errors. */ }
+			}
+		};
 		try {
-			await this.agentConnection.exportToHtml(tmpFile);
+			shareDir = fs.mkdtempSync(path.join(os.tmpdir(), "devo-share-"));
+			tmpFile = path.join(shareDir, "session.html");
+			exportedFile = await this.agentConnection.exportToHtml(tmpFile);
+			if (path.resolve(exportedFile) !== path.resolve(tmpFile)) fs.copyFileSync(exportedFile, tmpFile);
 		} catch (error: unknown) {
+			cleanupExport();
 			this.showError(`Failed to export session: ${error instanceof Error ? error.message : "Unknown error"}`);
 			return;
 		}
@@ -9511,11 +9548,7 @@ export class InteractiveMode {
 			this.editorContainer.clear();
 			this.editorContainer.addChild(this.editor);
 			this.ui.setFocus(this.editor);
-			try {
-				fs.unlinkSync(tmpFile);
-			} catch {
-				// Ignore cleanup errors
-			}
+			cleanupExport();
 		};
 
 		// Create a secret gist asynchronously
@@ -9528,8 +9561,9 @@ export class InteractiveMode {
 		};
 
 		try {
-			const result = await new Promise<{ stdout: string; stderr: string; code: number | null }>((resolve) => {
+			const result = await new Promise<{ stdout: string; stderr: string; code: number | null }>((resolve, reject) => {
 				proc = spawnHidden("gh", ["gist", "create", "--public=false", tmpFile]);
+				proc.on("error", reject);
 				let stdout = "";
 				let stderr = "";
 				proc.stdout?.on("data", (data) => {
@@ -10048,6 +10082,7 @@ export class InteractiveMode {
 			return;
 		}
 		const manager = new ScheduledManagerComponent({
+			actionState: this.scheduledManagerActionState,
 			getScheduledTasks: () => this.getScopedScheduledTasks(),
 			getRows: () => this.ui.terminal.rows,
 			onAction: (scheduled, action) => this.manageScheduledTask(scheduled, action),

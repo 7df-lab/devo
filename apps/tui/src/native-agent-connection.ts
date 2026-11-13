@@ -3912,11 +3912,14 @@ function isOsTempExportPath(candidate: string): boolean {
 
 function resolveExportPath(outputPath: string | undefined, cwd: string): string | undefined {
   if (!outputPath) return undefined;
-  // Vendored `/share` writes to os.tmpdir(); Native session/export only allows
-  // server_home/exports + session cwd. Drop ephemeral temp paths so the server
-  // chooses an allowed export location and returns that path for gist upload.
-  if (isOsTempExportPath(outputPath)) return undefined;
-  return path.isAbsolute(outputPath) ? outputPath : path.resolve(cwd, outputPath);
+  const resolved = path.resolve(cwd, outputPath);
+  const relative = path.relative(path.resolve(cwd), resolved);
+  const withinWorkspace = relative !== ".." && !relative.startsWith(`..${path.sep}`) && !path.isAbsolute(relative);
+  // Vendored `/share` uses os.tmpdir(). Redirect only temporary paths outside
+  // the session workspace; explicit exports inside a temporary workspace are
+  // valid. The server remains authoritative for canonical-path authorization.
+  if (isOsTempExportPath(resolved) && !withinWorkspace) return undefined;
+  return resolved;
 }
 
 function looksLikeWireApi(value: string): boolean {

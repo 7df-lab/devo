@@ -88,11 +88,7 @@ fn is_dangerous_powershell(command: &[String]) -> bool {
     }
 
     // Check for force delete operations (e.g., Remove-Item -Force)
-    if has_force_delete_cmdlet(&tokens_lc) {
-        return true;
-    }
-
-    false
+    has_force_delete_cmdlet(&tokens_lc)
 }
 
 fn has_opaque_powershell_execution_arg(args: &[String]) -> bool {

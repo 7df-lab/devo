@@ -616,6 +616,62 @@ async fn truncated_function_arguments_cannot_become_empty_inputs() {
     }
 }
 
+#[tokio::test]
+async fn code_only_transient_failures_preserve_retry_classification() {
+    for (code, expected_kind) in [
+        ("server_error", "provider_server_error"),
+        ("rate_limit_exceeded", "rate_limit_error"),
+    ] {
+        let mut expected = json!({
+            "error_kind": expected_kind,
+            "message": "Please try again",
+            "provider_name": "openai",
+        });
+        if code == "server_error" {
+            expected["status_code"] = Value::Null;
+        } else {
+            expected["retry_after_seconds"] = Value::Null;
+        }
+        for event in [
+            "error",
+            "response.failed",
+            "response.completed",
+            "response.done",
+        ] {
+            let error = json!({"code": code, "message": "Please try again"});
+            let payload = if event == "error" {
+                json!({"type": event, "code": code, "message": "Please try again"})
+            } else {
+                json!({"type": event, "response": {"status": "failed", "error": error}})
+            };
+            assert_eq!(
+                collect_events(format!("event: {event}\ndata: {payload}\n\n")).await,
+                vec![Err(expected.clone())],
+                "code-only {event}: {code}"
+            );
+        }
+    }
+}
+
+#[tokio::test]
+async fn unknown_code_substrings_do_not_become_transient_failures() {
+    for code in [
+        "not_server_error",
+        "rate_limit_exceeded_permanently",
+        "unknown",
+    ] {
+        let payload = json!({"type": "response.failed", "response": {"error": {
+            "code": code, "message": "Request rejected"
+        }}});
+        assert_eq!(
+            collect_events(format!("event: response.failed\ndata: {payload}\n\n")).await,
+            vec![Err(json!({
+                "error_kind": "unknown_error", "message": "Request rejected", "status_code": null
+            }))]
+        );
+    }
+}
+
 async fn collect_events(body: String) -> Vec<Result<StreamEvent, Value>> {
     let (provider, server) = spawn_provider(body).await;
     let events = timeout(Duration::from_secs(10), async {

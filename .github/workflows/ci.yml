@@ -188,7 +188,7 @@ jobs:
       - name: Boot and outcome scenarios (no provider credentials)
         working-directory: apps/tui
         run: |
-          for scenario in T1 goal heartbeat; do
+          for scenario in T1 goal heartbeat effort theme scheduled-timezone scheduled-pending; do
             echo "::group::tmux smoke: $scenario"
             node scripts/run-tmux-smoke.js "$scenario"
             echo "::endgroup::"
@@ -208,6 +208,11 @@ jobs:
           printf '%s\n' '{"deepseek": {"type": "api_key", "key": "ci-mock-key"}}' > "$home/auth.json"
           chmod 600 "$home/auth.json"
           DEVO_HOME="$home" node scripts/run-tmux-smoke.js T2
+          DEVO_HOME="$home" node scripts/run-tmux-smoke.js fork
+          DEVO_HOME="$home" node scripts/run-tmux-smoke.js clipboard
+          DEVO_HOME="$home" node scripts/run-tmux-smoke.js resume
+          DEVO_HOME="$home" node scripts/run-tmux-smoke.js share
+          DEVO_HOME="$home" node scripts/run-tmux-smoke.js export
 
   check:
     needs: changes

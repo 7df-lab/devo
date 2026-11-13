@@ -1,6 +1,7 @@
 import { type Component, Container, getKeybindings, Spacer, Text, truncateToWidth } from "@earendil-works/pi-tui";
 import { theme } from "../theme/theme.js";
 import { DynamicBorder } from "./dynamic-border.js";
+import { keyHint, keyText } from "./keybinding-hints.js";
 
 interface UserMessageItem {
 	id: string;
@@ -20,6 +21,10 @@ class UserMessageList implements Component {
 		this.messages = messages;
 		const initialIndex = initialSelectedId ? messages.findIndex((message) => message.id === initialSelectedId) : -1;
 		this.selectedIndex = initialIndex >= 0 ? initialIndex : Math.max(0, messages.length - 1);
+	}
+
+	setVisibleItems(count: number): void {
+		this.maxVisible = Math.max(1, Math.min(10, count));
 	}
 
 	invalidate(): void {}
@@ -45,7 +50,7 @@ class UserMessageList implements Component {
 			const normalizedMessage = message.text.replace(/\n/g, " ").trim();
 
 			const cursor = isSelected ? theme.fg("accent", "› ") : "  ";
-			const maxMsgWidth = width - 2;
+			const maxMsgWidth = Math.max(0, width - 2);
 			const truncatedMsg = truncateToWidth(normalizedMessage, maxMsgWidth);
 			const messageLine = cursor + (isSelected ? theme.bold(truncatedMsg) : truncatedMsg);
 
@@ -54,13 +59,13 @@ class UserMessageList implements Component {
 			const position = i + 1;
 			const metadata = `  Message ${position} of ${this.messages.length}`;
 			const metadataLine = theme.fg("muted", metadata);
-			lines.push(metadataLine);
+			lines.push(truncateToWidth(metadataLine, width));
 			lines.push("");
 		}
 
 		if (startIndex > 0 || endIndex < this.messages.length) {
 			const scrollInfo = theme.fg("muted", `  (${this.selectedIndex + 1}/${this.messages.length})`);
-			lines.push(scrollInfo);
+			lines.push(truncateToWidth(scrollInfo, width));
 		}
 
 		return lines;
@@ -87,36 +92,56 @@ class UserMessageList implements Component {
 
 export class UserMessageSelectorComponent extends Container {
 	private messageList: UserMessageList;
+	private header = new Container();
+	private footer = new Container();
 
 	constructor(
 		messages: UserMessageItem[],
 		onSelect: (entryId: string) => void,
 		onCancel: () => void,
 		initialSelectedId?: string,
+		private readonly getRows: () => number = () => process.stdout.rows || 24,
 	) {
 		super();
 
-		this.addChild(new Spacer(1));
-		this.addChild(new Text("Fork from Message", 1, 0));
-		this.addChild(
+		this.header.addChild(new Spacer(1));
+		this.header.addChild(new Text("Fork from Message", 1, 0));
+		this.header.addChild(
 			new Text(
 				theme.fg("muted", "Select a message to copy the active path up to that point into a new session"),
 				1,
 				0,
 			),
 		);
-		this.addChild(new Spacer(1));
-		this.addChild(new DynamicBorder());
-		this.addChild(new Spacer(1));
+		this.header.addChild(new Spacer(1));
+		this.header.addChild(new DynamicBorder());
+		this.header.addChild(new Spacer(1));
 
 		this.messageList = new UserMessageList(messages, initialSelectedId);
 		this.messageList.onSelect = onSelect;
 		this.messageList.onCancel = onCancel;
 
+		this.addChild(this.header);
 		this.addChild(this.messageList);
 
-		this.addChild(new Spacer(1));
-		this.addChild(new DynamicBorder());
+		this.footer.addChild(new Text(
+			theme.fg("dim", `${keyText("tui.select.up", { primaryOnly: true })}/${keyText("tui.select.down", { primaryOnly: true })}`)
+				+ theme.fg("muted", " move  ")
+				+ keyHint("tui.select.confirm", "fork", { primaryOnly: true }) + "  "
+				+ keyHint("tui.select.cancel", "cancel", { primaryOnly: true }),
+			1, 0,
+		));
+		this.footer.addChild(new DynamicBorder());
+		this.addChild(this.footer);
+	}
+
+	render(width: number): string[] {
+		const rows = this.getRows();
+		const viewportRows = Number.isFinite(rows) && rows > 0 ? Math.floor(rows) : 24;
+		// Leave four rows for the surrounding chat/editor chrome, plus the list counter.
+		const reservedRows = this.header.render(width).length + this.footer.render(width).length + 5;
+		this.messageList.setVisibleItems(Math.floor((viewportRows - reservedRows) / 3));
+		return super.render(width);
 	}
 
 	getMessageList(): UserMessageList {

@@ -11,6 +11,47 @@ use tokio::io::{AsyncReadExt, AsyncWriteExt};
 use tokio::net::TcpListener;
 
 #[tokio::test]
+async fn chat_stream_classifies_code_only_transient_errors() {
+    for (code, expected_kind, metadata) in [
+        ("server_error", "provider_server_error", "status_code"),
+        (
+            "rate_limit_exceeded",
+            "rate_limit_error",
+            "retry_after_seconds",
+        ),
+    ] {
+        let base_url = spawn_sse_server(vec![sse_data(json!({"error": {
+            "code": code, "message": "Please try again"
+        }}))])
+        .await;
+        let provider = OpenAIProvider::new(base_url);
+        let mut stream = provider
+            .completion_stream(minimal_request())
+            .await
+            .expect("chat stream");
+        let error = stream
+            .next()
+            .await
+            .expect("error item")
+            .expect_err("typed error");
+        let mut expected = json!({
+            "error_kind": expected_kind, "message": "Please try again", "provider_name": "openai"
+        });
+        expected[metadata] = serde_json::Value::Null;
+        assert_eq!(
+            serde_json::to_value(
+                error
+                    .downcast_ref::<ProviderError>()
+                    .expect("provider error")
+            )
+            .expect("serialize"),
+            expected
+        );
+        assert!(stream.next().await.is_none());
+    }
+}
+
+#[tokio::test]
 async fn chat_stream_reports_error_payload_returned_with_http_200() {
     let base_url = spawn_sse_server(vec![
         sse_data(json!({
