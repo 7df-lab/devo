@@ -37,7 +37,15 @@ for (const picker of ['branch', 'model']) {
  for (const width of [360,1000]) test(`${picker}: popup and clear fit ${width}px`, async ({page}, testInfo) => {
   await page.setViewportSize({width,height:700}); await page.goto('/?picker=' + picker);
   await page.getByRole('button',{name:'Choose ' + picker,exact:true}).click();
-  const input=page.getByRole('textbox'); const before=await input.boundingBox();
+  const input=page.getByRole('textbox');
+  const popupElement=page.locator('[data-slot="searchable-list-popover-content"]');
+  await expect(popupElement).toBeVisible();
+  // Bounding boxes include the opening zoom transform. Measure only after
+  // actual animations settle; retain animations and the strict width assertion.
+  await popupElement.evaluate(async element => {
+   await Promise.all(element.getAnimations({subtree:true}).map(animation => animation.finished));
+  });
+  const before=await input.boundingBox();
   await input.fill('a'.repeat(100));
   const clear=page.getByRole('button',{name:'Clear search',exact:true});
   await expect(clear).toBeVisible();
