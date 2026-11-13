@@ -131,7 +131,7 @@ impl ProviderRouter for SingleProviderRouter {
         self.provider
             .completion_stream(request)
             .await
-            .map_err(unknown_provider_error)
+            .map_err(normalize_provider_error)
     }
 
     async fn complete(
@@ -142,7 +142,7 @@ impl ProviderRouter for SingleProviderRouter {
         self.provider
             .completion(request)
             .await
-            .map_err(unknown_provider_error)
+            .map_err(normalize_provider_error)
     }
 
     async fn complete_with_usage_observer(
@@ -154,7 +154,7 @@ impl ProviderRouter for SingleProviderRouter {
         self.provider
             .completion_with_usage_observer(request, usage_observer)
             .await
-            .map_err(unknown_provider_error)
+            .map_err(normalize_provider_error)
     }
 
     fn name(&self) -> &str {
@@ -224,7 +224,7 @@ impl ProviderRouter for MultiProviderRouter {
         self.provider_for_route(&route)?
             .completion_stream(request)
             .await
-            .map_err(unknown_provider_error)
+            .map_err(normalize_provider_error)
     }
 
     async fn complete(
@@ -235,7 +235,7 @@ impl ProviderRouter for MultiProviderRouter {
         self.provider_for_route(&route)?
             .completion(request)
             .await
-            .map_err(unknown_provider_error)
+            .map_err(normalize_provider_error)
     }
 
     async fn complete_with_usage_observer(
@@ -247,7 +247,7 @@ impl ProviderRouter for MultiProviderRouter {
         self.provider_for_route(&route)?
             .completion_with_usage_observer(request, usage_observer)
             .await
-            .map_err(unknown_provider_error)
+            .map_err(normalize_provider_error)
     }
 
     fn name(&self) -> &str {
@@ -255,7 +255,35 @@ impl ProviderRouter for MultiProviderRouter {
     }
 }
 
-fn unknown_provider_error(error: anyhow::Error) -> ProviderError {
+fn normalize_provider_error(error: anyhow::Error) -> ProviderError {
+    // SDKs use anyhow for transport errors, but structured provider failures
+    // must survive routing so retry policy and recovery hints remain accurate.
+    if let Some(provider_error) = error
+        .chain()
+        .find_map(|cause| cause.downcast_ref::<ProviderError>())
+    {
+        let mut normalized = provider_error.clone();
+        let diagnostic = error.to_string();
+        if diagnostic != provider_error.to_string() {
+            let message = match &mut normalized {
+                ProviderError::AuthenticationError { message, .. }
+                | ProviderError::RateLimitError { message, .. }
+                | ProviderError::ProviderServerError { message, .. }
+                | ProviderError::ProviderTimeoutError { message, .. }
+                | ProviderError::ContextLimitError { message, .. }
+                | ProviderError::ModelNotFoundError { message, .. }
+                | ProviderError::QuotaExceededError { message, .. }
+                | ProviderError::ContentFilteredError { message, .. }
+                | ProviderError::InvalidRequestError { message, .. }
+                | ProviderError::StreamError { message, .. }
+                | ProviderError::UnknownError { message, .. } => message,
+            };
+            // HTTP adapters attach status, request and response diagnostics as
+            // anyhow context. Keep that context as well as the typed cause.
+            *message = format!("{diagnostic}: {message}");
+        }
+        return normalized;
+    }
     ProviderError::UnknownError {
         message: error.to_string(),
         status_code: None,
@@ -275,6 +303,38 @@ mod tests {
     use pretty_assertions::assert_eq;
 
     use super::*;
+
+    #[test]
+    fn structured_errors_keep_outer_diagnostics_and_metadata() {
+        let error = ProviderError::RateLimitError {
+            message: "slow down".to_string(),
+            retry_after_seconds: Some(7),
+            provider_name: Some("test".to_string()),
+        };
+        let normalized = normalize_provider_error(anyhow::Error::new(error).context("HTTP 429"));
+        assert_eq!(
+            serde_json::to_value(normalized).unwrap(),
+            serde_json::to_value(ProviderError::RateLimitError {
+                message: "HTTP 429: slow down".to_string(),
+                retry_after_seconds: Some(7),
+                provider_name: Some("test".to_string()),
+            })
+            .unwrap()
+        );
+    }
+
+    #[test]
+    fn unstructured_errors_keep_the_existing_fallback() {
+        let error = normalize_provider_error(anyhow::anyhow!("transport failed"));
+        assert_eq!(
+            serde_json::to_value(error).unwrap(),
+            serde_json::to_value(ProviderError::UnknownError {
+                message: "transport failed".to_string(),
+                status_code: None,
+            })
+            .unwrap()
+        );
+    }
 
     #[derive(Default)]
     struct CapturingProvider {
