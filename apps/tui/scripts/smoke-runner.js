@@ -8,9 +8,11 @@ import { fileURLToPath, pathToFileURL } from "node:url";
 import { setTimeout as sleep } from "node:timers/promises";
 import { scheduledDelivered, rpcSucceeded, turnOutcome } from "./smoke-outcomes.js";
 
+import { startResizeProvider, checkResizeStatus } from "./resize-status-smoke.mjs";
+
 const repo = resolve(dirname(fileURLToPath(import.meta.url)), "../../..");
 const scenario = process.argv[2] || "T1";
-const scenarios = ["T1", "T2", "T3", "goal", "bash", "agents", "schedule", "heartbeat", "activity", "effort", "theme", "fork", "clipboard", "resume", "scheduled-timezone", "scheduled-pending", "export", "share", "refine"];
+const scenarios = ["resize-status", "T1", "T2", "T3", "goal", "bash", "agents", "schedule", "heartbeat", "activity", "effort", "theme", "fork", "clipboard", "resume", "scheduled-timezone", "scheduled-pending", "export", "share", "refine"];
 const preloaded = ["clipboard", "scheduled-pending"].includes(scenario);
 const tmux = process.env.DEVO_TMUX_BIN || (process.platform === "win32" ? "psmux" : "tmux");
 const binary = resolve(process.env.DEVO_BIN || process.env.DEVO_SERVER_BIN
@@ -35,6 +37,7 @@ async function run() {
   const home = mkdtempSync(join(tmpdir(), "devo-tui-smoke-"));
   const trace = join(home, "protocol.ndjsonl");
   const sourceHome = process.env.DEVO_HOME || join(homedir(), ".devo");
+  let resizeProvider;
   let ownedSession = false;
   let pane = "";
   let refineProvider;
@@ -63,6 +66,7 @@ async function run() {
       } } }));
       writeFileSync(join(home, "auth.json"), JSON.stringify({ deepseek: { type: "api_key", key: "local-fixture-only" } }), { mode: 0o600 });
     }
+    if (scenario === "resize-status") resizeProvider = await startResizeProvider(home);
     const settingsPath = join(sourceHome, "settings.json");
     const settings = !(["effort", "theme"].includes(scenario)) && existsSync(settingsPath) ? JSON.parse(readFileSync(settingsPath, "utf8")) : {};
     writeFileSync(join(home, "settings.json"), JSON.stringify({ ...settings, ...(scenario === "theme" ? { theme: "dark" } : {}), onboardingShown: true }));
@@ -150,6 +154,9 @@ async function run() {
         console.log("refine: idle no-op, explicit failure, deferred model execution verified");
         break;
       }
+      case "resize-status":
+        await checkResizeStatus({ provider: resizeProvider, mux, session, send, waitFor, records, turnOutcome });
+        break;
       case "share": {
         await send("share-seed: say hello briefly.");
         await waitFor("share seed", events => turnOutcome(events, "completed"));
@@ -528,6 +535,7 @@ async function run() {
     console.error(`=== last pane ===\n${pane}`);
     throw error;
   } finally {
+    resizeProvider?.close();
     if (ownedSession) mux(["kill-session", "-t", session], false);
     refineProvider?.close();
     // The target is our own mkdtemp child, never the source credential folder.

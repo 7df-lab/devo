@@ -62,6 +62,11 @@ try {
     await waitFor("model request", () => requestCount > before);
     const turnId = records().slice(traceStart).find(row => row.method === "turn/started")?.payload?.params?.turn?.id;
     assert.ok(turnId, "current turn must start before argument deltas");
+    // Argument-only deltas do not feed the activity tracker. Exercise the
+    // working count with a real assistant text delta before streaming code.
+    chunk({ content: "Preparing the requested Python example." });
+    await waitFor("live token count without estimate suffix", text => /↓ \d+ tokens/.test(text));
+    assert.ok(!pane.includes("(est.)"), "working token label must not include the estimate suffix");
     chunk({ tool_calls: [{ index: 0, function: { arguments: '{"code":"stream_first = 1' } }] });
     await waitFor("first partial source", text => text.includes("╰─ stream_first = 1"));
     assert.ok(!pane.includes("stream_second"));
