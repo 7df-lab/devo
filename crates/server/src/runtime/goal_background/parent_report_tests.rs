@@ -1,5 +1,6 @@
 //! Parent reports share the durable FIFO but join the current turn at a safe boundary.
 use super::*;
+use pretty_assertions::assert_eq;
 
 #[tokio::test]
 async fn parent_reports_steer_same_turn_and_preserve_distinct_events() -> Result<()> {
