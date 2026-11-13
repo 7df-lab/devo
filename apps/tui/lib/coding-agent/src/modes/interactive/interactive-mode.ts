@@ -8985,7 +8985,10 @@ export class InteractiveMode {
 		}
 		let sessionPath: string;
 		try {
-			sessionPath = (await resolveSessionPath(selector, this.getCurrentCwd(), this.connectionState?.sessionDir))
+			sessionPath = (await resolveSessionPath(
+				selector, this.getCurrentCwd(), this.connectionState?.sessionDir,
+				(scope) => this.agentConnection.listSavedSessions(scope),
+			))
 				.path;
 		} catch (error) {
 			if (error instanceof SessionSelectorError) {
