@@ -9,6 +9,7 @@ use serde::{Deserialize, Serialize};
 use serde_json::{Value, json};
 
 use super::files::{Directory, FileMode};
+use super::store_lock::StoreLock;
 
 pub(super) const MAX_SNAPSHOT_BYTES: usize = 1024 * 1024;
 const MAX_RUNS: usize = 128;
@@ -220,8 +221,7 @@ pub(super) fn save(
 ) -> Result<Value> {
     validate_id(&run_id)?;
     validate_snapshot(&run_id, &snapshot)?;
-    let lock = directory.open_file("store.lock", FileMode::Lock)?;
-    fs2::FileExt::lock_exclusive(&lock)?;
+    let _lock = StoreLock::acquire(directory.open_file("store.lock", FileMode::Lock)?)?;
     save_locked(directory, owner, run_id, expected_revision, snapshot)
 }
 
@@ -229,13 +229,12 @@ pub(super) fn save(
 /// admission or close returns. No runtime actor/map lock is held by this gate.
 pub(super) struct EffectTransaction {
     directory: Directory,
-    _lock: std::fs::File,
+    _lock: StoreLock,
 }
 
 impl EffectTransaction {
     pub fn open(directory: Directory) -> Result<Self> {
-        let lock = directory.open_file("store.lock", FileMode::Lock)?;
-        fs2::FileExt::lock_exclusive(&lock)?;
+        let lock = StoreLock::acquire(directory.open_file("store.lock", FileMode::Lock)?)?;
         Ok(Self {
             directory,
             _lock: lock,
