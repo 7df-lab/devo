@@ -313,6 +313,22 @@ async fn queued_input_drains_into_followup_turn_and_broadcasts_empty_queue() -> 
         "subscription/create failed: {subscription_response}"
     );
 
+    // A roster-only observer must see queued/host-driven turn activation too.
+    let (roster_connection, mut roster_rx) = initialize_connection(&runtime).await?;
+    let roster_subscription = runtime
+        .handle_incoming(
+            roster_connection,
+            json!({
+                "id": 3, "method": "subscription/create", "params": {
+                    "selectors": [{ "kind": "sessionsByCwd", "cwd": workspace_root }],
+                    "includeSnapshot": false
+                }
+            }),
+        )
+        .await
+        .context("roster subscription response")?;
+    assert!(roster_subscription.get("error").is_none());
+
     let turn_response = runtime
         .handle_incoming(
             connection_id,
@@ -424,6 +440,23 @@ async fn queued_input_drains_into_followup_turn_and_broadcasts_empty_queue() -> 
         drained["params"]["startedTurnId"].as_str().is_some(),
         "drained notification should carry the follow-up turn id: {drained}"
     );
+    let followup_id = drained["params"]["startedTurnId"]
+        .as_str()
+        .context("follow-up id")?;
+    let mut roster_events = Vec::new();
+    let active = recv_until(
+        &mut roster_rx,
+        "roster follow-up activation",
+        |event| {
+            event["method"] == "session/statusChanged"
+                && event["params"]["activeTurnId"].as_str() == Some(followup_id)
+        },
+        &mut roster_events,
+    )
+    .await?;
+    assert_eq!(active["params"]["sessionId"], json!(session_id));
+    assert_eq!(active["params"]["status"], json!("active"));
+
     recv_until(
         &mut notifications_rx,
         "second turn/completed",

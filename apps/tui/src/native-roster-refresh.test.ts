@@ -105,3 +105,58 @@ test("continuous roster invalidations still publish each read and settle callers
   await flush();
   for (const read of reads) read.resolve(page("disposed"));
 });
+
+test("roster observes a child created while its subscription is being installed", async () => {
+  let handler: ((method: string, params: unknown) => void) | undefined;
+  let childExists = false;
+  const client: NativeRosterClient = {
+    onNotification(callback) { handler = callback; return () => { handler = undefined; }; },
+    async request(method) {
+      if (method === "subscription/create") {
+        childExists = true;
+        handler?.("session/created", { session: { id: "child" } });
+        return { subscriptionId: "roster" };
+      }
+      if (method === "session/list") return {
+        data: [{ id: "root" }, ...(childExists ? [{ id: "child", parent: { sessionId: "root" }, status: "active" }] : [])],
+        nextCursor: null,
+      };
+      if (method === "agent/list") return { agents: [] };
+      return {};
+    },
+  };
+  const roster = await subscribeAgentRoster(client, "/repo", () => {});
+  await flush();
+  assert.deepEqual(roster.summaries().map(({ sessionId, activity }) => ({ sessionId, activity })), [
+    { sessionId: "root", activity: "idle" },
+    { sessionId: "child", activity: "working" },
+  ]);
+  await roster.dispose();
+});
+
+test("roster reconciles a child started during the initial snapshot read", async () => {
+  const read = deferred<unknown>();
+  let handler: ((method: string, params: unknown) => void) | undefined;
+  let reads = 0;
+  const client: NativeRosterClient = {
+    onNotification(callback) { handler = callback; return () => { handler = undefined; }; },
+    async request(method) {
+      if (method === "subscription/create") return { subscriptionId: "roster" };
+      if (method === "session/list") {
+        reads++;
+        return reads === 1 ? read.promise : { data: [{ id: "child", status: "active" }], nextCursor: null };
+      }
+      if (method === "agent/list") return { agents: [] };
+      return {};
+    },
+  };
+  const pending = subscribeAgentRoster(client, "/repo", () => {});
+  await flush();
+  handler?.("session/statusChanged", { sessionId: "child", status: "active" });
+  read.resolve({ data: [{ id: "child", status: "idle" }], nextCursor: null });
+  const roster = await pending;
+  await flush();
+  assert.equal(roster.summaries()[0]?.activity, "working");
+  assert.equal(reads, 2);
+  await roster.dispose();
+});

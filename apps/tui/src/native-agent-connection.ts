@@ -1,3 +1,4 @@
+import { applyInterruptedTurnsToAgentMessages } from "./native-to-pi/interrupted-history.js";
 import { requireSessionWorkspace, type WorkspaceTrust } from "./workspace-trust.js";
 import { textHydrationState } from "./native-to-pi/stream-hydration-state.js";
 import { completedItemRevisions, notificationItemIdentity, runningAssistantItems, normalizeHistoryItems, hydrateRunningText } from "./native-history-hydration.js";
@@ -1284,7 +1285,7 @@ export class NativeAgentConnection implements AgentConnection {
       content: runningMessages.flatMap(message => Array.isArray(message.content) ? message.content : []),
     } : undefined;
     const transcript = running.length
-      ? applyFailedTurnsToAgentMessages(nativeItemsToAgentMessages(items.filter(item => !running.includes(item as Record<string, unknown>))), this.historySnapshotTurns.get(messages) ?? [])
+      ? applyFailedTurnsToAgentMessages(applyInterruptedTurnsToAgentMessages(nativeItemsToAgentMessages(items.filter(item => !running.includes(item as Record<string, unknown>))), this.historySnapshotTurns.get(messages) ?? []), this.historySnapshotTurns.get(messages) ?? [])
       : messages;
     // Message boundaries are not turn boundaries: one running turn can already
     // contain completed reasoning/assistant messages or a later steering input.
@@ -1348,7 +1349,7 @@ export class NativeAgentConnection implements AgentConnection {
           turnCursor = page?.nextCursor ?? undefined;
         } while (turnCursor);
         historyTurns = turns;
-        messages = applyFailedTurnsToAgentMessages(messages, turns);
+        messages = applyFailedTurnsToAgentMessages(applyInterruptedTurnsToAgentMessages(messages, turns), turns);
       } catch {
         // best-effort — items alone still restore chat text
       }
@@ -3091,15 +3092,8 @@ export class NativeAgentConnection implements AgentConnection {
         err.painted = true;
         throw err;
       }
-      this.emitSessionEvent({
-        type: "refine_complete",
-        result: {
-          id: result.refinementId ?? "",
-          summary,
-          scope: options?.global ? "global" : "local",
-          appliedEdits: [],
-        } as never,
-      });
+      // Admission is not completion. The server publishes the durable
+      // refinement result (including no-op/failure) as an item notification.
       return {
         id: result.refinementId ?? "",
         summary,

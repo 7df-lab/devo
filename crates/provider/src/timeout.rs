@@ -1,9 +1,8 @@
-//! Provider HTTP connection timeout configuration.
+//! Provider connection and query-stream timeout configuration.
 //!
-//! Provider response duration is intentionally not bounded at this layer. A
-//! model may need an arbitrarily long time to load or generate output, while
-//! transport failures are reported by the HTTP/SSE stream and requests can be
-//! cancelled by the owning turn.
+//! The query loop bounds stream creation and waits between normalized model
+//! events. Continuous generation has no overall deadline. Non-streaming SDK
+//! calls are not covered by that query-stream deadline.
 
 use std::time::Duration;
 
@@ -14,6 +13,12 @@ pub const CONNECT_TIMEOUT_SECS: u64 = 30;
 #[inline]
 pub fn connect_timeout() -> Duration {
     Duration::from_secs(CONNECT_TIMEOUT_SECS)
+}
+
+/// Maximum query-stream creation or idle wait. Keepalives are not model events.
+/// Partial model content is never automatically replayed after this deadline.
+pub fn response_idle_timeout() -> Duration {
+    Duration::from_secs(300)
 }
 
 #[cfg(test)]

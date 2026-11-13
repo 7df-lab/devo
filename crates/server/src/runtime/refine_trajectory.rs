@@ -80,7 +80,7 @@ pub(crate) fn selected_evidence(
 
 /// Defense in depth, not a promise of complete PII/secret detection. The user
 /// must review selected items. Omit the whole suspicious line, including values.
-fn redact_obvious_secrets(text: &str) -> String {
+pub(super) fn redact_obvious_secrets(text: &str) -> String {
     text.lines()
         .map(|line| {
             let lower = line.to_ascii_lowercase();

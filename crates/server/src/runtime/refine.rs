@@ -19,11 +19,22 @@ use devo_harness::{
     RefineEditOp, RefineProposal, append_refinement, apply_proposal_re_read, rollback_refinement,
     should_auto_refine,
 };
-use devo_protocol::native::item::{Item, ItemEnvelope, ItemState};
+use devo_protocol::native::item::Item;
 use devo_protocol::native::rpc_session::{SessionRefineRunParams, SessionRefineRunResult};
 
 /// Last-write-wins pending refine requests keyed by session id (in-memory).
 static PENDING_REFINES: LazyLock<Mutex<HashMap<String, PendingRefine>>> =
+    LazyLock::new(|| Mutex::new(HashMap::new()));
+
+#[cfg(test)]
+#[derive(Clone)]
+struct RefineRequeueTestGate {
+    entered: Arc<tokio::sync::Notify>,
+    release: Arc<tokio::sync::Notify>,
+}
+
+#[cfg(test)]
+static REFINE_REQUEUE_TEST_GATES: LazyLock<Mutex<HashMap<String, RefineRequeueTestGate>>> =
     LazyLock::new(|| Mutex::new(HashMap::new()));
 
 /// Successful user-visible assistant turns since last auto-refine (root only).
@@ -51,6 +62,8 @@ pub(crate) struct PendingRefine {
     pub requested_at: chrono::DateTime<Utc>,
     /// True when scheduled by root auto-interval (Plan Mode skips apply).
     pub autonomous: bool,
+    /// A finished plan deferred by a newer turn; never rerun the model on resume.
+    pub prepared: Option<Result<(PathBuf, RefineProposal), String>>,
 }
 
 /// Ensure the session harness directory exists with a valid (or empty) state file.
@@ -285,6 +298,7 @@ fn schedule_refine_run_inner(
         trajectory_evidence,
         requested_at: Utc::now(),
         autonomous,
+        prepared: None,
     };
     PENDING_REFINES
         .lock()
@@ -483,66 +497,99 @@ impl ServerRuntime {
         session_dir: &Path,
         plan_mode: bool,
     ) -> Option<AppliedRefine> {
-        let pending = take_pending_refine(native_session_id)?;
-        if plan_mode {
-            PENDING_REFINES
-                .lock()
-                .unwrap_or_else(|e| e.into_inner())
-                .insert(native_session_id.as_str().to_string(), pending);
-            return None;
-        }
-        let target_dir = session_dir.to_path_buf();
-        let target_pending = pending.clone();
-        let harness_path = match tokio::task::spawn_blocking(move || {
-            refine_target_harness_path(&target_dir, &target_pending)
-        })
-        .await
-        {
-            Ok(Ok(path)) => path,
-            Ok(Err(error)) => {
-                tracing::warn!(%error, "refine apply skipped: harness unavailable");
+        loop {
+            let mut pending = take_pending_refine(native_session_id)?;
+            if plan_mode {
+                PENDING_REFINES
+                    .lock()
+                    .unwrap_or_else(|e| e.into_inner())
+                    .entry(native_session_id.as_str().to_string())
+                    .or_insert(pending);
                 return None;
             }
-            Err(error) => {
-                tracing::warn!(%error, "refine initialization worker failed");
-                return None;
-            }
-        };
-        let proposal = if pending.rollback_id.is_some() {
-            placeholder_proposal(&pending)
-        } else {
-            match self
-                .plan_refine_proposal_llm(session_id, &pending, &harness_path)
+            let prepared = if let Some(prepared) = pending.prepared.take() {
+                prepared
+            } else {
+                let target_dir = session_dir.to_path_buf();
+                let target_pending = pending.clone();
+                let harness_path = tokio::task::spawn_blocking(move || {
+                    refine_target_harness_path(&target_dir, &target_pending)
+                })
                 .await
+                .map_err(|error| error.to_string())
+                .and_then(|result| result);
+                match harness_path {
+                    Err(error) => Err(error),
+                    Ok(path) if pending.rollback_id.is_some() => {
+                        Ok((path, placeholder_proposal(&pending)))
+                    }
+                    Ok(path) => self
+                        .plan_refine_proposal_llm(session_id, &pending, &path)
+                        .await
+                        .map(|proposal| (path, proposal)),
+                }
+            };
+            let handle = self.session(session_id).await?;
+            // Never hold admission while waiting for the model. Recheck after
+            // planning, then serialize only the local commit + canonical item write
+            // against new turn admission, just like compaction's apply phase.
+            let _state_change_guard = handle.lock_state_change().await;
+            if self.runtime_active_turn_id(session_id).await.is_some()
+                || self.active_stream_state(session_id).await.is_some()
+                || handle.collaboration_mode().await == Some(devo_protocol::CollaborationMode::Plan)
             {
-                Ok(proposal) => proposal,
-                Err(error) => return Some(AppliedRefine::failed(&pending, error)),
+                #[cfg(test)]
+                {
+                    let gate = REFINE_REQUEUE_TEST_GATES
+                        .lock()
+                        .unwrap()
+                        .remove(native_session_id.as_str());
+                    if let Some(gate) = gate {
+                        gate.entered.notify_one();
+                        gate.release.notified().await;
+                    }
+                }
+                pending.prepared = Some(prepared);
+                PENDING_REFINES
+                    .lock()
+                    .unwrap_or_else(|e| e.into_inner())
+                    .entry(native_session_id.as_str().to_string())
+                    .or_insert(pending);
+                // Post-turn can finish while this plan is in flight and observe
+                // no pending request. Recheck *after* publishing the prepared work:
+                // either its boundary takes it, or we drain it here when idle.
+                if self.runtime_active_turn_id(session_id).await.is_none()
+                    && self.active_stream_state(session_id).await.is_none()
+                    && handle.collaboration_mode().await
+                        != Some(devo_protocol::CollaborationMode::Plan)
+                {
+                    continue;
+                }
+                return None;
             }
-        };
-        // A user can enter Plan Mode while the auxiliary model is planning.
-        if let Some(handle) = self.session(session_id).await
-            && handle.collaboration_mode().await == Some(devo_protocol::CollaborationMode::Plan)
-        {
-            PENDING_REFINES
-                .lock()
-                .unwrap_or_else(|e| e.into_inner())
-                .entry(native_session_id.as_str().to_string())
-                .or_insert(pending);
-            return None;
-        }
-        let session_dir = session_dir.to_path_buf();
-        // Planning holds no store lock. The blocking worker acquires the shared
-        // transaction lock only for re-read/drift-check/apply/atomic commit.
-        match tokio::task::spawn_blocking(move || {
-            commit_refinement(&session_dir, &harness_path, &pending, proposal)
-        })
-        .await
-        {
-            Ok(applied) => applied,
-            Err(error) => {
-                tracing::warn!(%error, "refine apply worker failed");
-                None
+            let applied = match prepared {
+                Err(error) => Some(AppliedRefine::failed(&pending, error)),
+                Ok((harness_path, proposal)) => {
+                    let session_dir = session_dir.to_path_buf();
+                    let failed_pending = pending.clone();
+                    match tokio::task::spawn_blocking(move || {
+                        commit_refinement(&session_dir, &harness_path, &pending, proposal)
+                    })
+                    .await
+                    {
+                        Ok(applied) => applied,
+                        Err(error) => {
+                            Some(AppliedRefine::failed(&failed_pending, error.to_string()))
+                        }
+                    }
+                }
+            };
+            if let Some(applied) = &applied {
+                // Still under the idle admission gate: actor sequence allocation and
+                // the transcript leaf cannot race a new inline turn or MergeTurn.
+                self.persist_applied_refinement(session_id, applied).await;
             }
+            return applied;
         }
     }
 }
@@ -650,7 +697,14 @@ impl ServerRuntime {
                 }
             }
         };
-        let result = schedule_refine_run_inner(
+        if session_dir.is_none() {
+            return self.error_response(
+                request_id,
+                ProtocolErrorCode::InvalidParams,
+                "Refinement requires a persistent session directory",
+            );
+        }
+        let mut result = schedule_refine_run_inner(
             &params.session_id,
             &params,
             is_root,
@@ -658,33 +712,36 @@ impl ServerRuntime {
             /*autonomous*/ false,
             trajectory_evidence,
         );
+        let idle = self.runtime_active_turn_id(legacy_id).await.is_none();
+        if result.scheduled {
+            result.note = Some(
+                if plan_mode {
+                    "Refinement queued until Plan Mode ends."
+                } else if idle {
+                    "Refinement started; the result will appear when it finishes."
+                } else {
+                    "Refinement queued until the current turn ends."
+                }
+                .into(),
+            );
+        }
         if result.scheduled
-            && self.runtime_active_turn_id(legacy_id).await.is_none()
+            && idle
             && let Some(session_dir) = session_dir
         {
-            // The promised contract is "applies immediately when idle", but
-            // the boundary apply only runs in the post-turn pipeline — an
-            // idle session would sit on the pending refine until the user's
-            // next turn. Apply now (fire-and-forget so the RPC stays snappy;
-            // a turn that starts meanwhile simply loses the race and the
-            // boundary apply no-ops on the already-taken pending).
+            // Start idle work without blocking the RPC. A newer turn defers the
+            // prepared proposal until a stable post-turn boundary.
             let runtime = Arc::clone(self);
             let native_session_id = params.session_id;
             let legacy_session_id = legacy_id;
             tokio::spawn(async move {
-                let Some(applied) = runtime
+                runtime
                     .apply_pending_refine_at_boundary(
                         legacy_session_id,
                         &native_session_id,
                         &session_dir,
                         plan_mode,
                     )
-                    .await
-                else {
-                    return;
-                };
-                runtime
-                    .persist_applied_refinement(legacy_session_id, &applied)
                     .await;
             });
         }
@@ -704,9 +761,6 @@ impl ServerRuntime {
         let Some(handle) = self.session(session_id).await else {
             return;
         };
-        let Some(rollout_path) = handle.rollout_path().await.flatten() else {
-            return;
-        };
         let resume_snapshot = handle.resume_snapshot().await;
         let native_session_id = if let Some(snap) = resume_snapshot.as_ref() {
             snap.summary.native.id
@@ -723,22 +777,17 @@ impl ServerRuntime {
                 TurnId::new()
             });
         let seq = handle.allocate_item_seq().await.unwrap_or(0);
-        let now = Utc::now();
-        let envelope = ItemEnvelope {
-            id: devo_protocol::native::ids::ItemId::new(),
-            session_id: native_session_id,
-            turn_id: native_turn_id,
-            seq,
-            revision: 1,
-            created_at: now,
-            updated_at: now,
-            state: ItemState::Completed,
-            item: applied.native_item(),
-            parent_id: None,
-        };
+        // Use the normal item transaction so the result is on the active
+        // transcript path, in the actor snapshot, durable, and broadcast.
         if let Err(error) = self
-            .rollout_store
-            .append_canonical_item_at(&rollout_path, envelope)
+            .complete_native_item_checked(
+                native_session_id,
+                native_turn_id,
+                devo_protocol::native::ids::ItemId::new(),
+                seq,
+                applied.native_item(),
+            )
+            .await
         {
             tracing::warn!(%error, "failed to persist Item::Refinement");
         }

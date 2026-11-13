@@ -683,8 +683,8 @@ impl ServerRuntime {
         }
     }
 
-    /// Drain bash/python async completion notices into a short follow-up turn
-    /// when the session is idle. Shared by parked Python cells and `bash.completed`.
+    /// Admit bash/python completions to the owner inbox for safe-boundary steering
+    /// or an idle wake. Shared by parked Python cells and `bash.completed`.
     pub(crate) async fn drain_async_tool_completion_notices(
         self: &Arc<Self>,
         session_id: SessionId,

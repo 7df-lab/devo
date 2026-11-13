@@ -2877,3 +2877,31 @@ test("resumed context survives prompt admission until a new authoritative usage 
   assert.deepEqual((await conn.getState()).contextUsage, { tokens: 0, contextWindow: 1000, percent: 0 });
   await conn.dispose();
 });
+
+test("resume restores durable interruption between its own reply and the next turn", async () => {
+  const { conn } = await bootConnection([(method, _params, respond) => {
+    if (method === "session/items/list") {
+      respond({ data: [
+        { id: "user1", turnId: "t1", seq: 1, item: { type: "userMessage", content: [{ type: "text", text: "first" }] } },
+        { id: "partial", turnId: "t1", seq: 2, item: { type: "assistantMessage", text: "partial" } },
+        { id: "user2", turnId: "t2", seq: 3, item: { type: "userMessage", content: [{ type: "text", text: "next" }] } },
+      ], nextCursor: null });
+      return true;
+    }
+    if (method === "session/turns/list") {
+      respond({ data: [{ id: "t1", sequence: 1, status: "interrupted", completedAt: "2026-01-01T00:00:01Z" }, { id: "t2", sequence: 2, status: "completed" }], nextCursor: null });
+      return true;
+    }
+    return false;
+  }]);
+  try {
+    await conn.switchSession("sess_resumed");
+    for (let i = 0; i < 2; i++) {
+      const messages = await conn.getMessages() as Record<string, unknown>[];
+      assert.deepEqual(messages.map(message => message.stopReason === "aborted" ? "ABORT" : (message.content as { text: string }[])[0]?.text), ["first", "partial", "ABORT", "next"]);
+      assert.equal(messages[1].stopReason, null);
+    }
+  } finally {
+    await conn.dispose();
+  }
+});

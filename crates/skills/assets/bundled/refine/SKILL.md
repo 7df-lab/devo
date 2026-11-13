@@ -5,7 +5,7 @@ description: Trigger continual harness refinement from the Python REPL. Use when
 
 # Refine
 
-Refinement analyzes the conversation trajectory and applies small, evidence-backed
+Refinement consolidates existing harness entries and applies small, evidence-backed
 updates to the continual harness (prompts, memories, skills, subagent specs).
 The implementation lives in the host (the same one behind the user's `/refine`
 command); this skill is the kernel-side interface to it. Call it directly from
@@ -15,7 +15,7 @@ the Python REPL:
 await refine.status()
 await refine.run()
 await refine.run("create a memory about always checking git status before committing")
-await refine.run("promote the error-handling pattern to a global skill", global_=True)
+await refine.run("distill reusable session lessons into global memories", global_=True)
 ```
 
 ## API
@@ -27,7 +27,10 @@ await refine.run("promote the error-handling pattern to a global skill", global_
   Returns `{"scheduled": True}` immediately, or `{"scheduled": False, "reason": ...}`
   when refinement cannot start. Optional `instructions` focus the refinement on a
   specific observation. Set `global_=True` to target the global harness store
-  (cross-session); omit for local (session-scoped) refinement.
+  (cross-session); omit for local (session-scoped) refinement. Global requests also
+  review bounded session-memory candidates, preserving the local entries. Only
+  stable, qualified lessons become global memories; temporary progress and
+  unverified trajectory candidates are excluded. Empty edits are valid.
 
 ## Rules
 

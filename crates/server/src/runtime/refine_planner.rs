@@ -4,6 +4,8 @@
 //! heuristic planner on parse/provider failure. Auxiliary model slots are
 //! shared (cap 1) with title polish per L2-DES-RLM-001 DD-15.
 
+#[path = "refine_promotion.rs"]
+mod promotion;
 #[path = "refine_trajectory.rs"]
 pub(super) mod trajectory;
 
@@ -121,6 +123,8 @@ struct LlmHarnessEntry {
     title: Option<String>,
     content: Option<String>,
     path: Option<String>,
+    source_id: Option<String>,
+    applicability: Option<String>,
 }
 
 fn parse_kind(raw: &str) -> Option<HarnessKind> {
@@ -149,6 +153,11 @@ fn entry_from_llm(
     scope: HarnessScope,
 ) -> HarnessEntry {
     let now = Utc::now();
+    let mut metadata = json!({ "source": "refine_llm" });
+    if let Some(source_id) = &raw.source_id {
+        metadata["source_id"] = json!(source_id);
+        metadata["applicability"] = json!(raw.applicability);
+    }
     HarnessEntry {
         id: raw.id.clone().unwrap_or_else(|| id.to_string()),
         kind: raw.kind.as_deref().and_then(parse_kind).unwrap_or(kind),
@@ -160,7 +169,7 @@ fn entry_from_llm(
         scope: Some(scope),
         reference: json!({}),
         arguments: json!({}),
-        metadata: json!({ "source": "refine_llm" }),
+        metadata,
         source: "refine".into(),
         created_at: now,
         updated_at: now,
@@ -254,8 +263,8 @@ impl ServerRuntime {
         {
             // A valid empty edit list is a deliberate no-op, never overridden.
             Some(proposal) => Ok(proposal),
-            None if !pending.trajectory_item_ids.is_empty() => Err(
-                "selected trajectory was unavailable, unsupported, or produced no valid plan"
+            None if !pending.autonomous => Err(
+                "Refinement could not obtain a valid model plan; no edits were applied. Please retry."
                     .into(),
             ),
             None => Ok(plan_refine_proposal(pending, harness_path)),
@@ -269,7 +278,11 @@ impl ServerRuntime {
         harness_path: &std::path::Path,
     ) -> Option<RefineProposal> {
         let _permit = match tokio::time::timeout(
-            Duration::from_millis(50),
+            if pending.autonomous {
+                Duration::from_millis(50)
+            } else {
+                REFINE_AUX_TIMEOUT
+            },
             self.auxiliary_model_slots.acquire(),
         )
         .await
@@ -330,6 +343,22 @@ impl ServerRuntime {
                 });
             }
         }
+        let candidates = if pending.global {
+            let local_dir = snapshot.summary.session_dir.clone();
+            let global_baseline = baseline.clone();
+            tokio::task::spawn_blocking(move || {
+                promotion::Candidates::load(
+                    local_dir.as_deref(),
+                    &global_baseline,
+                    session_id.as_str(),
+                )
+            })
+            .await
+            .ok()?
+            .ok()?
+        } else {
+            promotion::Candidates::default()
+        };
         let snapshot = serde_json::to_string(&visible_entries).ok()?;
         // Evidence was bounded/redacted/frozen by the Native handler. Never
         // re-read live history later and accidentally expand user consent.
@@ -339,8 +368,8 @@ impl ServerRuntime {
             .cloned()
             .unwrap_or_else(|| json!([]));
         let model_request = build_refine_plan_request(
-            catalog_request_model,
-            request_model,
+            catalog_request_model.clone(),
+            request_model.clone(),
             pending,
             &snapshot,
             &trajectory,
@@ -365,6 +394,46 @@ impl ServerRuntime {
         let mut proposal = parse_refine_proposal_text(pending, &text)?;
         trajectory::constrain_trajectory_proposal(&mut proposal, &pending.trajectory_item_ids)
             .ok()?;
+        promotion::preserve_provenance(&mut proposal, &baseline);
+        // Do not give the normal global editor session candidates. Promotion
+        // runs in a separate request with create-only authority, then joins the
+        // original proposal for one atomic, baseline-checked commit.
+        if !candidates.is_empty() {
+            let mut promotion_pending = pending.clone();
+            promotion_pending.instructions = Some(format!(
+                "Distill only stable reusable lessons from the supplied session memories. Existing global entries are read-only context. Return empty edits when none are justified or the caller excludes promotion. Caller focus: {}",
+                pending
+                    .instructions
+                    .as_deref()
+                    .unwrap_or("No additional focus")
+            ));
+            let mut promotion_request = build_refine_plan_request(
+                catalog_request_model,
+                request_model,
+                &promotion_pending,
+                &snapshot,
+                &json!([]),
+            );
+            candidates.extend_request(&mut promotion_request);
+            let response =
+                tokio::time::timeout(REFINE_AUX_TIMEOUT, provider.completion(promotion_request))
+                    .await
+                    .ok()?
+                    .ok()?;
+            let mut promoted =
+                parse_refine_proposal_text(pending, &response_text(&response.content))?;
+            candidates
+                .constrain(&mut promoted, &baseline, refine_target_scope(pending))
+                .ok()?;
+            if !promoted.edits.is_empty() {
+                proposal.summary = format!(
+                    "{}; distilled {} session memories for cross-session reuse",
+                    proposal.summary,
+                    promoted.edits.len()
+                );
+                proposal.edits.extend(promoted.edits);
+            }
+        }
         devo_harness::bind_proposal_baseline(&mut proposal, &baseline).ok()?;
         Some(proposal)
     }
