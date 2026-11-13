@@ -188,11 +188,14 @@ jobs:
       - name: Boot and outcome scenarios (no provider credentials)
         working-directory: apps/tui
         run: |
-          for scenario in T1 goal heartbeat effort theme scheduled-timezone scheduled-pending abort-history; do
+          for scenario in T1 resize-status goal heartbeat effort theme scheduled-timezone scheduled-pending abort-history; do
             echo "::group::tmux smoke: $scenario"
             node scripts/run-tmux-smoke.js "$scenario"
             echo "::endgroup::"
           done
+      - name: Incremental Python code and default Details in real TTY
+        working-directory: apps/tui
+        run: node scripts/python-code-stream-smoke.mjs
       - name: Completed-turn scenario against the local mock provider
         working-directory: apps/tui
         env:
