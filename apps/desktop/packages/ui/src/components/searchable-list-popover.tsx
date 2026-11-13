@@ -1,4 +1,5 @@
 import { Popover as PopoverPrimitive } from "@base-ui/react/popover"
+import { XIcon } from "lucide-react"
 import { cn } from "@devo/ui/lib/utils"
 import {
 	createContext,
@@ -167,8 +168,25 @@ function SearchableListPopoverSearch({
 				value={search}
 				onChange={(e) => setSearch(e.target.value)}
 				placeholder={placeholder}
-				className="h-6 w-full bg-transparent text-sm outline-none placeholder:text-muted-foreground/50"
+				aria-label={placeholder}
+				className="h-6 min-w-0 flex-1 bg-transparent text-sm outline-none placeholder:text-muted-foreground/50"
 			/>
+			<span className="ml-2 flex size-6 shrink-0 items-center justify-center">
+				{search && (
+					<button
+						type="button"
+						aria-label="Clear search"
+						title="Clear search"
+						className="flex size-6 items-center justify-center rounded-sm text-muted-foreground hover:bg-muted hover:text-foreground focus-visible:outline-2 focus-visible:outline-ring"
+						onClick={() => {
+							setSearch("")
+							inputRef.current?.focus()
+						}}
+					>
+						<XIcon aria-hidden="true" className="size-3.5 stroke-[1.5]" />
+					</button>
+				)}
+			</span>
 		</div>
 	)
 }
