@@ -9,9 +9,11 @@ import { scheduledDelivered, rpcSucceeded, turnOutcome } from "./smoke-outcomes.
 
 import { startResizeProvider, checkResizeStatus } from "./resize-status-smoke.mjs";
 
+import { startWaitTimerProvider, checkWaitTimer } from "./wait-timer-smoke.mjs";
+
 const repo = resolve(dirname(fileURLToPath(import.meta.url)), "../../..");
 const scenario = process.argv[2] || "T1";
-const scenarios = ["resize-status", "T1", "T2", "T3", "goal", "bash", "agents", "schedule", "heartbeat", "activity", "effort", "theme", "fork", "clipboard", "resume", "scheduled-timezone", "scheduled-pending", "export", "share"];
+const scenarios = ["wait-timer", "resize-status", "T1", "T2", "T3", "goal", "bash", "agents", "schedule", "heartbeat", "activity", "effort", "theme", "fork", "clipboard", "resume", "scheduled-timezone", "scheduled-pending", "export", "share"];
 const preloaded = ["clipboard", "scheduled-pending"].includes(scenario);
 const tmux = process.env.DEVO_TMUX_BIN || (process.platform === "win32" ? "psmux" : "tmux");
 const binary = resolve(process.env.DEVO_BIN || process.env.DEVO_SERVER_BIN
@@ -37,6 +39,7 @@ async function run() {
   const trace = join(home, "protocol.ndjsonl");
   const sourceHome = process.env.DEVO_HOME || join(homedir(), ".devo");
   let resizeProvider;
+  let waitTimerProvider;
   let ownedSession = false;
   let pane = "";
   try {
@@ -58,6 +61,7 @@ async function run() {
       }));
     }
     if (scenario === "resize-status") resizeProvider = await startResizeProvider(home);
+    if (scenario === "wait-timer") waitTimerProvider = await startWaitTimerProvider(home);
     const settingsPath = join(sourceHome, "settings.json");
     const settings = !(["effort", "theme"].includes(scenario)) && existsSync(settingsPath) ? JSON.parse(readFileSync(settingsPath, "utf8")) : {};
     writeFileSync(join(home, "settings.json"), JSON.stringify({ ...settings, ...(scenario === "theme" ? { theme: "dark" } : {}), onboardingShown: true }));
@@ -127,6 +131,9 @@ async function run() {
     console.log("=== boot ===\n" + pane);
     switch (scenario) {
       case "T1": break;
+      case "wait-timer":
+        await checkWaitTimer({ provider: waitTimerProvider, mux, session, send, waitFor, records, turnOutcome });
+        break;
       case "resize-status":
         await checkResizeStatus({ provider: resizeProvider, mux, session, send, waitFor, records, turnOutcome });
         break;
@@ -490,6 +497,7 @@ async function run() {
     throw error;
   } finally {
     resizeProvider?.close();
+    waitTimerProvider?.close();
     if (ownedSession) mux(["kill-session", "-t", session], false);
     // The target is our own mkdtemp child, never the source credential folder.
     if (dirname(home) !== resolve(tmpdir())) throw new Error("Unexpected smoke home location");

@@ -140,3 +140,31 @@ test("snapshot fences turn lifecycle notifications by identity without suppressi
       { id: "followup", phase: "started" });
   } finally { await connection.dispose(); }
 });
+
+test("active turn clock survives reattachment after intermediate responses and steering", async () => {
+  let connection: NativeAgentConnection;
+  let turns: unknown[] = [{ id: "current", sessionId: "child", status: "inProgress", startedAt: "2026-11-13T10:00:00Z" }];
+  connection = NativeAgentConnection.create({ writeLine(line) {
+    const request = JSON.parse(line);
+    if (request.id == null) return;
+    const result = request.method === "session/items/list" ? { data: [], nextCursor: null }
+      : request.method === "session/turns/list" ? { data: turns, nextCursor: null } : {};
+    connection.pushChunk(JSON.stringify({ jsonrpc: "2.0", id: request.id, result }) + "\n");
+  } });
+  Object.assign(connection, { sessionId: "child", activeSessionId: "child", expectedTurnId: "current", isStreaming: true });
+  try {
+    const expected = Date.parse("2026-11-13T10:00:00Z");
+    assert.equal((await connection.getInitialSnapshot()).activeTurnStartedAt, expected);
+    assert.equal((await connection.getInitialSnapshot()).activeTurnStartedAt, expected);
+    for (const patch of [
+      { id: "previous" }, { sessionId: "other" }, { status: "completed" }, { startedAt: "invalid" },
+    ]) {
+      turns = [{ id: "current", sessionId: "child", status: "inProgress", startedAt: "2026-11-13T10:00:00Z", ...patch }];
+      assert.equal((await connection.getInitialSnapshot()).activeTurnStartedAt, undefined);
+    }
+    turns = [{ id: "current", sessionId: "child", status: "waitingApproval", startedAt: "2026-11-13T10:00:00Z" }];
+    assert.equal((await connection.getInitialSnapshot()).activeTurnStartedAt, expected);
+    Object.assign(connection, { isStreaming: false });
+    assert.equal((await connection.getInitialSnapshot()).activeTurnStartedAt, undefined);
+  } finally { await connection.dispose(); }
+});

@@ -51,7 +51,7 @@ interface ActivityHarness {
   shortcutClears: number;
   recapRenders: number;
   handleEvent(event: AgentConnectionSessionEvent): Promise<void>;
-  restoreTurnStartFromMessages(messages: readonly AgentMessage[]): void;
+  restoreTurnStartFromMessages(messages: readonly AgentMessage[], activeTurnStartedAt?: number): void;
 }
 
 function activityHarness(): ActivityHarness {
@@ -167,4 +167,21 @@ test("human and legacy agent inputs still reset activity and start runs", () => 
       startsRun: true, status: { activity: "waiting", direction: "up", tokens: 0 },
     });
   }
+});
+
+
+test("active Native turn start wins over intermediate assistant messages and later steering", () => {
+  const mode = activityHarness();
+  const history: AgentMessage[] = [
+    { role: "user", content: "Original", timestamp: 2000 },
+    assistantMessage(3000),
+    { role: "user", content: "Steer", timestamp: 4000 },
+  ];
+  mode.restoreTurnStartFromMessages(history, 2000);
+  assert.deepEqual({ turn: mode.turnStartedAt, working: mode.workingStartedAt }, { turn: 2000, working: 2000 });
+  mode.restoreTurnStartFromMessages([assistantMessage(5000)], 2000);
+  assert.deepEqual({ turn: mode.turnStartedAt, working: mode.workingStartedAt }, { turn: 2000, working: 2000 });
+  Object.assign(mode, { isAgentStreaming: () => false });
+  mode.restoreTurnStartFromMessages(history, 2000);
+  assert.equal(mode.turnStartedAt, undefined, "idle does not revive a completed clock");
 });

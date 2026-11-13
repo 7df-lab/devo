@@ -2935,7 +2935,7 @@ export class InteractiveMode {
 		const bashFinished = this.isBashRunning() && !snapshot.state.isBashRunning;
 		this.applyConnectionStateSnapshot(snapshot.state);
 		this.refreshQueueSelectionFromState();
-		this.restoreTurnStartFromMessages(this.getSessionContextFromConnectionSnapshot(snapshot).messages);
+		this.restoreTurnStartFromMessages(this.getSessionContextFromConnectionSnapshot(snapshot).messages, snapshot.activeTurnStartedAt);
 		this.streamingComponent = undefined;
 		this.streamingMessage = undefined;
 		this.rlmNodeId = snapshot.parent?.childId;
@@ -3226,7 +3226,7 @@ export class InteractiveMode {
 	}
 
 	// Recover the in-flight run's start from a restored transcript so the elapsed timer survives re-attach.
-	private restoreTurnStartFromMessages(messages: readonly AgentMessage[]): void {
+	private restoreTurnStartFromMessages(messages: readonly AgentMessage[], activeTurnStartedAt?: number): void {
 		this.turnStartedAt = undefined;
 		if (!this.isAgentStreaming()) return;
 		for (let i = messages.length - 1; i >= 0; i--) {
@@ -3237,6 +3237,9 @@ export class InteractiveMode {
 				break;
 			}
 		}
+		// Native snapshots identify the active turn; transcript messages alone can
+		// mistake an intermediate assistant response for the previous turn boundary.
+		if (Number.isFinite(activeTurnStartedAt)) this.turnStartedAt = activeTurnStartedAt;
 		if (this.turnStartedAt !== undefined && this.workingStartedAt !== undefined) {
 			this.workingStartedAt = this.turnStartedAt;
 			this.updateWorkingLoaderMessage();
@@ -6866,7 +6869,7 @@ export class InteractiveMode {
 		this.rlmNodeId = snapshot.parent?.childId;
 		this.seedSubagentSummary(snapshot.children);
 		this.applyConnectionStateSnapshot(state);
-		this.restoreTurnStartFromMessages(context.messages);
+		this.restoreTurnStartFromMessages(context.messages, snapshot.activeTurnStartedAt);
 		await measureAsync("transcript.render_context_to_request_render", () =>
 			this.renderSessionContext(context, {
 				updateFooter: true,

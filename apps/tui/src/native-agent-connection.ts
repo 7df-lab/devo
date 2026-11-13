@@ -1267,7 +1267,19 @@ export class NativeAgentConnection implements AgentConnection {
     const transcript = running.length
       ? applyFailedTurnsToAgentMessages(nativeItemsToAgentMessages(items.filter(item => !running.includes(item as Record<string, unknown>))), this.historySnapshotTurns.get(messages) ?? [])
       : messages;
+    // Message boundaries are not turn boundaries: one running turn can already
+    // contain completed reasoning/assistant messages or a later steering input.
+    // Recover its clock from the exact active turn, never from the latest message.
+    const activeTurn = this.isStreaming && this.expectedTurnId
+      ? (this.historySnapshotTurns.get(messages) ?? []).find(raw => {
+          const turn = raw as { id?: string; sessionId?: string; status?: string };
+          return turn.id === this.expectedTurnId && turn.sessionId === sessionId &&
+            ["inprogress", "waitingapproval"].includes(String(turn.status).toLowerCase());
+        }) as { startedAt?: string } | undefined
+      : undefined;
+    const activeTurnStartedAt = typeof activeTurn?.startedAt === "string" ? Date.parse(activeTurn.startedAt) : NaN;
     return {
+      ...(Number.isFinite(activeTurnStartedAt) ? { activeTurnStartedAt } : {}),
       state: this.buildState(),
       messages: transcript as never,
       ...(streamingMessage ? { streamingMessage: streamingMessage as never, streamingItemIds: runningIds, streamingPrefixes } : {}),

@@ -302,6 +302,8 @@ export interface AgentConnectionParentMetadata {
 }
 
 export interface AgentConnectionSnapshot {
+	/** Authoritative start of the currently running turn, in Unix milliseconds. */
+	activeTurnStartedAt?: number;
 	state: AgentConnectionState;
 	messages: AgentMessage[];
 	/** In-flight assistant message, separate from finalized transcript messages. */
