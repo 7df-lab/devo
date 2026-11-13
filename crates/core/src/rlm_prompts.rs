@@ -470,13 +470,16 @@ mod tests {
                 let prompt = build_rlm_base_prompt(&options);
                 assert!(prompt.contains("Inside an `ipython` Python cell"));
                 assert!(prompt.contains("Neither is a standalone model tool"));
-                assert!(prompt.contains("`await rlm.shell(command)` for short one-shot commands"));
-                assert!(prompt.contains("`h = bash(command)` for background work"));
                 assert!(
-                    prompt.contains(
-                        r#"`bash(command, mode="interactive")` for ongoing input/output"#
-                    )
+                    prompt.contains("`r = await rlm.shell(command)` for short one-shot commands")
                 );
+                assert!(prompt.contains("first get a handle with `h = bash(command)`"));
+                assert!(prompt.contains("then use `r = await h`"));
+                assert!(prompt.contains("Native sessions return a dict with `stdout` and `exit`"));
+                assert!(!prompt.contains("await bash("));
+                assert!(prompt.contains(
+                    r#"`h = bash(command, mode="interactive")` for ongoing input/output"#
+                ));
                 assert_eq!(
                     prompt.matches("Neither is a standalone model tool").count(),
                     1
