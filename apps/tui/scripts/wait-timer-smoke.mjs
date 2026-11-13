@@ -70,7 +70,10 @@ export async function checkWaitTimer({ provider, mux, session, send, waitFor, re
     const probe = `clock-probe-${turn}`;
     mux(["send-keys", "-t", session, "-l", probe]);
     await waitFor("reattached editor rendered", () => screen().includes(probe));
-    if (elapsed() < before) throw new Error(`Elapsed clock reset: ${before}s -> ${elapsed()}s`);
+    const after = elapsed();
+    if (!Number.isFinite(before) || !Number.isFinite(after) || after < before) {
+      throw new Error(`Elapsed clock missing or reset: ${before}s -> ${after}s`);
+    }
     mux(["send-keys", "-t", session, "C-u"]);
     if (provider.calls.get(turn) !== 2 || turnOutcome(records().slice(start), "completed")) throw new Error("Navigation restarted or ended the held turn");
     console.log(`=== wait timer reattached ${turn} ===\n${screen()}`);
