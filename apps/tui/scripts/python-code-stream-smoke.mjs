@@ -77,6 +77,11 @@ try {
       return !!turnId && requestCount === before + 1;
     });
     assert.ok(turnId, "current turn must start before argument deltas");
+    // Argument-only deltas do not feed the activity tracker. Exercise the
+    // working count with a real assistant text delta before streaming code.
+    chunk({ content: "Preparing the requested Python example." });
+    await waitFor("live token count without estimate suffix", text => /↓ \d+ tokens/.test(text));
+    assert.ok(!pane.includes("(est.)"), "working token label must not include the estimate suffix");
     chunk({ tool_calls: [{ index: 0, function: { arguments: '{"code":"stream_first = 1' } }] });
     await waitFor("first partial source", text => text.includes("╰─ stream_first = 1"));
     assert.ok(!pane.includes("stream_second"));
@@ -107,9 +112,49 @@ try {
   console.log("python-code-stream passed");
 } finally {
   console.log(pane);
-  spawnSync(process.env.DEVO_TMUX_BIN || "tmux", ["kill-session", "-t", session]);
+  // tmux kill-session only requests pane teardown. Capture the CLI and its
+  // descendants first, then wait for their exit before removing their DEVO_HOME.
+  const tmux = process.env.DEVO_TMUX_BIN || "tmux";
+  const panePid = Number(spawnSync(tmux, ["display-message", "-p", "-t", session, "#{pane_pid}"], { encoding: "utf8", timeout: 2000 }).stdout);
+  const processRows = () => {
+    const result = spawnSync("ps", ["-eo", "pid=,ppid=,stat="], { encoding: "utf8", timeout: 2000 });
+    if (result.status !== 0) return null;
+    return result.stdout.trim().split("\n").map(line => {
+      const [pid, parent, state] = line.trim().split(/\s+/);
+      return { pid: Number(pid), parent: Number(parent), state };
+    });
+  };
+  const initial = processRows();
+  const owned = new Set(Number.isInteger(panePid) && panePid > 0 ? [panePid] : []);
+  for (let changed = true; initial && changed;) {
+    changed = false;
+    for (const row of initial) if (owned.has(row.parent) && !owned.has(row.pid)) {
+      owned.add(row.pid);
+      changed = true;
+    }
+  }
+  spawnSync(tmux, ["kill-session", "-t", session], { timeout: 2000 });
   response?.destroy();
   server.closeAllConnections();
   await new Promise(resolve => server.close(resolve));
-  rmSync(home, { recursive: true, force: true });
+  let stopped = false;
+  const deadline = Date.now() + 10000;
+  while (initial && owned.size > 0 && Date.now() < deadline) {
+    const rows = processRows();
+    if (!rows) break;
+    if (!rows.some(row => owned.has(row.pid) && !row.state.startsWith("Z"))) {
+      stopped = true;
+      break;
+    }
+    await sleep(100);
+  }
+  if (stopped) {
+    try {
+      rmSync(home, { recursive: true, force: true, maxRetries: 5, retryDelay: 100 });
+    } catch (error) {
+      // Cleanup must not replace the primary regression result. A late writer
+      // not present in the process snapshot can still require retaining it.
+      console.warn(`Retaining smoke home after cleanup failed (${error.code ?? error.message}): ${home}`);
+    }
+  } else console.warn(`Retaining smoke home because process exit was not confirmed: ${home}`);
 }
