@@ -468,20 +468,24 @@ mod tests {
             for active_tools in [None, Some(vec!["ipython".to_string()])] {
                 options.active_tools = active_tools;
                 let prompt = build_rlm_base_prompt(&options);
-                assert!(prompt.contains("only inside a Python cell sent to the `ipython` tool"));
-                assert!(prompt.contains("Do not call `bash` as a standalone model tool"));
-                assert!(prompt.contains(r#"result = await bash("pwd")"#));
+                assert!(prompt.contains("Inside an `ipython` Python cell"));
+                assert!(prompt.contains("Neither is a standalone model tool"));
+                assert!(prompt.contains("`await rlm.shell(command)` for short one-shot commands"));
+                assert!(prompt.contains("`h = bash(command)` for background work"));
+                assert!(
+                    prompt.contains(
+                        r#"`bash(command, mode="interactive")` for ongoing input/output"#
+                    )
+                );
                 assert_eq!(
-                    prompt
-                        .matches("Do not call `bash` as a standalone model tool")
-                        .count(),
+                    prompt.matches("Neither is a standalone model tool").count(),
                     1
                 );
             }
             for active_tools in [vec![], vec!["bash".to_string()]] {
                 options.active_tools = Some(active_tools);
                 let prompt = build_rlm_base_prompt(&options);
-                assert!(!prompt.contains("Do not call `bash` as a standalone model tool"));
+                assert!(!prompt.contains("Neither is a standalone model tool"));
             }
         }
     }
