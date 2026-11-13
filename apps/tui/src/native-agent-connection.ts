@@ -237,6 +237,7 @@ export class NativeAgentConnection implements AgentConnection {
   private sessionTransitionGeneration = 0;
   private activeSessionId: string | undefined;
   private expectedTurnId: string | null = null;
+  private activeTurnClock: { id: string; sessionId: string; startedAt: number } | undefined;
   private subscriptionId: string | null = null;
   private subscriptionCursors: Array<{ streamId: string; seq: number }> = [];
   /** >0 while applying subscription/create replay (not live events). */
@@ -487,15 +488,27 @@ export class NativeAgentConnection implements AgentConnection {
         this.retryAttempt = 0;
         this.localAbortChromePending = false;
         this.turnSawFileMutation = false;
-        const turn = p.turn as { id?: string } | undefined;
-        if (turn?.id) this.expectedTurnId = String(turn.id);
+        const turn = p.turn as { id?: string; startedAt?: string } | undefined;
+        if (turn?.id) {
+          this.expectedTurnId = String(turn.id);
+          const startedAt = typeof turn.startedAt === "string" ? Date.parse(turn.startedAt) : NaN;
+          this.activeTurnClock = Number.isFinite(startedAt) && this.sessionId
+            ? { id: this.expectedTurnId, sessionId: this.sessionId, startedAt } : undefined;
+        }
       }
       if (this.subscriptionReplayDepth === 0) {
         // Drain notifications can race the UI; re-list so Follow-up/Steering banners clear.
         void this.refreshQueueFromServer();
       }
     }
-    if (method === "turn/completed") {
+    // The current subscription snapshot is newer than historical replay. A
+    // previous turn's terminal event must not retire its active successor.
+    const terminalTurn = (p.turn ?? p) as { id?: string; turnId?: string; status?: string };
+    const isTerminalNotification = method === "turn/completed" ||
+      (method === "turn/statusChanged" && ["completed", "interrupted", "failed"].includes(String(terminalTurn.status).toLowerCase()));
+    const replayedPreviousTurnEnd = isTerminalNotification && this.subscriptionReplayDepth > 0 &&
+      this.expectedTurnId !== null && String(terminalTurn.id ?? terminalTurn.turnId ?? "") !== this.expectedTurnId;
+    if (method === "turn/completed" && !replayedPreviousTurnEnd) {
       this.isStreaming = false;
       this.retryAttempt = 0;
       this.expectedTurnId = null;
@@ -675,7 +688,8 @@ export class NativeAgentConnection implements AgentConnection {
           this.turnSawFileMutation = true;
         }
       }
-      if (this.subscriptionReplayDepth > 0 && ev.type === "agent_start") {
+      if ((this.subscriptionReplayDepth > 0 && ev.type === "agent_start") ||
+        (replayedPreviousTurnEnd && ev.type === "agent_end")) {
         continue;
       }
       if (ev.type === "session_usage_update") {
@@ -954,6 +968,8 @@ export class NativeAgentConnection implements AgentConnection {
       serviceTier: "default",
       availableThinkingLevels: this.availableThinkingLevels,
       isStreaming: this.isStreaming,
+      activeTurnStartedAt: this.isStreaming && this.activeTurnClock?.id === this.expectedTurnId &&
+        this.activeTurnClock?.sessionId === this.sessionId ? this.activeTurnClock.startedAt : undefined,
       isCompacting: this.isCompacting,
       isBashRunning: this.isBashRunning,
       retryAttempt: this.retryAttempt,
@@ -1064,13 +1080,16 @@ export class NativeAgentConnection implements AgentConnection {
       // may never receive the statusChanged event that started compaction.
       if (Array.isArray(session.flags)) this.isCompacting = session.flags.includes("compacting");
       const activeTurn = (data.activeTurn ?? data.active_turn) as
-        | { id?: string }
+        | { id?: string; startedAt?: string }
         | null
         | undefined;
       if (activeTurn && typeof activeTurn === "object" && activeTurn.id) {
         snapshotHasActiveTurn = true;
         this.isStreaming = true;
         this.expectedTurnId = String(activeTurn.id);
+        const startedAt = typeof activeTurn.startedAt === "string" ? Date.parse(activeTurn.startedAt) : NaN;
+        this.activeTurnClock = Number.isFinite(startedAt)
+          ? { id: this.expectedTurnId, sessionId, startedAt } : undefined;
       }
       const items = (data.items ?? data.recentItems) as unknown[] | undefined;
       if (Array.isArray(items)) {
@@ -1268,7 +1287,19 @@ export class NativeAgentConnection implements AgentConnection {
     const transcript = running.length
       ? applyFailedTurnsToAgentMessages(applyInterruptedTurnsToAgentMessages(nativeItemsToAgentMessages(items.filter(item => !running.includes(item as Record<string, unknown>))), this.historySnapshotTurns.get(messages) ?? []), this.historySnapshotTurns.get(messages) ?? [])
       : messages;
+    // Message boundaries are not turn boundaries: one running turn can already
+    // contain completed reasoning/assistant messages or a later steering input.
+    // Recover its clock from the exact active turn, never from the latest message.
+    const activeTurn = this.isStreaming && this.expectedTurnId
+      ? (this.historySnapshotTurns.get(messages) ?? []).find(raw => {
+          const turn = raw as { id?: string; sessionId?: string; status?: string };
+          return turn.id === this.expectedTurnId && turn.sessionId === sessionId &&
+            ["inprogress", "waitingapproval"].includes(String(turn.status).toLowerCase());
+        }) as { startedAt?: string } | undefined
+      : undefined;
+    const activeTurnStartedAt = typeof activeTurn?.startedAt === "string" ? Date.parse(activeTurn.startedAt) : NaN;
     return {
+      ...(Number.isFinite(activeTurnStartedAt) ? { activeTurnStartedAt } : {}),
       state: this.buildState(),
       messages: transcript as never,
       ...(streamingMessage ? { streamingMessage: streamingMessage as never, streamingItemIds: runningIds, streamingPrefixes } : {}),

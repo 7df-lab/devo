@@ -302,6 +302,8 @@ export interface AgentConnectionParentMetadata {
 }
 
 export interface AgentConnectionSnapshot {
+	/** Authoritative start of the currently running turn, in Unix milliseconds. */
+	activeTurnStartedAt?: number;
 	state: AgentConnectionState;
 	messages: AgentMessage[];
 	/** In-flight assistant message, separate from finalized transcript messages. */
@@ -344,6 +346,8 @@ export interface AgentConnectionState {
 	serviceTier: ServiceTier;
 	availableThinkingLevels: ThinkingLevel[];
 	isStreaming: boolean;
+	/** Available before transcript hydration when the backend supplies an active turn snapshot. */
+	activeTurnStartedAt?: number;
 	isCompacting: boolean;
 	isBashRunning: boolean;
 	retryAttempt: number;

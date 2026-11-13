@@ -13,9 +13,11 @@ import { scheduledDelivered, rpcSucceeded, turnOutcome } from "./smoke-outcomes.
 import { assertInterruptedHistory } from "./abort-history-outcome.mjs";
 import { startResizeProvider, checkResizeStatus } from "./resize-status-smoke.mjs";
 
+import { startWaitTimerProvider, checkWaitTimer } from "./wait-timer-smoke.mjs";
+
 const repo = resolve(dirname(fileURLToPath(import.meta.url)), "../../..");
 const scenario = process.argv[2] || "T1";
-const scenarios = ["subagent-roster", "resize-status", "T1", "T2", "T3", "goal", "bash", "agents", "schedule", "heartbeat", "activity", "effort", "theme", "fork", "clipboard", "resume", "scheduled-timezone", "scheduled-pending", "export", "share", "refine", "steering", "abort-history"];
+const scenarios = ["wait-timer", "subagent-roster", "resize-status", "T1", "T2", "T3", "goal", "bash", "agents", "schedule", "heartbeat", "activity", "effort", "theme", "fork", "clipboard", "resume", "scheduled-timezone", "scheduled-pending", "export", "share", "refine", "steering", "abort-history"];
 const preloaded = ["clipboard", "scheduled-pending"].includes(scenario);
 const tmux = process.env.DEVO_TMUX_BIN || (process.platform === "win32" ? "psmux" : "tmux");
 const binary = resolve(process.env.DEVO_BIN || process.env.DEVO_SERVER_BIN
@@ -45,6 +47,7 @@ async function run() {
   let finishFirstReply;
   let steeringRequests = 0;
   let resizeProvider;
+  let waitTimerProvider;
   let subagentRosterProvider;
   let ownedSession = false;
   let pane = "";
@@ -126,6 +129,7 @@ async function run() {
     }
     if (scenario === "subagent-roster") subagentRosterProvider = await startSubagentRosterProvider(home);
     if (scenario === "resize-status") resizeProvider = await startResizeProvider(home);
+    if (scenario === "wait-timer") waitTimerProvider = await startWaitTimerProvider(home);
     const settingsPath = join(sourceHome, "settings.json");
     const settings = !(["effort", "theme"].includes(scenario)) && existsSync(settingsPath) ? JSON.parse(readFileSync(settingsPath, "utf8")) : {};
     writeFileSync(join(home, "settings.json"), JSON.stringify({ ...settings, ...(scenario === "theme" ? { theme: "dark" } : {}), onboardingShown: true }));
@@ -238,6 +242,9 @@ async function run() {
 
       case "subagent-roster":
         await checkSubagentRoster({ provider: subagentRosterProvider, mux, session, send, waitFor });
+        break;
+      case "wait-timer":
+        await checkWaitTimer({ provider: waitTimerProvider, mux, session, send, waitFor, records, turnOutcome });
         break;
       case "resize-status":
         await checkResizeStatus({ provider: resizeProvider, mux, session, send, waitFor, records, turnOutcome });
@@ -647,6 +654,7 @@ async function run() {
     throw error;
   } finally {
     resizeProvider?.close();
+    waitTimerProvider?.close();
     abortServer?.closeAllConnections();
     abortServer?.close();
     if (ownedSession) mux(["kill-session", "-t", session], false);

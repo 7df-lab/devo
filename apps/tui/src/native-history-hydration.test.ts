@@ -140,3 +140,98 @@ test("snapshot fences turn lifecycle notifications by identity without suppressi
       { id: "followup", phase: "started" });
   } finally { await connection.dispose(); }
 });
+
+test("active turn clock survives reattachment after intermediate responses and steering", async () => {
+  let connection: NativeAgentConnection;
+  let turns: unknown[] = [{ id: "current", sessionId: "child", status: "inProgress", startedAt: "2026-11-13T10:00:00Z" }];
+  connection = NativeAgentConnection.create({ writeLine(line) {
+    const request = JSON.parse(line);
+    if (request.id == null) return;
+    const result = request.method === "session/items/list" ? { data: [], nextCursor: null }
+      : request.method === "session/turns/list" ? { data: turns, nextCursor: null } : {};
+    connection.pushChunk(JSON.stringify({ jsonrpc: "2.0", id: request.id, result }) + "\n");
+  } });
+  Object.assign(connection, { sessionId: "child", activeSessionId: "child", expectedTurnId: "current", isStreaming: true });
+  try {
+    const expected = Date.parse("2026-11-13T10:00:00Z");
+    assert.equal((await connection.getInitialSnapshot()).activeTurnStartedAt, expected);
+    assert.equal((await connection.getInitialSnapshot()).activeTurnStartedAt, expected);
+    for (const patch of [
+      { id: "previous" }, { sessionId: "other" }, { status: "completed" }, { startedAt: "invalid" },
+    ]) {
+      turns = [{ id: "current", sessionId: "child", status: "inProgress", startedAt: "2026-11-13T10:00:00Z", ...patch }];
+      assert.equal((await connection.getInitialSnapshot()).activeTurnStartedAt, undefined);
+    }
+    turns = [{ id: "current", sessionId: "child", status: "waitingApproval", startedAt: "2026-11-13T10:00:00Z" }];
+    assert.equal((await connection.getInitialSnapshot()).activeTurnStartedAt, expected);
+    Object.assign(connection, { isStreaming: false });
+    assert.equal((await connection.getInitialSnapshot()).activeTurnStartedAt, undefined);
+  } finally { await connection.dispose(); }
+});
+
+test("subscription clock is available before transcript hydration and cannot leak to another turn", async () => {
+  let conn: NativeAgentConnection;
+  let activeTurn: unknown = { id: "current", startedAt: "2026-11-13T10:00:00Z" };
+  const requests: string[] = [];
+  conn = NativeAgentConnection.create({ writeLine(line) {
+    const request = JSON.parse(line); if (request.id == null) return;
+    requests.push(request.method);
+    const result = request.method === "subscription/create"
+      ? { subscriptionId: "sub", snapshots: [{ data: { session: { id: "child" }, activeTurn } }] }
+      : {};
+    conn.pushChunk(JSON.stringify({ jsonrpc: "2.0", id: request.id, result }) + "\n");
+  } });
+  Object.assign(conn, { sessionId: "child" });
+  const internal = conn as unknown as { createSubscription(): Promise<void> };
+  try {
+    await internal.createSubscription();
+    assert.equal((await conn.getState()).activeTurnStartedAt, Date.parse("2026-11-13T10:00:00Z"));
+    assert.equal(requests.includes("session/items/list"), false, "clock must not wait for history hydration");
+    Object.assign(conn, { expectedTurnId: "newer" });
+    assert.equal((await conn.getState()).activeTurnStartedAt, undefined);
+    Object.assign(conn, { expectedTurnId: "current", sessionId: "other" });
+    assert.equal((await conn.getState()).activeTurnStartedAt, undefined);
+    Object.assign(conn, { sessionId: "child" });
+    activeTurn = null;
+    await internal.createSubscription();
+    assert.equal((await conn.getState()).activeTurnStartedAt, undefined);
+  } finally { await conn.dispose(); }
+});
+
+
+for (const status of ["completed", "interrupted", "failed"]) {
+test(`historical ${status} lifecycle cannot retire the active subscription turn`, async () => {
+  let conn: NativeAgentConnection;
+  conn = NativeAgentConnection.create({ writeLine(line) {
+    const request = JSON.parse(line); if (request.id == null) return;
+    const result = request.method === "subscription/create" ? {
+      subscriptionId: "sub",
+      snapshots: [{ data: { session: { id: "child" }, activeTurn: {
+        id: "current", startedAt: "2026-11-13T10:00:00Z",
+      } } }],
+      replay: [
+        { notification: { method: "turn/statusChanged", params: { turnId: "previous", sessionId: "child", status } } },
+        { notification: { method: "turn/completed", params: { turn: { id: "previous", sessionId: "child", status } } } },
+      ],
+    } : {};
+    conn.pushChunk(JSON.stringify({ jsonrpc: "2.0", id: request.id, result }) + "\n");
+  } });
+  Object.assign(conn, { sessionId: "child" });
+  const events: any[] = [];
+  conn.subscribe(event => events.push(event));
+  try {
+    await (conn as unknown as { createSubscription(): Promise<void> }).createSubscription();
+    const state = await conn.getState();
+    assert.equal(state.isStreaming, true);
+    assert.equal(state.activeTurnStartedAt, Date.parse("2026-11-13T10:00:00Z"));
+    assert.equal(events.some(event => event.event?.type === "agent_end"), false);
+    conn.pushChunk(JSON.stringify({ jsonrpc: "2.0", method: "turn/completed", params: { turn: {
+      id: "current", sessionId: "child", status: "completed",
+    } } }) + "\n");
+    assert.equal((await conn.getState()).isStreaming, false);
+    assert.equal((await conn.getState()).activeTurnStartedAt, undefined);
+    assert.equal(events.filter(event => event.event?.type === "agent_end").length, 1);
+  } finally { await conn.dispose(); }
+});
+
+}
