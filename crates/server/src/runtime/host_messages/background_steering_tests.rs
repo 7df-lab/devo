@@ -194,7 +194,7 @@ async fn background_completions_steer_the_active_turn_once_in_fifo_order() -> Re
         )
         .await?;
     super::super::kernel_host::push_bash_notice(
-        &env.session.to_string(),
+        env.session.as_str(),
         json!({
             "kind": "async_python_completion", "params": {"cellId": "SECOND_PYTHON", "status": "completed"}
         }),

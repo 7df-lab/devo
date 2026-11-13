@@ -71,6 +71,7 @@ struct WaitingGoal {
     connection_id: u64,
     session_id: SessionId,
     goal: Goal,
+    initial_turn_id: String,
 }
 
 impl WaitingGoal {
@@ -90,7 +91,11 @@ impl WaitingGoal {
             "background-wait-goal",
         )
         .await?;
-        support::wait_for_notification(&mut notifications, "turn/started").await?;
+        let started = support::wait_for_notification(&mut notifications, "turn/started").await?;
+        let initial_turn_id = started["params"]["turn"]["id"]
+            .as_str()
+            .context("initial turn id")?
+            .to_owned();
         support::wait_for_captured_request_count(&provider.requests, /*expected*/ 1).await?;
         Ok(Self {
             _data_root: data_root,
@@ -100,6 +105,7 @@ impl WaitingGoal {
             connection_id,
             session_id,
             goal,
+            initial_turn_id,
         })
     }
 
@@ -228,12 +234,45 @@ async fn completion_before_wait_is_armed_is_not_lost() -> Result<()> {
     let mut test = WaitingGoal::new().await?;
     test.start_work("fast-command");
     test.finish_work("fast-command", "fast command finished before parent turn");
-    test.finish_first_turn().await?;
-    test.wait_for_second_turn().await?;
+    // The coordinator publishes asynchronously. Wait for durable admission
+    // before releasing the request, so this really exercises the busy boundary.
+    timeout(Duration::from_secs(/*secs*/ 5), async {
+        loop {
+            let update =
+                support::wait_for_notification(&mut test.notifications, "queue/updated").await?;
+            if update["params"]["queue"]
+                .to_string()
+                .contains("fast command finished before parent turn")
+            {
+                return Ok::<_, anyhow::Error>(());
+            }
+        }
+    })
+    .await
+    .context("background result was not admitted")??;
+    test.provider.release(/*index*/ 0);
+    support::wait_for_captured_request_count(&test.provider.requests, /*expected*/ 2).await?;
     {
         let requests = test.provider.requests.lock().expect("lock requests");
         assert!(support::request_contains_text(
             &requests[1],
+            "fast command finished before parent turn"
+        ));
+    }
+    // The completion steers the current turn, not a separate regular turn.
+    test.assert_no_new_turn(/*expected_requests*/ 2).await?;
+    test.provider.release(/*index*/ 1);
+    let completed = support::collect_until_turn_completed(&mut test.notifications).await?;
+    assert_eq!(
+        completed.last().context("completion event")?["params"]["turn"]["id"],
+        test.initial_turn_id
+    );
+    test.wait_for_turn(/*expected_requests*/ 3, "goalContinuation")
+        .await?;
+    {
+        let requests = test.provider.requests.lock().expect("lock requests");
+        assert!(support::request_contains_text(
+            &requests[2],
             "fast command finished before parent turn"
         ));
     }
