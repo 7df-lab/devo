@@ -90,14 +90,18 @@ pub(super) fn provider_error_from_payload(
             message,
             status_code,
         },
-        None if payload.kind.as_deref().is_some_and(is_server_error_kind) => {
+        None if payload.kind.as_deref().is_some_and(is_server_error_kind)
+            || payload.code.as_ref().and_then(Value::as_str) == Some("server_error") =>
+        {
             ProviderError::ProviderServerError {
                 message,
                 status_code: None,
                 provider_name,
             }
         }
-        None if payload.kind.as_deref().is_some_and(is_rate_limit_kind) => {
+        None if payload.kind.as_deref().is_some_and(is_rate_limit_kind)
+            || payload.code.as_ref().and_then(Value::as_str) == Some("rate_limit_exceeded") =>
+        {
             ProviderError::RateLimitError {
                 message,
                 retry_after_seconds: None,
