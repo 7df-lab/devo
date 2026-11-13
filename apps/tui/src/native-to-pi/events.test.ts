@@ -802,3 +802,32 @@ test("live Python kernel restore item emits the injected restored-state notice",
   assert.equal(message.customType, "ipython_state_restored");
   assert.deepEqual(message.details, { restored: true });
 });
+
+test("steering admission leaves the previous assistant open until its authoritative completion", () => {
+  const state = createStreamState();
+  const output: Array<Record<string, unknown>> = [];
+  const emit = (method: string, params: unknown) => {
+    const events = nativeNotificationToPiEvents(method, params, state);
+    output.push(...events);
+    return events;
+  };
+  emit("item/started", { id: "reply-1", item: { type: "assistantMessage", text: "" } });
+  emit("item/assistantMessage/delta", { itemId: "reply-1", delta: "First reply" });
+  // claim_inbox_steers publishes the user item before ModelResponseCompleted
+  // reaches the event stream and completes the preceding assistant item.
+  const admitted = emit("item/started", {
+    id: "steer-1", item: { type: "userMessage", content: [{ type: "text", text: "Continue" }] },
+  });
+  assert.deepEqual(admitted.map((event) => [event.type, (event.message as { role: string }).role]), [
+    ["message_start", "user"], ["message_end", "user"],
+  ]);
+  emit("item/completed", { id: "reply-1", item: { type: "assistantMessage", text: "First reply final" } });
+  emit("item/started", { id: "reply-2", item: { type: "assistantMessage", text: "" } });
+  emit("item/assistantMessage/delta", { itemId: "reply-2", delta: "Second reply" });
+  emit("item/completed", { id: "reply-2", item: { type: "assistantMessage", text: "Second reply" } });
+  emit("turn/completed", { turn: { status: "completed" } });
+  const completions = output.filter((event) => event.type === "message_end" && (event.message as { role: string }).role === "assistant");
+  assert.deepEqual(completions.map((event) => (event.message as { content: unknown }).content), [
+    [{ type: "text", text: "First reply final" }], [{ type: "text", text: "Second reply" }],
+  ]);
+});
