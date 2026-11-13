@@ -121,6 +121,16 @@ impl ServerRuntime {
             );
         }
         drop(state_change_guard);
+        // Roster subscribers observe session lifecycle, not per-session turns.
+        // Host messages (including child startup) also enter through this path.
+        self.broadcast_notification(
+            devo_protocol::native::event::ServerNotification::session_status_changed(
+                session_id,
+                SessionStatus::Active,
+                Some(turn.native.id),
+            ),
+        )
+        .await;
         self.broadcast_notification(
             devo_protocol::native::event::ServerNotification::TurnStarted {
                 turn: Box::new(turn.native.clone()),
@@ -231,6 +241,16 @@ impl ServerRuntime {
             );
         }
         drop(state_change_guard);
+        // Roster subscribers observe session lifecycle, not per-session turns.
+        // Host messages (including child startup) also enter through this path.
+        self.broadcast_notification(
+            devo_protocol::native::event::ServerNotification::session_status_changed(
+                session_id,
+                SessionStatus::Active,
+                Some(turn.native.id),
+            ),
+        )
+        .await;
         self.broadcast_notification(
             devo_protocol::native::event::ServerNotification::TurnStarted {
                 turn: Box::new(turn.native.clone()),

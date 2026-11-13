@@ -365,6 +365,7 @@ export async function subscribeAgentRoster(
   let current: AgentsViewSessionSummary[] = [];
   let disposed = false;
   let refreshQueued = false;
+  let initializing = true;
   let subscriptionId: string | null = null;
 
   let pendingRefresh: Promise<void> | undefined;
@@ -396,6 +397,7 @@ export async function subscribeAgentRoster(
 
   const scheduleRefresh = () => {
     if (disposed || refreshQueued) return;
+    if (initializing) { refreshAgain = true; return; }
     refreshQueued = true;
     queueMicrotask(() => {
       refreshQueued = false;
@@ -403,7 +405,11 @@ export async function subscribeAgentRoster(
     });
   };
 
-  current = await measureAsync("roster.initial_summaries", () => fetchAgentRosterSummaries(client, { cwd }));
+  // Install the observer and server subscription before reading the snapshot.
+  // Otherwise a child created between the read and subscribe is lost forever.
+  const unsubscribeNotification = client.onNotification?.((method) => {
+    if (ROSTER_REFRESH_METHODS.has(method)) scheduleRefresh();
+  });
 
   try {
     const result = (await client.request("subscription/create", {
@@ -416,9 +422,19 @@ export async function subscribeAgentRoster(
     // surfaces roster events (e.g. via NativeAgentConnection.notifyRoster).
   }
 
-  const unsubscribeNotification = client.onNotification?.((method) => {
-    if (ROSTER_REFRESH_METHODS.has(method)) scheduleRefresh();
-  });
+  try {
+    refreshAgain = false;
+    current = await measureAsync("roster.initial_summaries", () => fetchAgentRosterSummaries(client, { cwd }));
+  } catch (error) {
+    unsubscribeNotification?.();
+    if (subscriptionId) {
+      try { await client.request("subscription/unsubscribe", { subscriptionId }); } catch { /* best effort */ }
+    }
+    throw error;
+  } finally {
+    initializing = false;
+  }
+  if (refreshAgain) scheduleRefresh();
 
   return {
     summaries: () => current,
