@@ -224,7 +224,25 @@ async function run() {
         mux(["send-keys", "-t", session, "C-u"]);
         await send("/model");
         await waitFor("model picker", (_events, text) => text.includes("require sign in"));
-        await send("deepseek-v4-flash");
+        mux(["send-keys", "-t", session, "-l", "deepseek/deepseek-v4-flash"]);
+        // Search ranking is not provider identity: third-party catalog IDs can
+        // contain the same deepseek/ prefix. Inspect only the current viewport.
+        const selectionDeadline = Date.now() + timeout;
+        let previousRow;
+        let navigations = 0;
+        while (true) {
+          const viewport = mux(["capture-pane", "-t", session, "-p"]).stdout;
+          const row = viewport.split("\n").find(line => /^\s*›.*require sign in · /.test(line));
+          if (viewport.includes("deepseek/deepseek-v4-flash") && row && row !== previousRow) {
+            if (/require sign in · deepseek\s*$/.test(row)) break;
+            if (++navigations > 300) throw new Error("DeepSeek provider not found in model picker");
+            previousRow = row;
+            mux(["send-keys", "-t", session, "Down"]);
+          }
+          if (Date.now() > selectionDeadline) throw new Error("Timed out locating the exact DeepSeek provider");
+          await sleep(100);
+        }
+        mux(["send-keys", "-t", session, "Enter"]);
         await waitFor("model requires login", (_events, text) => text.includes("Enter API key:"));
         mux(["send-keys", "-t", session, "Escape"]);
         break;

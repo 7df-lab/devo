@@ -53,3 +53,34 @@ test("legacy credential bindings match Native migration without cross-provider f
   assert.equal(state.unavailable("openai"), false);
   assert.equal(state.unavailable("other"), true);
 });
+
+test("logout smoke reselects the exact provider among same-name catalog models", async () => {
+  const {ModelSelectorComponent} = await import("../lib/coding-agent/src/modes/interactive/components/model-selector.js");
+  const {ModelRegistry} = await import("../lib/coding-agent/src/core/model-registry.js");
+  const {normalizeAgentModel} = await import("./native-agent-connection.js");
+  const models = ["agentrouter", "aimlapi", "deepseek"].map(provider => ({
+    ...normalizeAgentModel({provider,id:"deepseek-v4-flash",name:"DeepSeek V4 Flash",reasoning:true})!,
+    // Preserve catalog IDs as supplied to the picker, including prefix collisions.
+    id:provider === "deepseek" ? "deepseek-v4-flash" : "deepseek/deepseek-v4-flash",
+  }));
+  let selected: string | undefined;
+  const selector = new ModelSelectorComponent(
+    {requestRender(){}} as never, undefined, ModelRegistry.inMemory(AuthStorage.inMemory()), [],
+    model => {selected=model.provider;}, () => {}, "deepseek/deepseek-v4-flash",
+    {availableModels:models as never,configuredProviders:new Set(),inline:true,getRows:()=>30},
+  );
+  assert.match(selector.render(100).join("\n"),/require sign in/);
+  // Mirror the smoke's visible-row identity check rather than assuming rank.
+  let navigations = 0;
+  while (true) {
+    const viewport = selector.render(140).join("\n").replace(/\x1b\[[0-?]*[ -/]*[@-~]/g, "");
+    const row = viewport.split("\n").find(line => /^\s*›.*require sign in · /.test(line));
+    assert.ok(row, "selected provider row is visible");
+    if (/require sign in · deepseek\s*$/.test(row)) break;
+    assert.ok(++navigations < models.length, "exact provider must be reachable");
+    selector.handleInput("\x1b[B");
+  }
+  assert.equal(navigations, 2);
+  selector.handleInput("\r");
+  assert.equal(selected,"deepseek");
+});
