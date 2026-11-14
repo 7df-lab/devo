@@ -3,8 +3,7 @@ import test from "node:test";
 import { mkdtemp, mkdir, readdir, readFile, writeFile, rm, symlink, realpath } from "node:fs/promises";
 import { join } from "node:path";
 import { tmpdir } from "node:os";
-import { PassThrough } from "node:stream";
-import { WorkspaceTrust, promptWorkspaceTrust, requireSessionWorkspace } from "./workspace-trust.js";
+import { WorkspaceTrust, requireSessionWorkspace } from "./workspace-trust.js";
 import { StdioJsonRpc } from "./stdio-jsonrpc.js";
 async function fixture(t: { after(fn: () => Promise<void>): void }) {
   const root = await mkdtemp(join(tmpdir(), "devo-trust-"));
@@ -56,13 +55,6 @@ test("symlinks share canonical trust, retargets do not", { skip: process.platfor
   await rm(alias); await symlink(second, alias);
   await assert.rejects(trust.require(alias), /not trusted/);
 });
-for (const [answer, expected] of [["yes\n", true], ["\n", false], ["y\n", false], ["no\n", false], ["", false]] as const) {
-  test(`prompt requires explicit yes: ${JSON.stringify(answer)}`, async () => {
-    const input = new PassThrough(), output = new PassThrough();
-    const result = promptWorkspaceTrust("/project\u001b[2J", input, output); input.end(answer);
-    assert.equal(await result, expected); assert.match(output.read().toString(), /\\u001b/);
-  });
-}
 test("session admission only reads metadata when trust is denied", async (t) => {
   const { home, workspace } = await fixture(t); const methods: string[] = [];
   const rpc = new StdioJsonRpc(line => {

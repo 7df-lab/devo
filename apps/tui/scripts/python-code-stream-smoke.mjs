@@ -64,7 +64,7 @@ try {
   writeFileSync(join(home, "settings.json"), JSON.stringify({ onboardingShown: true }));
   mux(["new-session", "-d", "-s", session, "-c", repo, "-x", "100", "-y", "30", "-e", `DEVO_HOME=${home}`, "-e", `DEVO_CODING_AGENT_DIR=${home}`, "-e", `PRIME_AGENT_CODING_AGENT_DIR=${home}`, "-e", "DEVO_PROTOCOL_TRACE=1", "-e", `DEVO_PROTOCOL_TRACE_FILE=${trace}`, "--", binary]);
   await waitFor("trust", text => text.includes("Trust this workspace?"));
-  await send("yes");
+  mux(["send-keys", "-t", session, "Down", "Enter"]);
   await waitFor("default Details", text => text.includes("Details") && text.includes("Scheduled"));
   for (const width of [100, 40]) {
     mux(["resize-window", "-t", session, "-x", String(width), "-y", "30"]);
