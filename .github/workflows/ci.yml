@@ -190,6 +190,22 @@ jobs:
         run: |
           node --test scripts/owned-smoke-tmux.test.mjs
           node scripts/workspace-trust-smoke.mjs
+      - name: Observe real PTY latency baseline (no performance threshold)
+        working-directory: apps/tui
+        env:
+          DEVO_BENCH_OUTPUT: ${{ runner.temp }}/tui-latency.json
+        run: |
+          node --test scripts/tui-latency.test.mjs
+          node --import tsx --test scripts/tui-latency-input.test.ts
+          node scripts/tui-latency.mjs
+      - name: Upload raw PTY baseline and environment
+        if: always()
+        uses: actions/upload-artifact@v4
+        with:
+          name: tui-latency-${{ github.event.pull_request.head.sha || github.sha }}
+          path: ${{ runner.temp }}/tui-latency.json
+          if-no-files-found: warn
+          retention-days: 14
       - name: Boot and outcome scenarios (no provider credentials)
         working-directory: apps/tui
         run: |
