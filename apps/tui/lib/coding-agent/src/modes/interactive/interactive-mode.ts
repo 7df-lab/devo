@@ -639,6 +639,9 @@ export interface InteractiveModeOptions {
 	 */
 	excludedLoginProviderIds?: ReadonlyArray<string>;
 	/** Host connection setup performed only after an explicit successful login. */
+	getStoredProviderCredentials?(): Promise<Array<{ provider: string; kind?: string }>>;
+	onProviderLogoutStarted?(providerId: string): void;
+	onProviderLoggedOut?(providerId: string): Promise<void>;
 	onProviderAuthenticated?(providerId: string, authType: "oauth" | "api_key", kind: "provider" | "service"): Promise<void>;
 	/**
 	 * Builtin slash command names the host serves itself. Excluded builtins are
@@ -8003,8 +8006,7 @@ export class InteractiveMode {
 		if (model) {
 			try {
 				const authFlows = this.createAuthFlows();
-				const providerOptions = authFlows.getLoginProviderOptions();
-				if (!(await this.ensureModelProviderConfigured(model, authFlows, providerOptions))) return;
+				if (!(await this.ensureModelProviderConfigured(model, authFlows))) return;
 				await this.completeModelSelection(model);
 			} catch (error) {
 				this.showError(error instanceof Error ? error.message : String(error));
@@ -8070,11 +8072,11 @@ export class InteractiveMode {
 	private async ensureModelProviderConfigured(
 		model: AgentConnectionModel,
 		authFlows: ProviderAuthFlows,
-		providerOptions: ReadonlyArray<AuthSelectorProvider>,
 	): Promise<boolean> {
 		if (this.isModelProviderConfigured(model)) return true;
 
-		const provider = providerOptions.find(
+		// Catalog refresh may have added a Native provider since the menu opened.
+		const provider = authFlows.getLoginProviderOptions().find(
 			(option) => option.id === model.provider && (option.category ?? "provider") === "provider",
 		);
 		if (!provider) {
@@ -8094,7 +8096,7 @@ export class InteractiveMode {
 	}
 
 	private isModelProviderConfigured(model: AgentConnectionModel): boolean {
-		return this.connectionConfiguredProviders.has(model.provider) || this.modelRegistry.hasConfiguredAuth(model);
+		return this.connectionConfiguredProviders.has(model.provider);
 	}
 
 	private applyConnectionModelCatalog(catalog: AgentConnectionModelCatalog): void {
@@ -8656,7 +8658,7 @@ export class InteractiveMode {
 						let completed = false;
 						let selectionInFlight: Promise<void> | undefined;
 						try {
-							const ready = await this.ensureModelProviderConfigured(model, authFlows, providerOptions);
+							const ready = await this.ensureModelProviderConfigured(model, authFlows);
 							if (settled) return;
 							focus();
 							menu.refreshAuthentication();
@@ -9058,8 +9060,12 @@ export class InteractiveMode {
 			showStatus: (message) => this.showStatus(message),
 			showError: (message) => this.showError(message),
 			getAvailableModels: () => this.getConnectionAvailableModels(),
+			getModelProviderIds: () => this.connectionModelCatalog.map((model) => model.provider),
 			excludedLoginProviderIds: this.options.excludedLoginProviderIds,
 			onProviderAuthenticated: this.options.onProviderAuthenticated,
+			onProviderLogoutStarted: this.options.onProviderLogoutStarted,
+			onProviderLoggedOut: this.options.onProviderLoggedOut,
+			getStoredProviderCredentials: this.options.getStoredProviderCredentials,
 			onAuthChanged: async () => {
 				await this.refreshConnectionModelsAfterAuthChange();
 				await this.updateAvailableProviderCount();
