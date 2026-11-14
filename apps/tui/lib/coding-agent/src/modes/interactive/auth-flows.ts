@@ -99,6 +99,8 @@ export interface ProviderAuthFlowsHost {
 	showError(message: string): void;
 	/** Models currently visible to the host; used to detect providers configured via external credentials. */
 	getAvailableModels(): Promise<ReadonlyArray<{ provider: string }>>;
+	/** Complete Native catalog, including providers requiring authentication. */
+	getModelProviderIds?(): ReadonlyArray<string>;
 	/** Invoked after stored credentials change so the host can refresh dependent UI. */
 	onAuthChanged?(): void | Promise<void>;
 	/** Invoked after a successful login (e.g. to surface billing warnings). */
@@ -266,7 +268,10 @@ export class ProviderAuthFlows {
 			...(provider.id.startsWith("mcp:") ? { category: "service" as const } : {}),
 		}));
 
-		const modelProviders = new Set(this.host.modelRegistry.getAll().map((model) => model.provider));
+		const modelProviders = new Set([
+			...this.host.modelRegistry.getAll().map((model) => model.provider),
+			...(this.host.getModelProviderIds?.() ?? []),
+		]);
 		for (const providerId of modelProviders) {
 			if (!isApiKeyLoginProvider(providerId, oauthProviderIds)) {
 				continue;

@@ -84,3 +84,38 @@ test("logout smoke reselects the exact provider among same-name catalog models",
   selector.handleInput("\r");
   assert.equal(selected,"deepseek");
 });
+
+test("Native-only logged-out model opens the actual API key dialog and cancellation stays unauthenticated", async () => {
+  const { InteractiveMode } = await import("../lib/coding-agent/src/modes/interactive/interactive-mode.js");
+  const auth = AuthStorage.inMemory();
+  let overlay: {handleInput(data:string):void; render(width:number):string[]} | undefined;
+  const errors: string[] = [];
+  const mode = Object.create(InteractiveMode.prototype) as {
+    ui: unknown; modelRegistry: unknown; options: unknown;
+    connectionModelCatalog: Array<{provider:string;id:string}>;
+    connectionConfiguredProviders: Set<string>;
+    showError(message:string):void;
+    createAuthFlows(): ProviderAuthFlows;
+    ensureModelProviderConfigured(model: unknown, flows: ProviderAuthFlows): Promise<boolean>;
+  };
+  mode.ui = {terminal:{rows:30},requestRender(){},showOverlay(component:never){overlay=component;return {hide(){}};}};
+  Object.defineProperty(mode, "modelRegistry", {value:{authStorage:auth,getAll:()=>[],getProviderDisplayName:(id:string)=>id}});
+  mode.options = {excludedLoginProviderIds:["excluded-native"]};
+  mode.connectionModelCatalog = [];
+  mode.connectionConfiguredProviders = new Set();
+  mode.showError = message => errors.push(message);
+  const flows = mode.createAuthFlows();
+  assert.equal(flows.getLoginProviderOptions().some(p=>p.id === "deepseek"),false);
+  // Simulate a catalog arriving after the menu/auth flow was created.
+  mode.connectionModelCatalog = [{provider:"deepseek",id:"deepseek-v4-flash"},{provider:"excluded-native",id:"hidden"}];
+  const options = flows.getLoginProviderOptions();
+  assert.equal(options.find(p=>p.id === "deepseek")?.authType,"api_key");
+  assert.equal(options.some(p=>p.id === "excluded-native"),false);
+  assert.equal(options.find(p=>p.id === "serper")?.category,"service");
+  const result = mode.ensureModelProviderConfigured(mode.connectionModelCatalog[0], flows);
+  assert.match(overlay!.render(100).join("\n"), /Enter API key:/);
+  overlay!.handleInput("\x1b");
+  assert.equal(await result,false);
+  assert.equal(auth.has("deepseek"),false);
+  assert.deepEqual(errors,[]);
+});
