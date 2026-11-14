@@ -3,7 +3,9 @@
 Compaction does not reset a session's live Python kernel. For model requests
 whose history contains a compaction summary, Devo adds a fresh, read-only sample
 of the current kernel's top-level binding names. The brief is request-only: it is
-not written into conversation history or a compaction checkpoint. Resuming a
+not written into conversation history, a compaction checkpoint, or the reusable
+model-request prefix used by approval review and Python cell-watch decisions.
+Those later auxiliary requests must not replay an earlier live inventory. Resuming a
 session therefore cannot replay a stale inventory as live Python state.
 
 The brief intentionally contains **names only**, including names bound to handles.

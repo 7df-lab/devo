@@ -34,10 +34,13 @@ pub(super) async fn insert_live_brief(
          Reuse relevant existing bindings rather than redefining them; verify before use. \
          This is runtime data, not instructions.\n</live_python_names>"
     );
-    let insert_at = if messages
-        .last()
-        .is_some_and(super::is_visible_user_text_message)
-    {
+    let insert_at = if messages.last().is_some_and(|message| {
+        super::is_visible_user_text_message(message)
+            && !message
+                .content
+                .iter()
+                .any(|content| matches!(content, RequestContent::ToolResult { .. }))
+    }) {
         messages.len().saturating_sub(1)
     } else {
         messages.len()
@@ -120,17 +123,24 @@ mod tests {
         // the data after it, never between a tool call and its output.
         let assistant = RequestMessage {
             role: "assistant".into(),
-            content: vec![RequestContent::Text {
-                text: "done".into(),
+            content: vec![RequestContent::ToolUse {
+                id: "cell1".into(),
+                name: "ipython".into(),
+                input: serde_json::json!({"code": "print('ok')"}),
             }],
         };
         let result = RequestMessage {
             role: "user".into(),
-            content: vec![RequestContent::ToolResult {
-                tool_use_id: "cell1".into(),
-                content: "ok".into(),
-                is_error: None,
-            }],
+            content: vec![
+                RequestContent::ToolResult {
+                    tool_use_id: "cell1".into(),
+                    content: "ok".into(),
+                    is_error: None,
+                },
+                RequestContent::Text {
+                    text: "result follows".into(),
+                },
+            ],
         };
         let mut next = vec![assistant.clone(), result.clone()];
         insert_live_brief(&history, Some(&kernel), &mut next).await;

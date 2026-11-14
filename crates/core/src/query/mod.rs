@@ -696,12 +696,6 @@ pub async fn query(
             &prefetched_user_inputs,
             &active_turn_config.model.input_modalities,
         );
-        kernel_brief::insert_live_brief(
-            &history,
-            runtime.context().kernel.as_deref(),
-            &mut messages,
-        )
-        .await;
         // Internal registries may retain handlers for server-side operations, but
         // only the Python kernel schema is ever sent to a model provider.
         let model_registry = registry.restricted_to_specs(&["ipython"]);
@@ -730,7 +724,7 @@ pub async fn query(
             turn_config.web_fetch,
             active_turn_config.model.provider,
         );
-        let request = ModelRequest {
+        let mut request = ModelRequest {
             model_slug: devo_protocol::ModelProfileKey::CatalogSlug(catalog_request_model),
             model: provider_request_model,
             system: request_system,
@@ -752,6 +746,19 @@ pub async fn query(
             reasoning_effort: request_reasoning_effort,
             extra_body,
         };
+        // Auto-review and cell-watch reuse this prefix after Python may have
+        // changed state. Keep the live observation exclusive to this attempt.
+        if let Some(slot) = &options.last_model_request
+            && let Ok(mut last) = slot.lock()
+        {
+            *last = Some(request.clone());
+        }
+        kernel_brief::insert_live_brief(
+            &history,
+            runtime.context().kernel.as_deref(),
+            &mut request.messages,
+        )
+        .await;
         let breakdown = estimate_request_context_breakdown(&request);
         tracing::debug!(
             tool_count = request_tools.len(),
@@ -772,11 +779,6 @@ pub async fn query(
             has_system = request.system.is_some(),
             "built model request"
         );
-        if let Some(slot) = &options.last_model_request
-            && let Ok(mut last) = slot.lock()
-        {
-            *last = Some(request.clone());
-        }
 
         if let Some(journal) = &options.journal {
             journal
