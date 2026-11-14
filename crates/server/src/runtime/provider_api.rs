@@ -14,7 +14,9 @@ use crate::ProtocolErrorCode;
 use crate::SuccessResponse;
 
 use super::ServerRuntime;
-use super::credential_binding::{bind_provider_credential_id, oauth_transport_defaults};
+use super::credential_binding::{
+    api_key_login_transport, bind_provider_credential_id, oauth_transport_defaults,
+};
 
 fn mask_secret(secret: &str) -> String {
     let trimmed = secret.trim();
@@ -261,21 +263,41 @@ impl ServerRuntime {
             .trim()
             .to_ascii_lowercase();
         let transport = if params.configure_connection {
-            if kind != "oauth" {
+            if kind != "oauth" && kind != "api_key" {
                 return self.error_response(
                     request_id,
                     ProtocolErrorCode::InvalidParams,
-                    "configureConnection is only valid for OAuth credentials",
+                    "configureConnection requires an OAuth credential or API key",
                 );
             }
-            match oauth_transport_defaults(provider) {
-                Some(transport) => Some(transport),
-                None => {
-                    return self.error_response(
-                        request_id,
-                        ProtocolErrorCode::InvalidParams,
-                        format!("provider {provider} has no retained OAuth transport adapter"),
-                    );
+            if kind == "api_key" {
+                let home = self
+                    .deps
+                    .config_store
+                    .lock()
+                    .expect("app config store mutex should not be poisoned")
+                    .user_config_dir()
+                    .to_path_buf();
+                match api_key_login_transport(&home, provider) {
+                    Ok(transport) => transport,
+                    Err(error) => {
+                        return self.error_response(
+                            request_id,
+                            ProtocolErrorCode::InvalidParams,
+                            error,
+                        );
+                    }
+                }
+            } else {
+                match oauth_transport_defaults(provider) {
+                    Some(transport) => Some(transport),
+                    None => {
+                        return self.error_response(
+                            request_id,
+                            ProtocolErrorCode::InvalidParams,
+                            format!("provider {provider} has no retained OAuth transport adapter"),
+                        );
+                    }
                 }
             }
         } else {

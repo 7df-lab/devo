@@ -131,7 +131,7 @@ export async function completeHostProviderAuthentication(
     const credential = authStorage.get(provider);
     if (authType !== "oauth") {
       if (!credential || credential.type !== "api_key") throw new Error(`Missing API key for ${provider}`);
-      await connection.completeExplicitStoredLogin(provider, credential);
+      await connection.completeExplicitApiKeyLogin(provider, credential);
       return;
     }
     if (!credential || credential.type !== "oauth") throw new Error(`Missing OAuth credential for ${provider}`);

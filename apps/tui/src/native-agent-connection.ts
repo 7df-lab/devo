@@ -3618,6 +3618,16 @@ export class NativeAgentConnection implements AgentConnection {
     return this.rpc.request("credential/set", params);
   }
 
+  /** Explicit API-key login pins catalog transport; sync never does. */
+  async completeExplicitApiKeyLogin(provider: string, credential: AuthCredentialLike): Promise<void> {
+    if (credential.type !== "api_key" || provider.startsWith("mcp:")) return;
+    await this.rpc.request("credential/set", {
+      ...credentialSetParamsFromAuth(provider, credential),
+      configureConnection: true,
+    });
+    this.explicitLoginModels.clear(provider);
+  }
+
   /** Block dispatch before either local or Native credential persistence can fail. */
   providerLogoutStarted(provider: string): void {
     this.authStateGeneration += 1;
@@ -3670,11 +3680,6 @@ export class NativeAgentConnection implements AgentConnection {
     } finally {
       if (this.explicitProviderLogins.get(provider) === operation) this.explicitProviderLogins.delete(provider);
     }
-  }
-
-  /** Explicit API-key login is allowed while automatic sync is blocked by logout. */
-  async completeExplicitStoredLogin(provider: string, credential: AuthCredentialLike): Promise<void> {
-    await this.rpc.request("credential/set", credentialSetParamsFromAuth(provider, credential));
   }
 
   /** Only an explicit successful login may undo a logout in this client. */

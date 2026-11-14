@@ -105,3 +105,18 @@ credentials are needed. Relevant checks are `cargo test -p devo-provider`,
 workspace CI (check, test, Clippy, generated-protocol consistency and platforms).
 Local Rust execution was unavailable in the editing environment; actual CI
 results, rather than this checklist, determine readiness to merge.
+
+## Explicit API-key login and catalog transport
+
+TUI `/login` with an API key now pins the selected catalog provider's endpoint and
+protocol into the user connection, just as an explicit OAuth login initializes
+its adapter. This is an explicit-login action (`credential/set` with
+`configureConnection: true`), not an implicit routing fallback. Startup credential
+synchronization and credential refresh never adopt a catalog endpoint.
+
+Existing complete user endpoints/protocols remain unchanged. Credential-only
+connections created by older TUI versions can be repaired by logging in again.
+Partially configured custom transports and providers absent from the live catalog
+must be configured explicitly; the runtime does not guess a protocol from a name.
+Only transport is pinned. Model names, limits and costs remain live catalog
+metadata, and later catalog changes cannot redirect an existing credential.
