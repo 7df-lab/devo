@@ -3568,6 +3568,16 @@ export class NativeAgentConnection implements AgentConnection {
     return this.rpc.request("credential/set", params);
   }
 
+  /** Explicit API-key login pins catalog transport; sync never does. */
+  async completeExplicitApiKeyLogin(provider: string, credential: AuthCredentialLike): Promise<void> {
+    if (credential.type !== "api_key" || provider.startsWith("mcp:")) return;
+    await this.rpc.request("credential/set", {
+      ...credentialSetParamsFromAuth(provider, credential),
+      configureConnection: true,
+    });
+    this.explicitLoginModels.clear(provider);
+  }
+
   /** Explicit user login, never invoked by startup sync or token refresh. */
   async completeExplicitOAuthLogin(provider: string, credential: AuthCredentialLike): Promise<void> {
     if (credential.type !== "oauth" || provider.startsWith("mcp:")) return;

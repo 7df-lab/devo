@@ -2905,3 +2905,19 @@ test("resume restores durable interruption between its own reply and the next tu
     await conn.dispose();
   }
 });
+
+ test("explicit API-key login pins the catalog only on the explicit path", async () => {
+  const { conn, fake } = await bootConnection();
+  fake.requests.length = 0;
+  await conn.setCredentialFromAuth("deepseek", { type: "api_key", key: "fixture" });
+  await conn.completeExplicitApiKeyLogin("deepseek", { type: "api_key", key: "fixture" });
+  assert.deepEqual(fake.requests.filter(r => r.method === "credential/set"), [
+    { method: "credential/set", params: { provider: "deepseek", kind: "api_key", secret: "fixture" } },
+    { method: "credential/set", params: { provider: "deepseek", kind: "api_key", secret: "fixture", configureConnection: true } },
+  ]);
+  fake.requests.length = 0;
+  await conn.completeExplicitApiKeyLogin("mcp:test", { type: "api_key", key: "fixture" });
+  await conn.completeExplicitApiKeyLogin("deepseek", { type: "oauth", access: "fixture" });
+  assert.deepEqual(fake.requests, []);
+  await conn.dispose();
+});

@@ -143,10 +143,11 @@ function createInteractiveMode(
       title: DEVO_SPLASH_TITLE,
     },
     onProviderAuthenticated: async (provider, authType, kind) => {
-      if (authType !== "oauth" || kind !== "provider" || provider.startsWith("mcp:")) return;
+      if (kind !== "provider" || provider.startsWith("mcp:")) return;
       const credential = uiServices.modelRegistry.authStorage.get(provider);
-      if (!credential || credential.type !== "oauth") throw new Error(`Missing OAuth credential for ${provider}`);
-      await connection.completeExplicitOAuthLogin(provider, credential);
+      if (!credential || credential.type !== authType) throw new Error(`Missing credential for ${provider}`);
+      if (authType === "oauth") await connection.completeExplicitOAuthLogin(provider, credential);
+      else await connection.completeExplicitApiKeyLogin(provider, credential);
     },
     excludedLoginProviderIds: ["prime-inference"],
     excludedBuiltinCommands: DEVO_EXCLUDED_BUILTIN_COMMANDS,

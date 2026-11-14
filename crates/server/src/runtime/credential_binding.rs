@@ -5,13 +5,13 @@ use std::path::Path;
 
 use devo_core::{ProviderConfigEntry, ProviderWireApi};
 
-#[derive(Clone, Copy)]
-pub(super) struct OAuthTransport {
-    endpoint: &'static str,
+#[derive(Clone)]
+pub(super) struct LoginTransport {
+    endpoint: String,
     protocol: ProviderWireApi,
 }
 
-pub(super) fn oauth_transport_defaults(provider_id: &str) -> Option<OAuthTransport> {
+pub(super) fn oauth_transport_defaults(provider_id: &str) -> Option<LoginTransport> {
     let (endpoint, protocol) = match provider_id {
         "openai-codex" => (
             "https://chatgpt.com/backend-api/codex",
@@ -31,16 +31,85 @@ pub(super) fn oauth_transport_defaults(provider_id: &str) -> Option<OAuthTranspo
         ),
         _ => return None,
     };
-    Some(OAuthTransport { endpoint, protocol })
+    Some(LoginTransport {
+        endpoint: endpoint.to_string(),
+        protocol,
+    })
 }
 
-/// Patch the owning file in place. Only an explicit OAuth connection request
+/// Pin the catalog transport only during an explicit API-key login. Ordinary
+/// credential sync never adopts remote endpoints. Existing complete user routes
+/// remain authoritative; partial routes require an explicit configuration repair.
+pub(super) fn api_key_login_transport(
+    user_dir: &Path,
+    provider_id: &str,
+) -> Result<Option<LoginTransport>, String> {
+    let mut config = devo_core::read_provider_catalog_config(
+        &user_dir.join(devo_core::PROVIDER_CONFIG_FILE_NAME),
+    )
+    .map_err(|error| error.to_string())?;
+    let custom = devo_core::read_provider_catalog_config(
+        &user_dir.join(devo_core::CUSTOM_PROVIDER_CONFIG_FILE_NAME),
+    )
+    .map_err(|error| error.to_string())?;
+    config.merge_overlay(custom);
+    if let Some(entry) = config.providers.get(provider_id) {
+        let endpoint = entry
+            .base_url
+            .as_deref()
+            .filter(|url| !url.trim().is_empty());
+        match (endpoint, entry.wire_api) {
+            (Some(_), Some(_)) => return Ok(None),
+            _ if !entry.models.is_empty()
+                && entry.models.values().all(|model| {
+                    model
+                        .base_url
+                        .as_deref()
+                        .or(endpoint)
+                        .is_some_and(|url| !url.trim().is_empty())
+                        && model.wire_api.or(entry.wire_api).is_some()
+                }) =>
+            {
+                return Ok(None);
+            }
+            (None, None)
+                if entry
+                    .models
+                    .values()
+                    .all(|model| model.base_url.is_none() && model.wire_api.is_none()) => {}
+            _ => {
+                return Err(format!(
+                    "provider `{provider_id}` has incomplete transport; configure its endpoint and protocol explicitly"
+                ));
+            }
+        }
+    }
+    let directory = devo_core::load_remote_catalog_overlay(user_dir)
+        .map_err(|error| error.to_string())?
+        .unwrap_or_default();
+    let entry = directory.providers.get(provider_id)
+        .ok_or_else(|| format!("provider `{provider_id}` is not in the live catalog; configure its endpoint and protocol explicitly"))?;
+    let endpoint = entry
+        .base_url
+        .as_deref()
+        .filter(|url| !url.trim().is_empty())
+        .ok_or_else(|| format!("provider `{provider_id}` has no catalog endpoint"))?;
+    let protocol = entry
+        .wire_api
+        .ok_or_else(|| format!("provider `{provider_id}` has no supported catalog protocol"))?;
+    Ok(Some(LoginTransport {
+        endpoint: endpoint.to_string(),
+        protocol,
+    }))
+}
+
+/// Patch the owning file in place. Only an explicit connection request
 /// supplies transport defaults; synchronization and credential refresh do not.
 pub(super) fn bind_provider_credential_id(
     user_dir: &Path,
     provider_id: &str,
     credential_id: &str,
-    transport: Option<OAuthTransport>,
+    transport: Option<LoginTransport>,
 ) -> Result<(), String> {
     let config_file = user_dir.join(devo_core::PROVIDER_CONFIG_FILE_NAME);
     let custom_file = user_dir.join(devo_core::CUSTOM_PROVIDER_CONFIG_FILE_NAME);
@@ -71,7 +140,7 @@ pub(super) fn bind_provider_credential_id(
 fn apply_binding(
     entry: &mut ProviderConfigEntry,
     credential_id: &str,
-    transport: Option<OAuthTransport>,
+    transport: Option<LoginTransport>,
 ) {
     entry.credential = Some(credential_id.to_string());
     entry.enabled.get_or_insert(true);
@@ -204,7 +273,7 @@ mod tests {
     }
 
     #[tokio::test]
-    async fn configure_connection_rejects_api_keys_and_unknown_adapters_before_writing() {
+    async fn configure_connection_rejects_missing_catalog_and_unknown_adapters_before_writing() {
         let home = tempfile::tempdir().unwrap();
         let runtime = crate::test_support::TestRuntime::noop().runtime(home.path());
         for request in [
@@ -223,5 +292,191 @@ mod tests {
                 .join(devo_core::PROVIDER_CONFIG_FILE_NAME)
                 .exists()
         );
+    }
+}
+
+#[cfg(test)]
+mod api_key_tests {
+    use super::*;
+    use pretty_assertions::assert_eq;
+    use serde_json::json;
+
+    #[tokio::test]
+    async fn explicit_catalog_api_key_login_pins_transport_without_persisting_directory() {
+        let home = tempfile::tempdir().unwrap();
+        let source = tempfile::NamedTempFile::new().unwrap();
+        std::fs::write(
+            source.path(),
+            json!({"deepseek": {
+                "npm": "@ai-sdk/deepseek", "api": "https://api.deepseek.com",
+                "models": {"deepseek-chat": {"tool_call": true, "limit": {"context": 64000}}}
+            }})
+            .to_string(),
+        )
+        .unwrap();
+        let catalog = devo_core::CatalogConfig {
+            source: source.path().to_string_lossy().into_owned(),
+            ..Default::default()
+        };
+        assert!(matches!(
+            devo_core::refresh_remote_catalog(home.path(), &catalog).await,
+            devo_core::CatalogRefreshOutcome::Updated { .. }
+        ));
+        let runtime = crate::test_support::TestRuntime::noop().runtime(home.path());
+        // Startup synchronization creates a credential-only overlay. It must not
+        // adopt the remote endpoint until the user explicitly connects.
+        let mut request = json!({"provider": "deepseek", "secret": "fixture", "kind": "api_key"});
+        let synced = runtime
+            .handle_native_credential_set(json!(1), request.clone())
+            .await;
+        assert!(synced.get("error").is_none(), "{synced}");
+        let path = home.path().join(devo_core::PROVIDER_CONFIG_FILE_NAME);
+        let sparse = devo_core::read_provider_catalog_config(&path).unwrap();
+        assert_eq!(
+            (
+                sparse.providers["deepseek"].base_url.clone(),
+                sparse.providers["deepseek"].wire_api
+            ),
+            (None, None)
+        );
+        request["configureConnection"] = json!(true);
+        let response = runtime
+            .handle_native_credential_set(json!(2), request)
+            .await;
+        assert!(response.get("error").is_none(), "{response}");
+        let stored = devo_core::read_provider_catalog_config(&path).unwrap();
+        let expected = serde_json::from_value(json!({"provider": {"deepseek": {
+            "name": "deepseek", "credential": "deepseek", "enabled": true,
+            "base_url": "https://api.deepseek.com", "wire_api": "openai_chat_completions"
+        }}}))
+        .unwrap();
+        assert_eq!(stored, expected);
+        let effective =
+            devo_core::effective_provider_catalog_with_home(&stored, Some(home.path())).unwrap();
+        assert_eq!(
+            effective.providers["deepseek"].wire_api,
+            Some(ProviderWireApi::OpenAIChatCompletions)
+        );
+        assert!(!effective.providers["deepseek"].models.is_empty());
+        // Subsequent logins preserve the approved route even if metadata changes.
+        std::fs::write(
+            source.path(),
+            json!({"deepseek": {
+                "npm": "@ai-sdk/anthropic", "api": "https://changed.example",
+                "models": {"deepseek-chat": {"tool_call": true}}
+            }})
+            .to_string(),
+        )
+        .unwrap();
+        devo_core::refresh_remote_catalog_force(home.path(), &catalog).await;
+        assert!(
+            api_key_login_transport(home.path(), "deepseek")
+                .unwrap()
+                .is_none()
+        );
+    }
+
+    #[test]
+    fn api_key_login_preserves_complete_model_scoped_transport() {
+        let home = tempfile::tempdir().unwrap();
+        let config: devo_core::ProviderConfigFile = serde_json::from_value(json!({"provider": {"custom": {
+            "models": {"model": {"base_url": "https://user.example", "wire_api": "anthropic_messages"}}
+        }}})).unwrap();
+        let path = home.path().join(devo_core::PROVIDER_CONFIG_FILE_NAME);
+        devo_core::write_provider_catalog_config(&path, &config).unwrap();
+        assert!(
+            api_key_login_transport(home.path(), "custom")
+                .unwrap()
+                .is_none()
+        );
+        assert_eq!(
+            devo_core::read_provider_catalog_config(&path).unwrap(),
+            config
+        );
+    }
+
+    #[test]
+    fn api_key_login_preserves_mixed_inherited_model_transports() {
+        for provider in [
+            json!({"wire_api": "openai_responses", "models": {"model": {"base_url": "https://user.example"}}}),
+            json!({"base_url": "https://user.example", "models": {"model": {"wire_api": "openai_responses"}}}),
+        ] {
+            let home = tempfile::tempdir().unwrap();
+            let config: devo_core::ProviderConfigFile =
+                serde_json::from_value(json!({"provider": {"custom": provider}})).unwrap();
+            let path = home
+                .path()
+                .join(devo_core::CUSTOM_PROVIDER_CONFIG_FILE_NAME);
+            devo_core::write_provider_catalog_config(&path, &config).unwrap();
+            assert!(
+                api_key_login_transport(home.path(), "custom")
+                    .unwrap()
+                    .is_none()
+            );
+            assert_eq!(
+                devo_core::read_provider_catalog_config(&path).unwrap(),
+                config
+            );
+        }
+    }
+
+    #[test]
+    fn api_key_login_rejects_one_incomplete_model_without_filling_from_catalog() {
+        let home = tempfile::tempdir().unwrap();
+        let config: devo_core::ProviderConfigFile =
+            serde_json::from_value(json!({"provider": {"custom": {
+                "wire_api": "openai_responses", "models": {
+                    "complete": {"base_url": "https://user.example"},
+                    "incomplete": {"context_window": 64000}
+                }
+            }}}))
+            .unwrap();
+        let path = home.path().join(devo_core::PROVIDER_CONFIG_FILE_NAME);
+        devo_core::write_provider_catalog_config(&path, &config).unwrap();
+        assert!(api_key_login_transport(home.path(), "custom").is_err());
+        assert_eq!(
+            devo_core::read_provider_catalog_config(&path).unwrap(),
+            config
+        );
+    }
+
+    #[test]
+    fn api_key_login_preserves_complete_custom_route_and_rejects_partial_routes() {
+        for (endpoint, protocol, succeeds) in [
+            (
+                Some("https://custom.example/v1"),
+                Some(ProviderWireApi::OpenAIResponses),
+                true,
+            ),
+            (Some("https://custom.example/v1"), None, false),
+            (None, Some(ProviderWireApi::OpenAIResponses), false),
+        ] {
+            let home = tempfile::tempdir().unwrap();
+            let config = devo_core::ProviderConfigFile {
+                providers: [(
+                    "deepseek".to_string(),
+                    ProviderConfigEntry {
+                        base_url: endpoint.map(str::to_string),
+                        wire_api: protocol,
+                        ..Default::default()
+                    },
+                )]
+                .into_iter()
+                .collect(),
+                ..Default::default()
+            };
+            let path = home
+                .path()
+                .join(devo_core::CUSTOM_PROVIDER_CONFIG_FILE_NAME);
+            devo_core::write_provider_catalog_config(&path, &config).unwrap();
+            assert_eq!(
+                api_key_login_transport(home.path(), "deepseek").is_ok(),
+                succeeds
+            );
+            assert_eq!(
+                devo_core::read_provider_catalog_config(&path).unwrap(),
+                config
+            );
+        }
     }
 }
