@@ -104,6 +104,9 @@ export interface ProviderAuthFlowsHost {
 	/** Invoked after a successful login (e.g. to surface billing warnings). */
 	onLoginCompleted?(): void;
 	/** Explicit login only, awaited before refreshing the host model catalog. */
+	getStoredProviderCredentials?(): Promise<Array<{ provider: string; kind?: string }>>;
+	onProviderLogoutStarted?(providerId: string): void;
+	onProviderLoggedOut?(providerId: string): Promise<void>;
 	onProviderAuthenticated?(providerId: string, authType: "oauth" | "api_key", kind: "provider" | "service"): Promise<void>;
 	/**
 	 * Provider ids omitted from /login and the providers configuration tab.
@@ -191,8 +194,17 @@ export class ProviderAuthFlows {
 		return this.showApiKeyLoginDialog(providerOption.id, providerOption.name, kind);
 	}
 
-	runLogout(): Promise<string | null> {
+	async runLogout(): Promise<string | null> {
 		const providerOptions = this.getLogoutProviderOptions();
+		try {
+			for (const credential of await this.host.getStoredProviderCredentials?.() ?? []) {
+				if (providerOptions.some((option) => option.id === credential.provider)) continue;
+				providerOptions.push({ id: credential.provider, name: this.host.modelRegistry.getProviderDisplayName(credential.provider), authType: credential.kind === "oauth" ? "oauth" : "api_key", category: credential.provider === "serper" ? "service" : "provider" });
+			}
+		} catch (error) {
+			this.host.showError(`Could not list provider credentials: ${error instanceof Error ? error.message : String(error)}`);
+			return null;
+		}
 		if (providerOptions.length === 0) {
 			this.host.showStatus(
 				"No stored credentials to remove. /logout only removes credentials saved by /login; environment variables and models.json config are unchanged.",
@@ -214,7 +226,9 @@ export class ProviderAuthFlows {
 					close();
 
 					try {
-						this.host.modelRegistry.authStorage.logout(providerOption.id);
+						this.host.onProviderLogoutStarted?.(providerOption.id);
+						this.host.modelRegistry.authStorage.removeVerified(providerOption.id);
+						await this.host.onProviderLoggedOut?.(providerOption.id);
 						this.host.modelRegistry.refresh();
 						await this.host.onAuthChanged?.();
 						const message =
@@ -224,6 +238,7 @@ export class ProviderAuthFlows {
 						this.host.showStatus(message);
 						resolve(providerOption.id);
 					} catch (error: unknown) {
+						await Promise.resolve(this.host.onAuthChanged?.()).catch(() => {});
 						this.host.showError(`Logout failed: ${error instanceof Error ? error.message : String(error)}`);
 						resolve(null);
 					}
@@ -285,7 +300,7 @@ export class ProviderAuthFlows {
 		const oauthProvidersById = new Map(authStorage.getOAuthProviders().map((p) => [p.id, p]));
 		for (const providerId of authStorage.list()) {
 			const credential = authStorage.get(providerId);
-			if (!credential) {
+			if (!credential || (credential.type !== "oauth" && credential.type !== "api_key")) {
 				continue;
 			}
 			const isSerper = providerId === SERPER_CREDENTIAL_ID;

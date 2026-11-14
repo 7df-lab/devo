@@ -18,7 +18,7 @@ import { startWaitTimerProvider, checkWaitTimer } from "./wait-timer-smoke.mjs";
 
 const repo = resolve(dirname(fileURLToPath(import.meta.url)), "../../..");
 const scenario = process.argv[2] || "T1";
-const scenarios = ["queue-output", "wait-timer", "subagent-roster", "resize-status", "T1", "T2", "T3", "goal", "bash", "agents", "schedule", "heartbeat", "activity", "effort", "theme", "fork", "clipboard", "resume", "scheduled-timezone", "scheduled-pending", "export", "share", "refine", "steering", "abort-history"];
+const scenarios = ["logout", "queue-output", "wait-timer", "subagent-roster", "resize-status", "T1", "T2", "T3", "goal", "bash", "agents", "schedule", "heartbeat", "activity", "effort", "theme", "fork", "clipboard", "resume", "scheduled-timezone", "scheduled-pending", "export", "share", "refine", "steering", "abort-history"];
 const preloaded = ["clipboard", "scheduled-pending"].includes(scenario);
 const tmux = process.env.DEVO_TMUX_BIN || (process.platform === "win32" ? "psmux" : "tmux");
 const binary = resolve(process.env.DEVO_BIN || process.env.DEVO_SERVER_BIN
@@ -56,7 +56,7 @@ async function run() {
   let refineProvider;
   try {
     for (const name of ["auth.json", "providers.json", "config.toml"]) {
-      if (!(["effort", "theme"].includes(scenario)) && existsSync(join(sourceHome, name))) copyFileSync(join(sourceHome, name), join(home, name));
+      if (!(["effort", "theme", "logout"].includes(scenario)) && existsSync(join(sourceHome, name))) copyFileSync(join(sourceHome, name), join(home, name));
     }
     if (["effort", "theme"].includes(scenario)) {
       // Self-contained metadata fixture: selectors require no model request or credentials.
@@ -71,6 +71,12 @@ async function run() {
           } },
         } },
       }));
+    }
+    if (scenario === "logout") {
+      writeFileSync(join(home, "providers.json"), JSON.stringify({ model: "deepseek/deepseek-v4-flash", provider: { deepseek: {
+        credential: "deepseek", enabled: true, base_url: "http://127.0.0.1:9/v1", wire_api: "openai_chat_completions",
+      } } }));
+      writeFileSync(join(home, "auth.json"), JSON.stringify({ deepseek: { type: "api_key", key: "local-fixture-only" } }), { mode: 0o600 });
     }
     if (scenario === "refine") {
       refineProvider = await createRefineSmokeProvider();
@@ -134,7 +140,7 @@ async function run() {
     if (scenario === "queue-output") queueOutputProvider = await startQueueOutputProvider(home);
     if (scenario === "wait-timer") waitTimerProvider = await startWaitTimerProvider(home);
     const settingsPath = join(sourceHome, "settings.json");
-    const settings = !(["effort", "theme"].includes(scenario)) && existsSync(settingsPath) ? JSON.parse(readFileSync(settingsPath, "utf8")) : {};
+    const settings = !(["effort", "theme", "logout"].includes(scenario)) && existsSync(settingsPath) ? JSON.parse(readFileSync(settingsPath, "utf8")) : {};
     writeFileSync(join(home, "settings.json"), JSON.stringify({ ...settings, ...(scenario === "theme" ? { theme: "dark" } : {}), onboardingShown: true }));
     if (preloaded) {
       if (process.platform === "win32") throw new Error("clipboard substitute smoke currently requires Unix tmux");
@@ -202,6 +208,24 @@ async function run() {
     console.log("=== boot ===\n" + pane);
     switch (scenario) {
       case "T1": break;
+      case "logout": {
+        await send("/logout");
+        await waitFor("logout provider selector", (_events, text) => text.includes("DeepSeek") && text.includes("logout"));
+        await send("deepseek");
+        await waitFor("Native credential revoked", (events, text) => rpcSucceeded(events, "credential/delete") && text.includes("Removed stored API key"));
+        const auth = JSON.parse(readFileSync(join(home, "auth.json"), "utf8"));
+        if (auth.deepseek || Object.keys(auth.credentials ?? {}).some(id => id === "deepseek" || id.startsWith("deepseek:"))) throw new Error("DeepSeek credential persisted after logout");
+        const before = records().length;
+        await send("must not send after logout");
+        await waitFor("blank current model blocks prompt", (_events, text) => text.includes("No model selected"));
+        if (records().slice(before).some(event => event.method === "turn/start")) throw new Error("Turn was dispatched after logout");
+        await send("/model");
+        await waitFor("model picker", (_events, text) => text.includes("require sign in"));
+        await send("deepseek-v4-flash");
+        await waitFor("model requires login", (_events, text) => text.includes("Enter API key:"));
+        mux(["send-keys", "-t", session, "Escape"]);
+        break;
+      }
       case "queue-output":
         await checkQueueOutput({ provider: queueOutputProvider, mux, session, send, waitFor, records, rpcSucceeded });
         break;

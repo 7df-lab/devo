@@ -2905,3 +2905,238 @@ test("resume restores durable interruption between its own reply and the next tu
     await conn.dispose();
   }
 });
+
+test("logout hides selected model and rejects stale snapshots until explicit login", async () => {
+  let deleted = false;
+  const { conn, fake } = await bootConnection([(method, _params, respond) => {
+    if (method === "credential/list") { respond({ credentials: deleted ? [] : [{ id: "openai-key", provider: "openai" }] }); return true; }
+    if (method === "credential/delete") { deleted = true; respond({}); return true; }
+    if (method === "provider/list") { respond({ providers: [{ id: "openai", credential: "openai-key" }], connectedProviderIds: ["openai"], connectionModels: { openai: { "gpt-test": {} } } }); return true; }
+    return false;
+  }]);
+  await conn.logoutProvider("openai");
+  assert.equal(deleted, true);
+  assert.equal((await conn.getState()).model, undefined);
+  assert.deepEqual((await conn.getModelCatalog()).configuredProviders, []);
+  await assert.rejects(conn.setModel("openai", "gpt-test"), /Sign in/);
+  await assert.rejects(conn.prompt("should not send"), /No model selected/);
+  await assert.rejects(conn.followUp("should not queue"), /No model selected/);
+  assert.equal(fake.requests.some(({ method }) => method === "turn/start"), false);
+  conn.pushChunk(`${JSON.stringify({ jsonrpc: "2.0", method: "session/metadataUpdated", params: { session: { id: "sess_test", model: { provider: "openai", model: "gpt-test" } } } })}\n`);
+  assert.equal((await conn.getState()).model, undefined);
+  conn.providerLoginCompleted("openai");
+  deleted = false;
+  await conn.setModel("openai", "gpt-test");
+  assert.equal((await conn.getState()).model?.provider, "openai");
+  await conn.dispose();
+});
+
+test("failed logout stays fail closed without blocking unrelated providers", async () => {
+  const { conn } = await bootConnection([(method, _params, respond, error) => {
+    if (method === "credential/list") { respond({ credentials: [{ id: "openai-key", provider: "openai" }] }); return true; }
+    if (method === "credential/delete") { error("disk failed"); return true; }
+    return false;
+  }]);
+  await assert.rejects(conn.logoutProvider("openai"), /disk failed/);
+  assert.equal((await conn.getState()).model, undefined);
+  await assert.rejects(conn.prompt("not authorized"), /No model selected/);
+  await conn.setModel("other", "other-model");
+  assert.equal((await conn.getState()).model?.provider, "other");
+  await conn.dispose();
+});
+
+test("local logout persistence failure blocks actual flow dispatch", async () => {
+  const { ProviderAuthFlows } = await import("../lib/coding-agent/src/modes/interactive/auth-flows.js");
+  const { AuthStorage } = await import("../lib/coding-agent/src/core/auth-storage.js");
+  const { initTheme } = await import("../lib/coding-agent/src/modes/interactive/theme/theme.js");
+  initTheme("dark");
+  const { conn, fake } = await bootConnection();
+  const auth = AuthStorage.inMemory();
+  auth.set("openai", { type: "api_key", key: "fixture" });
+  auth.removeVerified = () => { throw new Error("simulated EACCES"); };
+  let overlay: { handleInput(data: string): void } | undefined;
+  const flows = new ProviderAuthFlows({
+    ui: { terminal: { rows: 30 }, requestRender() {}, showOverlay(component: never) { overlay = component; return { hide() {} }; } } as never,
+    modelRegistry: { authStorage: auth, refresh() {}, getProviderDisplayName(id: string) { return id; } } as never,
+    getAvailableModels: async () => [],
+    onProviderLogoutStarted: provider => conn.providerLogoutStarted(provider),
+    onProviderLoggedOut: provider => conn.logoutProvider(provider),
+    onAuthChanged: async () => {}, showStatus() {}, showError() {},
+  });
+  try {
+    const logout = flows.runLogout(); await Promise.resolve(); overlay!.handleInput("\r");
+    assert.equal(await logout, null);
+    assert.equal((await conn.getState()).model, undefined);
+    await assert.rejects(conn.prompt("blocked"), /No model selected/);
+    assert.equal(fake.requests.some(request => request.method === "turn/start"), false);
+  } finally { await conn.dispose(); }
+});
+
+test("late selection cannot revive a cleared different session", async () => {
+  const { conn, fake } = await bootConnection([(method, params, respond) => {
+    if (method === "session/resume") { respond({session: {id: params.sessionId, model: {provider: params.sessionId === "B" ? "other" : "openai", id:"gpt-test"}, version:1}}); return true; }
+    return false;
+  }]);
+  try {
+    await conn.logoutProvider("openai");
+    await conn.switchSession("B");
+    let release!: () => void;
+    let reached!: () => void;
+    const held = new Promise<void>(resolve => { release = resolve; });
+    const entered = new Promise<void>(resolve => { reached = resolve; });
+    conn.getAvailableModels = async () => { reached(); await held; return []; };
+    const pending = conn.setModel("other", "new");
+    const rejected = assert.rejects(pending, /superseded/);
+    await entered;
+    await conn.switchSession("sess_test");
+    release(); await rejected;
+    assert.equal((await conn.getState()).model, undefined);
+    await assert.rejects(conn.prompt("blocked"), /No model selected/);
+    assert.equal(fake.requests.some(request => request.method === "turn/start"), false);
+  } finally { await conn.dispose(); }
+});
+
+test("logout fences queued sync and same-tick older explicit login", async () => {
+  const { conn, fake } = await bootConnection();
+  try {
+    let ran = false;
+    const oldLogin = conn.runExplicitProviderLogin("openai", async () => { ran = true; });
+    const rejected = assert.rejects(oldLogin, /superseded/);
+    await conn.logoutProvider("openai"); await rejected;
+    assert.equal(ran, false);
+    await conn.setCredentialFromAuth("openai", {type:"api_key", key:"fixture"});
+    assert.equal(fake.requests.some(request => request.method === "credential/set"), false);
+    assert.equal((await conn.getState()).model, undefined);
+  } finally { await conn.dispose(); }
+});
+
+test("late metadata acknowledgement cannot switch the active session", async () => {
+  let release!: () => void;
+  let reached!: () => void;
+  const entered = new Promise<void>(resolve => { reached = resolve; });
+  const {conn} = await bootConnection([(method, params, respond) => {
+    if (method === "session/metadata/update") { release = () => respond({session:{id:params.sessionId, model:params.model, version:2}}); reached(); return true; }
+    return false;
+  }]);
+  try {
+    const pending = conn.setModel("other", "new");
+    const rejected = assert.rejects(pending, /Session changed/);
+    await entered;
+    await conn.switchSession("B");
+    release(); await rejected;
+    assert.equal((await conn.getState()).sessionId, "B");
+    assert.equal((await conn.getState()).model?.provider, "openai");
+  } finally { await conn.dispose(); }
+});
+
+test("logout drains active explicit login and deletes its credential afterwards", async () => {
+  let release!: () => void;
+  let entered!: () => void;
+  const started = new Promise<void>(resolve => { entered = resolve; });
+  const calls: string[] = [];
+  const {conn} = await bootConnection([(method, _params, respond) => {
+    if (method === "credential/set") { calls.push("set"); release=()=>respond({}); entered(); return true; }
+    if (method === "credential/list") { respond({credentials:[{id:"openai",provider:"openai"}]}); return true; }
+    if (method === "credential/delete") { calls.push("delete"); respond({}); return true; }
+    return false;
+  }]);
+  try {
+    const pending = conn.runExplicitProviderLogin("openai", () => conn.completeExplicitStoredLogin("openai", {type:"api_key",key:"fixture"}));
+    const rejected = assert.rejects(pending, /superseded/);
+    await started;
+    const logout = conn.logoutProvider("openai");
+    await Promise.resolve(); assert.deepEqual(calls,["set"]);
+    release(); await rejected; await logout;
+    assert.deepEqual(calls,["set","delete"]);
+    assert.equal((await conn.getState()).model, undefined);
+  } finally { await conn.dispose(); }
+});
+
+test("shared auth storage removal still revokes Native live credentials", async () => {
+  const { ProviderAuthFlows } = await import("../lib/coding-agent/src/modes/interactive/auth-flows.js");
+  const { AuthStorage } = await import("../lib/coding-agent/src/core/auth-storage.js");
+  const { initTheme } = await import("../lib/coding-agent/src/modes/interactive/theme/theme.js");
+  initTheme("dark");
+  const home = fs.mkdtempSync(path.join(os.tmpdir(), "devo-shared-auth-logout-"));
+  const auth = AuthStorage.create(path.join(home, "auth.json"), {usePrimeCliConfig:false});
+  auth.set("openai", {type:"api_key",key:"fixture"});
+  const deleted: string[] = [];
+  const {conn} = await bootConnection([(method, params, respond) => {
+    if (method === "credential/list") {
+      const disk = JSON.parse(fs.readFileSync(path.join(home,"auth.json"),"utf8"));
+      respond({credentials:disk.openai ? [{id:"openai",provider:"openai"}] : []}); return true;
+    }
+    if (method === "credential/delete") { deleted.push(String(params.credentialId)); respond({}); return true; }
+    return false;
+  }]);
+  let overlay: {handleInput(data:string):void} | undefined;
+  const flows = new ProviderAuthFlows({
+    ui:{terminal:{rows:30},requestRender(){},showOverlay(component:never){overlay=component;return {hide(){}};}} as never,
+    modelRegistry:{authStorage:auth,refresh(){},getProviderDisplayName(id:string){return id;}} as never,
+    getAvailableModels:async()=>[],
+    getStoredProviderCredentials:async()=> (await conn.listCredentials()).credentials as {provider:string}[],
+    onProviderLogoutStarted:provider=>conn.providerLogoutStarted(provider),
+    onProviderLoggedOut:provider=>conn.logoutProvider(provider),
+    onAuthChanged:async()=>{}, showStatus(){}, showError(message){throw new Error(message);},
+  });
+  try {
+    const logout=flows.runLogout();
+    for(let n=0; !overlay && n<10; n++) await Promise.resolve();
+    assert.ok(overlay); overlay.handleInput("\r");
+    assert.equal(await logout,"openai");
+    assert.deepEqual(deleted,["openai"]);
+    assert.equal((await conn.getState()).model,undefined);
+    assert.equal(JSON.parse(fs.readFileSync(path.join(home,"auth.json"),"utf8")).openai,undefined);
+  } finally {await conn.dispose();fs.rmSync(home,{recursive:true,force:true});}
+});
+
+test("host login intent cannot revive failed logout while awaiting auth sync", async () => {
+  const {completeHostProviderAuthentication, wireAuthCredentialSync} = await import("./host.js");
+  const {AuthStorage} = await import("../lib/coding-agent/src/core/auth-storage.js");
+  let release!:()=>void;
+  let entered!:()=>void;
+  const started=new Promise<void>(resolve=>{entered=resolve;});
+  let writes=0;
+  const {conn}=await bootConnection([(method,_params,respond)=>{
+    if(method==="credential/set"){writes++;release=()=>respond({});entered();return true;}return false;
+  }]);
+  const auth=AuthStorage.inMemory();auth.set("openai",{type:"api_key",key:"fixture"});
+  try {
+    wireAuthCredentialSync(conn,auth);
+    await started;
+    const pending=completeHostProviderAuthentication(conn,auth,"openai","api_key","provider");
+    const rejected=assert.rejects(pending,/superseded/);
+    await Promise.resolve();await Promise.resolve();
+    // Same pre-persistence boundary used by the real auth flow on EACCES.
+    conn.providerLogoutStarted("openai");
+    release();await rejected;
+    assert.equal(writes,1);
+    assert.equal((await conn.getState()).model,undefined);
+    await assert.rejects(conn.setModel("openai","gpt-test"),/Sign in/);
+  } finally {await conn.dispose();}
+});
+
+test("pre-login catalog response cannot undo successful login", async () => {
+  let hold=false;
+  let release!:()=>void;
+  let entered!:()=>void;
+  const started=new Promise<void>(resolve=>{entered=resolve;});
+  const {conn}=await bootConnection([(method,_params,respond)=>{
+    if(method==="credential/list") {
+      if(hold){hold=false;release=()=>respond({credentials:[]});entered();}
+      else respond({credentials:[{id:"openai",provider:"openai"}]});
+      return true;
+    }
+    if(method==="provider/list"){respond({providers:[{id:"openai",credential:"openai"}],connectedProviderIds:["openai"]});return true;}
+    return false;
+  }]);
+  try {
+    hold=true;
+    const stale=conn.getModelCatalog();await started;
+    await conn.runExplicitProviderLogin("openai",async()=>{});
+    assert.deepEqual((await conn.getModelCatalog()).configuredProviders,["openai"]);
+    release();await stale;
+    assert.equal((await conn.getState()).model?.provider,"openai");
+    await conn.setModel("openai","gpt-test");
+  } finally {await conn.dispose();}
+});

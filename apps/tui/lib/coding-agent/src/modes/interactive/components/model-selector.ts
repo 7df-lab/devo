@@ -382,7 +382,7 @@ export class ModelSelectorComponent extends Container implements Focusable {
 		const key = this.getModelKey(item);
 		let configured = this.configuredAuth.get(key);
 		if (configured === undefined) {
-			configured = this.configuredProviders?.has(item.provider) || this.modelRegistry.hasConfiguredAuth(item.model);
+			configured = this.configuredProviders ? this.configuredProviders.has(item.provider) : this.modelRegistry.hasConfiguredAuth(item.model);
 			this.configuredAuth.set(key, configured);
 		}
 		return configured;

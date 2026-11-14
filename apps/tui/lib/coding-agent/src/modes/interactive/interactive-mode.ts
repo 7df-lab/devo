@@ -639,6 +639,9 @@ export interface InteractiveModeOptions {
 	 */
 	excludedLoginProviderIds?: ReadonlyArray<string>;
 	/** Host connection setup performed only after an explicit successful login. */
+	getStoredProviderCredentials?(): Promise<Array<{ provider: string; kind?: string }>>;
+	onProviderLogoutStarted?(providerId: string): void;
+	onProviderLoggedOut?(providerId: string): Promise<void>;
 	onProviderAuthenticated?(providerId: string, authType: "oauth" | "api_key", kind: "provider" | "service"): Promise<void>;
 	/**
 	 * Builtin slash command names the host serves itself. Excluded builtins are
@@ -8094,7 +8097,7 @@ export class InteractiveMode {
 	}
 
 	private isModelProviderConfigured(model: AgentConnectionModel): boolean {
-		return this.connectionConfiguredProviders.has(model.provider) || this.modelRegistry.hasConfiguredAuth(model);
+		return this.connectionConfiguredProviders.has(model.provider);
 	}
 
 	private applyConnectionModelCatalog(catalog: AgentConnectionModelCatalog): void {
@@ -9060,6 +9063,9 @@ export class InteractiveMode {
 			getAvailableModels: () => this.getConnectionAvailableModels(),
 			excludedLoginProviderIds: this.options.excludedLoginProviderIds,
 			onProviderAuthenticated: this.options.onProviderAuthenticated,
+			onProviderLogoutStarted: this.options.onProviderLogoutStarted,
+			onProviderLoggedOut: this.options.onProviderLoggedOut,
+			getStoredProviderCredentials: this.options.getStoredProviderCredentials,
 			onAuthChanged: async () => {
 				await this.refreshConnectionModelsAfterAuthChange();
 				await this.updateAvailableProviderCount();

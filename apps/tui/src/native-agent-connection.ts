@@ -18,6 +18,7 @@ import { ModelCatalogRefresh } from "./model-catalog-refresh.js";
 import { randomUUID } from "node:crypto";
 import fs from "node:fs";
 import os from "node:os";
+import { ProviderLogoutState } from "./provider-logout.js";
 import path from "node:path";
 import type {
   AgentConnection,
@@ -249,7 +250,18 @@ export class NativeAgentConnection implements AgentConnection {
   private transcriptNavigationGeneration = 0;
   private pendingInitialMessages?: { sessionId: string; revision: number; promise: Promise<never[]> };
   private streamState: StreamState = createStreamState();
-  private model: AgentConnectionModel | undefined;
+  private readonly providerLogout = new ProviderLogoutState();
+  private selectedModel: AgentConnectionModel | undefined;
+  private readonly clearedModelSessions = new Set<string>();
+  private modelSelectionGeneration = 0;
+  private authStateGeneration = 0;
+  private modelCatalogReadSequence = 0;
+  private readonly explicitProviderLogins = new Map<string, Promise<void>>();
+  private readonly providerLogouts = new Map<string, Promise<void>>();
+  private get model(): AgentConnectionModel | undefined {
+    return this.selectedModel && !this.clearedModelSessions.has(this.sessionId ?? "") && !this.providerLogout.unavailable(this.selectedModel.provider) ? this.selectedModel : undefined;
+  }
+  private set model(model: AgentConnectionModel | undefined) { this.selectedModel = model; }
   private thinkingLevel: ThinkingLevel = "medium";
   /** Empty until catalog enrichment; do not invent a full effort ladder. */
   private availableThinkingLevels: ThinkingLevel[] = [];
@@ -1185,10 +1197,11 @@ export class NativeAgentConnection implements AgentConnection {
 
   private async refreshSessionSnapshot(): Promise<void> {
     const sessionId = this.sessionId;
+    const transition = this.sessionTransitionGeneration;
     if (!sessionId) return;
     try {
       const result = (await this.rpc.request("session/read", { sessionId })) as { session?: Record<string, unknown> };
-      if (this.sessionId === sessionId && result?.session) this.applySessionSnapshot(result.session);
+      if (this.sessionId === sessionId && transition === this.sessionTransitionGeneration && result?.session) this.applySessionSnapshot(result.session);
     } catch {
       // best-effort
     }
@@ -1198,14 +1211,21 @@ export class NativeAgentConnection implements AgentConnection {
     await this.refreshSessionSnapshot();
   }
 
-  private async updateSessionMetadata(patch: Record<string, unknown>): Promise<Record<string, unknown> | undefined> {
+  private async updateSessionMetadata(patch: Record<string, unknown>, assertCurrent?: () => void): Promise<Record<string, unknown> | undefined> {
     const sessionId = this.requireSessionId();
+    const transition = this.sessionTransitionGeneration;
+    const assertSession = () => {
+      if (this.disposed || this.sessionId !== sessionId || this.sessionTransitionGeneration !== transition) throw new Error("Session changed during metadata update");
+      assertCurrent?.();
+    };
     await this.refreshSessionSnapshot();
+    assertSession();
     const result = (await this.rpc.request("session/metadata/update", {
       sessionId,
       expectedVersion: this.sessionVersion || 0,
       ...patch,
     })) as { session?: Record<string, unknown> };
+    assertSession();
     if (result?.session) this.applySessionSnapshot(result.session);
     return result?.session;
   }
@@ -1540,6 +1560,8 @@ export class NativeAgentConnection implements AgentConnection {
    * (`credentials.<id>.{kind,value}`), so this must come from Native RPCs.
    */
   private async loadModelCatalog(): Promise<AgentConnectionModelCatalog> {
+    const authGeneration = this.authStateGeneration;
+    const sequence = ++this.modelCatalogReadSequence;
     const byKey = new Map<string, AgentConnectionModel>();
     const configured = new Set<string>();
     const add = (m: AgentConnectionModel | null) => {
@@ -1548,13 +1570,18 @@ export class NativeAgentConnection implements AgentConnection {
     };
     const markConfigured = (providerId: string | undefined) => {
       const id = String(providerId ?? "").trim();
-      if (id) configured.add(id);
+      if (id && !this.providerLogout.unavailable(id)) configured.add(id);
     };
     const [modelListResponse, providerListResponse, credentialsResponse] = await Promise.all([
       measureAsync("model_catalog.model_list", () => this.rpc.request("model/list", {})).catch(() => undefined),
       measureAsync("model_catalog.provider_list", () => this.rpc.request("provider/list", {})).catch(() => undefined),
       measureAsync("model_catalog.credential_list", () => this.listCredentials()).catch(() => undefined),
     ]);
+    const authProviders = (providerListResponse as { providers?: Array<{ id?: string; name?: string; credential?: string | null }> } | undefined)?.providers ?? [];
+    const authCredentials = (credentialsResponse as { credentials?: Array<{ id?: string }> } | undefined)?.credentials ?? [];
+    if (sequence === this.modelCatalogReadSequence && authGeneration === this.authStateGeneration) {
+      this.providerLogout.reconcile(authProviders, authCredentials);
+    }
     try {
       const result = modelListResponse as {
         models?: Array<Record<string, unknown>>;
@@ -2371,6 +2398,9 @@ export class NativeAgentConnection implements AgentConnection {
   }
 
   private async startTurn(message: string, images?: unknown[]): Promise<void> {
+    if (this.clearedModelSessions.has(this.sessionId ?? "") || (this.selectedModel && this.providerLogout.unavailable(this.selectedModel.provider))) {
+      throw new Error(`No model selected. Sign in with /login or select a model with /model.`);
+    }
     const sessionId = this.requireSessionId();
     this.isStreaming = true;
     const input = promptInput(message, images);
@@ -2601,6 +2631,9 @@ export class NativeAgentConnection implements AgentConnection {
   }
 
   async steer(message: string, _images?: unknown[]): Promise<void> {
+    if (this.clearedModelSessions.has(this.sessionId ?? "") || (this.selectedModel && this.providerLogout.unavailable(this.selectedModel.provider))) {
+      throw new Error("No model selected. Sign in with /login or select a model with /model.");
+    }
     // resumeIfIdle: no active turn → start one.
     // Busy path: Native turn/steer admits input into the shared FIFO.
     if (!this.isStreaming || !this.expectedTurnId) {
@@ -2636,6 +2669,9 @@ export class NativeAgentConnection implements AgentConnection {
   }
 
   async followUp(message: string, _images?: unknown[]): Promise<void> {
+    if (this.clearedModelSessions.has(this.sessionId ?? "") || (this.selectedModel && this.providerLogout.unavailable(this.selectedModel.provider))) {
+      throw new Error("No model selected. Sign in with /login or select a model with /model.");
+    }
     const sessionId = this.requireSessionId();
     try {
       await this.rpc.request("session/queue/push", {
@@ -2805,10 +2841,21 @@ export class NativeAgentConnection implements AgentConnection {
   }
 
   async setModel(provider: string, modelId: string): Promise<AgentConnectionModel> {
+    if (this.providerLogout.unavailable(provider)) throw new Error(`Sign in to ${provider} with /login before selecting a model.`);
+    const sessionId = this.sessionId;
+    const generation = this.providerLogout.generation(provider);
+    const transition = this.sessionTransitionGeneration;
+    const selection = ++this.modelSelectionGeneration;
+    const assertCurrent = () => {
+      if (this.disposed || this.sessionId !== sessionId || this.sessionTransitionGeneration !== transition || this.modelSelectionGeneration !== selection || this.providerLogout.generation(provider) !== generation || this.providerLogout.unavailable(provider)) {
+        throw new Error("Model selection was superseded by a session or authentication change. Select the model again.");
+      }
+    };
     await this.explicitLoginModels.pinSelected(provider, modelId);
+    assertCurrent();
     await this.updateSessionMetadata({
       model: { provider, model: modelId },
-    });
+    }, assertCurrent);
     const catalog = await this.getAvailableModels().catch(() => [] as AgentConnectionModel[]);
     const fromCatalog =
       findCatalogModel(catalog, { id: modelId, provider }) ??
@@ -2816,6 +2863,8 @@ export class NativeAgentConnection implements AgentConnection {
     const model =
       fromCatalog ??
       normalizeAgentModel({ provider, id: modelId, modelId, reasoning: true })!;
+    assertCurrent();
+    this.clearedModelSessions.delete(sessionId ?? "");
     this.model = model;
     this.applyAvailableThinkingLevelsFromModel(model);
     // Keep the new model window provisional until fresh Native usage arrives;
@@ -3564,9 +3613,72 @@ export class NativeAgentConnection implements AgentConnection {
 
   /** Sync a single AuthStorage credential into Native `credential/set`. */
   async setCredentialFromAuth(provider: string, credential: AuthCredentialLike): Promise<unknown> {
+    if (this.providerLogout.isLoggedOut(provider)) return;
     const params = credentialSetParamsFromAuth(provider, credential);
     return this.rpc.request("credential/set", params);
   }
+
+  /** Block dispatch before either local or Native credential persistence can fail. */
+  providerLogoutStarted(provider: string): void {
+    this.authStateGeneration += 1;
+    this.providerLogout.logout(provider);
+    if (this.selectedModel?.provider === provider && this.sessionId) this.clearedModelSessions.add(this.sessionId);
+  }
+
+  /** Explicit logout is fail-closed even when a server deletion fails. */
+  async logoutProvider(provider: string, pendingWrites: Promise<void> = Promise.resolve()): Promise<void> {
+    this.providerLogoutStarted(provider);
+    const previous = this.providerLogouts.get(provider);
+    const login = this.explicitProviderLogins.get(provider);
+    const revoke = (async () => {
+      await Promise.all([pendingWrites, previous, login].map(promise => Promise.resolve(promise).catch(() => {})));
+      this.explicitLoginModels.clear(provider);
+      const listed = await this.listCredentials();
+      // AuthStorage shares auth.json with Native and may already have removed
+      // this key. Idempotent deletion is still required to invalidate live
+      // routers that captured the credential before the file changed.
+      const credentialIds = new Set([provider]);
+      for (const entry of listed.credentials) {
+        const credential = entry as { id?: string; provider?: string };
+        if (credential.provider === provider && credential.id) credentialIds.add(credential.id);
+      }
+      for (const credentialId of credentialIds) await this.deleteCredential(credentialId);
+    })();
+    this.providerLogouts.set(provider, revoke);
+    try { await revoke; } finally { if (this.providerLogouts.get(provider) === revoke) this.providerLogouts.delete(provider); }
+  }
+
+  /** Serialize explicit login against revocation, and never revive an older login. */
+  async runExplicitProviderLogin(provider: string, login: (assertCurrent: () => void) => Promise<void>): Promise<void> {
+    const generation = this.providerLogout.generation(provider);
+    await this.providerLogouts.get(provider);
+    if (generation !== this.providerLogout.generation(provider)) throw new Error("Login superseded by logout; sign in again.");
+    const previous = this.explicitProviderLogins.get(provider);
+    const assertCurrent = () => {
+      if (generation !== this.providerLogout.generation(provider)) throw new Error("Login superseded by authentication change; sign in again.");
+    };
+    const operation = (async () => {
+      await previous?.catch(() => {});
+      assertCurrent();
+      await login(assertCurrent);
+    })();
+    this.explicitProviderLogins.set(provider, operation);
+    try {
+      await operation;
+      if (generation !== this.providerLogout.generation(provider)) throw new Error("Login superseded by logout; sign in again.");
+      this.providerLoginCompleted(provider);
+    } finally {
+      if (this.explicitProviderLogins.get(provider) === operation) this.explicitProviderLogins.delete(provider);
+    }
+  }
+
+  /** Explicit API-key login is allowed while automatic sync is blocked by logout. */
+  async completeExplicitStoredLogin(provider: string, credential: AuthCredentialLike): Promise<void> {
+    await this.rpc.request("credential/set", credentialSetParamsFromAuth(provider, credential));
+  }
+
+  /** Only an explicit successful login may undo a logout in this client. */
+  providerLoginCompleted(provider: string): void { this.authStateGeneration += 1; this.providerLogout.login(provider); }
 
   /** Explicit user login, never invoked by startup sync or token refresh. */
   async completeExplicitOAuthLogin(provider: string, credential: AuthCredentialLike): Promise<void> {
