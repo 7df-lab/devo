@@ -5,6 +5,7 @@
 //! from the orchestration loop in this file.
 
 mod event;
+mod kernel_brief;
 mod pending_input;
 mod prompt_estimate;
 mod provider_retry;
@@ -375,6 +376,7 @@ fn is_injected_context_message(message: &RequestMessage) -> bool {
             RequestContent::Text { text } => {
                 let trimmed = text.trim_start();
                 trimmed.starts_with("<environment_context>")
+                    || trimmed.starts_with("<live_python_names>")
                     || trimmed.starts_with("<background_work_results>")
                     || trimmed.starts_with("<available_skills>")
                     || trimmed.starts_with("<language_preference>")
@@ -722,7 +724,7 @@ pub async fn query(
             turn_config.web_fetch,
             active_turn_config.model.provider,
         );
-        let request = ModelRequest {
+        let mut request = ModelRequest {
             model_slug: devo_protocol::ModelProfileKey::CatalogSlug(catalog_request_model),
             model: provider_request_model,
             system: request_system,
@@ -744,6 +746,19 @@ pub async fn query(
             reasoning_effort: request_reasoning_effort,
             extra_body,
         };
+        // Auto-review and cell-watch reuse this prefix after Python may have
+        // changed state. Keep the live observation exclusive to this attempt.
+        if let Some(slot) = &options.last_model_request
+            && let Ok(mut last) = slot.lock()
+        {
+            *last = Some(request.clone());
+        }
+        kernel_brief::insert_live_brief(
+            &history,
+            runtime.context().kernel.as_deref(),
+            &mut request.messages,
+        )
+        .await;
         let breakdown = estimate_request_context_breakdown(&request);
         tracing::debug!(
             tool_count = request_tools.len(),
@@ -764,11 +779,6 @@ pub async fn query(
             has_system = request.system.is_some(),
             "built model request"
         );
-        if let Some(slot) = &options.last_model_request
-            && let Ok(mut last) = slot.lock()
-        {
-            *last = Some(request.clone());
-        }
 
         if let Some(journal) = &options.journal {
             journal

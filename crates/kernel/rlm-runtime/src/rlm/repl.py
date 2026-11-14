@@ -977,6 +977,13 @@ async def _handle_list_names(req: dict[str, Any], ns: dict[str, Any]) -> None:
     _send({"event": "done", "id": req["id"], "status": "ok", "names": _list_names(ns)})
 
 
+async def _handle_namespace_brief(req: dict[str, Any], ns: dict[str, Any]) -> None:
+    from .namespace_brief import namespace_brief
+
+    _send({"event": "done", "id": req["id"], "status": "ok",
+           "names": namespace_brief(ns, _ALWAYS_SKIP)})
+
+
 async def _handle_request(
     handler: Callable[[dict[str, Any], dict[str, Any]], Awaitable[None]],
     req: dict[str, Any],
@@ -1017,6 +1024,8 @@ async def _serve(queue: asyncio.Queue[dict[str, Any]], ns: dict[str, Any]) -> No
             await _handle_request(_handle_execute, req, ns)
         elif rtype in ("snapshot", "restore"):
             await _handle_request(_handle_state, req, ns)
+        elif rtype == "namespace_brief":
+            await _handle_request(_handle_namespace_brief, req, ns)
         elif rtype == "list_names":
             await _handle_request(_handle_list_names, req, ns)
 
@@ -1026,6 +1035,7 @@ _REQUIRED_FIELDS = {
     "snapshot": ("id", "path", "manifest_path"),
     "restore": ("id", "path"),
     "list_names": ("id",),
+    "namespace_brief": ("id",),
     "shutdown": (),
 }
 
@@ -1217,7 +1227,8 @@ def main() -> None:
     signal.signal(signal.SIGINT, _sigint_handler)
     threading.Thread(target=_read_requests, args=(stdin_fd, queue), daemon=True).start()
 
-    _send({"event": "ready", "protocol": PROTOCOL_VERSION, "python": platform.python_version()})
+    _send({"event": "ready", "protocol": PROTOCOL_VERSION, "python": platform.python_version(),
+           "supports_namespace_brief": True})
 
     _serve_task = _loop.create_task(_serve(queue, user_module.__dict__))
     # A KeyboardInterrupt escaping a cell or background task stops

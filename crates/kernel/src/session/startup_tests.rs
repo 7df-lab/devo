@@ -19,6 +19,7 @@ async fn startup_stderr_before_ready_does_not_break_handshake() {
         ReadyEvent {
             protocol: PROTOCOL_VERSION,
             python: "test".into(),
+            supports_namespace_brief: false,
         },
     );
     assert!(child.wait().await.expect("fake kernel exit").success());

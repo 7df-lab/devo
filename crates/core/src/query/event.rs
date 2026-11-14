@@ -160,7 +160,8 @@ pub struct QueryOptions {
     /// shared outer `None` keeps the turn-start goal; `Some(None)` clears it.
     pub live_goal: Option<SharedLiveGoal>,
     /// Slot written before each provider attempt so in-turn callers (auto-review)
-    /// can reuse the same request prefix for prompt-cache hits.
+    /// can reuse the request prefix for prompt-cache hits. Ephemeral live Python
+    /// observations are excluded: later auxiliary calls must not replay them.
     pub last_model_request: Option<SharedLastModelRequest>,
     /// Continual Harness digest (after skills, before goal). Empty/None skips.
     /// Host loads via `devo_harness::HarnessDigestInjector` at turn start.
@@ -198,7 +199,7 @@ pub type SharedLiveTurnSettings = Arc<std::sync::Mutex<LiveTurnSettings>>;
 /// no host change; a set option replaces or clears the turn's goal context.
 pub type SharedLiveGoal = Arc<std::sync::Mutex<Option<Option<devo_protocol::ThreadGoal>>>>;
 
-/// Shared handle to the last assembled provider request for the running turn.
+/// Shared handle to the reusable provider prefix, excluding live Python observations.
 pub type SharedLastModelRequest = Arc<std::sync::Mutex<Option<ModelRequest>>>;
 
 impl std::fmt::Debug for QueryOptions {

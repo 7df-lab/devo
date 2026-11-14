@@ -33,6 +33,7 @@ event.
 | `snapshot` | `{"type":"snapshot","id":str,"path":str,"manifest_path":str,"max_bytes"?:int,"max_variable_bytes"?:int,"prune_oversized"?:bool}` |
 | `restore` | `{"type":"restore","id":str,"path":str}` |
 | `list_names` | `{"type":"list_names","id":str}` |
+| `namespace_brief` | `{"type":"namespace_brief","id":str}` |
 | `shutdown` | `{"type":"shutdown","id"?:str}` |
 
 Requests other than `interrupt` and `host_reply` run strictly in order, one at
@@ -182,3 +183,15 @@ top-level names under the same filter the snapshot applies.
 `rlm.local_bash` child process groups, replies `done` (when the request carried
 an id), stops the loop, and exits 0. Product `rlm.bash` commands are owned and
 cleaned up by the host, not by Python process-group signaling.
+
+`namespace_brief` replies with `done.names`, a name-only sample of at most 32
+public ASCII identifiers (up to 64 bytes) from the first 256 namespace keys.
+It never reads values, runs object hooks, serializes, or prunes bindings. An empty
+sample does not establish an empty namespace. The host skips busy kernels and
+bounds the request to 200 ms; unavailable responses are omitted from context.
+
+The ready handshake advertises `supports_namespace_brief: true`. Hosts send
+this request only when that capability is present; older v3 runtimes omit it
+and are never probed, avoiding untagged unknown-request errors in later cells.
+A timed-out or cancelled caller does not cancel an admitted stdin frame midway:
+the writer retains the stdin lock until the complete frame is written.

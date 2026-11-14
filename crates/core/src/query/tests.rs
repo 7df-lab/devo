@@ -3810,3 +3810,6 @@ async fn query_emits_parallel_tool_results_as_each_tool_finishes() {
 
 #[path = "durability_tests.rs"]
 mod durability;
+
+#[path = "kernel_brief_tests.rs"]
+mod kernel_brief;
