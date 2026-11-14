@@ -1,4 +1,7 @@
 /** Statistics and observation helpers for the real product PTY benchmark. */
+// /new takes optional arguments: bare-name Enter accepts completion, not submission.
+export const NEW_SESSION_INPUT = "/new ";
+
 export const metricNames = ["first_trust_screen_ms", "accepted_to_editable_ms", "input_echo_ms", "new_session_editable_ms", "resume_empty_editable_ms"];
 
 export function positiveInteger(value, name) {

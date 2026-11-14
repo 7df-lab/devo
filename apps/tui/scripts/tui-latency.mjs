@@ -9,7 +9,7 @@ import { performance } from "node:perf_hooks";
 import { fileURLToPath } from "node:url";
 import { setTimeout as sleep } from "node:timers/promises";
 import { createOwnedSmokeTmux } from "./owned-smoke-tmux.mjs";
-import { parseTrace, positiveInteger, sessionResult, summarize, waitForObservation } from "./tui-latency-support.mjs";
+import { NEW_SESSION_INPUT, parseTrace, positiveInteger, sessionResult, summarize, waitForObservation } from "./tui-latency-support.mjs";
 
 const repo = resolve(dirname(fileURLToPath(import.meta.url)), "../../..");
 const binary = resolve(process.env.DEVO_BIN || join(repo, "target/debug", process.platform === "win32" ? "devo.exe" : "devo"));
@@ -83,7 +83,7 @@ try {
     await clear(marker);
 
     let offset = records().length;
-    send("/new");
+    send(NEW_SESSION_INPUT);
     await wait("new command typed", state => state.text.includes("/new"));
     const creating = performance.now();
     keys("Enter");

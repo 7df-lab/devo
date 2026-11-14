@@ -196,6 +196,7 @@ jobs:
           DEVO_BENCH_OUTPUT: ${{ runner.temp }}/tui-latency.json
         run: |
           node --test scripts/tui-latency.test.mjs
+          node --import tsx --test scripts/tui-latency-input.test.ts
           node scripts/tui-latency.mjs
       - name: Upload raw PTY baseline and environment
         if: always()

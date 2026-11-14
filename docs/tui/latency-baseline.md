@@ -9,6 +9,7 @@ cargo build -p devo-cli --bin devo --locked
 cd apps/tui
 npm ci --ignore-scripts --no-audit --no-fund
 node --test scripts/tui-latency.test.mjs
+node --import tsx --test scripts/tui-latency-input.test.ts
 node scripts/tui-latency.mjs
 ```
 
@@ -42,7 +43,7 @@ ready marker, preload, or replacement rendering path is used.
 
 ## Interpreting the report
 
-JSON contains every raw sample, nearest-rank p50/p95/min/max, source revision,
+JSON contains every completed raw sample, nearest-rank p50/p95/min/max, source revision,
 CLI SHA-256, Node/tmux/OS/CPU information, and the polling interval. Defaults are
 5 samples and a 25 ms polling interval; p95 of five samples is simply the maximum.
 These are **upper-bound observations**, including tmux command startup, capture,
