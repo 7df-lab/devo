@@ -1,22 +1,18 @@
 /** Real product TTY admission: no trust or server activation on cancellation. */
 import assert from "node:assert/strict";
-import { spawnSync } from "node:child_process";
 import { existsSync, mkdtempSync, readdirSync, readFileSync, rmSync, writeFileSync } from "node:fs";
 import { tmpdir } from "node:os";
 import { dirname, join, resolve } from "node:path";
 import { fileURLToPath } from "node:url";
 import { setTimeout as sleep } from "node:timers/promises";
+import { createOwnedSmokeTmux } from "./owned-smoke-tmux.mjs";
 
 const repo = resolve(dirname(fileURLToPath(import.meta.url)), "../../..");
 const binary = resolve(process.env.DEVO_BIN || join(repo, "target/debug", process.platform === "win32" ? "devo.exe" : "devo"));
 const tmux = process.env.DEVO_TMUX_BIN || (process.platform === "win32" ? "psmux" : "tmux");
 const root = mkdtempSync(join(tmpdir(), "devo-trust-smoke-"));
-const owned = new Set();
-function mux(args, required = true) {
-  const result = spawnSync(tmux, args, { encoding: "utf8", timeout: 10000 });
-  if (required && (result.error || result.status !== 0)) throw new Error(`${args[0]}: ${result.error?.message || result.stderr}`);
-  return result;
-}
+const server = createOwnedSmokeTmux({ directory: root, executable: tmux });
+const { mux } = server;
 async function waitFor(label, predicate) {
   const deadline = Date.now() + 60000;
   while (Date.now() < deadline) {
@@ -34,14 +30,14 @@ function launch(label, home, width) {
   mux(["new-session", "-d", "-s", session, "-c", repo, "-x", String(width), "-y", "30",
     "-e", `DEVO_HOME=${home}`, "-e", `DEVO_CODING_AGENT_DIR=${home}`, "-e", `PRIME_AGENT_CODING_AGENT_DIR=${home}`,
     "-e", "DEVO_PROTOCOL_TRACE=1", "-e", `DEVO_PROTOCOL_TRACE_FILE=${trace}`, "--", binary]);
-  owned.add(session);
   return { session, trace, pane: () => mux(["capture-pane", "-t", session, "-p"]).stdout };
 }
 function stop(session) {
-  mux(["kill-session", "-t", session], false); owned.delete(session);
+  mux(["kill-session", "-t", session]);
 }
 try {
   assert.ok(existsSync(binary), "build devo-cli before this smoke");
+  server.start();
   for (const [label, keys] of [
     ["default", ["Enter"]], ["escape", ["Down", "Escape"]],
     ["ctrl-c", ["Down", "C-c"]], ["ctrl-d", ["Down", "C-d"]], ["typed-yes", ["y", "e", "s", "Enter"]],
@@ -53,7 +49,6 @@ try {
     assert.equal(records(trace).length, 0, "no server RPC before consent");
     mux(["send-keys", "-t", session, ...keys]);
     await waitFor("declined process exit", () => mux(["has-session", "-t", session], false).status !== 0);
-    owned.delete(session);
     assert.ok(!existsSync(join(home, "workspace-trust")), "decline cannot persist trust");
     assert.equal(records(trace).length, 0, "decline cannot activate a session");
   }
@@ -77,6 +72,6 @@ try {
   stop(second.session);
   console.log("Workspace trust real TTY: default No, cancellation, arrows, resize, acceptance, remembered trust passed");
 } finally {
-  for (const session of owned) stop(session);
+  server.close();
   rmSync(root, { recursive: true, force: true });
 }
