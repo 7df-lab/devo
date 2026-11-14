@@ -187,7 +187,9 @@ jobs:
         run: cargo build -p devo-cli --bin devo --locked
       - name: Workspace trust selector in real TTY
         working-directory: apps/tui
-        run: node scripts/workspace-trust-smoke.mjs
+        run: |
+          node --test scripts/owned-smoke-tmux.test.mjs
+          node scripts/workspace-trust-smoke.mjs
       - name: Boot and outcome scenarios (no provider credentials)
         working-directory: apps/tui
         run: |
