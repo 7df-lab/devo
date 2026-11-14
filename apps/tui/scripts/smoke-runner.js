@@ -210,7 +210,7 @@ async function run() {
       case "T1": break;
       case "logout": {
         await send("/logout");
-        await waitFor("logout provider selector", (_events, text) => text.includes("DeepSeek") && text.includes("logout"));
+        await waitFor("logout provider selector", (_events, text) => text.includes("DeepSeek") && text.includes("Saved Credentials") && text.includes("Choose a credential to remove."));
         await send("deepseek");
         await waitFor("Native credential revoked", (events, text) => rpcSucceeded(events, "credential/delete") && text.includes("Removed stored API key"));
         const auth = JSON.parse(readFileSync(join(home, "auth.json"), "utf8"));
@@ -219,6 +219,9 @@ async function run() {
         await send("must not send after logout");
         await waitFor("blank current model blocks prompt", (_events, text) => text.includes("No model selected"));
         if (records().slice(before).some(event => event.method === "turn/start")) throw new Error("Turn was dispatched after logout");
+        // Rejected prompts intentionally restore the editor draft. Clear only
+        // this test draft before issuing the next slash command.
+        mux(["send-keys", "-t", session, "C-u"]);
         await send("/model");
         await waitFor("model picker", (_events, text) => text.includes("require sign in"));
         await send("deepseek-v4-flash");

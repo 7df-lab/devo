@@ -21,7 +21,7 @@ for (const fail of [false, true]) test(`logout waits for Native revocation befor
   const auth = AuthStorage.inMemory();
   auth.set("deepseek", { type: "api_key", key: "test-only" });
   const calls: string[] = [];
-  let overlay: { handleInput(data: string): void } | undefined;
+  let overlay: { handleInput(data: string): void; render(width: number): string[] } | undefined;
   let finish!: () => void;
   const pending = new Promise<void>((resolve) => { finish = resolve; });
   const flows = new ProviderAuthFlows({
@@ -35,6 +35,9 @@ for (const fail of [false, true]) test(`logout waits for Native revocation befor
   });
   const result = flows.runLogout();
   await Promise.resolve();
+  const rendered = overlay!.render(100).join("\n");
+  assert.match(rendered, /Saved Credentials/);
+  assert.match(rendered, /Choose a credential to remove\./);
   overlay!.handleInput("\r");
   await Promise.resolve();
   assert.deepEqual(calls, ["delete"]);
