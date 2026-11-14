@@ -2,8 +2,6 @@
 import { createHash, randomUUID } from "node:crypto";
 import { mkdir, readFile, realpath, rename, stat, unlink, writeFile } from "node:fs/promises";
 import { isAbsolute, join, relative, sep } from "node:path";
-import { createInterface } from "node:readline";
-import type { Readable, Writable } from "node:stream";
 import type { StdioJsonRpc } from "./stdio-jsonrpc.js";
 
 export type TrustPrompt = (cwd: string) => Promise<boolean>;
@@ -66,18 +64,7 @@ export class WorkspaceTrust {
   }
 }
 
-export function promptWorkspaceTrust(cwd: string, input: Readable = process.stdin, output: Writable = process.stdout): Promise<boolean> {
-  output.write(`\n┌─ Workspace trust\n│ ${JSON.stringify(cwd)}\n│\n│ Only continue if you trust this folder's contents.\n│ Devo may read project instructions and configuration, contact model\n│ services, and run tools or MCP servers with your account's access.\n│ Trust does not enable a sandbox or change your permission settings.\n└─ Trust this workspace? Type yes to continue; Enter to exit: `);
-  return new Promise((resolve) => {
-    const reader = createInterface({ input, output, terminal: false });
-    reader.once("line", (line) => {
-      resolve(line.trim().toLowerCase() === "yes");
-      reader.close();
-    });
-    reader.once("close", () => resolve(false));
-    reader.once("SIGINT", () => { reader.close(); resolve(false); });
-  });
-}
+export { promptWorkspaceTrust } from "./workspace-trust-prompt.js";
 
 /** Read-only lookup before a saved session can load project configuration. */
 export async function requireSessionWorkspace(rpc: StdioJsonRpc, trust: WorkspaceTrust, sessionId: string): Promise<void> {

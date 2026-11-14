@@ -197,7 +197,7 @@ async function run() {
 
     // The isolated test home has no saved approvals; admit only this test repo.
     await waitFor("workspace trust", (_events, text) => text.includes("Trust this workspace?"));
-    await send("yes");
+    mux(["send-keys", "-t", session, "Down", "Enter"]);
     await waitFor("ready chat chrome", (events, text) => rpcSucceeded(events, "session/new") && text.includes("Subagents") && text.includes("Scheduled") && text.includes("Shells"));
     console.log("=== boot ===\n" + pane);
     switch (scenario) {

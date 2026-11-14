@@ -1,9 +1,11 @@
 # TUI workspace trust
 
 When starting `devo` in a directory for the first time, review the displayed
-canonical directory and type **yes** only if you trust its contents. Enter,
-EOF, or any other answer declines; no Native server or session is started by
-that TUI before acceptance. `--yolo` does not skip this prompt.
+canonical directory and use **↑/↓** to select **Yes, I trust this folder**, then
+press **Enter** only if you trust its contents. **No, exit** is selected by
+default. Enter on No, Esc, Ctrl+C, Ctrl+D, or EOF declines; typing or pasting
+`yes` does not grant trust. No Native server or session is started by that TUI
+before acceptance. `--yolo` does not skip this prompt.
 
 Project instructions and configuration can influence the agent, model endpoints,
 and tools/MCP processes running with your account's permissions. Workspace trust

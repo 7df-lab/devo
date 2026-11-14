@@ -185,6 +185,9 @@ jobs:
         run: npm ci --ignore-scripts --no-audit --no-fund
       - name: Build CLI
         run: cargo build -p devo-cli --bin devo --locked
+      - name: Workspace trust selector in real TTY
+        working-directory: apps/tui
+        run: node scripts/workspace-trust-smoke.mjs
       - name: Boot and outcome scenarios (no provider credentials)
         working-directory: apps/tui
         run: |
