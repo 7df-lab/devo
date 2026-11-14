@@ -194,7 +194,7 @@ jobs:
         working-directory: apps/tui
         run: |
           node --test scripts/queue-output-outcome.test.mjs
-          for scenario in T1 queue-output subagent-roster resize-status wait-timer goal heartbeat effort theme scheduled-timezone scheduled-pending refine steering abort-history; do
+          for scenario in T1 logout queue-output subagent-roster resize-status wait-timer goal heartbeat effort theme scheduled-timezone scheduled-pending refine steering abort-history; do
             echo "::group::tmux smoke: $scenario"
             node scripts/run-tmux-smoke.js "$scenario"
             echo "::endgroup::"

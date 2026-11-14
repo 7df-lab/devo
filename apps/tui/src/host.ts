@@ -86,38 +86,57 @@ export function createDevoUiServices(options: {
 
 /**
  * After `/login` stores tokens in AuthStorage, push them to Native
- * via `credential/set`. Wraps AuthStorage.set/remove so later logins sync too.
+ * via `credential/set`. Serializes AuthStorage.set; explicit logout awaits and revokes these writes.
  */
+const authSyncs = new WeakMap<AuthStorage, { flush(): Promise<void> }>();
+
 export function wireAuthCredentialSync(
   connection: NativeAgentConnection,
   authStorage: AuthStorage,
 ): void {
   const originalSet = authStorage.set.bind(authStorage);
-  const originalRemove = authStorage.remove.bind(authStorage);
-
+  let pending = Promise.resolve();
+  const enqueue = (operation: () => Promise<unknown>) => {
+    pending = pending.catch(() => {}).then(operation).then(() => {});
+    // Background OAuth refresh has no awaiting UI caller, but explicit auth
+    // flows await flush and surface any failure instead of racing the catalog.
+    void pending.catch(() => {});
+  };
+  authSyncs.set(authStorage, { flush: () => pending });
   authStorage.set = (provider: string, credential: AuthCredentialLike) => {
     originalSet(provider, credential as never);
-    void connection.syncAuthStorage(authStorage).catch(() => {});
+    if (!provider.startsWith("mcp:")) enqueue(() => connection.setCredentialFromAuth(provider, credential));
   };
+  for (const provider of authStorage.list()) {
+    const credential = authStorage.get(provider);
+    if (credential && (credential.type === "api_key" || credential.type === "oauth") && !provider.startsWith("mcp:")) enqueue(() => connection.setCredentialFromAuth(provider, credential));
+  }
+}
 
-  authStorage.remove = (provider: string) => {
-    originalRemove(provider);
-    void (async () => {
-      try {
-        const listed = await connection.listCredentials();
-        for (const c of listed.credentials ?? []) {
-          const row = c as { id?: string; provider?: string };
-          if (row.provider === provider && row.id) {
-            await connection.deleteCredential(row.id);
-          }
-        }
-      } catch {
-        // ignore
-      }
-    })();
-  };
-
-  void connection.syncAuthStorage(authStorage).catch(() => {});
+/** The login intent must be fenced before waiting for prior background writes. */
+export async function completeHostProviderAuthentication(
+  connection: NativeAgentConnection,
+  authStorage: AuthStorage,
+  provider: string,
+  authType: "oauth" | "api_key",
+  kind?: "provider" | "service",
+): Promise<void> {
+  if (kind !== "provider" || provider.startsWith("mcp:")) {
+    await authSyncs.get(authStorage)?.flush();
+    return;
+  }
+  await connection.runExplicitProviderLogin(provider, async (assertCurrent) => {
+    await authSyncs.get(authStorage)?.flush();
+    assertCurrent();
+    const credential = authStorage.get(provider);
+    if (authType !== "oauth") {
+      if (!credential || credential.type !== "api_key") throw new Error(`Missing API key for ${provider}`);
+      await connection.completeExplicitStoredLogin(provider, credential);
+      return;
+    }
+    if (!credential || credential.type !== "oauth") throw new Error(`Missing OAuth credential for ${provider}`);
+    await connection.completeExplicitOAuthLogin(provider, credential);
+  });
 }
 
 function createInteractiveMode(
@@ -142,12 +161,22 @@ function createInteractiveMode(
       logo: DEVO_COMPACT_ORBIT_LOGO,
       title: DEVO_SPLASH_TITLE,
     },
-    onProviderAuthenticated: async (provider, authType, kind) => {
-      if (authType !== "oauth" || kind !== "provider" || provider.startsWith("mcp:")) return;
-      const credential = uiServices.modelRegistry.authStorage.get(provider);
-      if (!credential || credential.type !== "oauth") throw new Error(`Missing OAuth credential for ${provider}`);
-      await connection.completeExplicitOAuthLogin(provider, credential);
+    getStoredProviderCredentials: async () => {
+      const result = await connection.listCredentials();
+      return result.credentials.filter((entry): entry is { provider: string; kind?: string } =>
+        typeof (entry as { provider?: unknown }).provider === "string");
     },
+    onProviderLogoutStarted: (provider) => {
+      if (!provider.startsWith("mcp:")) connection.providerLogoutStarted(provider);
+    },
+    onProviderLoggedOut: async (provider) => {
+      if (provider.startsWith("mcp:")) return;
+      // Finish older login writes before deleting; no stale queued sync may
+      // recreate the credential after logout has reported success.
+      await connection.logoutProvider(provider, authSyncs.get(uiServices.modelRegistry.authStorage)?.flush());
+    },
+    onProviderAuthenticated: (provider, authType, kind) =>
+      completeHostProviderAuthentication(connection, uiServices.modelRegistry.authStorage, provider, authType, kind),
     excludedLoginProviderIds: ["prime-inference"],
     excludedBuiltinCommands: DEVO_EXCLUDED_BUILTIN_COMMANDS,
   });
