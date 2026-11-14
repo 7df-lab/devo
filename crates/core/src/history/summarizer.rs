@@ -88,14 +88,10 @@ impl HistorySummarizer for DefaultHistorySummarizer {
             reasoning_effort: None,
             extra_body: None,
         };
-        let request_preview = serde_json::to_string_pretty(&request).unwrap_or_else(|error| {
-            format!("<failed to serialize compaction request for logging: {error}>")
-        });
         debug!(
             model = %self.request_model,
             message_count = request.messages.len(),
             max_tokens = request.max_tokens,
-            compaction_request = %request_preview,
             "sending LLM compaction request"
         );
 
@@ -147,7 +143,6 @@ impl HistorySummarizer for DefaultHistorySummarizer {
         debug!(
             model = %self.request_model,
             response_chars = text.len(),
-            compaction_response = %text,
             "received LLM compaction response"
         );
 

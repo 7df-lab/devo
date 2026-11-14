@@ -553,6 +553,8 @@ fn shared_journal_late_child_and_grandchild_keep_cumulative_and_local_context() 
 mod completion_tests;
 #[path = "replay_tests.rs"]
 mod replay_tests;
+#[path = "trace_tests.rs"]
+mod trace_tests;
 
 #[path = "legacy_boundary_tests.rs"]
 mod legacy_boundary_tests;

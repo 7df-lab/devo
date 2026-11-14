@@ -18,6 +18,7 @@ use std::pin::Pin;
 use std::sync::Arc;
 use std::task::Context;
 use std::task::Poll;
+use tracing::Instrument;
 use tracing::warn;
 use uuid::Uuid;
 
@@ -310,6 +311,7 @@ impl ModelProviderSDK for InstrumentedProvider {
         match self
             .provider
             .completion_with_usage_observer(request, observer)
+            .instrument(attempt.span.clone())
             .await
         {
             Ok(mut response) => {
@@ -350,7 +352,12 @@ impl ModelProviderSDK for InstrumentedProvider {
             self.provider.name().to_owned(),
             request.clone(),
         );
-        match self.provider.completion_stream(request.clone()).await {
+        match self
+            .provider
+            .completion_stream(request.clone())
+            .instrument(attempt.span.clone())
+            .await
+        {
             Ok(inner) => Ok(Box::pin(MeteredStream { inner, attempt })),
             Err(error) => {
                 attempt.finish(UsageCallOutcome::Failed, None)?;
@@ -371,6 +378,7 @@ struct CallAttemptGuard {
     request: ModelRequest,
     terminal: bool,
     call_id: String,
+    span: tracing::Span,
     last_usage: Arc<std::sync::Mutex<Option<Usage>>>,
 }
 
@@ -388,13 +396,30 @@ impl CallAttemptGuard {
             .expect("usage ledger lock")
             .projection
             .owner_for_call(context.session_id, context.call.turn_id);
+        let call_id = Uuid::now_v7().to_string();
+        // Reuse the journal's identity; never attach request/response bodies or
+        // provider configuration (which can contain credentials) to diagnostics.
+        let span = tracing::info_span!(
+            "model_call",
+            %call_id,
+            session_id = %context.call.session_id,
+            turn_id = tracing::field::Empty,
+            purpose = ?context.call.purpose,
+            provider = %provider_name,
+            model = %request.model,
+        );
+        if let Some(turn_id) = context.call.turn_id {
+            span.record("turn_id", tracing::field::display(turn_id));
+        }
+        tracing::debug!(parent: &span, "model call started");
         Self {
             ledger,
             context,
             provider_name,
             request,
             terminal: false,
-            call_id: Uuid::now_v7().to_string(),
+            call_id,
+            span,
             last_usage: Default::default(),
         }
     }
@@ -404,6 +429,7 @@ impl CallAttemptGuard {
             return Ok(());
         }
         self.terminal = true;
+        tracing::debug!(parent: &self.span, ?outcome, "model call finished");
         self.ledger
             .record(
                 &self.call_id,
@@ -425,7 +451,7 @@ impl Drop for CallAttemptGuard {
     fn drop(&mut self) {
         let usage = self.last_usage.lock().expect("usage sample lock").take();
         if let Err(error) = self.finish(UsageCallOutcome::Cancelled, usage.as_ref()) {
-            warn!(%error, "failed to persist cancelled model-call usage");
+            warn!(parent: &self.span, %error, "failed to persist cancelled model-call usage");
         }
     }
 }
@@ -439,6 +465,8 @@ impl Stream for MeteredStream {
     type Item = Result<StreamEvent>;
 
     fn poll_next(mut self: Pin<&mut Self>, context: &mut Context<'_>) -> Poll<Option<Self::Item>> {
+        // Enter only for this synchronous poll, never across an await/yield.
+        let _guard = self.attempt.span.clone().entered();
         let mut item = self.inner.as_mut().poll_next(context);
         if let Poll::Ready(Some(Ok(StreamEvent::MessageDone { response }))) = &mut item
             && !response.usage.is_reported()
