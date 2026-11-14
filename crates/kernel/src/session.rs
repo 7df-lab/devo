@@ -4,6 +4,7 @@
 mod inflight_wait_tests;
 #[cfg(test)]
 mod lifetime_tests;
+mod namespace_brief;
 mod session_event_pump;
 
 use std::path::{Path, PathBuf};
@@ -1163,8 +1164,16 @@ async fn read_ready(stdout: &mut BufReader<ChildStdout>) -> Result<ReadyEvent, R
     let mut startup_stderr = String::new();
     loop {
         match read_line_event(stdout).await {
-            Ok(KernelEvent::Ready { protocol, python }) => {
-                return Ok(ReadyEvent { protocol, python });
+            Ok(KernelEvent::Ready {
+                protocol,
+                python,
+                supports_namespace_brief,
+            }) => {
+                return Ok(ReadyEvent {
+                    protocol,
+                    python,
+                    supports_namespace_brief,
+                });
             }
             Ok(KernelEvent::Stderr { text, .. }) => {
                 // Python redirects startup diagnostics onto the protocol stream.

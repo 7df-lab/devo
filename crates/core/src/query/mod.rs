@@ -5,6 +5,7 @@
 //! from the orchestration loop in this file.
 
 mod event;
+mod kernel_brief;
 mod pending_input;
 mod prompt_estimate;
 mod provider_retry;
@@ -375,6 +376,7 @@ fn is_injected_context_message(message: &RequestMessage) -> bool {
             RequestContent::Text { text } => {
                 let trimmed = text.trim_start();
                 trimmed.starts_with("<environment_context>")
+                    || trimmed.starts_with("<live_python_names>")
                     || trimmed.starts_with("<background_work_results>")
                     || trimmed.starts_with("<available_skills>")
                     || trimmed.starts_with("<language_preference>")
@@ -694,6 +696,12 @@ pub async fn query(
             &prefetched_user_inputs,
             &active_turn_config.model.input_modalities,
         );
+        kernel_brief::insert_live_brief(
+            &history,
+            runtime.context().kernel.as_deref(),
+            &mut messages,
+        )
+        .await;
         // Internal registries may retain handlers for server-side operations, but
         // only the Python kernel schema is ever sent to a model provider.
         let model_registry = registry.restricted_to_specs(&["ipython"]);

@@ -12,7 +12,7 @@ pub const PROTOCOL_VERSION: u32 = 3;
 ///
 /// Requests run strictly in order, one at a time, except `interrupt` and
 /// `host_reply`, which are handled on the reader thread. `execute`, `snapshot`,
-/// `restore`, `list_names`, and `shutdown` (when it carries an `id`) each
+/// `restore`, `list_names`, `namespace_brief`, and `shutdown` (when it carries an `id`) each
 /// receive exactly one matching [`KernelEvent::Done`] with the same `id`.
 /// `interrupt` and `host_reply` are fire-and-forget and produce no reply.
 ///
@@ -88,6 +88,10 @@ pub enum KernelRequest {
     /// The matching `done` carries them in `names`.
     ListNames { id: String },
 
+    /// Read a bounded name-only sample without touching namespace values.
+    /// The matching `done` carries at most 32 ASCII identifiers in `names`.
+    NamespaceBrief { id: String },
+
     /// Stop the runtime, kill its background Bash process groups, and exit 0.
     ///
     /// With `id`, the kernel emits a final `done` before exiting. Closing stdin
@@ -129,7 +133,13 @@ pub enum KernelEvent {
     ///
     /// `protocol` must equal [`PROTOCOL_VERSION`]; a mismatch fails the spawn.
     /// `python` is the interpreter version string.
-    Ready { protocol: u32, python: String },
+    Ready {
+        protocol: u32,
+        python: String,
+        /// Additive capability: absent on older protocol-v3 runtimes.
+        #[serde(default)]
+        supports_namespace_brief: bool,
+    },
 
     /// Captured standard output.
     ///
@@ -208,6 +218,8 @@ pub struct ReadyEvent {
     pub protocol: u32,
     /// Python interpreter version, for example `"3.13.11"`.
     pub python: String,
+    /// Explicit support for the bounded name-only request; false on older v3.
+    pub supports_namespace_brief: bool,
 }
 
 /// Errors from spawning a kernel or talking to it over the protocol.
@@ -283,9 +295,15 @@ mod tests {
         let raw = r#"{"event":"ready","protocol":3,"python":"3.13.11"}"#;
         let ev: KernelEvent = serde_json::from_str(raw).expect("parse");
         match ev {
-            KernelEvent::Ready { protocol, python } => {
-                assert_eq!(protocol, PROTOCOL_VERSION);
-                assert_eq!(python, "3.13.11");
+            KernelEvent::Ready {
+                protocol,
+                python,
+                supports_namespace_brief,
+            } => {
+                assert_eq!(
+                    (protocol, python.as_str(), supports_namespace_brief),
+                    (PROTOCOL_VERSION, "3.13.11", false)
+                );
             }
             other => panic!("unexpected {other:?}"),
         }

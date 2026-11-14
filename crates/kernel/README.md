@@ -42,7 +42,9 @@ model tool call
 ```
 
 The crate also exposes interrupt, snapshot, restore, `list_names`, and shutdown
-over the same protocol. Alongside `execute`, these make up the whole surface
+over the same protocol, plus a bounded, name-only `namespace_brief` for
+[post-compaction context](../../docs/python-kernel-compaction.md). Alongside
+`execute`, these make up the whole surface
 between the two processes.
 
 The Python package itself is described in

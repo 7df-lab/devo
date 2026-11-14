@@ -109,6 +109,7 @@ The full behavior, ordering rules, and examples live in
 | `snapshot` | Serialize the namespace with dill and write a manifest. |
 | `restore` | Load names from a snapshot. |
 | `list_names` | List user-defined top-level names. |
+| `namespace_brief` | Bounded read-only sample of names, never values. |
 | `shutdown` | Stop the runtime, kill local Bash children, and exit. |
 
 | Event | Purpose |
@@ -124,7 +125,7 @@ The full behavior, ordering rules, and examples live in
 `result` is data: it is optional and appears at most once. `done` is lifecycle:
 exactly one per id'd request, always last, and the collector stops there. An
 `error` event is not terminal by itself; `done` follows it. `snapshot`,
-`restore`, and `list_names` have no `result`; their payload is carried by
+`restore`, `list_names`, and `namespace_brief` have no `result`; their payload is carried by
 `done`.
 
 ## Module map
