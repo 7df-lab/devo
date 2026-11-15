@@ -256,3 +256,53 @@ async fn host_bash_tasks_list_and_read_after_python_forgets_handle() {
     assert_eq!(unrelated["result"]["tasks"], json!([]));
     host_bash::cancel_session(session_id.as_str());
 }
+
+#[tokio::test]
+async fn cancelled_command_admission_returns_reserved_capacity() {
+    let home = tempfile::tempdir().expect("tempdir");
+    let runtime = TestRuntime::noop().runtime(home.path());
+    let manager = CommandExecManager::new();
+    let sessions = manager.sessions.lock().await;
+    for _ in 0..=devo_core::tools::unified_exec::MAX_PROCESSES {
+        let mut start = Box::pin(manager.start(
+            Arc::clone(&runtime),
+            1,
+            CommandExecParams {
+                session_id: None,
+                process_id: "cancelled-admission".to_string(),
+                cwd: Some(home.path().to_path_buf()),
+                program: CommandExecProgram::OneShot {
+                    command: "echo must-not-run".to_string(),
+                },
+                size: None,
+            },
+            CommandExecContext {
+                cwd: home.path().to_path_buf(),
+                sandbox_workspace: None,
+                sandbox_profile: None,
+            },
+        ));
+        // Poll the actual admission path through reservation, then cancel at the
+        // sessions lock before any subprocess is spawned.
+        tokio::select! {
+            biased;
+            result = &mut start => panic!("admission should wait for sessions lock: {result:?}"),
+            () = std::future::ready(()) => {}
+        }
+        drop(start);
+    }
+    assert!(sessions.is_empty());
+    drop(sessions);
+    let mut reservations = Vec::new();
+    for _ in 0..devo_core::tools::unified_exec::MAX_PROCESSES {
+        reservations.push(
+            manager
+                .store
+                .reserve_process_id()
+                .await
+                .expect("capacity returned"),
+        );
+    }
+    assert!(manager.store.reserve_process_id().await.is_none());
+    assert!(manager.store.is_empty().await);
+}

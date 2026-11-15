@@ -27,15 +27,17 @@ async fn dropped_stdin_call_stops_existing_process() {
     #[cfg(unix)]
     let command = "sleep 30";
     let cwd = std::env::current_dir().unwrap();
+    let reservation = store.reserve_process_id().await.expect("reserve process slot");
+    let process_id = reservation.id();
     let (process, _) = UnifiedExecProcess::spawn(
-        /*process_id*/ 1234, command, &cwd, /*shell*/ None,
+        process_id, command, &cwd, /*shell*/ None,
         /*login*/ false, /*tty*/ false,
     ).await.unwrap();
     let process = Arc::new(process);
-    store.insert_reserved(1234, Arc::clone(&process)).await;
+    reservation.insert(Arc::clone(&process));
     let handler = WriteStdinHandler::new(Arc::clone(&store));
     let mut call = Box::pin(handler.handle(test_ctx(cwd), serde_json::json!({
-        "process_id": 1234, "chars": "", "yield_time_ms": 30000,
+        "process_id": process_id, "chars": "", "yield_time_ms": 30000,
     }), /*progress*/ None));
     tokio::select! {
         biased;

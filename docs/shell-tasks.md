@@ -195,3 +195,17 @@ cannot retract that turn or its history. The host reports `already_delivered` an
 the retained process result is still available. This is not a promise of exactly-once
 model execution or side effects across crashes. Persistence of notification receipts
 does not mean that running processes survive a server restart.
+
+## Host process-store capacity
+
+Each unified-exec `ProcessStore` counts stored processes and pending spawn
+reservations together toward its 64-slot limit. At capacity, eviction retains
+the eight most recently used stored processes and prefers older exited entries
+before other older entries. If no stored entry can be evicted, admission fails
+before spawning another process.
+
+Rust callers retain the `ProcessReservation` returned by `reserve_process_id()`
+across startup, obtain its ID with `id()`, then consume it with `insert(process)`.
+Dropping the reservation, including on an error or future cancellation, releases
+its capacity synchronously. Insertion transfers the slot atomically; a reservation
+invalidated by teardown cannot insert a process or release a newer reservation.

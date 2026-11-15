@@ -199,7 +199,7 @@ impl ToolHandler for ExecCommandHandler {
             };
         }
 
-        let Some(process_id) = self.store.reserve_process_id().await else {
+        let Some(reservation) = self.store.reserve_process_id().await else {
             return Ok(ToolResult::error(
                 ToolResultContent::Text(format!(
                     "max unified exec processes ({}) reached; cannot allocate process",
@@ -213,6 +213,7 @@ impl ToolHandler for ExecCommandHandler {
             ));
         };
 
+        let process_id = reservation.id();
         let spawned_process = UnifiedExecProcess::spawn_with_sandbox_overlay(
             process_id,
             &args.cmd,
@@ -238,7 +239,6 @@ impl ToolHandler for ExecCommandHandler {
         let (proc, _broadcast_rx) = match spawned_process {
             Ok(spawned) => spawned,
             Err(error) => {
-                self.store.release_reserved(process_id).await;
                 return Err(ToolCallError::ExecutionFailed(format!(
                     "failed to spawn process: {error}"
                 )));
@@ -246,9 +246,7 @@ impl ToolHandler for ExecCommandHandler {
         };
 
         let proc = Arc::new(proc);
-        self.store
-            .insert_reserved(process_id, Arc::clone(&proc))
-            .await;
+        reservation.insert(Arc::clone(&proc));
 
         if execution_mode == ExecExecutionMode::Background {
             let owner_session_id = ctx.session_id;

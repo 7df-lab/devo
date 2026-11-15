@@ -1,10 +1,9 @@
 use std::cmp::Reverse;
 use std::collections::HashMap;
-use std::collections::HashSet;
 use std::sync::Arc;
+use std::sync::Mutex;
 
 use rand::Rng;
-use tokio::sync::RwLock;
 use tracing::warn;
 
 use super::process::UnifiedExecProcess;
@@ -24,77 +23,120 @@ struct ProcessPruneMeta {
 
 const PROTECTED_RECENT_PROCESSES: usize = 8;
 
-pub struct ProcessStore {
-    processes: RwLock<HashMap<i32, ProcessEntry>>,
-    reserved_process_ids: RwLock<HashSet<i32>>,
+#[derive(Default)]
+struct StoreState {
+    processes: HashMap<i32, ProcessEntry>,
+    reserved_process_ids: HashMap<i32, Arc<()>>,
 }
 
-impl ProcessStore {
-    pub fn new() -> Self {
-        ProcessStore {
-            processes: RwLock::new(HashMap::new()),
-            reserved_process_ids: RwLock::new(HashSet::new()),
-        }
+pub struct ProcessStore {
+    // All accounting transitions are synchronous and atomic, including cancellation cleanup.
+    state: Mutex<StoreState>,
+}
+
+/// Owns a capacity slot until insertion or drop, including cancellation across awaits.
+pub struct ProcessReservation<'a> {
+    store: &'a ProcessStore,
+    id: i32,
+    token: Arc<()>,
+}
+
+impl ProcessReservation<'_> {
+    pub fn id(&self) -> i32 {
+        self.id
     }
 
-    pub async fn allocate(&self, process: Arc<UnifiedExecProcess>) -> i32 {
-        let Some(id) = self.reserve_process_id().await else {
+    pub fn insert(self, process: Arc<UnifiedExecProcess>) {
+        let mut state = self.store.state.lock().expect("process store lock");
+        if !state
+            .reserved_process_ids
+            .get(&self.id)
+            .is_some_and(|token| Arc::ptr_eq(token, &self.token))
+        {
             process.terminate();
-            return 0;
-        };
-        self.insert_reserved(id, process).await;
-        id
-    }
-
-    pub async fn reserve_process_id(&self) -> Option<i32> {
-        let mut reserved = self.reserved_process_ids.write().await;
-        let mut map = self.processes.write().await;
-
-        if map.len() >= MAX_PROCESSES {
-            self.prune_process_if_needed(&mut map);
+            return;
         }
-
-        if map.len() >= MAX_PROCESSES {
-            warn!("max unified exec processes ({MAX_PROCESSES}) reached; cannot allocate process");
-            return None;
-        }
-
-        if map.len() >= WARNING_PROCESSES {
-            warn!(
-                "unified exec processes at {}/{} (warning threshold)",
-                map.len(),
-                MAX_PROCESSES
-            );
-        }
-
-        let id = loop {
-            let candidate = rand::rng().random_range(1_000..100_000);
-            if !map.contains_key(&candidate) && !reserved.contains(&candidate) {
-                break candidate;
-            }
-        };
-        reserved.insert(id);
-        Some(id)
-    }
-
-    pub async fn insert_reserved(&self, id: i32, process: Arc<UnifiedExecProcess>) {
-        self.reserved_process_ids.write().await.remove(&id);
-        let mut map = self.processes.write().await;
-        map.insert(
-            id,
+        state.reserved_process_ids.remove(&self.id);
+        state.processes.insert(
+            self.id,
             ProcessEntry {
                 process,
                 last_used: std::time::Instant::now(),
             },
         );
     }
+}
 
-    pub async fn release_reserved(&self, id: i32) {
-        self.reserved_process_ids.write().await.remove(&id);
+impl Drop for ProcessReservation<'_> {
+    fn drop(&mut self) {
+        let mut state = self.store.state.lock().expect("process store lock");
+        // terminate_all/remove can invalidate a reservation. Never release a newer slot
+        // if its random process ID happens to be reused while this guard is still alive.
+        if state
+            .reserved_process_ids
+            .get(&self.id)
+            .is_some_and(|token| Arc::ptr_eq(token, &self.token))
+        {
+            state.reserved_process_ids.remove(&self.id);
+        }
+    }
+}
+
+impl ProcessStore {
+    pub fn new() -> Self {
+        ProcessStore {
+            state: Mutex::new(StoreState::default()),
+        }
+    }
+
+    pub async fn allocate(&self, process: Arc<UnifiedExecProcess>) -> i32 {
+        let Some(reservation) = self.reserve_process_id().await else {
+            process.terminate();
+            return 0;
+        };
+        let id = reservation.id();
+        reservation.insert(process);
+        id
+    }
+
+    pub async fn reserve_process_id(&self) -> Option<ProcessReservation<'_>> {
+        let mut state = self.state.lock().expect("process store lock");
+        let StoreState {
+            processes: map,
+            reserved_process_ids: reserved,
+        } = &mut *state;
+        if map.len() + reserved.len() >= MAX_PROCESSES {
+            self.prune_process_if_needed(map);
+        }
+        if map.len() + reserved.len() >= MAX_PROCESSES {
+            warn!("max unified exec processes ({MAX_PROCESSES}) reached; cannot allocate process");
+            return None;
+        }
+        if map.len() + reserved.len() >= WARNING_PROCESSES {
+            warn!(
+                "unified exec processes at {}/{} (warning threshold)",
+                map.len() + reserved.len(),
+                MAX_PROCESSES
+            );
+        }
+        let id = loop {
+            let candidate = rand::rng().random_range(1_000..100_000);
+            if !map.contains_key(&candidate) && !reserved.contains_key(&candidate) {
+                break candidate;
+            }
+        };
+        let token = Arc::new(());
+        reserved.insert(id, Arc::clone(&token));
+        Some(ProcessReservation {
+            store: self,
+            id,
+            token,
+        })
     }
 
     pub async fn get(&self, id: i32) -> Option<Arc<UnifiedExecProcess>> {
-        let mut map = self.processes.write().await;
+        let mut state = self.state.lock().expect("process store lock");
+        let map = &mut state.processes;
         map.get_mut(&id).map(|entry| {
             entry.last_used = std::time::Instant::now();
             Arc::clone(&entry.process)
@@ -102,38 +144,49 @@ impl ProcessStore {
     }
 
     pub async fn remove(&self, id: i32) {
-        self.reserved_process_ids.write().await.remove(&id);
-        let mut map = self.processes.write().await;
+        let mut state = self.state.lock().expect("process store lock");
+        state.reserved_process_ids.remove(&id);
+        let map = &mut state.processes;
         if let Some(entry) = map.remove(&id) {
             entry.process.terminate();
         }
     }
 
     pub async fn terminate_all(&self) {
-        self.reserved_process_ids.write().await.clear();
         let processes = {
-            let mut map = self.processes.write().await;
-            map.drain()
+            let mut state = self.state.lock().expect("process store lock");
+            state.reserved_process_ids.clear();
+            state
+                .processes
+                .drain()
                 .map(|(_id, entry)| entry.process)
                 .collect::<Vec<_>>()
         };
-
         for process in processes {
             process.terminate();
         }
     }
 
     pub async fn len(&self) -> usize {
-        self.processes.read().await.len()
+        self.state
+            .lock()
+            .expect("process store lock")
+            .processes
+            .len()
     }
 
     pub async fn is_empty(&self) -> bool {
-        self.processes.read().await.is_empty()
+        self.state
+            .lock()
+            .expect("process store lock")
+            .processes
+            .is_empty()
     }
 
     pub async fn prune_exited(&self) {
-        let mut map = self.processes.write().await;
-        self.prune_locked(&mut map);
+        let mut state = self.state.lock().expect("process store lock");
+        let map = &mut state.processes;
+        self.prune_locked(map);
     }
 
     fn prune_locked(&self, map: &mut HashMap<i32, ProcessEntry>) {
@@ -150,9 +203,7 @@ impl ProcessStore {
     }
 
     fn prune_process_if_needed(&self, map: &mut HashMap<i32, ProcessEntry>) {
-        if map.len() < MAX_PROCESSES {
-            return;
-        }
+        // The caller checks combined process and reservation occupancy.
         let meta = map
             .iter()
             .map(|(process_id, entry)| ProcessPruneMeta {
@@ -228,6 +279,109 @@ mod tests {
     }
 
     #[tokio::test]
+    async fn reservations_enforce_capacity_and_drop_reopens_slot() {
+        let store = ProcessStore::new();
+        let mut slots = Vec::new();
+        for _ in 0..MAX_PROCESSES {
+            slots.push(store.reserve_process_id().await.expect("available slot"));
+        }
+        assert!(store.reserve_process_id().await.is_none());
+        assert_eq!(store.len().await, 0);
+        drop(slots.pop());
+        slots.push(store.reserve_process_id().await.expect("released slot"));
+        assert!(store.reserve_process_id().await.is_none());
+    }
+
+    #[tokio::test(flavor = "multi_thread", worker_threads = 4)]
+    async fn concurrent_reservations_do_not_exceed_capacity() {
+        let store = Arc::new(ProcessStore::new());
+        let barrier = Arc::new(tokio::sync::Barrier::new(MAX_PROCESSES * 2));
+        let mut tasks = Vec::new();
+        for _ in 0..MAX_PROCESSES * 2 {
+            let store = Arc::clone(&store);
+            let barrier = Arc::clone(&barrier);
+            tasks.push(tokio::spawn(async move {
+                let reservation = store.reserve_process_id().await;
+                // Keep all admitted slots alive until every task has attempted admission.
+                barrier.wait().await;
+                reservation.as_ref().map(ProcessReservation::id)
+            }));
+        }
+        let mut ids = std::collections::HashSet::new();
+        for task in tasks {
+            if let Some(id) = task.await.unwrap() {
+                assert!(ids.insert(id));
+            }
+        }
+        assert_eq!(ids.len(), MAX_PROCESSES);
+        assert!(store.state.lock().unwrap().reserved_process_ids.is_empty());
+    }
+
+    #[tokio::test]
+    async fn cancelled_reservation_returns_capacity_without_async_cleanup() {
+        let store = ProcessStore::new();
+        for _ in 0..MAX_PROCESSES + 1 {
+            let work = async {
+                let _reservation = store.reserve_process_id().await.expect("available slot");
+                std::future::pending::<()>().await;
+            };
+            let mut work = Box::pin(work);
+            assert!(futures::poll!(&mut work).is_pending());
+            drop(work);
+            assert!(store.state.lock().unwrap().reserved_process_ids.is_empty());
+        }
+    }
+
+    #[tokio::test]
+    async fn invalidated_reservation_cannot_insert_or_release_reused_id() {
+        let store = ProcessStore::new();
+        let reservation = store.reserve_process_id().await.unwrap();
+        let id = reservation.id();
+        store.terminate_all().await;
+        let token = Arc::new(());
+        store
+            .state
+            .lock()
+            .unwrap()
+            .reserved_process_ids
+            .insert(id, Arc::clone(&token));
+        let proc = Arc::new(spawn_echo().await);
+        reservation.insert(Arc::clone(&proc));
+        assert!(store.is_empty().await);
+        assert!(!proc.is_running());
+        assert!(Arc::ptr_eq(
+            store
+                .state
+                .lock()
+                .unwrap()
+                .reserved_process_ids
+                .get(&id)
+                .unwrap(),
+            &token
+        ));
+    }
+
+    #[tokio::test]
+    async fn mixed_capacity_prunes_only_outside_recent_processes() {
+        let store = ProcessStore::new();
+        for _ in 0..PROTECTED_RECENT_PROCESSES + 1 {
+            store.allocate(Arc::new(spawn_echo().await)).await;
+        }
+        let mut slots = Vec::new();
+        for _ in PROTECTED_RECENT_PROCESSES + 1..MAX_PROCESSES {
+            slots.push(store.reserve_process_id().await.unwrap());
+        }
+        slots.push(
+            store
+                .reserve_process_id()
+                .await
+                .expect("one unprotected process"),
+        );
+        assert_eq!(store.len().await, PROTECTED_RECENT_PROCESSES);
+        assert!(store.reserve_process_id().await.is_none());
+    }
+
+    #[tokio::test]
     async fn store_allocate_and_get() {
         let store = ProcessStore::new();
         let proc = spawn_echo().await;
@@ -239,7 +393,8 @@ mod tests {
     #[tokio::test]
     async fn store_reserved_insert_preserves_process_id() {
         let store = ProcessStore::new();
-        let id = store.reserve_process_id().await.expect("reserve id");
+        let reservation = store.reserve_process_id().await.expect("reserve id");
+        let id = reservation.id();
         let (proc, _rx) = UnifiedExecProcess::spawn(
             id,
             "echo test",
@@ -251,7 +406,7 @@ mod tests {
         .await
         .expect("spawn should succeed");
 
-        store.insert_reserved(id, Arc::new(proc)).await;
+        reservation.insert(Arc::new(proc));
         let proc = store.get(id).await.expect("stored process");
 
         assert_eq!(proc.process_id(), id);
@@ -269,7 +424,7 @@ mod tests {
     #[tokio::test]
     async fn store_terminate_all_drains_processes_and_reservations() {
         let store = ProcessStore::new();
-        let reserved_id = store.reserve_process_id().await.expect("reserve id");
+        let reservation = store.reserve_process_id().await.expect("reserve id");
         let proc = Arc::new(spawn_echo().await);
         let id = store.allocate(Arc::clone(&proc)).await;
 
@@ -279,7 +434,7 @@ mod tests {
         assert!(store.get(id).await.is_none());
         assert!(!proc.is_running());
         assert!(store.reserve_process_id().await.is_some());
-        store.release_reserved(reserved_id).await;
+        drop(reservation);
     }
 
     #[tokio::test]
