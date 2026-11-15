@@ -5,7 +5,7 @@ use std::pin::Pin;
 use anyhow::{Context, Result};
 use async_trait::async_trait;
 use devo_protocol::{
-    ModelRequest, ModelResponse, ProviderWireApi, RequestContent, ResponseContent,
+    ModelRequest, ModelResponse, ProviderWireApi, RequestContent, ResponseContent, ResponseExtra,
     ResponseMetadata, StopReason, StreamEvent, Usage,
 };
 use futures::Stream;
@@ -267,6 +267,7 @@ fn parse_response(value: Value) -> Result<ModelResponse> {
         .and_then(Value::as_array)
         .and_then(|candidates| candidates.first());
     let mut content = Vec::new();
+    let mut metadata = ResponseMetadata::default();
     if let Some(parts) = candidate
         .and_then(|candidate| candidate.pointer("/content/parts"))
         .and_then(Value::as_array)
@@ -275,7 +276,13 @@ fn parse_response(value: Value) -> Result<ModelResponse> {
             if let Some(text) = part.get("text").and_then(Value::as_str)
                 && !text.is_empty()
             {
-                content.push(ResponseContent::Text(text.to_string()));
+                if part.get("thought").and_then(Value::as_bool) == Some(true) {
+                    metadata.extras.push(ResponseExtra::ReasoningText {
+                        text: text.to_string(),
+                    });
+                } else {
+                    content.push(ResponseContent::Text(text.to_string()));
+                }
             }
             if let Some(call) = part.get("functionCall") {
                 content.push(ResponseContent::ToolUse {
@@ -341,7 +348,7 @@ fn parse_response(value: Value) -> Result<ModelResponse> {
         content,
         stop_reason,
         usage: normalized_usage,
-        metadata: ResponseMetadata::default(),
+        metadata,
     })
 }
 
@@ -469,5 +476,199 @@ mod tests {
                 "tool output: {output}"
             );
         }
+    }
+    #[test]
+    fn google_thought_summary_is_not_final_answer_text() {
+        let response = parse_response(json!({
+            "candidates": [{"content": {"parts": [
+                {"thought": true, "text": "Reasoning summary"},
+                {"text": "Final answer"}
+            ]}, "finishReason": "STOP"}]
+        }))
+        .expect("valid Google response");
+        let visible: Vec<_> = response
+            .content
+            .iter()
+            .filter_map(|part| match part {
+                ResponseContent::Text(text) => Some(text.as_str()),
+                _ => None,
+            })
+            .collect();
+        assert_eq!(visible, vec!["Final answer"]);
+        assert_eq!(
+            response.metadata.extras,
+            vec![ResponseExtra::ReasoningText {
+                text: "Reasoning summary".into()
+            }]
+        );
+    }
+
+    #[test]
+    fn google_thought_parts_preserve_boundaries_and_tools() {
+        let response = parse_response(json!({
+            "candidates": [{"content": {"parts": [
+                {"thought": true, "text": ""},
+                {"thought": true, "text": "First"},
+                {"thought": false, "text": "Answer"},
+                {"thought": true, "text": "Second"},
+                {"text": "More"},
+                {"functionCall": {"id": "call", "name": "read", "args": {}}},
+                {"thought": true}
+            ]}, "finishReason": "STOP"}]
+        }))
+        .expect("valid response");
+        assert_eq!(
+            response.content,
+            vec![
+                ResponseContent::Text("Answer".into()),
+                ResponseContent::Text("More".into()),
+                ResponseContent::ToolUse {
+                    id: "call".into(),
+                    name: "read".into(),
+                    input: json!({})
+                },
+            ]
+        );
+        assert_eq!(
+            response.metadata.extras,
+            vec![
+                ResponseExtra::ReasoningText {
+                    text: "First".into()
+                },
+                ResponseExtra::ReasoningText {
+                    text: "Second".into()
+                },
+            ]
+        );
+        assert_eq!(response.stop_reason, Some(StopReason::ToolUse));
+        let only_thought = parse_response(json!({
+            "candidates": [{"content": {"parts": [{"thought": true, "text": "Summary"}]},
+                "finishReason": "MAX_TOKENS"}]
+        }))
+        .expect("thought-only response");
+        assert_eq!(only_thought.content, vec![]);
+        assert_eq!(
+            only_thought.metadata.extras,
+            vec![ResponseExtra::ReasoningText {
+                text: "Summary".into()
+            },]
+        );
+        assert_eq!(only_thought.stop_reason, Some(StopReason::MaxTokens));
+    }
+    /// Verifies: real HTTP completion and synthetic streaming preserve summaries only as metadata.
+    #[tokio::test]
+    async fn google_thought_metadata_survives_completion_and_stream() {
+        use futures::StreamExt;
+        use tokio::io::{AsyncReadExt, AsyncWriteExt};
+        let listener = tokio::net::TcpListener::bind("127.0.0.1:0")
+            .await
+            .expect("bind mock");
+        let address = listener.local_addr().expect("mock address");
+        let server = tokio::spawn(async move {
+            for _ in 0..2 {
+                let (mut socket, _) = listener.accept().await.expect("accept request");
+                let mut request = [0; 4096];
+                let bytes_read = socket.read(&mut request).await.expect("read request");
+                assert!(bytes_read > 0, "request must not be empty");
+                let body = r#"{"candidates":[{"content":{"parts":[{"thought":true,"text":"Summary"},{"text":"Answer"}]},"finishReason":"STOP"}]}"#;
+                let response = format!(
+                    "HTTP/1.1 200 OK\r\ncontent-type: application/json\r\ncontent-length: {}\r\nconnection: close\r\n\r\n{body}",
+                    body.len()
+                );
+                socket
+                    .write_all(response.as_bytes())
+                    .await
+                    .expect("write response");
+            }
+        });
+        let provider = GoogleGenerativeAiProvider::new(format!("http://{address}"), "fixture");
+        let request = ModelRequest {
+            model_slug: ModelProfileKey::Generic,
+            model: "gemini-2.5-flash".into(),
+            system: None,
+            messages: vec![],
+            max_tokens: 64,
+            tools: None,
+            hosted_tools: vec![],
+            sampling: SamplingControls::default(),
+            request_thinking: None,
+            reasoning_effort: None,
+            extra_body: Some(
+                json!({"generationConfig": {"thinkingConfig": {"includeThoughts": true}}}),
+            ),
+        };
+        assert_eq!(
+            build_request(&request)["generationConfig"]["thinkingConfig"]["includeThoughts"],
+            json!(true)
+        );
+        let response = provider
+            .completion(request.clone())
+            .await
+            .expect("completion");
+        assert_eq!(
+            response.content,
+            vec![ResponseContent::Text("Answer".into())]
+        );
+        assert_eq!(
+            response.metadata.extras,
+            vec![ResponseExtra::ReasoningText {
+                text: "Summary".into()
+            }]
+        );
+        let events = provider
+            .completion_stream(request)
+            .await
+            .expect("stream")
+            .collect::<Vec<_>>()
+            .await
+            .into_iter()
+            .collect::<Result<Vec<_>>>()
+            .expect("stream events");
+        assert_eq!(
+            events,
+            vec![
+                StreamEvent::TextStart { index: 0 },
+                StreamEvent::TextDelta {
+                    index: 0,
+                    text: "Answer".into()
+                },
+                StreamEvent::MessageDone { response },
+            ]
+        );
+        server.await.expect("mock server");
+    }
+
+    /// Verifies: subsequent Google requests do not relabel persisted reasoning as answer text.
+    #[test]
+    fn google_history_keeps_reasoning_out_of_answer_parts() {
+        let request = ModelRequest {
+            model_slug: ModelProfileKey::Generic,
+            model: "gemini-2.5-flash".into(),
+            system: None,
+            messages: vec![devo_protocol::RequestMessage {
+                role: "assistant".into(),
+                content: vec![
+                    RequestContent::Reasoning {
+                        text: "Summary".into(),
+                    },
+                    RequestContent::Text {
+                        text: "Answer".into(),
+                    },
+                ],
+            }],
+            max_tokens: 64,
+            tools: None,
+            hosted_tools: vec![],
+            sampling: SamplingControls::default(),
+            request_thinking: None,
+            reasoning_effort: None,
+            extra_body: None,
+        };
+        assert_eq!(
+            build_request(&request)["contents"],
+            json!([
+                {"role": "model", "parts": [{"text": "Answer"}]}
+            ])
+        );
     }
 }
