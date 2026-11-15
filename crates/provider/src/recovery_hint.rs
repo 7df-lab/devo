@@ -83,13 +83,13 @@ pub fn recovery_hint_for_message(message: &str) -> Option<String> {
         || msg.contains("re-authenticate")
         || msg.contains("oauth refresh failed")
         || msg.contains("oauth credential")
-        || (msg.contains("401") && !msg.contains("1401"))
-        || msg.contains("403")
+        || has_status_code(&msg, "401")
+        || has_status_code(&msg, "403")
     {
         return Some(AUTH_HINT.to_string());
     }
     if msg.contains("model not found")
-        || (msg.contains("404")
+        || (has_status_code(&msg, "404")
             && (msg.contains("does not exist")
                 || msg.contains("not found")
                 || msg.contains("model")))
@@ -125,11 +125,32 @@ pub fn recovery_hint_for_message(message: &str) -> Option<String> {
         || msg.contains("network unreachable")
         || msg.contains("host unreachable")
         || msg.contains("proxy")
-        || msg.contains("408")
+        || has_status_code(&msg, "408")
     {
         return Some(NETWORK_PROXY_HINT.to_string());
     }
     None
+}
+
+// Bare digits inside ports, model names, timings and request IDs are not HTTP
+// statuses. Structured errors above take precedence; flattened errors need a
+// status marker (or a leading/raw status code) before numeric classification.
+fn has_status_code(message: &str, code: &str) -> bool {
+    let mut previous = "";
+    for (index, token) in message.split_whitespace().enumerate() {
+        let token = token.trim_matches(['(', ')', '[', ']', ':', ',', ';']);
+        if token == code
+            && (index == 0
+                || matches!(
+                    previous,
+                    "http" | "http/1.0" | "http/1.1" | "http/2" | "status" | "status_code" | "code"
+                ))
+        {
+            return true;
+        }
+        previous = token;
+    }
+    false
 }
 
 #[cfg(test)]
@@ -198,5 +219,62 @@ mod tests {
             Some(AUTH_HINT)
         );
         assert_eq!(recovery_hint_for_message("quota exceeded"), None);
+    }
+    #[test]
+    fn numeric_substrings_do_not_override_network_errors() {
+        for message in [
+            "connection refused at http://127.0.0.1:4030/v1",
+            "connection refused at http://127.0.0.1:401/v1",
+            "request timed out after 401 ms",
+            "connection reset (request id 403)",
+            "connection failed for model local-4040",
+        ] {
+            assert_eq!(
+                recovery_hint_for_message(message).as_deref(),
+                Some(NETWORK_PROXY_HINT),
+                "{message}"
+            );
+        }
+        for message in [
+            "model local-4040 unavailable",
+            "request id 408",
+            "request id abc403def",
+        ] {
+            assert_eq!(recovery_hint_for_message(message), None, "{message}");
+        }
+    }
+
+    #[test]
+    fn flattened_status_codes_keep_recovery_hints() {
+        for message in [
+            "HTTP 401",
+            "HTTP/1.1 403",
+            "status: 403",
+            "status code: 401",
+            "status_code: 403",
+            "403",
+            "401 (request id 1401)",
+        ] {
+            assert_eq!(
+                recovery_hint_for_message(message).as_deref(),
+                Some(AUTH_HINT),
+                "{message}"
+            );
+        }
+        assert_eq!(
+            recovery_hint_for_message("HTTP 404: model unavailable").as_deref(),
+            Some(MODEL_NOT_FOUND_HINT)
+        );
+        assert_eq!(
+            recovery_hint_for_message("HTTP 408").as_deref(),
+            Some(NETWORK_PROXY_HINT)
+        );
+        assert_eq!(
+            recovery_hint_for_anyhow(&anyhow::anyhow!(
+                "connection refused at http://127.0.0.1:4030/v1"
+            ))
+            .as_deref(),
+            Some(NETWORK_PROXY_HINT)
+        );
     }
 }
