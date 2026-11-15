@@ -5,6 +5,7 @@
  * pre-fills fields from the automation, and shows Delete/Test/Pause actions.
  */
 
+import { desktopFolderNameFromDirectory } from "../../lib/desktop-folders"
 import { Badge } from "@devo/ui/components/badge"
 import { Button } from "@devo/ui/components/button"
 import {
@@ -77,7 +78,7 @@ function formatDate(ts: number): string {
 }
 
 function ProjectChip({ path, onRemove }: { path: string; onRemove: () => void }) {
-	const name = path.split("/").pop() ?? path
+	const name = desktopFolderNameFromDirectory(path)
 	return (
 		<span className="inline-flex items-center gap-1 rounded-md bg-accent px-2 py-0.5 text-xs">
 			{name}
@@ -250,7 +251,7 @@ export function CreateAutomationDialog({
 				.filter((p) => !workspaces.includes(p.worktree))
 				.map((p) => ({
 					value: p.worktree,
-					label: p.name ?? p.worktree.split("/").pop() ?? p.worktree,
+					label: p.name ?? desktopFolderNameFromDirectory(p.worktree),
 					path: p.worktree,
 				})),
 		[discoveredProjects, workspaces],

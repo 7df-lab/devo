@@ -1,3 +1,4 @@
+import { AutomationFixture } from "./automation-fixture"
 import { AutomationEditFixture } from "./automation-edit-fixture"
 import React, { useState } from "react"
 import { SearchFixture } from "./search-fixture"
@@ -58,4 +59,4 @@ function Fixture() {
 		</main>
 	)
 }
-createRoot(document.getElementById("root")!).render(new URLSearchParams(location.search).has("automation-edit") ? <AutomationEditFixture /> : new URLSearchParams(location.search).has("picker") ? <SearchFixture /> : <Fixture />)
+createRoot(document.getElementById("root")!).render(new URLSearchParams(location.search).has("automation-edit") ? <AutomationEditFixture /> : new URLSearchParams(location.search).has("automation") ? <AutomationFixture /> : new URLSearchParams(location.search).has("picker") ? <SearchFixture /> : <Fixture />)
