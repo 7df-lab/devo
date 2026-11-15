@@ -10,9 +10,11 @@ export default defineConfig({
       name: 'skill-fixture-data-boundary',
       enforce: 'pre',
       resolveId(source, importer) {
-        // These two production modules only use pure Native item helpers, not transport.
+        // These production modules only use pure Native item helpers, not transport.
         if (source === '@devo-ai/sdk/v2/client' &&
-            ['/components/chat/session-task-list.tsx', '/atoms/messages.ts'].some(suffix =>
+            ['/components/chat/session-task-list.tsx', '/atoms/messages.ts',
+             '/components/chat/chat-turn.tsx', '/components/chat/turn-activity.tsx',
+             '/components/chat/turn-activity-model.ts', '/atoms/derived/session-chat.ts'].some(suffix =>
               importer?.replaceAll('\\', '/').endsWith(suffix))) {
           return path('../packages/devo-ai-sdk/src/v2/native-item.ts');
         }

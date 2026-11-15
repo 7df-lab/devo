@@ -1,3 +1,4 @@
+import { AssistantCopyFixture } from "./assistant-copy-fixture"
 import { TaskListFixture } from "./task-list-fixture"
 import { SkillErrorFixture } from "./skill-error-fixture"
 import { SkillImeFixture } from "./skill-ime-fixture"
@@ -63,4 +64,4 @@ function Fixture() {
 		</main>
 	)
 }
-createRoot(document.getElementById("root")!).render(new URLSearchParams(location.search).has("task-list") ? <TaskListFixture /> : new URLSearchParams(location.search).has("skill-error") ? <SkillErrorFixture /> : new URLSearchParams(location.search).has("skill-ime") ? <SkillImeFixture /> : new URLSearchParams(location.search).has("message-edit") ? <MessageEditFixture /> : new URLSearchParams(location.search).has("message-copy") ? <MessageCopyFixture /> : new URLSearchParams(location.search).has("automation-edit") ? <AutomationEditFixture /> : new URLSearchParams(location.search).has("picker") ? <SearchFixture /> : <Fixture />)
+createRoot(document.getElementById("root")!).render(new URLSearchParams(location.search).has("assistant-copy") ? <AssistantCopyFixture /> : new URLSearchParams(location.search).has("task-list") ? <TaskListFixture /> : new URLSearchParams(location.search).has("skill-error") ? <SkillErrorFixture /> : new URLSearchParams(location.search).has("skill-ime") ? <SkillImeFixture /> : new URLSearchParams(location.search).has("message-edit") ? <MessageEditFixture /> : new URLSearchParams(location.search).has("message-copy") ? <MessageCopyFixture /> : new URLSearchParams(location.search).has("automation-edit") ? <AutomationEditFixture /> : new URLSearchParams(location.search).has("picker") ? <SearchFixture /> : <Fixture />)
