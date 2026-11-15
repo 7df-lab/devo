@@ -6,6 +6,7 @@ import {
 } from "@devo/ui/components/ai-elements/message"
 import { Button } from "@devo/ui/components/button"
 import { cn } from "@devo/ui/lib/utils"
+import { toast } from "sonner"
 import { CheckIcon, CopyIcon, PencilIcon } from "lucide-react"
 import { useCallback, useEffect, useRef, useState, type KeyboardEvent, type ReactNode } from "react"
 
@@ -53,9 +54,14 @@ export function UserMessageBlock({
 
 	const handleCopy = useCallback(async () => {
 		if (!text) return
-		await navigator.clipboard.writeText(text)
-		setCopied(true)
-		setTimeout(() => setCopied(false), 2000)
+		try {
+			await navigator.clipboard.writeText(text)
+			setCopied(true)
+			setTimeout(() => setCopied(false), 2000)
+		} catch {
+			setCopied(false)
+			toast.error("Failed to copy message")
+		}
 	}, [text])
 
 	const handleStartEdit = useCallback(() => {
