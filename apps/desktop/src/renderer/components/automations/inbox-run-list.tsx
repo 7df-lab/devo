@@ -4,6 +4,7 @@
  * Groups automation configs (Scheduled) and runs (Completed/Archived) into sections.
  */
 
+import { desktopFolderNameFromDirectory } from "../../lib/desktop-folders"
 import { useNavigate, useParams } from "@tanstack/react-router"
 import { useSetAtom } from "jotai"
 import { useCallback, useMemo } from "react"
@@ -27,7 +28,7 @@ interface InboxRunListProps {
 
 function getRunProjectLabel(run: AutomationRun): string | null {
 	if (!run.workspace) return null
-	return run.workspace.split("/").pop() ?? null
+	return desktopFolderNameFromDirectory(run.workspace)
 }
 
 // ============================================================

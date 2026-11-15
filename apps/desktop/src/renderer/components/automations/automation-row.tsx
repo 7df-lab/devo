@@ -5,6 +5,7 @@
  * Right-click context menu: Edit, Run Now, Pause/Resume, Delete.
  */
 
+import { desktopFolderNameFromDirectory } from "../../lib/desktop-folders"
 import {
 	ContextMenu,
 	ContextMenuContent,
@@ -52,7 +53,7 @@ export const AutomationRow = memo(function AutomationRow({
 
 	const projectLabel =
 		automation.workspaces.length > 0
-			? automation.workspaces.map((w) => w.split("/").pop()).join(", ")
+			? automation.workspaces.map((w) => desktopFolderNameFromDirectory(w)).join(", ")
 			: null
 
 	return (

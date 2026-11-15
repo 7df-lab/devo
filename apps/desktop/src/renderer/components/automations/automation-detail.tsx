@@ -8,6 +8,7 @@
  * Rendered at /automations/:automationId
  */
 
+import { desktopFolderNameFromDirectory } from "../../lib/desktop-folders"
 import { Badge } from "@devo/ui/components/badge"
 import { Button } from "@devo/ui/components/button"
 import { Separator } from "@devo/ui/components/separator"
@@ -178,7 +179,7 @@ export function AutomationDetail() {
 	}
 
 	const isPaused = automation.status === "paused"
-	const projectLabels = automation.workspaces.map((w) => w.split("/").pop() ?? w)
+	const projectLabels = automation.workspaces.map((w) => desktopFolderNameFromDirectory(w))
 
 	return (
 		<div className="flex h-full flex-col">
