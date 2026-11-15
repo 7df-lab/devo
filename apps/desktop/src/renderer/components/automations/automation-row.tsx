@@ -14,7 +14,7 @@ import {
 } from "@devo/ui/components/context-menu"
 import { Tooltip, TooltipContent, TooltipTrigger } from "@devo/ui/components/tooltip"
 import { CircleIcon, PauseIcon, PencilIcon } from "lucide-react"
-import { memo, useState } from "react"
+import { memo, useRef } from "react"
 import type { Automation } from "../../../preload/api"
 import { useCountdown } from "../../hooks/use-countdown"
 
@@ -37,7 +37,8 @@ export const AutomationRow = memo(function AutomationRow({
 	onTogglePause,
 	onDelete,
 }: AutomationRowProps) {
-	const [hovered, setHovered] = useState(false)
+	const rowButtonRef = useRef<HTMLButtonElement>(null)
+	const menuReturnFocus = useRef<HTMLElement | null>(null)
 
 	const StatusIcon =
 		automation.status === "paused"
@@ -55,62 +56,53 @@ export const AutomationRow = memo(function AutomationRow({
 			? automation.workspaces.map((w) => w.split("/").pop()).join(", ")
 			: null
 
-	return (
-		<ContextMenu>
-			<ContextMenuTrigger
-				render={
-					<button
-						type="button"
-						onClick={onClick}
-						onMouseEnter={() => setHovered(true)}
-						onMouseLeave={() => setHovered(false)}
-						className={`flex w-full items-center gap-2 rounded-md px-3 py-2 text-left text-sm transition-colors ${
-							isSelected ? "bg-accent text-accent-foreground" : "hover:bg-accent/50"
-						} ${isPaused ? "opacity-60" : ""}`}
-					/>
-				}
+	const row = (
+		<div
+			onContextMenuCapture={(event) => {
+				menuReturnFocus.current = (event.target as Element).closest("button") ?? rowButtonRef.current
+			}}
+			className={`group flex w-full items-center rounded-md text-sm transition-colors ${
+				isSelected ? "bg-accent text-accent-foreground" : "hover:bg-accent/50"
+			} ${isPaused ? "opacity-60" : ""}`}
+		>
+			<button
+				ref={rowButtonRef}
+				type="button"
+				onClick={onClick}
+				className="flex min-w-0 flex-1 items-center gap-2 rounded-md py-2 pl-3 pr-2 text-left focus-visible:outline-none focus-visible:ring-2 focus-visible:ring-ring"
 			>
-				<StatusIcon
-					className={`size-4 shrink-0 ${
-						automation.status === "active" ? "text-muted-foreground" : "text-muted-foreground/60"
-					}`}
-				/>
-
+				<StatusIcon aria-hidden="true" className={`size-4 shrink-0 ${automation.status === "active" ? "text-muted-foreground" : "text-muted-foreground/60"}`} />
 				<div className="min-w-0 flex-1">
 					<div className="flex items-center gap-1.5">
 						<span className="truncate font-medium text-sm">{automation.name}</span>
-						{projectLabel && (
-							<span className="truncate text-xs text-muted-foreground">{projectLabel}</span>
-						)}
+						{projectLabel && <span className="truncate text-xs text-muted-foreground">{projectLabel}</span>}
 					</div>
 				</div>
+				{countdownText && <span className="shrink-0 text-xs text-muted-foreground">{countdownText}</span>}
+			</button>
+			{/* A stable sibling slot stays reachable by keyboard without hiding the countdown. */}
+			<div className="flex shrink-0 items-center py-2 pr-3">
+				<Tooltip>
+					<TooltipTrigger render={
+						<button
+							type="button"
+							aria-label="Edit automation"
+							onClick={() => onEdit(automation)}
+							className="rounded p-0.5 text-muted-foreground opacity-0 group-hover:opacity-100 group-focus-within:opacity-100 focus-visible:opacity-100 focus-visible:outline-none focus-visible:ring-2 focus-visible:ring-ring hover:text-foreground"
+						/>
+					}>
+						<PencilIcon aria-hidden="true" className="size-3.5" />
+					</TooltipTrigger>
+					<TooltipContent>Edit automation</TooltipContent>
+				</Tooltip>
+			</div>
+		</div>
+	)
 
-				{hovered ? (
-					<Tooltip>
-						<TooltipTrigger
-							render={
-								<button
-									type="button"
-									className="shrink-0 rounded p-0.5 text-muted-foreground hover:text-foreground"
-									onClick={(e) => {
-										e.stopPropagation()
-										onEdit(automation)
-									}}
-								/>
-							}
-						>
-							<PencilIcon className="size-3.5" />
-						</TooltipTrigger>
-						<TooltipContent>Edit automation</TooltipContent>
-					</Tooltip>
-				) : (
-					countdownText && (
-						<span className="shrink-0 text-xs text-muted-foreground">{countdownText}</span>
-					)
-				)}
-			</ContextMenuTrigger>
-
-			<ContextMenuContent>
+	return (
+		<ContextMenu>
+			<ContextMenuTrigger render={row} tabIndex={-1} />
+			<ContextMenuContent finalFocus={menuReturnFocus}>
 				<ContextMenuItem onClick={() => onEdit(automation)}>Edit</ContextMenuItem>
 				<ContextMenuItem onClick={() => onRunNow(automation.id)}>Run now</ContextMenuItem>
 				<ContextMenuItem onClick={() => onTogglePause(automation)}>
