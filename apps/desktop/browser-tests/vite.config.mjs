@@ -17,8 +17,8 @@ export default defineConfig({
       },
       load(id) {
         if (id === '\0skill-fixture-connection') {
-          // Cached fixture data disables fetching. Any unexpected request must fail loudly.
-          return 'export function getProjectClient() { throw new Error("Skill fixture must use cached data"); }';
+          // The data boundary only handles the error fixture directory; other calls throw.
+          return `export { getProjectClient } from ${JSON.stringify(path("./skill-error-data.ts"))};`;
         }
       },
     },
