@@ -275,12 +275,13 @@ impl CommandExecManager {
             session_id: params.session_id,
             process_id: params.process_id.clone(),
         };
-        let store_process_id = self.store.reserve_process_id().await.ok_or_else(|| {
+        let reservation = self.store.reserve_process_id().await.ok_or_else(|| {
             (
                 ProtocolErrorCode::InternalError,
                 "unable to reserve shell process id".to_string(),
             )
         })?;
+        let store_process_id = reservation.id();
         let duplicate_process_id = {
             let mut sessions = self.sessions.lock().await;
             if sessions.contains_key(&key) {
@@ -297,7 +298,6 @@ impl CommandExecManager {
             }
         };
         if duplicate_process_id {
-            self.store.release_reserved(store_process_id).await;
             return Err((
                 ProtocolErrorCode::InvalidParams,
                 format!("duplicate command/exec process id: {}", params.process_id),
@@ -322,15 +322,12 @@ impl CommandExecManager {
             Ok(spawned) => spawned,
             Err(error) => {
                 self.sessions.lock().await.remove(&key);
-                self.store.release_reserved(store_process_id).await;
                 return Err((ProtocolErrorCode::InternalError, error));
             }
         };
 
         let process = Arc::new(process);
-        self.store
-            .insert_reserved(store_process_id, Arc::clone(&process))
-            .await;
+        reservation.insert(Arc::clone(&process));
         self.spawn_output_task(runtime, key, Arc::clone(&process), output_rx);
 
         Ok(CommandExecResult {
