@@ -135,6 +135,7 @@ export const SkillPickerDialog = memo(function SkillPickerDialog({
 
 	const handleKeyDown = useCallback(
 		(e: React.KeyboardEvent) => {
+			if (e.nativeEvent.isComposing || e.nativeEvent.keyCode === 229) return
 			if (filtered.length === 0) return
 
 			switch (e.key) {
