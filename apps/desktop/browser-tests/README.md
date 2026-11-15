@@ -16,3 +16,13 @@ Search picker scenarios mount the production shared popover/search/list componen
 and the real ModelPickerList with controlled catalog data. They cover clear via
 Enter/Space, selection, close/reopen, and 360/1000px popup geometry. The branch
 fixture uses the shared composition, not Electron Git IPC or branch mutation.
+
+Automation label scenarios mount the production InboxRunList (including
+AutomationRow), AutomationDetail and CreateAutomationDialog with real Jotai atoms
+and UI primitives at 360/1000px. Controlled Windows/trailing-slash paths cover all
+five display sites, discovered option secondary paths, add/remove and exact save
+payloads. A test-only Vite resolver replaces only automation imports of router,
+backend, provider hooks and model toolbar boundaries; no native picker, network,
+model execution or actual automation is invoked. This does not validate native
+filesystem identity or full Electron integration. Screenshots cover the rendered
+inbox/detail labels; browser assertions cover dialog labels and interactions.
