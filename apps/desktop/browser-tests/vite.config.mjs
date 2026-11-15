@@ -10,6 +10,12 @@ export default defineConfig({
       name: 'skill-fixture-data-boundary',
       enforce: 'pre',
       resolveId(source, importer) {
+        // These two production modules only use pure Native item helpers, not transport.
+        if (source === '@devo-ai/sdk/v2/client' &&
+            ['/components/chat/session-task-list.tsx', '/atoms/messages.ts'].some(suffix =>
+              importer?.replaceAll('\\', '/').endsWith(suffix))) {
+          return path('../packages/devo-ai-sdk/src/v2/native-item.ts');
+        }
         if (source === '../../services/connection-manager' &&
             importer?.replaceAll('\\', '/').endsWith('/components/chat/skill-picker-dialog.tsx')) {
           return '\0skill-fixture-connection';

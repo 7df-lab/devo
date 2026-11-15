@@ -28,6 +28,19 @@ function normalizeTodoStatus(status: string): string {
 	}
 }
 
+function todoStatusLabel(status: string): string {
+	switch (normalizeTodoStatus(status)) {
+		case "completed":
+			return "Completed"
+		case "inProgress":
+			return "In progress"
+		case "cancelled":
+			return "Cancelled"
+		default:
+			return "Pending"
+	}
+}
+
 function todosFromPlanItem(item: Record<string, unknown>): Todo[] | null {
 	const raw = item.entries
 	if (!Array.isArray(raw) || raw.length === 0) return null
@@ -152,6 +165,7 @@ export function SessionTaskList({ sessionId }: SessionTaskListProps) {
 
 			{/* Expandable task list — smooth height transition via grid trick */}
 			<div
+				aria-hidden={!isExpanded}
 				className={cn(
 					"grid transition-[grid-template-rows] duration-200 ease-out",
 					isExpanded ? "grid-rows-[1fr]" : "grid-rows-[0fr]",
@@ -171,9 +185,10 @@ export function SessionTaskList({ sessionId }: SessionTaskListProps) {
 									className="flex items-start gap-2 animate-in fade-in-0 slide-in-from-bottom-1 duration-300"
 									style={{ animationDelay: `${index * 35}ms`, animationFillMode: "backwards" }}
 								>
-									<span className="mt-0.5 shrink-0">
+									<span className="mt-0.5 shrink-0" aria-hidden="true">
 										<TodoStatusIcon status={todo.status} />
 									</span>
+									<span className="sr-only">{todoStatusLabel(todo.status)}: </span>
 									<span className="flex items-baseline gap-1.5 text-sm leading-relaxed">
 										<span className="shrink-0 tabular-nums text-muted-foreground/40">{index + 1}.</span>
 										<span
