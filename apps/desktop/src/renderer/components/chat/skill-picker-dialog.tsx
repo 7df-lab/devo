@@ -13,6 +13,7 @@ import {
 	DialogHeader,
 	DialogTitle,
 } from "@devo/ui/components/dialog"
+import { Button } from "@devo/ui/components/button"
 import { Input } from "@devo/ui/components/input"
 import { ScrollArea } from "@devo/ui/components/scroll-area"
 import { cn } from "@devo/ui/lib/utils"
@@ -46,7 +47,7 @@ interface SkillPickerDialogProps {
 // ============================================================
 
 function useSkills(directory: string | null, enabled: boolean) {
-	const { data, isLoading } = useQuery({
+	const { data, isLoading, isError, isFetching, refetch } = useQuery({
 		queryKey: ["skills", directory],
 		queryFn: async () => {
 			const client = getProjectClient(directory!)
@@ -66,7 +67,7 @@ function useSkills(directory: string | null, enabled: boolean) {
 		staleTime: 30_000,
 	})
 
-	return { skills: data ?? [], isLoading }
+	return { skills: data ?? [], isLoading, isError, isFetching, refetch }
 }
 
 // ============================================================
@@ -84,7 +85,7 @@ export const SkillPickerDialog = memo(function SkillPickerDialog({
 	const searchRef = useRef<HTMLInputElement>(null)
 	const listRef = useRef<HTMLDivElement>(null)
 
-	const { skills, isLoading } = useSkills(directory, open)
+	const { skills, isLoading, isError, isFetching, refetch } = useSkills(directory, open)
 
 	// Fuzzy filter
 	const filtered = useMemo<Skill[]>(() => {
@@ -193,7 +194,16 @@ export const SkillPickerDialog = memo(function SkillPickerDialog({
 							</div>
 						)}
 
-						{!isLoading && filtered.length === 0 && (
+						{!isLoading && isError && (
+							<div className="space-y-2 py-4 text-center text-sm text-muted-foreground">
+								<p role="alert">Failed to load skills</p>
+								<Button size="sm" variant="outline" disabled={isFetching} onClick={() => void refetch()}>
+									{isFetching ? "Retrying..." : "Retry"}
+								</Button>
+							</div>
+						)}
+
+						{!isLoading && !isError && filtered.length === 0 && (
 							<div className="py-8 text-center text-sm text-muted-foreground">
 								{search ? "No skills found" : "No skills available"}
 							</div>
