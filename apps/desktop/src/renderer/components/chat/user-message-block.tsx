@@ -82,6 +82,8 @@ export function UserMessageBlock({
 		try {
 			await onEdit(next)
 			setEditing(false)
+		} catch {
+			toast.error("Failed to edit message")
 		} finally {
 			setSaving(false)
 		}
