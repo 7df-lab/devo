@@ -12,9 +12,11 @@ use futures::Stream;
 use reqwest::Client;
 use serde_json::{Value, json};
 
+use crate::error::ProviderError;
 use crate::http::invalid_status_error;
 use crate::{
-    ModelProviderSDK, ProviderAdapter, ProviderCapabilities, ProviderHttpOptions, merge_extra_body,
+    ModelProviderSDK, ProviderAdapter, ProviderCapabilities, ProviderHttpOptions, UsageObserver,
+    merge_extra_body,
 };
 
 pub const DEFAULT_GOOGLE_GENERATIVE_AI_BASE_URL: &str =
@@ -66,14 +68,11 @@ impl GoogleGenerativeAiProvider {
             )
             .json(body)
     }
-}
 
-#[async_trait]
-impl ModelProviderSDK for GoogleGenerativeAiProvider {
-    async fn completion(&self, request: ModelRequest) -> Result<ModelResponse> {
-        let body = build_request(&request);
+    async fn fetch_response(&self, request: &ModelRequest) -> Result<Value> {
+        let body = build_request(request);
         let response = self
-            .request_builder(&request, &body)
+            .request_builder(request, &body)
             .send()
             .await
             .context("failed to send Google Generative AI request")?;
@@ -96,6 +95,29 @@ impl ModelProviderSDK for GoogleGenerativeAiProvider {
             .json()
             .await
             .context("failed to decode Google Generative AI response")?;
+        Ok(value)
+    }
+}
+
+#[async_trait]
+impl ModelProviderSDK for GoogleGenerativeAiProvider {
+    async fn completion(&self, request: ModelRequest) -> Result<ModelResponse> {
+        parse_response(self.fetch_response(&request).await?)
+    }
+
+    async fn completion_with_usage_observer(
+        &self,
+        request: ModelRequest,
+        usage_observer: UsageObserver,
+    ) -> Result<ModelResponse> {
+        let value = self.fetch_response(&request).await?;
+        let mut usage = parse_usage(&value);
+        if prompt_block_error(&value).is_some() {
+            usage.terminal_sample = true;
+        }
+        if usage.is_reported() {
+            usage_observer(&usage);
+        }
         parse_response(value)
     }
 
@@ -108,8 +130,19 @@ impl ModelProviderSDK for GoogleGenerativeAiProvider {
         // response as text/tool events followed by MessageDone. This is a
         // synthetic stream: no content or usage arrives before the full
         // generateContent response completes.
-        let response = self.completion(request).await?;
-        let stream_response = response.clone();
+        let value = self.fetch_response(&request).await?;
+        if let Some(error) = prompt_block_error(&value) {
+            let mut usage = parse_usage(&value);
+            usage.terminal_sample = true;
+            let stream = async_stream::try_stream! {
+                if usage.is_reported() {
+                    yield StreamEvent::UsageDelta(usage);
+                }
+                Err(anyhow::Error::from(error))?;
+            };
+            return Ok(Box::pin(stream));
+        }
+        let stream_response = parse_response(value)?;
         let stream = async_stream::try_stream! {
             for (index, content) in stream_response.content.iter().enumerate() {
                 match content {
@@ -262,6 +295,9 @@ fn build_request(request: &ModelRequest) -> Value {
 }
 
 fn parse_response(value: Value) -> Result<ModelResponse> {
+    if let Some(error) = prompt_block_error(&value) {
+        return Err(error.into());
+    }
     let candidate = value
         .get("candidates")
         .and_then(Value::as_array)
@@ -314,6 +350,36 @@ fn parse_response(value: Value) -> Result<ModelResponse> {
         (Some(_), false) => Some(StopReason::StopSequence),
         (None, false) => None,
     };
+    Ok(ModelResponse {
+        id: value
+            .get("responseId")
+            .and_then(Value::as_str)
+            .unwrap_or_default()
+            .to_string(),
+        content,
+        stop_reason,
+        usage: parse_usage(&value),
+        metadata,
+    })
+}
+
+fn prompt_block_error(value: &Value) -> Option<ProviderError> {
+    // Only an explicit prompt block is handled here, not candidate finish reasons.
+    let reason = value.pointer("/promptFeedback/blockReason")?.as_str()?;
+    if reason.is_empty() || reason == "BLOCK_REASON_UNSPECIFIED" {
+        return None;
+    }
+    let safe_reason = match reason {
+        "SAFETY" | "OTHER" | "BLOCKLIST" | "PROHIBITED_CONTENT" | "IMAGE_SAFETY" => reason,
+        _ => "UNRECOGNIZED_BLOCK_REASON",
+    };
+    Some(ProviderError::ContentFilteredError {
+        message: format!("Google blocked the prompt ({safe_reason})."),
+        finish_reason: Some(safe_reason.to_string()),
+    })
+}
+
+fn parse_usage(value: &Value) -> Usage {
     let usage = value.get("usageMetadata");
     let input_tokens = token_count(usage, "promptTokenCount");
     let output_tokens = token_count(usage, "candidatesTokenCount");
@@ -339,17 +405,7 @@ fn parse_response(value: Value) -> Result<ModelResponse> {
     {
         unreported.push(devo_protocol::native::usage::UsageField::TotalTokens);
     }
-    Ok(ModelResponse {
-        id: value
-            .get("responseId")
-            .and_then(Value::as_str)
-            .unwrap_or_default()
-            .to_string(),
-        content,
-        stop_reason,
-        usage: normalized_usage,
-        metadata,
-    })
+    normalized_usage
 }
 
 fn token_count(usage: Option<&Value>, field: &str) -> Option<usize> {
@@ -671,4 +727,18 @@ mod tests {
             ])
         );
     }
+    #[test]
+    fn google_prompt_block_is_not_empty_success() {
+        let response = parse_response(json!({
+            "promptFeedback": {"blockReason": "SAFETY"},
+            "usageMetadata": {"promptTokenCount": 3, "totalTokenCount": 3}
+        }));
+        assert!(
+            response.is_err(),
+            "blocked prompt must not be a successful empty completion: {response:?}"
+        );
+    }
 }
+
+#[cfg(test)]
+mod blocked_tests;
