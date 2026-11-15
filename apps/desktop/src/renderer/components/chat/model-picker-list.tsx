@@ -44,6 +44,7 @@ export function ModelPickerList({
 	return (
 		<div
 			onKeyDown={(event) => {
+				if (event.nativeEvent.isComposing || event.nativeEvent.keyCode === 229) return
 				if (event.key !== "ArrowDown" && event.key !== "ArrowUp" && event.key !== "Enter") return
 				const rows = [
 					...(listRef.current?.querySelectorAll<HTMLButtonElement>(
