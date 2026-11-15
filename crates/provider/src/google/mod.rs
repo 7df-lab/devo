@@ -206,8 +206,12 @@ fn build_request(request: &ModelRequest) -> Value {
                     content,
                     ..
                 } => {
-                    let response = serde_json::from_str(content)
-                        .unwrap_or_else(|_| json!({ "result": content }));
+                    // Gemini requires functionResponse.response to be a JSON object.
+                    let response = match serde_json::from_str::<Value>(content) {
+                        Ok(value @ Value::Object(_)) => value,
+                        Ok(value) => json!({ "result": value }),
+                        Err(_) => json!({ "result": content }),
+                    };
                     parts.push(json!({
                         "functionResponse": {
                             "id": tool_use_id,
@@ -386,5 +390,84 @@ mod tests {
             built.headers()["x-goog-api-key"].to_str().expect("header"),
             "google-secret"
         );
+    }
+    /// Verifies: serialized tool responses are objects without losing result values or names.
+    #[test]
+    fn google_tool_result_response_requires_json_object_contract() {
+        let cases = [
+            ("42", json!({ "result": 42 })),
+            ("-1.5", json!({ "result": -1.5 })),
+            ("true", json!({ "result": true })),
+            ("false", json!({ "result": false })),
+            ("null", json!({ "result": null })),
+            ("[1,2]", json!({ "result": [1, 2] })),
+            ("[]", json!({ "result": [] })),
+            (r#""hello""#, json!({ "result": "hello" })),
+            (r#""""#, json!({ "result": "" })),
+            ("plain text", json!({ "result": "plain text" })),
+            ("", json!({ "result": "" })),
+            ("{invalid", json!({ "result": "{invalid" })),
+            (r#"{"ok":true}"#, json!({ "ok": true })),
+            ("{}", json!({})),
+            (
+                r#" { "result": [1, null], "error": "failed" } "#,
+                json!({ "result": [1, null], "error": "failed" }),
+            ),
+        ];
+        for (output, expected) in cases {
+            let request = ModelRequest {
+                model_slug: ModelProfileKey::Generic,
+                model: "gemini-2.5-flash".into(),
+                system: None,
+                messages: vec![
+                    devo_protocol::RequestMessage {
+                        role: "assistant".into(),
+                        content: vec![RequestContent::ToolUse {
+                            id: "call-1".into(),
+                            name: "read_value".into(),
+                            input: json!({}),
+                        }],
+                    },
+                    devo_protocol::RequestMessage {
+                        role: "user".into(),
+                        content: vec![RequestContent::ToolResult {
+                            tool_use_id: "call-1".into(),
+                            content: output.into(),
+                            is_error: None,
+                        }],
+                    },
+                ],
+                max_tokens: 64,
+                tools: None,
+                hosted_tools: Vec::new(),
+                sampling: SamplingControls::default(),
+                request_thinking: None,
+                reasoning_effort: None,
+                extra_body: None,
+            };
+            let provider = GoogleGenerativeAiProvider::new(
+                DEFAULT_GOOGLE_GENERATIVE_AI_BASE_URL,
+                "fixture-key",
+            );
+            let built = provider
+                .request_builder(&request, &build_request(&request))
+                .build()
+                .expect("build Google request");
+            let body: Value = serde_json::from_slice(
+                built
+                    .body()
+                    .expect("request body")
+                    .as_bytes()
+                    .expect("JSON body"),
+            )
+            .expect("parse serialized request");
+            assert_eq!(
+                body["contents"][1]["parts"][0],
+                json!({ "functionResponse": {
+                    "id": "call-1", "name": "read_value", "response": expected
+                }}),
+                "tool output: {output}"
+            );
+        }
     }
 }
