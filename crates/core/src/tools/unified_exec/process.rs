@@ -626,11 +626,13 @@ pub async fn collect_output(
 ) -> ProcessOutput {
     let started = Instant::now();
     let mut collected = Vec::new();
+    let mut original_byte_count = 0usize;
     let deadline = Duration::from_millis(yield_time_ms);
 
     loop {
         {
             let mut pending = process.output_buffer.lock().await;
+            original_byte_count = original_byte_count.saturating_add(pending.total());
             collected.extend_from_slice(&pending.drain_collect_bytes());
         }
 
@@ -652,6 +654,7 @@ pub async fn collect_output(
             sleep(Duration::from_millis(50)).await;
             {
                 let mut pending = process.output_buffer.lock().await;
+                original_byte_count = original_byte_count.saturating_add(pending.total());
                 collected.extend_from_slice(&pending.drain_collect_bytes());
             }
             while let Ok(bytes) = output_rx.try_recv() {
@@ -667,7 +670,8 @@ pub async fn collect_output(
         sleep(Duration::from_millis(10)).await;
     }
 
-    let original_token_count = approximate_token_count(collected.len());
+    let original_token_count = approximate_token_count(original_byte_count);
+    let buffer_truncated = original_byte_count > collected.len();
     let raw_output = String::from_utf8_lossy(&collected).to_string();
     let (output, truncated) = formatted_truncate_tokens(&raw_output, max_output_tokens);
 
@@ -685,7 +689,7 @@ pub async fn collect_output(
         output,
         exit_code: process.exit_code(),
         wall_time_secs: started.elapsed().as_secs_f64(),
-        truncated,
+        truncated: truncated || buffer_truncated,
         original_token_count,
     }
 }
@@ -1095,3 +1099,7 @@ mod tests {
         );
     }
 }
+
+#[cfg(all(test, unix))]
+#[path = "process_output_tests.rs"]
+mod process_output_tests;
