@@ -15,6 +15,7 @@ import {
 } from "@devo-ai/sdk/v2/client"
 import { CopyIcon, SplitIcon } from "lucide-react"
 import { memo, useCallback, useMemo, useState } from "react"
+import { toast } from "sonner"
 import type { ChatMessageEntry, ChatTurn as ChatTurnType } from "../../hooks/use-session-chat"
 import type { ProviderErrorEntry, ProviderRetryStatus } from "../../atoms/sessions"
 import type { Agent } from "../../lib/types"
@@ -139,9 +140,14 @@ export const ChatTurnComponent = memo(
 
 		const onCopy = useCallback(async () => {
 			if (!responseText) return
-			await navigator.clipboard.writeText(responseText)
-			setCopied(true)
-			setTimeout(() => setCopied(false), 1200)
+			try {
+				await navigator.clipboard.writeText(responseText)
+				setCopied(true)
+				setTimeout(() => setCopied(false), 1200)
+			} catch {
+				setCopied(false)
+				toast.error("Failed to copy response")
+			}
 		}, [responseText])
 
 		return (
