@@ -674,7 +674,7 @@ pub struct CredentialListResult {
 #[serde(rename_all = "camelCase")]
 pub struct CredentialSetParams {
     pub provider: String,
-    /// Explicit OAuth connect action: initialize missing transport from its auth
+    /// Explicit login action: initialize missing transport from the catalog or auth
     /// adapter. Credential synchronization and token refresh must leave this false.
     #[serde(default, skip_serializing_if = "std::ops::Not::not")]
     pub configure_connection: bool,
