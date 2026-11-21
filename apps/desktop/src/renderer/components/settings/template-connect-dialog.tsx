@@ -145,7 +145,8 @@ export function TemplateConnectDialog({
 						</div>
 						<DialogDescription className="text-sm leading-5">
 							Creates a Connection from this template. You can override the Base URL; model settings
-							are configured under Models. Saving does not test model access.
+							are configured under Models. Devo may send small hosted web-tool checks after saving.
+							Your provider may charge for these checks.
 							{PROVIDERS_OPTIONAL_API_KEY.has(provider.id)
 								? " Local providers refresh the model list from the live directory on connect."
 								: null}

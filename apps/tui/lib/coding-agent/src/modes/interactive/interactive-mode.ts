@@ -4836,6 +4836,17 @@ export class InteractiveMode {
 					this.editor.setText("");
 					return;
 				}
+				if (commandName === "web") {
+					this.echoLocalCommand(text);
+					if (commandArgs) {
+						this.chatContainer.addChild(new Text("Usage: /web", 1, 0));
+						this.ui.requestRender();
+					} else {
+						await this.handleWebCommand();
+					}
+					this.editor.setText("");
+					return;
+				}
 				if (commandName === "traces") {
 					await this.handleTracesCommand(canonicalCommandText);
 					this.editor.setText("");
@@ -9755,6 +9766,28 @@ export class InteractiveMode {
 		const component = new SystemPromptComponent(prompt, this.toolOutputExpanded);
 		this.chatContainer.addChild(component);
 		this.ui.requestRender();
+	}
+
+	private async handleWebCommand(): Promise<void> {
+		const connection = this.agentConnection;
+		const generation = this.sessionEventGeneration;
+		const sessionId = this.connectionState?.sessionId;
+		if (!sessionId) return;
+
+		const isCurrent = () =>
+			this.isCurrentConnectionGeneration(connection, generation) && this.connectionState?.sessionId === sessionId;
+		try {
+			const status = await connection.getWebStatus();
+			if (!status || !isCurrent()) return;
+			const formatRow = (label: string, value: { backend: string; note?: string }) =>
+				`${theme.fg("dim", `${label}:`)} ${value.backend}${value.note ? ` — ${value.note}` : ""}`;
+			this.chatContainer.addChild(
+				new Text(`${formatRow("Search", status.search)}\n${formatRow("Fetch", status.fetch)}`, 1, 0),
+			);
+			this.ui.requestRender();
+		} catch {
+			if (isCurrent()) this.showError("Couldn't read web settings.");
+		}
 	}
 
 	private formatTraceUploadResult(result: AgentTraceUploadResult): string {

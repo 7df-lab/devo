@@ -32,6 +32,13 @@ test("/quit advertises the Devo product name and /exit alias", () => {
   );
 });
 
+test("/web is an advertised read-only builtin", () => {
+  assert.deepEqual(BUILTIN_SLASH_COMMANDS.find((command) => command.name === "web"), {
+    name: "web",
+    description: "Show web search and fetch availability",
+  });
+});
+
 test("typing /exit in the slash menu selects /quit", async () => {
   assert.equal(resolveBuiltinSlashCommandName("exit"), "quit");
   const autocomplete = new CombinedAutocompleteProvider([...BUILTIN_SLASH_COMMANDS], repoRoot);

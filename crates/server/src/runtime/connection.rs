@@ -299,6 +299,9 @@ impl ServerRuntime {
             "session/systemPrompt/read" => {
                 Some(Box::pin(self.handle_native_session_system_prompt_read(id?, params)).await)
             }
+            "session/web/status/read" => {
+                Some(Box::pin(self.handle_native_session_web_status_read(id?, params)).await)
+            }
             "session/schedule/list" => {
                 Some(Box::pin(self.handle_native_session_schedule_list(id?, params)).await)
             }

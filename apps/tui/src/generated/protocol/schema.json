@@ -179987,6 +179987,61 @@
         }
       }
     },
+    "SessionWebStatusReadParams": {
+      "$schema": "http://json-schema.org/draft-07/schema#",
+      "title": "SessionWebStatusReadParams",
+      "type": "object",
+      "required": [
+        "sessionId"
+      ],
+      "properties": {
+        "sessionId": {
+          "$ref": "#/definitions/SessionId"
+        }
+      },
+      "definitions": {
+        "SessionId": {
+          "type": "string"
+        }
+      }
+    },
+    "SessionWebStatusReadResult": {
+      "$schema": "http://json-schema.org/draft-07/schema#",
+      "title": "SessionWebStatusReadResult",
+      "type": "object",
+      "required": [
+        "fetch",
+        "search"
+      ],
+      "properties": {
+        "fetch": {
+          "$ref": "#/definitions/WebBackendStatus"
+        },
+        "search": {
+          "$ref": "#/definitions/WebBackendStatus"
+        }
+      },
+      "definitions": {
+        "WebBackendStatus": {
+          "description": "Safe UI projection of a selected web backend. It never contains credentials.",
+          "type": "object",
+          "required": [
+            "backend"
+          ],
+          "properties": {
+            "backend": {
+              "type": "string"
+            },
+            "note": {
+              "type": [
+                "string",
+                "null"
+              ]
+            }
+          }
+        }
+      }
+    },
     "SkillInfo": {
       "$schema": "http://json-schema.org/draft-07/schema#",
       "title": "SkillInfo",
@@ -241530,6 +241585,10 @@
     },
     "session/usage/updated": {
       "incomingNotification": "SessionUsageUpdatedNotificationParams"
+    },
+    "session/web/status/read": {
+      "outgoingRequest": "SessionWebStatusReadParams",
+      "incomingResult": "SessionWebStatusReadResult"
     },
     "skill/list": {
       "outgoingRequest": "SkillListParams",

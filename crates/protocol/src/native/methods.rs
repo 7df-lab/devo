@@ -171,6 +171,14 @@ pub static NATIVE_METHODS: &[MethodSpec] = &[
         idempotency: Idempotency::None,
     },
     MethodSpec {
+        name: "session/web/status/read",
+        params_schema: schema_of::<SessionWebStatusReadParams>,
+        result_schema: schema_of::<SessionWebStatusReadResult>,
+        error_codes: SESSION_ERRORS,
+        required_capability: None,
+        idempotency: Idempotency::None,
+    },
+    MethodSpec {
         name: "session/resume",
         params_schema: schema_of::<SessionResumeParams>,
         result_schema: schema_of::<SessionResumeResult>,

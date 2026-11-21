@@ -71,6 +71,7 @@ export type {
 	AgentConnectionSwitchSessionOptions,
 	AgentConnectionThinkingLevelChangeEntry,
 	AgentConnectionToolDefinition,
+	AgentConnectionWebStatus,
 	AgentConnectionUserMessage,
 } from "./types.js";
 export { AgentConnectionPromptAdmissionError } from "./types.js";

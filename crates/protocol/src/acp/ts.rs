@@ -253,6 +253,9 @@ pub fn generate_protocol_typescript() -> String {
     push_decl::<native::session::Session>(&cfg, &mut output);
     push_decl::<native::rpc_session::SessionForkParams>(&cfg, &mut output);
     push_decl::<native::rpc_session::SessionForkResult>(&cfg, &mut output);
+    push_decl::<native::rpc_session::SessionWebStatusReadParams>(&cfg, &mut output);
+    push_decl::<native::rpc_session::WebBackendStatus>(&cfg, &mut output);
+    push_decl::<native::rpc_session::SessionWebStatusReadResult>(&cfg, &mut output);
     push_decl::<native::event::SubscriptionReplay>(&cfg, &mut output);
     // Keep the Native subscription event graph opaque in this compatibility
     // declaration file; the generated JSON Schema bundle remains precise.
