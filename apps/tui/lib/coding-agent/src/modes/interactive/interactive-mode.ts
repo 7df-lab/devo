@@ -6323,7 +6323,7 @@ export class InteractiveMode {
 			return clearKey ? `Press ${clearKey} again to exit` : "Press again to exit";
 		}
 		const text = this.editor.getExpandedText?.() ?? this.editor.getText();
-		if (!this.isAgentStreaming() || !text.trim()) {
+		if (this.queueSelection.isBrowsing || !this.isAgentStreaming() || !text.trim()) {
 			return undefined;
 		}
 		return `${keyText("app.message.followUp")} to queue message`;
@@ -7561,13 +7561,21 @@ export class InteractiveMode {
 		const lane = selected.lane === "steering" ? "steering" : "follow-up";
 		const older = this.getAppKeyDisplay("app.message.navigateOlder");
 		const newer = this.getAppKeyDisplay("app.message.navigateNewer");
-		const earlier = this.getAppKeyDisplay("app.message.moveEarlier");
-		const later = this.getAppKeyDisplay("app.message.moveLater");
+		const entryLabel = `${lane} ${selected.index + 1}`;
+		const browse = `${older}/${newer} browse`;
+		const ordered = this.connectionState?.sessionActions.ordered;
+		if (ordered?.find((entry) => entry.id === selected.id)?.editable === false) {
+			return theme.fg("dim", `${entryLabel} · read-only · ${browse}`);
+		}
+		const hints = [entryLabel, browse];
+		if (!ordered) {
+			const earlier = this.getAppKeyDisplay("app.message.moveEarlier");
+			const later = this.getAppKeyDisplay("app.message.moveLater");
+			hints.push(`${earlier}/${later} reorder`);
+		}
 		const queue = this.getAppKeyDisplay("app.message.followUp");
-		return theme.fg(
-			"dim",
-			`${lane} ${selected.index + 1} · ${older}/${newer} browse · ${earlier}/${later} reorder · enter steers · ${queue} queues · empty deletes`,
-		);
+		hints.push("enter steers", `${queue} queues`, "empty deletes");
+		return theme.fg("dim", hints.join(" · "));
 	}
 
 	private updateEditorBorderColor(): void {

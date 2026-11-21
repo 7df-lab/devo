@@ -113,12 +113,17 @@ test("picker hides dock and blocks actions without clearing session data", () =>
 	assert.match(plain(component.render(80)), /Scheduled loading/);
 });
 
-test("override label replaces location while preserving context", () => {
+test("override label replaces location and takes priority over context in a narrow pane", () => {
 	initTheme();
-	const component = new SubagentSummaryLine(() => "project", () => "model", () => "override");
-	const output = plain(component.render(80));
-	assert.match(output, /override.*model/);
-	assert.doesNotMatch(output, /project/);
+	const action = "Option+Enter to queue message";
+	const context = "deepseek-v4-flash · 7.5k (4%)";
+	const component = new SubagentSummaryLine(() => "project", () => context, () => action);
+	assert.match(plain(component.render(80)), /Option\+Enter to queue message +deepseek-v4-flash/);
+	assert.doesNotMatch(plain(component.render(80)), /project/);
+	const narrow = component.render(52);
+	assert.ok(plain(narrow).startsWith(action));
+	assert.ok(narrow.every((line) => visibleWidth(line) <= 52));
+	assert.equal(plain(component.render(action.length)).split("\n")[0], action);
 });
 
  test("Goal is conditional and does not change activity keyboard routing", () => {

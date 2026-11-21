@@ -232,8 +232,10 @@ export class SubagentSummaryLine implements Component, Focusable {
 		const safeWidth = Math.max(1, width);
 		const right = contextLabel ?? "";
 		const gap = left && right ? 2 : 0;
-		const rightWidth = Math.min(visibleWidth(right), Math.max(0, safeWidth - gap));
-		const leftWidth = Math.max(0, safeWidth - rightWidth - gap);
+		// Keep the current keyboard action readable before spending cells on context.
+		const actionWidth = overrideLabel ? Math.min(visibleWidth(left), safeWidth) : 0;
+		const rightWidth = Math.min(visibleWidth(right), Math.max(0, safeWidth - gap - actionWidth));
+		const leftWidth = overrideLabel ? actionWidth : Math.max(0, safeWidth - rightWidth - gap);
 		const renderedLeft = truncateToWidth(left, leftWidth, "…");
 		const renderedRight = truncateToWidth(right, rightWidth, "…");
 		const padding = Math.max(0, safeWidth - visibleWidth(renderedLeft) - visibleWidth(renderedRight));

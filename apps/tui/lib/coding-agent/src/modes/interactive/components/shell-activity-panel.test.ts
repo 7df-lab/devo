@@ -77,6 +77,28 @@ test("output and list scrolling stay within terminal bounds", () => {
 	}
 });
 
+test("long output wraps and remains scrollable in a short pane", () => {
+	const { state, panel } = setup();
+	state.tasks = [{ id: "one", command: "build", state: "failed", exitCode: 7, cwd: "/project",
+		output: "one two three four five six seven eight TAIL\nlast line\n" }];
+	state.rows = 5;
+	panel.render(24);
+	panel.handleInput("\r");
+	assert.match(plain(panel.render(24)), /failed · exit 7\none two three four five/);
+	const seen = [];
+	for (let index = 0; index < 8; index++) {
+		panel.handleInput("\u001b[B");
+		seen.push(plain(panel.render(24)).split("\n")[3]);
+	}
+	assert.ok(seen.some((row) => row?.includes("TAIL")));
+	assert.equal(seen.at(-1), "last line");
+
+	state.rows = 4;
+	assert.deepEqual(plain(panel.render(100)).split("\n"), [
+		"Shells · failed · exit 7", "one two three four five six seven eight TAIL", "last line", "↑/↓ scroll · ←/esc back",
+	]);
+});
+
 test("command and output cannot inject terminal control sequences", () => {
 	const { state, panel } = setup();
 	state.tasks = [{ id: "one", command: "echo\u001b[2Jboom\nnext", state: "running", output: "safe\u001b]52;c;abc\u0007\u001b[2Jtext\u0000" }];

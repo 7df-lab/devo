@@ -423,7 +423,14 @@ pub(super) async fn completion_stream(
                         }
                         "message_stop" => {
                             if let Some(error) = invalid_tool_input {
-                                Err(error)?;
+                                Err(if stop_reason == Some(StopReason::MaxTokens) {
+                                    ProviderError::InvalidRequestError {
+                                        message: "The model reached its output limit before finishing a tool call. The incomplete call was not run.".to_string(),
+                                        details: Some(error.to_string()),
+                                    }
+                                } else {
+                                    error
+                                })?;
                             }
                             for (index, mut filter) in std::mem::take(&mut dsml_text_filters) {
                                 for text in filter.finish() {

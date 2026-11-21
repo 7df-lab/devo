@@ -11,13 +11,17 @@ export function nativeShellTasks(result: unknown, sessionId: string): AgentConne
     if (!payload || item.sessionId !== sessionId || payload.type !== "backgroundTask" || payload.taskKind !== "shell") return [];
     const state = payload.state;
     if (typeof item.id !== "string" || !["running", "completed", "failed", "cancelled", "lost"].includes(String(state))) return [];
-    return [{
+    const task: AgentConnectionShellTask = {
       id: item.id,
       command: typeof payload.command === "string" ? payload.command : "Shell",
       state: state as AgentConnectionShellTask["state"],
       ...(typeof payload.cwd === "string" ? { cwd: payload.cwd } : {}),
       ...(typeof payload.exitCode === "number" ? { exitCode: payload.exitCode } : {}),
       ...(typeof payload.output === "string" ? { output: payload.output } : {}),
-    }];
-  });
+    };
+    const createdAt = typeof item.createdAt === "string" ? Date.parse(item.createdAt) : NaN;
+    return [{ task, createdAt: Number.isFinite(createdAt) ? createdAt : Number.MIN_SAFE_INTEGER }];
+  })
+    .sort((a, b) => Number(b.task.state === "running") - Number(a.task.state === "running") || b.createdAt - a.createdAt)
+    .map(({ task }) => task);
 }

@@ -136,19 +136,28 @@ async fn anthropic_stream_error_is_terminal_and_retains_provider_classification(
 
 #[tokio::test]
 async fn anthropic_incomplete_or_non_object_tool_json_is_not_executed() {
-    for partial in ["{\"path\":", "[]"] {
+    for (partial, reason, expected_message) in [
+        (
+            "{\"path\":",
+            "max_tokens",
+            "The model reached its output limit before finishing a tool call. The incomplete call was not run.",
+        ),
+        (
+            "[]",
+            "tool_use",
+            "anthropic tool input at content block 0 must be an object",
+        ),
+    ] {
         let delta = json!({"type":"content_block_delta","index":0,"delta":{"type":"input_json_delta","partial_json":partial}});
         let received = events(format!(
-            "event: content_block_start\ndata: {{\"index\":0,\"content_block\":{{\"type\":\"tool_use\",\"id\":\"tool_1\",\"name\":\"read\",\"input\":{{}}}}}}\n\nevent: content_block_delta\ndata: {delta}\n\nevent: content_block_stop\ndata: {{\"index\":0}}\n\nevent: message_delta\ndata: {{\"delta\":{{\"stop_reason\":\"max_tokens\"}},\"usage\":{{\"output_tokens\":17}}}}\n\nevent: message_stop\ndata: {{}}\n\n"
+            "event: content_block_start\ndata: {{\"index\":0,\"content_block\":{{\"type\":\"tool_use\",\"id\":\"tool_1\",\"name\":\"read\",\"input\":{{}}}}}}\n\nevent: content_block_delta\ndata: {delta}\n\nevent: content_block_stop\ndata: {{\"index\":0}}\n\nevent: message_delta\ndata: {{\"delta\":{{\"stop_reason\":\"{reason}\"}},\"usage\":{{\"output_tokens\":17}}}}\n\nevent: message_stop\ndata: {{}}\n\n"
         )).await;
         assert!(received.iter().any(
             |event| matches!(event, Ok(StreamEvent::UsageDelta(usage)) if usage.output_tokens == 17)
         ));
-        assert_eq!(
-            received.last().unwrap().as_ref().unwrap_err()["error_kind"],
-            json!("invalid_request_error")
-        );
-        assert!(received.last().is_some_and(Result::is_err));
+        let error = received.last().unwrap().as_ref().unwrap_err();
+        assert_eq!(error["error_kind"], json!("invalid_request_error"));
+        assert_eq!(error["message"], json!(expected_message));
         assert!(
             !received
                 .iter()
