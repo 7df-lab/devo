@@ -2,7 +2,7 @@ import assert from "node:assert/strict";
 import { test } from "node:test";
 import { NativeAgentConnection } from "./native-agent-connection.js";
 import { nativeNotificationSessionId } from "./native-notification-session.js";
-import { hostMessagePrefix } from "./native-connection-ops.js";
+import { hostMessagePrefix, queuePreviewText, queueSelectionText } from "./native-connection-ops.js";
 import { nativeItemsToAgentMessages } from "./native-to-pi/messages.js";
 import { createStreamState, nativeNotificationToPiEvents } from "./native-to-pi/events.js";
 
@@ -44,15 +44,9 @@ for (const params of [
   test(`Native owner resolves ${JSON.stringify(params)}`, () => assert.equal(nativeNotificationSessionId(params), "child"));
 }
 
-test("spawn has a named outgoing row and identical live/replay semantics", () => {
-  const messages = nativeItemsToAgentMessages([spawn]);
-  assert.deepEqual(messages, [{ role: "custom", customType: "Agent spawned", display: true,
-    content: [{ type: "text", text: "Spawned reviewer" }, { type: "text", text: "Inspect the code" }],
-    details: { agentSessionId: "child" }, timestamp: Date.parse(timestamp),
-  }]);
-  assert.deepEqual(nativeNotificationToPiEvents("item/started", { item: spawn }, createStreamState()), [
-    { type: "message_start", message: messages[0] }, { type: "message_end", message: messages[0] },
-  ]);
+test("routine spawn cards are omitted from live and replay transcript projection", () => {
+  assert.deepEqual(nativeItemsToAgentMessages([spawn]), []);
+  assert.deepEqual(nativeNotificationToPiEvents("item/started", { item: spawn }, createStreamState()), []);
 });
 
 test("named incoming sender keeps stable identity in live, replay and queue labels", () => {
@@ -66,8 +60,52 @@ test("named incoming sender keeps stable identity in live, replay and queue labe
   ]);
   assert.equal(hostMessagePrefix(origin), "[Agent message · reviewer] ");
   assert.deepEqual(nativeNotificationToPiEvents("queue/updated", { queue: [{ origin, preview: "Result" }] }, createStreamState()), [
-    { type: "session_action_update", actions: { queuedCount: 1, steering: [], followUps: ["[Agent message · reviewer] Result"], ordered: [{ id: "", text: "[Agent message · reviewer] Result", delivery: "followUp", blocked: false, editable: false }] } },
+    { type: "session_action_update", actions: { queuedCount: 1, steering: [], followUps: ["reviewer: Result"], ordered: [{ id: "", text: "reviewer: Result", delivery: "followUp", blocked: false, editable: false }] } },
   ]);
+});
+
+const resultOrigin = { source: "agent", sender: "ses_child", senderName: "Reviewer", eventId: "child:ses_child:turn_1:completed", delivery: "steer" };
+const resultPrefix = "Reviewer: Useful result";
+const resultText = "[system] Child agent /root/reviewer (ses_child) completed.\nUseful result\nMore detail";
+const completion = { id: "result", sessionId: "root", turnId: "root-turn", state: "completed", item: {
+  type: "userMessage", entry: "steer", origin: resultOrigin, content: [{ type: "text", text: resultText }],
+} };
+
+test("agent queue previews use the real body and browsing keeps all user-visible text", () => {
+  const entry = { queueItemId: "opaque-queue-id", position: 0, preview: "[system] Child agent /root/revi…", origin: resultOrigin };
+  assert.equal(queuePreviewText(entry), "Reviewer");
+  assert.equal(queuePreviewText({ ...entry, origin: { ...resultOrigin, eventId: "child:ses_child:turn_1:failed" } }), "Reviewer: failed");
+  const withInput = { ...entry, input: completion.item.content };
+  assert.equal(queuePreviewText(withInput), resultPrefix);
+  assert.equal(queueSelectionText(withInput), `${resultPrefix}\nMore detail`);
+  const directed = { ...entry, origin: { ...resultOrigin, eventId: "direct-message" },
+    preview: "shortened", input: [{ type: "text", text: "\u001b[2JDirect question\nSecond line" }] };
+  assert.equal(queuePreviewText(directed), "Reviewer: Direct question");
+  assert.equal(queueSelectionText(directed), "Reviewer: Direct question\nSecond line");
+  const ordinary = { queueItemId: "ordinary", position: 0, preview: "A regular queued note" };
+  assert.equal(queuePreviewText(ordinary), "A regular queued note");
+  assert.equal(queueSelectionText(ordinary), "A regular queued note");
+});
+
+test("child results are visible only while queued, not again on delivery", async () => {
+  const conn = await connection();
+  const events: unknown[] = [];
+  conn.subscribe(event => { if (event.type === "session_event") events.push(event.event); });
+  const queue = [{ queueItemId: "result-queue", delivery: "steer", origin: resultOrigin, input: completion.item.content, preview: "[system] Child agent" }];
+  try {
+    push(conn, "queue/updated", { sessionId: "root", queue });
+    push(conn, "item/started", { item: completion });
+    push(conn, "item/completed", { item: completion });
+    push(conn, "queue/updated", { sessionId: "root", queue: [] });
+    assert.deepEqual(events, [
+      { type: "session_action_update", actions: { queuedCount: 1, steering: [`${resultPrefix}\nMore detail`], followUps: [], ordered: [
+        { id: "result-queue", text: `${resultPrefix}\nMore detail`, preview: resultPrefix, delivery: "steer", blocked: false, editable: false },
+      ] } },
+      { type: "session_action_update", actions: { queuedCount: 0, steering: [], followUps: [], ordered: [] } },
+    ]);
+  } finally {
+    await conn.dispose();
+  }
 });
 
 test("child input, kernel, lifecycle and stream events reach only its monitor", async () => {
@@ -93,7 +131,7 @@ test("child input, kernel, lifecycle and stream events reach only its monitor", 
       [{ type: "text", text: "Hello " }], [{ type: "text", text: "Hello world" }],
     ]);
     push(conn, "item/started", { item: spawn });
-    assert.equal(root.length, 2);
+    assert.equal(root.length, 0);
     assert.equal(child.filter(event => (event.message as Record<string, unknown>)?.customType === "Agent spawned").length, 0);
   } finally {
     await watcher.close();
@@ -101,10 +139,11 @@ test("child input, kernel, lifecycle and stream events reach only its monitor", 
   }
 });
 
-test("subscription replay cannot leak child envelopes into a newly selected root", async () => {
+test("subscription replay keeps child results and child-session envelopes out of the root transcript", async () => {
   const replay = [
     { notification: { method: "item/started", params: { item: childInput } } },
     { notification: { method: "item/completed", params: { item: kernel } } },
+    { notification: { method: "item/completed", params: { item: completion } } },
   ];
   const conn = await connection(replay);
   const events: unknown[] = [];

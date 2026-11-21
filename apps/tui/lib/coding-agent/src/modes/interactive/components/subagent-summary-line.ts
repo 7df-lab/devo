@@ -193,7 +193,7 @@ export class SubagentSummaryLine implements Component, Focusable {
 			nextScheduled = ` · next ${seconds}s`;
 		}
 		const details = [
-			`Subagents · ${this.counts.running} running · ${this.counts.idle} idle · ${this.counts.inactive} inactive${this.openable ? "" : " · details unavailable"}`,
+			`Subagents · ${this.counts.running} running${this.openable ? "" : " · details unavailable"}`,
 			this.scheduledState === "ready"
 				? `Scheduled · ${this.scheduledTasks.active} active · ${this.scheduledTasks.paused} paused${nextScheduled}`
 				: `Scheduled · ${this.scheduledState}`,

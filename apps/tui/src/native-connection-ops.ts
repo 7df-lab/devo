@@ -3,7 +3,9 @@
  */
 
 import { randomUUID } from "node:crypto";
+import { stripVTControlCharacters } from "node:util";
 import { nativeGoalToAgentGoal, emptyGoalState } from "./native-to-pi/messages.js";
+import { childCompletionBody, childCompletionStatus } from "./native-to-pi/agent-display.js";
 import { DEFAULT_PREVIEW_LIMIT, MAX_PREVIEW_LIMIT } from "./native-traffic-log.js";
 
 export type QueueWireEntry = {
@@ -62,13 +64,30 @@ export function hostMessagePrefix(origin: unknown): string {
   return `[${labels[String(metadata.source)] ?? "Host notification"} · ${String(metadata.senderName ?? metadata.sender_name ?? metadata.sender ?? "Host")}] `;
 }
 
+function queueInputText(parts: unknown): string {
+  if (!Array.isArray(parts)) return "";
+  return parts.flatMap((part: { type?: unknown; text?: unknown } | null) =>
+    part?.type === "text" && typeof part.text === "string" && part.text ? [part.text] : [],
+  ).join("\n");
+}
+
+function agentQueueText(origin: Record<string, unknown>, text: string): string {
+  const status = childCompletionStatus(origin);
+  const name = String(origin.senderName ?? origin.sender_name ?? (status ? undefined : origin.sender) ?? "Agent");
+  const body = status
+    ? childCompletionBody(origin, status, text) || (status === "completed" ? "" : status.replaceAll("_", " "))
+    : text.trim();
+  const message = body ? `${name}: ${body}` : name;
+  return stripVTControlCharacters(message).replace(/\r\n?/g, "\n").replace(/[\u0000-\u0008\u000b\u000c\u000e-\u001f\u007f-\u009f]/g, "");
+}
+
 export function queuePreviewText(entry: QueueWireEntry): string {
-  const label = hostMessagePrefix(entry.origin);
-  if (entry.preview) return label + entry.preview;
-  const texts = (entry.input ?? [])
-    .filter((p) => p.type === "text" && p.text)
-    .map((p) => String(p.text));
-  return label + texts.join("\n");
+  if (entry.origin?.source === "agent") {
+    // Native's short preview is the first line; for child results that line
+    // is host metadata. Format the real input before taking the visible line.
+    return agentQueueText(entry.origin, queueInputText(entry.input) || (entry.preview ?? "")).split(/\r?\n/, 1)[0]!;
+  }
+  return hostMessagePrefix(entry.origin) + (entry.preview || queueInputText(entry.input));
 }
 
 /** Full text is editable only when every payload part can be represented losslessly. */
@@ -79,7 +98,12 @@ export function queueEditableText(entry: QueueWireEntry): string | undefined {
 }
 
 export function queueSelectionText(entry: QueueWireEntry): string {
-  return queueEditableText(entry) ?? queuePreviewText(entry);
+  const editable = queueEditableText(entry);
+  if (editable !== undefined) return editable;
+  if (entry.origin?.source === "agent") {
+    return agentQueueText(entry.origin, queueInputText(entry.input) || (entry.preview ?? ""));
+  }
+  return queuePreviewText(entry);
 }
 
 export type GoalSlashAction =

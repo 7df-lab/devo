@@ -1,5 +1,5 @@
-//! Typed, host-only input ingress. Background completions and explicit self
-//! messages use safe-boundary steering; other agent messages use follow-up delivery.
+//! Typed, host-only input ingress. Background and child completions and explicit
+//! self messages use safe-boundary steering; other agent messages use follow-up delivery.
 //! All delivery preserves inbox order; idle sessions wake.
 //! This is not an RPC and no producer can choose a human or system origin.
 use super::*;
@@ -52,11 +52,19 @@ impl HostMessage {
         status: &str,
         text: String,
     ) -> Self {
-        Self::agent(
-            child_id,
-            format!("child:{child_id}:{turn_id}:{status}"),
+        // A child finishing is a result for the active parent, not an explicit
+        // message asking for a separate turn. The inbox still preserves FIFO
+        // barriers and wakes an idle parent when there is no turn to steer.
+        Self {
+            origin: HostMessageOrigin {
+                event_id: format!("child:{child_id}:{turn_id}:{status}"),
+                source: HostMessageSource::Agent,
+                sender: child_id.to_string(),
+                sender_name: None,
+                delivery: HostMessageDelivery::Steer,
+            },
             text,
-        )
+        }
     }
 
     pub(super) fn managed_completion(owner: SessionId, work_id: String, text: String) -> Self {

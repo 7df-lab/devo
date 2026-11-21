@@ -55,8 +55,11 @@ async function run() {
   let pane = "";
   let refineProvider;
   try {
-    for (const name of ["auth.json", "providers.json", "config.toml"]) {
-      if (!(["effort", "theme", "logout"].includes(scenario)) && existsSync(join(sourceHome, name))) copyFileSync(join(sourceHome, name), join(home, name));
+    const isolated = ["effort", "theme", "logout", "subagent-roster"].includes(scenario);
+    if (!isolated) {
+      for (const name of ["auth.json", "providers.json", "config.toml"]) {
+        if (existsSync(join(sourceHome, name))) copyFileSync(join(sourceHome, name), join(home, name));
+      }
     }
     if (["effort", "theme"].includes(scenario)) {
       // Self-contained metadata fixture: selectors require no model request or credentials.
@@ -135,12 +138,15 @@ async function run() {
       } }));
       writeFileSync(join(home, "auth.json"), JSON.stringify({ deepseek: { type: "api_key", key: "isolated-smoke" } }), { mode: 0o600 });
     }
-    if (scenario === "subagent-roster") subagentRosterProvider = await startSubagentRosterProvider(home);
+    if (scenario === "subagent-roster") {
+      writeFileSync(join(home, "config.toml"), "[catalog]\noffline = true\n");
+      subagentRosterProvider = await startSubagentRosterProvider(home);
+    }
     if (scenario === "resize-status") resizeProvider = await startResizeProvider(home);
     if (scenario === "queue-output") queueOutputProvider = await startQueueOutputProvider(home);
     if (scenario === "wait-timer") waitTimerProvider = await startWaitTimerProvider(home);
     const settingsPath = join(sourceHome, "settings.json");
-    const settings = !(["effort", "theme", "logout"].includes(scenario)) && existsSync(settingsPath) ? JSON.parse(readFileSync(settingsPath, "utf8")) : {};
+    const settings = !isolated && existsSync(settingsPath) ? JSON.parse(readFileSync(settingsPath, "utf8")) : {};
     writeFileSync(join(home, "settings.json"), JSON.stringify({ ...settings, ...(scenario === "theme" ? { theme: "dark" } : {}), onboardingShown: true }));
     if (preloaded) {
       if (process.platform === "win32") throw new Error("clipboard substitute smoke currently requires Unix tmux");
@@ -292,7 +298,7 @@ async function run() {
       }
 
       case "subagent-roster":
-        await checkSubagentRoster({ provider: subagentRosterProvider, mux, session, send, waitFor });
+        await checkSubagentRoster({ provider: subagentRosterProvider, mux, session, send, waitFor, records });
         break;
       case "wait-timer":
         await checkWaitTimer({ provider: waitTimerProvider, mux, session, send, waitFor, records, turnOutcome });

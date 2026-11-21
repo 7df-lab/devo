@@ -1336,10 +1336,9 @@ export class InteractiveMode {
 		this.renderWidgets();
 		this.mainContainer.addChild(this.widgetContainerAbove);
 		this.renderRecap();
-		for (const container of this.getPromptContextContainers()) {
-			this.mainContainer.addChild(container);
-		}
+		this.mainContainer.addChild(this.sideQuestionContainer);
 		this.mainContainer.addChild(this.recapContainer);
+		this.mainContainer.addChild(this.queuedMessagesContainer);
 		this.mainContainer.addChild(this.editorContainer);
 		this.mainContainer.addChild(this.subagentSummaryLine);
 		this.mainContainer.addChild(this.widgetContainerBelow);
@@ -7572,12 +7571,8 @@ export class InteractiveMode {
 		this.ui.requestRender();
 	}
 
-	private getPromptContextContainers(): Container[] {
-		return [this.queuedMessagesContainer, this.sideQuestionContainer];
-	}
-
 	private getPromptDockComponents(): Component[] {
-		return [this.recapContainer, this.editorContainer, this.subagentSummaryLine, this.footerSlot];
+		return [this.recapContainer, this.queuedMessagesContainer, this.editorContainer, this.subagentSummaryLine, this.footerSlot];
 	}
 
 	/** Enter or leave fullscreen rendering without touching the persisted setting. */
@@ -7589,7 +7584,7 @@ export class InteractiveMode {
 					this.headerContainer,
 					this.mainViewContainer,
 					this.widgetContainerAbove,
-					...this.getPromptContextContainers(),
+					this.sideQuestionContainer,
 					this.widgetContainerBelow,
 				],
 				dock: this.promptDock,
@@ -7775,17 +7770,15 @@ export class InteractiveMode {
 		for (const component of this.pendingBashComponents) {
 			this.pendingMessagesContainer.addChild(component);
 		}
-		// Queued steering/follow-up previews are future turns, so they render in
-		// their own container below the execution indicator and recap.
+		// Pending inputs stay with the composer, not the scrollable transcript.
 		this.queuedMessagesContainer.clear();
 		const { steering: steeringMessages, followUp: followUpMessages, ordered } = this.getAllQueuedMessages();
-		const hasQueuedMessages = steeringMessages.length > 0 || followUpMessages.length > 0;
-		if (hasQueuedMessages) {
+		const entries: NonNullable<AgentConnectionQueueState["ordered"]> = ordered ?? [
+			...steeringMessages.map((text) => ({ id: "", text, delivery: "steer" as const, blocked: false })),
+			...followUpMessages.map((text) => ({ id: "", text, delivery: "followUp" as const, blocked: false })),
+		];
+		if (entries.length) {
 			this.queuedMessagesContainer.addChild(new Spacer(1));
-			const entries: NonNullable<AgentConnectionQueueState["ordered"]> = ordered ?? [
-				...steeringMessages.map((text) => ({ id: "", text, delivery: "steer" as const, blocked: false })),
-				...followUpMessages.map((text) => ({ id: "", text, delivery: "followUp" as const, blocked: false })),
-			];
 			for (const [index, entry] of entries.entries()) {
 				const mode = entry.recoveryRequired ? "Held · review required" : entry.delivery === "steer" ? "Steering" : "Follow-up";
 				const label = ordered ? `${index + 1}. ${mode}${entry.blocked ? " · waiting behind earlier input" : ""}` : mode;
@@ -7796,7 +7789,8 @@ export class InteractiveMode {
 				this.queuedMessagesContainer.addChild(new Text(theme.fg("warning", `Held input ${entry.id} is held after interruption, recovery, or a turn limit and may already have partially executed. Browse and remove it to discard. Explicit retry through Native session/queue/retry requires reviewing the prior turn and may be rejected while the turn limit applies; there is no automatic retry.`), 1, 0));
 			}
 			const dequeueHint = this.getAppKeyDisplay("app.message.navigateOlder");
-			const hintText = theme.fg("dim", `╰─ ${dequeueHint} to browse and edit queued messages`);
+			const editHint = entries.some((entry) => entry.editable !== false) ? " and edit" : "";
+			const hintText = theme.fg("dim", `╰─ ${dequeueHint} to browse${editHint} queued messages`);
 			this.queuedMessagesContainer.addChild(new TruncatedText(hintText, 1, 0));
 		}
 	}

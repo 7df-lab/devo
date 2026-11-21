@@ -6,7 +6,7 @@
  */
 
 import { IPYTHON_STATE_RESTORED_CUSTOM_TYPE } from "@earendil-works/pi-coding-agent/messages";
-import { agentCompletionDisplay } from "./agent-display.js";
+import { childCompletionStatus } from "./agent-display.js";
 import { shapeHostedToolResult } from "./tool-results.js";
 import {
   bashResultFromCommandExecution,
@@ -182,17 +182,16 @@ export function nativeItemToAgentMessages(envelope: unknown): AgentMessageLike[]
     // Host content is a custom notification, never a user-editable prompt.
     if (item.origin != null && typeof item.origin === "object") {
       const origin = item.origin as Record<string, unknown>;
+      if (childCompletionStatus(origin)) return [];
       const labels: Record<string, string> = {
         agent: "Agent message",
         backgroundTask: "Background notification",
         schedule: "Scheduled notification",
       };
-      const display = agentCompletionDisplay(origin, String(content[0]?.text ?? ""));
-      const visibleContent = [{ ...content[0], text: display.text }, ...content.slice(1)];
       return [{
         role: "custom",
         customType: labels[String(origin.source)] ?? "Host notification",
-        content: [{ type: "text", text: `From: ${String(origin.senderName ?? origin.sender_name ?? origin.sender ?? "Host")}${display.status ? ` · ${display.status}` : ""}` }, ...visibleContent],
+        content: [{ type: "text", text: `From: ${String(origin.senderName ?? origin.sender_name ?? origin.sender ?? "Host")}` }, ...content],
         display: true,
         details: { origin: item.origin },
         timestamp: ts,
@@ -201,17 +200,9 @@ export function nativeItemToAgentMessages(envelope: unknown): AgentMessageLike[]
     return [{ role: "user", content, timestamp: ts }];
   }
 
-  if (type === "subAgent" || type === "subagent" || type === "sub_agent") {
-    const name = String(item.agentNickname ?? item.agent_nickname ?? item.role ?? "agent");
-    return [{
-      role: "custom",
-      customType: "Agent spawned",
-      content: [{ type: "text", text: `Spawned ${name}` }, { type: "text", text: String(item.task ?? "") }],
-      display: true,
-      details: { agentSessionId: item.agentSessionId ?? item.agent_session_id },
-      timestamp: ts,
-    }];
-  }
+  // Spawned child work is represented by the Subagents monitor, not a routine
+  // transcript card. The Native event still drives the monitor projection.
+  if (type === "subAgent" || type === "subagent" || type === "sub_agent") return [];
 
   if (type === "assistantMessage") {
     return [
