@@ -7,7 +7,7 @@
 
 import { IPYTHON_STATE_RESTORED_CUSTOM_TYPE } from "@earendil-works/pi-coding-agent/messages";
 import { agentCompletionDisplay } from "./agent-display.js";
-import { shapeHostedToolResult } from "./tool-results.js";
+import { shapeHostedToolResult, toolResultName } from "./tool-results.js";
 import {
   bashResultFromCommandExecution,
   displayToolName,
@@ -271,7 +271,7 @@ export function nativeItemToAgentMessages(envelope: unknown): AgentMessageLike[]
   if (type === "toolResult" || type === "tool_result") {
     const callId = String(item.callId ?? item.call_id ?? "");
     if (!callId) return [];
-    const toolName = displayToolName(String(item.toolName ?? item.tool_name ?? item.name ?? "tool"));
+    const toolName = displayToolName(toolResultName(item) ?? "tool");
     const shaped = shapeToolResultOutput(item.output, item.displayContent ?? item.display_content);
     return [
       toolResultMessage(callId, toolName, shaped, Boolean(item.isError ?? item.is_error), ts),
@@ -455,6 +455,8 @@ export function nativeItemsToAgentMessages(items: unknown): AgentMessageLike[] {
       }
       if (msg.role === "toolResult") {
         const callId = String(msg.toolCallId ?? "");
+        const meta = callMeta.get(callId);
+        if (meta) msg.toolName = meta.toolName;
         if (callId) callsWithResults.add(callId);
         if (callId && !seenCalls.has(callId)) {
           // Orphan result (e.g. toolCall pruned) — synthesize the call so IM keeps the row.
