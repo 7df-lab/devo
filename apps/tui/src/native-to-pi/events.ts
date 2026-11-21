@@ -5,7 +5,7 @@ import { textHydrationState } from "./stream-hydration-state.js";
  */
 
 import { queueEditableText, queueSelectionText, queuePreviewText as queueEntryPreview, type QueueWireEntry } from "../native-connection-ops.js";
-import { shapeHostedToolResult } from "./tool-results.js";
+import { shapeHostedToolResult, toolResultName } from "./tool-results.js";
 import { nativeCumulativeUsage } from "./usage.js";
 import {
   nativeGoalToAgentGoal,
@@ -419,8 +419,15 @@ function projectItemCompleted(
   } else if (type === "toolResult" || type === "tool_result") {
     const callId = String(item.callId ?? item.call_id ?? "");
     const resultValue = shapeToolResultOutput(item.output, item.displayContent ?? item.display_content);
+    const resultName = toolResultName(item);
     events.push(
-      ...projectToolExecutionEnd(callId, resultValue, Boolean(item.isError ?? item.is_error), state.tools),
+      ...projectToolExecutionEnd(
+        callId,
+        resultValue,
+        Boolean(item.isError ?? item.is_error),
+        state.tools,
+        resultName ? displayToolName(resultName) : undefined,
+      ),
     );
     const details = (resultValue as { details?: { sentAgentMessages?: unknown[] } })?.details;
     const messages = details?.sentAgentMessages;
