@@ -210,10 +210,9 @@ test("legacy plan item start falls back to itemId; inputDelta remaps to tool_use
     },
     state,
   );
-  assert.ok(
-    events.every((e) => e.toolCallId === "call-plan-2"),
-    "deltas after the remap must key the real tool call id",
-  );
+  assert.deepEqual(events, [], "a remapped delta must not create a second, anonymous row");
+  assert.equal(state.callIdByItemId.get("item_plan_2"), "call-plan-2");
+  assert.equal(state.partialJsonByCall.get("call-plan-2"), '{"plan": [{');
 });
 
 test("planResultFromItem renders checklist and preserves entries", () => {

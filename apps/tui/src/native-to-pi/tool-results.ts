@@ -11,6 +11,23 @@ export function shapeHostedToolResult(item: Record<string, unknown>, state: unkn
   return { ...shapeToolResultOutput(item.output, display), isError };
 }
 
+/** Recover identity when the call item is missing (e.g. attaching mid-turn). */
+export function toolResultName(item: Record<string, unknown>): string | undefined {
+  const name = item.toolName ?? item.tool_name ?? item.name;
+  if (typeof name === "string" && name.trim()) return name;
+
+  const output = item.output;
+  if (output == null || typeof output !== "object") return undefined;
+  const record = output as Record<string, unknown>;
+  const details = record.details != null && typeof record.details === "object"
+    ? record.details as Record<string, unknown>
+    : record;
+  // Match the kernel result envelope, not arbitrary output with a status field.
+  if (typeof details.stdout === "string" && typeof details.stderr === "string" &&
+      typeof details.status === "string" && typeof details.durationMs === "number") return "ipython";
+  return undefined;
+}
+
 function isIpythonDetailsShape(value: Record<string, unknown>): boolean {
   return (
     typeof value.status === "string" ||

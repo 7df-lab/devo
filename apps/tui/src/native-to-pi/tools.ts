@@ -21,6 +21,8 @@ export type NativeToPiToolState = {
   pendingCalls: Set<string>;
   /** Calls that already received tool_execution_start. */
   startedCalls: Set<string>;
+  /** Running notifications received before the tool's identity. */
+  runningBeforeCall: Set<string>;
   /** Calls whose args were marked complete. */
   argsCompleteCalls: Set<string>;
   /** Calls that already emitted tool_execution_end (ignore late duplicates). */
@@ -34,6 +36,7 @@ export function createNativeToPiToolState(): NativeToPiToolState {
     partialJsonByCall: new Map(),
     pendingCalls: new Set(),
     startedCalls: new Set(),
+    runningBeforeCall: new Set(),
     argsCompleteCalls: new Set(),
     finishedCalls: new Set(),
   };
@@ -187,6 +190,7 @@ function clearCall(state: NativeToPiToolState, callId: string): void {
   state.partialJsonByCall.delete(callId);
   state.pendingCalls.delete(callId);
   state.startedCalls.delete(callId);
+  state.runningBeforeCall.delete(callId);
   state.argsCompleteCalls.delete(callId);
   for (const [itemId, mapped] of state.callIdByItemId) {
     if (mapped === callId) state.callIdByItemId.delete(itemId);
@@ -224,13 +228,21 @@ export function projectToolItemStarted(
   const itemId = String(envelope.id ?? item.id ?? "");
   const type = item.type;
   const events: Array<Record<string, unknown>> = [];
+  const replayEarlyStatus = (callId: string) => {
+    if (state.runningBeforeCall.delete(callId)) {
+      events.push(...projectToolStatusUpdated({ callId, status: "in_progress" }, state));
+    }
+    return events;
+  };
 
   if (type === "toolCall" || type === "tool_call") {
     const callId = String(item.callId ?? item.call_id ?? item.id ?? itemId);
-    if (state.finishedCalls.has(callId)) return [];
+    if (!callId || state.finishedCalls.has(callId)) return [];
     const rawName = String(item.toolName ?? item.tool_name ?? item.name ?? "tool");
     const toolName = displayToolName(rawName);
-    const args = normalizeToolArgs(rawName, item.arguments ?? item.input ?? {});
+    const input = item.arguments ?? item.input;
+    const partial = state.partialJsonByCall.get(callId);
+    const args = normalizeToolArgs(rawName, isEmptyArgs(input) && partial ? parseStreamingJson(partial) : input);
     rememberCall(state, callId, itemId || undefined, toolName);
 
     if (!state.pendingCalls.has(callId)) {
@@ -254,7 +266,7 @@ export function projectToolItemStarted(
         events.push({ type: "tool_args_complete", toolCallId: callId });
       }
     }
-    return events;
+    return replayEarlyStatus(callId);
   }
 
   if (type === "hostedToolCall" || type === "hosted_tool_call") {
@@ -284,7 +296,7 @@ export function projectToolItemStarted(
       state.argsCompleteCalls.add(callId);
       events.push({ type: "tool_args_complete", toolCallId: callId });
     }
-    return events;
+    return replayEarlyStatus(callId);
   }
 
   if (type === "commandExecution") {
@@ -318,7 +330,7 @@ export function projectToolItemStarted(
         events.push({ type: "tool_args_complete", toolCallId: callId });
       }
     }
-    return events;
+    return replayEarlyStatus(callId);
   }
 
   if (type === "fileChange") {
@@ -346,7 +358,7 @@ export function projectToolItemStarted(
         args,
       });
     }
-    return events;
+    return replayEarlyStatus(callId);
   }
 
   if (type === "plan") {
@@ -366,7 +378,7 @@ export function projectToolItemStarted(
         args: {},
       });
     }
-    return events;
+    return replayEarlyStatus(callId);
   }
 
   return events;
@@ -386,22 +398,21 @@ export function projectToolCallInputDelta(
   // (including over a plan start's itemId self-mapping).
   if (callId === itemId && itemId) {
     const named = extractPartialJsonCallId(String(params.delta ?? params.text ?? ""));
-    if (named && named !== itemId) {
-      callId = named;
-      state.callIdByItemId.set(itemId, named);
-    }
+    if (named && named !== itemId) callId = named;
   }
 
+  if (state.finishedCalls.has(callId)) return [];
+  if (itemId && callId !== itemId) state.callIdByItemId.set(itemId, callId);
   const chunk = extractPartialJsonChunk(String(params.delta ?? params.text ?? ""));
   const prev = state.partialJsonByCall.get(callId) ?? "";
   const accumulated = prev + chunk;
   state.partialJsonByCall.set(callId, accumulated);
 
-  const args = normalizeToolArgs(
-    state.toolNameByCall.get(callId) ?? "tool",
-    parseStreamingJson(accumulated),
-  );
-  const toolName = state.toolNameByCall.get(callId) ?? "tool";
+  // An anonymous pending row cannot switch to the right renderer when the
+  // named item arrives. Buffer the arguments without publishing a row yet.
+  const toolName = state.toolNameByCall.get(callId);
+  if (!toolName) return [];
+  const args = normalizeToolArgs(toolName, parseStreamingJson(accumulated));
 
   const events: Array<Record<string, unknown>> = [];
   if (!state.pendingCalls.has(callId)) {
@@ -452,9 +463,13 @@ export function projectToolStatusUpdated(
   if (status !== "in_progress" && status !== "inprogress" && status !== "running") {
     return [];
   }
-  if (state.startedCalls.has(callId)) return [];
+  if (state.startedCalls.has(callId) || state.finishedCalls.has(callId)) return [];
 
-  const toolName = state.toolNameByCall.get(callId) ?? "tool";
+  const toolName = state.toolNameByCall.get(callId);
+  if (!toolName) {
+    state.runningBeforeCall.add(callId);
+    return [];
+  }
   const events: Array<Record<string, unknown>> = [];
   if (!state.argsCompleteCalls.has(callId)) {
     state.argsCompleteCalls.add(callId);
@@ -475,10 +490,11 @@ export function projectToolExecutionEnd(
   result: unknown,
   isError: boolean,
   state: NativeToPiToolState,
+  fallbackToolName?: string,
 ): Array<Record<string, unknown>> {
   if (!callId) return [];
   if (state.finishedCalls.has(callId)) return [];
-  const toolName = state.toolNameByCall.get(callId) ?? "tool";
+  const toolName = state.toolNameByCall.get(callId) ?? fallbackToolName ?? "tool";
   const events: Array<Record<string, unknown>> = [];
 
   // Ensure running→done transition even if status_updated was missed.
