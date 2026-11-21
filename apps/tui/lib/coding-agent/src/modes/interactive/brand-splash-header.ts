@@ -79,6 +79,7 @@ export interface BrandSplashHeaderOptions {
 	topPadding?: boolean;
 	getModelId?: () => string | undefined;
 	getExtraMetadata?: () => readonly BrandSplashMetadataLine[];
+	getProxy?: () => readonly string[];
 }
 
 export class BrandSplashHeader implements Component {
@@ -133,6 +134,11 @@ export class BrandSplashHeader implements Component {
 						`${theme.fg("dim", cwdLabel)}${theme.fg("muted", truncatePathMiddle(formatSplashCwd(cwd), Math.max(1, metaWidth - visibleWidth(cwdLabel))))}`,
 					]),
 		];
+		metaLines.push(
+			...(this.options.getProxy?.() ?? []).map((proxy) =>
+				`${theme.fg("dim", "proxy ")}${theme.fg("muted", truncateToWidth(proxy, Math.max(1, metaWidth - visibleWidth("proxy "))))}`,
+			),
+		);
 		const lines = this.options.topPadding ? [""] : [];
 		const rowCount = Math.max(showLogo ? this.logoRaw.length : 0, metaLines.length);
 		const metaStartIndex = showLogo ? Math.floor((rowCount - metaLines.length) / 2) : 0;

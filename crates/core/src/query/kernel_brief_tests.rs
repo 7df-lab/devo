@@ -9,9 +9,8 @@ async fn kernel_brief_is_fresh_for_primary_requests_but_absent_from_reusable_pre
         devo_kernel::default_runtime_pythonpath(std::path::Path::new(env!("CARGO_MANIFEST_DIR")))
             .expect("runtime source");
     let kernel = devo_kernel::KernelSession::spawn(devo_kernel::KernelSessionConfig {
-        python: std::path::PathBuf::from("python"),
         python_path_entries: vec![source],
-        ..devo_kernel::KernelSessionConfig::default()
+        ..devo_kernel::KernelSessionConfig::for_runtime().expect("compatible Python runtime")
     })
     .await
     .expect("real runtime");

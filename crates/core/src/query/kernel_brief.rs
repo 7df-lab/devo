@@ -59,16 +59,15 @@ mod tests {
     use super::*;
     use crate::history::ContextView;
     use pretty_assertions::assert_eq;
-    use std::path::{Path, PathBuf};
+    use std::path::Path;
 
     #[tokio::test]
     async fn brief_is_live_ephemeral_and_only_added_to_compacted_requests() {
         let source = devo_kernel::default_runtime_pythonpath(Path::new(env!("CARGO_MANIFEST_DIR")))
             .expect("runtime source");
         let kernel = devo_kernel::KernelSession::spawn(devo_kernel::KernelSessionConfig {
-            python: PathBuf::from("python"),
             python_path_entries: vec![source],
-            ..devo_kernel::KernelSessionConfig::default()
+            ..devo_kernel::KernelSessionConfig::for_runtime().expect("compatible Python runtime")
         })
         .await
         .expect("real runtime");

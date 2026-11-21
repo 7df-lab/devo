@@ -21,6 +21,7 @@ import {
   DEVO_SPLASH_TITLE,
   DEVO_TUI_VERSION,
 } from "./devo-brand.js";
+import { getProxySplashValues } from "./fetch-proxy.js";
 import { createNativeAgentsViewBackend } from "./native-agents-view-backend.js";
 
 /**
@@ -160,6 +161,7 @@ function createInteractiveMode(
     brandSplash: {
       logo: DEVO_COMPACT_ORBIT_LOGO,
       title: DEVO_SPLASH_TITLE,
+      getProxy: () => getProxySplashValues(process.env),
     },
     getStoredProviderCredentials: async () => {
       const result = await connection.listCredentials();
@@ -260,6 +262,7 @@ export async function runInteractiveHost(options: {
     brandSplash: {
       logo: DEVO_COMPACT_ORBIT_LOGO,
       title: DEVO_SPLASH_TITLE,
+      getProxy: () => getProxySplashValues(process.env),
     },
     appTitle: DEVO_APP_TITLE,
     excludedLoginProviderIds: ["prime-inference"],

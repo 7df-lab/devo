@@ -7,7 +7,8 @@ import { readFileSync } from "node:fs";
 import { dirname, join } from "node:path";
 import { fileURLToPath } from "node:url";
 import { APP_NAME, APP_TITLE } from "../lib/coding-agent/src/config.js";
-import { BUILTIN_SLASH_COMMANDS } from "../lib/coding-agent/src/core/slash-commands.js";
+import { BUILTIN_SLASH_COMMANDS, resolveBuiltinSlashCommandName } from "../lib/coding-agent/src/core/slash-commands.js";
+import { CombinedAutocompleteProvider } from "@earendil-works/pi-tui";
 import {
   checkForNewPiVersion,
   getLatestPiRelease,
@@ -22,13 +23,27 @@ import { getAvailableThemes } from "../lib/coding-agent/src/modes/interactive/th
 
 const repoRoot = join(dirname(fileURLToPath(import.meta.url)), "../../..");
 
-test("product name is devo so /quit is Quit devo", () => {
+test("/quit advertises the Devo product name and /exit alias", () => {
   assert.equal(APP_NAME, "devo");
   assert.equal(APP_TITLE, "devo");
   assert.deepEqual(
     BUILTIN_SLASH_COMMANDS.find((command) => command.name === "quit"),
-    { name: "quit", description: "Quit devo" },
+    { name: "quit", description: "Quit devo (alias: /exit)", aliases: ["exit"] },
   );
+});
+
+test("typing /exit in the slash menu selects /quit", async () => {
+  assert.equal(resolveBuiltinSlashCommandName("exit"), "quit");
+  const autocomplete = new CombinedAutocompleteProvider([...BUILTIN_SLASH_COMMANDS], repoRoot);
+  const lines = ["/exit"];
+  const suggestions = await autocomplete.getSuggestions(lines, 0, 5, { signal: new AbortController().signal });
+  assert.ok(suggestions);
+  assert.deepEqual(suggestions.items[0], {
+    value: "quit", label: "quit", description: "Quit devo (alias: /exit)",
+  });
+  assert.deepEqual(autocomplete.applyCompletion(lines, 0, 5, suggestions.items[0], suggestions.prefix), {
+    lines: ["/quit"], cursorLine: 0, cursorCol: 5,
+  });
 });
 
 test("slash command descriptions do not mention prime", () => {

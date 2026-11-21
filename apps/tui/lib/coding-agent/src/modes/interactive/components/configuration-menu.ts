@@ -1,5 +1,5 @@
 import type { Api, Model, ModelThinkingLevel } from "@earendil-works/pi-ai";
-import { Container, type Focusable, type TUI, TruncatedText, truncateToWidth } from "@earendil-works/pi-tui";
+import { Container, type Focusable, getKeybindings, type TUI, TruncatedText, truncateToWidth } from "@earendil-works/pi-tui";
 import type { AuthStorage } from "../../../core/auth-storage.js";
 import type { ModelRegistry } from "../../../core/model-registry.js";
 import { theme } from "../theme/theme.js";
@@ -161,7 +161,9 @@ export class ConfigurationMenuComponent extends Container implements Focusable {
 					? `${navigate} model · ${effort} effort · ${selectKey} select · ${closeKey} close`
 					: `${navigate} navigate · ${selectKey} select · ${closeKey} close`
 				: `${selectKey} select · ${closeKey} close`;
-		return [...super.render(width), truncateToWidth(theme.fg("dim", ` ${hint}`), width, "", true)];
+		const switchHint = this.activeTab === "mcp-connections" ? "" :
+			`${keyText("app.model.select", { primaryOnly: true })} ${this.activeTab === "models" ? "providers" : "models"} · `;
+		return [...super.render(width), truncateToWidth(theme.fg("dim", ` ${switchHint}${hint}`), width, "", true)];
 	}
 
 	getActiveTab(): ConfigurationMenuTab {
@@ -182,8 +184,8 @@ export class ConfigurationMenuComponent extends Container implements Focusable {
 		this.options.requestRender();
 	}
 
-	refreshAuthentication(): void {
-		this.bodies.providers.refresh();
+	refreshAuthentication(providers?: ReadonlyArray<AuthSelectorProvider>): void {
+		this.bodies.providers.refresh(providers?.filter((provider) => (provider.category ?? "provider") === "provider"));
 		this.bodies["mcp-connections"].refresh();
 		this.options.requestRender();
 	}
@@ -202,6 +204,10 @@ export class ConfigurationMenuComponent extends Container implements Focusable {
 
 	handleInput(keyData: string): void {
 		if (this.busy) return;
+		if (this.activeTab !== "mcp-connections" && getKeybindings().matches(keyData, "app.model.select")) {
+			this.setActiveTab(this.activeTab === "models" ? "providers" : "models");
+			return;
+		}
 		this.activeBody.handleInput(keyData);
 	}
 

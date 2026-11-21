@@ -2148,13 +2148,13 @@ test("token-only usage events retain the known server window", async () => {
   await conn.dispose();
 });
 
-test("OAuth startup and refresh sync never configure connections or discover models", async () => {
+test("OAuth startup and token sync never configure connections or discover models", async () => {
   const { conn, fake } = await bootConnection();
   const credential = { type: "oauth" as const, access: "test-access", refresh: "test-refresh", expires: 123 };
   fake.requests.length = 0;
   await conn.syncAuthStorage({ list: () => ["openai-codex"], get: () => credential });
   await conn.setCredentialFromAuth("openai-codex", credential);
-  await conn.refreshModelCatalog();
+  await conn.getModelCatalog();
   assert.deepEqual(fake.requests.filter(({ method }) => method === "credential/set"), [
     { method: "credential/set", params: { provider: "openai-codex", kind: "oauth", access: "test-access", refresh: "test-refresh", expiresAt: 123 } },
     { method: "credential/set", params: { provider: "openai-codex", kind: "oauth", access: "test-access", refresh: "test-refresh", expiresAt: 123 } },
@@ -2163,17 +2163,91 @@ test("OAuth startup and refresh sync never configure connections or discover mod
   await conn.dispose();
 });
 
-test("explicit OAuth discovers transient models and pins only the selected transport before session change", async () => {
+test("picker rediscovers saved OAuth models on a fresh connection without another login", async () => {
+  let finishDiscovery!: () => void;
+  let discoveryStarted!: () => void;
+  const started = new Promise<void>((resolve) => { discoveryStarted = resolve; });
+  const { conn, fake } = await bootConnection([(method, _params, respond) => {
+    if (method === "credential/list") {
+      respond({ credentials: [
+        { id: "subscription", provider: "subscription", kind: "oauth" },
+        { id: "openai", provider: "openai", kind: "api_key" },
+        { id: "unconnected", provider: "unconnected", kind: "oauth" },
+      ] });
+    } else if (method === "provider/list") {
+      respond({ providers: [
+        { id: "openai-codex", credential: "subscription", baseUrl: "https://codex.example" },
+        { id: "openai", baseUrl: "https://api.example", models: { "api-model": {} } },
+        { id: "unconnected", baseUrl: "https://unconnected.example" },
+      ], connectedProviderIds: ["openai-codex", "openai"] });
+    } else if (method === "provider/discover") {
+      finishDiscovery = () => respond({ models: { "account-only": {}, hidden: { enabled: false } } });
+      discoveryStarted();
+    } else return false;
+    return true;
+  }]);
+  fake.requests.length = 0;
+  assert.deepEqual((await conn.getModelCatalog()).models.filter(m => m.provider === "openai-codex"), []);
+
+  const first = conn.refreshModelCatalog();
+  const second = conn.refreshModelCatalog();
+  await started;
+  finishDiscovery();
+  for (const { models, configuredProviders } of await Promise.all([first, second])) {
+    assert.deepEqual(models.filter(m => m.provider === "openai-codex").map(m => m.id), ["account-only"]);
+    assert.ok(models.some(m => m.provider === "openai" && m.id === "api-model"));
+    assert.ok(configuredProviders.includes("openai-codex"));
+  }
+  await conn.refreshModelCatalog();
+  assert.deepEqual(fake.requests.filter(({ method }) => ["credential/set", "provider/discover", "provider/upsert"].includes(method)), [
+    { method: "provider/discover", params: { providerId: "openai-codex", forceRefresh: true } },
+  ]);
+  await conn.dispose();
+});
+
+test("a picker response in flight at logout cannot restore an account model", async () => {
+  let finishDiscovery!: () => void;
+  let discoveryStarted!: () => void;
+  const started = new Promise<void>((resolve) => { discoveryStarted = resolve; });
+  const { conn, fake } = await bootConnection([(method, _params, respond) => {
+    if (method === "credential/list") {
+      respond({ credentials: [{ id: "openai-codex", provider: "openai-codex", kind: "oauth" }] });
+    } else if (method === "provider/list") {
+      respond({ providers: [{ id: "openai-codex", baseUrl: "https://codex.example" }], connectedProviderIds: ["openai-codex"] });
+    } else if (method === "provider/discover") {
+      finishDiscovery = () => respond({ models: { "account-only": {} } });
+      discoveryStarted();
+    } else return false;
+    return true;
+  }]);
+  const refreshing = conn.refreshModelCatalog();
+  await started;
+  conn.providerLogoutStarted("openai-codex");
+  finishDiscovery();
+  for (const catalog of [await refreshing, await conn.refreshModelCatalog()]) {
+    assert.deepEqual(catalog.models.filter(m => m.provider === "openai-codex"), []);
+    assert.ok(!catalog.configuredProviders.includes("openai-codex"));
+  }
+  assert.equal(fake.requests.filter(({ method }) => method === "provider/discover").length, 1);
+  await conn.dispose();
+});
+
+test("explicit OAuth pins the selected route and effort levels before changing the session", async () => {
+  const provider = { id: "openai-codex", name: "Codex", baseUrl: "https://pinned.example", wireApis: ["openai_responses"], enabled: true };
+  const levels = ["low", "medium", "high", "xhigh", "max"];
+  const effort = { reasoningCapability: { levels }, defaultReasoningEffort: "medium" };
+  let savedModels: Record<string, unknown> = {};
   const { conn, fake } = await bootConnection([
-    (method, _params, respond) => {
+    (method, params, respond) => {
       if (method === "provider/list") {
-        respond({ providers: [{ id: "openai-codex", name: "Codex", baseUrl: "https://pinned.example", wireApis: ["openai_responses"], enabled: true }] });
+        respond({ providers: [provider], connectionModels: { "openai-codex": savedModels } });
       } else if (method === "provider/discover") {
         respond({ providerId: "openai-codex", models: {
-          "chosen": { name: "Live chosen", contextWindow: 123456, cost: { input: 2 }, capabilities: { tools: true } },
+          "chosen": { name: "Live chosen", contextWindow: 123456, cost: { input: 2 }, capabilities: { tools: true }, ...effort },
           "other": { name: "Do not persist", cost: { input: 3 } },
         } });
       } else if (method === "provider/upsert") {
+        savedModels = (params.provider as { models: Record<string, unknown> }).models;
         respond({});
       } else return false;
       return true;
@@ -2190,18 +2264,95 @@ test("explicit OAuth discovers transient models and pins only the selected trans
   fake.requests.length = 0;
   await conn.setModel("openai-codex", "chosen");
   assert.deepEqual(fake.requests.filter(({ method }) => method === "provider/upsert"), [{
-    method: "provider/upsert", params: { provider: {
-      id: "openai-codex", name: "Codex", baseUrl: "https://pinned.example", wireApis: ["openai_responses"], enabled: true,
-      models: { chosen: { origin: "user", baseUrl: "https://pinned.example", wireApi: "openai_responses", requestModel: "chosen" } },
+    method: "provider/upsert", params: { defaultModel: "openai-codex/chosen", provider: {
+      ...provider,
+      models: { chosen: { origin: "user", baseUrl: "https://pinned.example", wireApi: "openai_responses", requestModel: "chosen", ...effort } },
       modelOverrides: {},
     } },
   }]);
   assert.ok(fake.requests.findIndex(r => r.method === "provider/upsert") < fake.requests.findIndex(r => r.method === "session/metadata/update"));
   assert.deepEqual(fake.requests.filter(({ method }) => method === "provider/discover"), []);
+  assert.deepEqual((await conn.getState()).availableThinkingLevels, levels);
+  await conn.setThinkingLevel("max");
+  assert.deepEqual(fake.requests.filter(r => r.method === "session/metadata/update").at(-1)?.params?.settings, { reasoningEffort: "max" });
   await conn.dispose();
 });
 
-test("explicit login setup ignores API keys and MCP OAuth", async () => {
+test("model picker merges a catalog API-key provider, rediscovered Codex models, and a custom route", async () => {
+  const { conn, fake } = await bootConnection([(method, _params, respond) => {
+    if (method === "provider/list") {
+      respond({ providers: [
+        { id: "deepseek", baseUrl: "https://api.deepseek.com", wireApis: ["openai_chat_completions"], models: { "deepseek-flash": {} } },
+        { id: "openai-codex", baseUrl: "https://chatgpt.com/backend-api/codex", wireApis: ["openai_responses"] },
+        { id: "local", baseUrl: "http://127.0.0.1:8000", wireApis: ["openai_chat_completions"] },
+      ], connectedProviderIds: ["deepseek", "openai-codex", "local"], connectionModels: {
+        "openai-codex": { saved: {} }, local: { "local-model": {} },
+      } });
+    } else if (method === "provider/discover") {
+      respond({ models: { saved: {}, "account-model": {}, hidden: { enabled: false } } });
+    } else if (method === "provider/upsert") {
+      respond({});
+    } else return false;
+    return true;
+  }]);
+  fake.requests.length = 0;
+  await conn.completeExplicitStoredLogin("deepseek", { type: "api_key", key: "test-key" });
+  await conn.completeExplicitOAuthLogin("openai-codex", { type: "oauth", access: "test-access" });
+  const models = await conn.getAvailableModels();
+  assert.deepEqual(models.filter(({ provider }) => ["deepseek", "openai-codex", "local"].includes(provider))
+    .map(({ provider, id }) => `${provider}/${id}`).sort(), [
+    "deepseek/deepseek-flash", "local/local-model", "openai-codex/account-model", "openai-codex/saved",
+  ]);
+  assert.deepEqual(fake.requests.filter(({ method }) => ["credential/set", "provider/discover"].includes(method)), [
+    { method: "credential/set", params: { provider: "deepseek", kind: "api_key", secret: "test-key", configureConnection: true } },
+    { method: "credential/set", params: { provider: "openai-codex", kind: "oauth", access: "test-access", configureConnection: true } },
+    { method: "provider/discover", params: { providerId: "openai-codex", forceRefresh: true } },
+  ]);
+  await conn.setModel("deepseek", "deepseek-flash");
+  assert.ok(fake.requests.findIndex(r => r.method === "provider/upsert") < fake.requests.findIndex(r => r.method === "session/metadata/update"));
+  await conn.dispose();
+});
+
+test("a saved API-key route does not hide catalog effort metadata", async () => {
+  const levels = ["low", "medium", "high", "xhigh", "max"];
+  const { conn } = await bootConnection([(method, _params, respond) => {
+    if (method !== "provider/list") return false;
+    respond({
+      providers: [{ id: "openai", models: { "gpt-6.2-sol": { reasoningCapability: { levels } } } }],
+      connectionModels: { openai: { "gpt-6.2-sol": { baseUrl: "https://pinned.example" } } },
+    });
+    return true;
+  }]);
+  await conn.setModel("openai", "gpt-6.2-sol");
+  assert.deepEqual((await conn.getState()).availableThinkingLevels, levels);
+  await conn.dispose();
+});
+
+test("catalog keeps slash-containing model IDs distinct and selects the full ID", async () => {
+  const ids = ["publisher-a/shared-name", "publisher-b/shared-name"];
+  const { conn, fake } = await bootConnection([(method, _params, respond) => {
+    if (method === "model/list") {
+      respond({ models: ids.map((modelId) => ({
+        provider: "openai_chat_completions", providerId: "openrouter", modelId, slug: `openrouter/${modelId}`,
+      })) });
+    } else if (method === "provider/list") {
+      respond({ providers: [{
+        id: "openrouter", baseUrl: "https://provider.example", wireApis: ["openai_chat_completions"],
+        models: Object.fromEntries(ids.map((id) => [id, {}])),
+      }], connectedProviderIds: ["openrouter"] });
+    } else return false;
+    return true;
+  }]);
+  assert.deepEqual((await conn.getAvailableModels()).filter(({ provider }) => provider === "openrouter").map(({ id }) => id), ids);
+  const chosen = ids[1];
+  await conn.setModel("openrouter", chosen);
+  assert.equal(fake.requests.find(({ method }) => method === "provider/upsert")?.params.defaultModel, `openrouter/${chosen}`);
+  const update = fake.requests.find(({ method }) => method === "session/metadata/update");
+  assert.deepEqual(update?.params.model, { provider: "openrouter", model: chosen });
+  await conn.dispose();
+});
+
+test("explicit OAuth setup ignores API keys and MCP OAuth", async () => {
   const { conn, fake } = await bootConnection();
   fake.requests.length = 0;
   await conn.completeExplicitOAuthLogin("openai", { type: "api_key", key: "test-key" });

@@ -8,6 +8,7 @@ import test from "node:test";
 import { fileURLToPath } from "node:url";
 import { BrandSplashHeader } from "@earendil-works/pi-coding-agent/interactive";
 import { initTheme } from "@earendil-works/pi-coding-agent/theme";
+import { getProxySplashValues } from "./fetch-proxy.js";
 import {
   DEVO_COMPACT_ORBIT_LOGO,
   DEVO_SPLASH_TITLE,
@@ -33,6 +34,19 @@ test("Devo splash header uses DEVO wordmark logo and title", () => {
   ).version;
   assert.ok(lines.includes(`v${process.env.DEVO_VERSION?.trim() || packageVersion}`));
   assert.match(lines, /deepseek-v4-flash/);
+});
+
+test("splash displays sanitized proxy metadata after cwd when configured", () => {
+  initTheme("dark", true);
+  const header = new BrandSplashHeader(DEVO_TUI_VERSION, () => "/tmp/devo", undefined, {
+    logo: DEVO_COMPACT_ORBIT_LOGO,
+    title: DEVO_SPLASH_TITLE,
+    getProxy: () => getProxySplashValues({ HTTPS_PROXY: "http://user:secret@127.0.0.1:12345/path" }),
+  });
+  const lines = header.render(100).join("\n").replace(/\x1b\[[0-9;]*m/g, "");
+  assert.match(lines, /proxy http:\/\/127\.0\.0\.1:12345/);
+  assert.ok(lines.indexOf("cwd") < lines.indexOf("proxy http://127.0.0.1:12345"));
+  assert.doesNotMatch(lines, /secret|user/);
 });
 
 test("default splash header uses the Devo wordmark", () => {

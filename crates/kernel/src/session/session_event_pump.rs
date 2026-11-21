@@ -493,12 +493,14 @@ for line in sys.stdin:
             eprintln!("skip: kernel runtime not found");
             return;
         };
+        let Ok(config) = KernelSessionConfig::for_runtime() else {
+            eprintln!("skip: compatible Python not found");
+            return;
+        };
         let config = KernelSessionConfig {
-            python: PathBuf::from("python"),
             cwd: std::env::temp_dir(),
             python_path_entries: vec![runtime_path],
-            extra_env: Vec::new(),
-            workspace_access: crate::WorkspaceAccess::ReadWrite,
+            ..config
         };
         let session = match KernelSession::spawn(config).await {
             Ok(session) => session,
@@ -588,12 +590,14 @@ for line in sys.stdin:
             eprintln!("skip: kernel runtime not found");
             return;
         };
+        let Ok(config) = KernelSessionConfig::for_runtime() else {
+            eprintln!("skip: compatible Python not found");
+            return;
+        };
         let session = match KernelSession::spawn(KernelSessionConfig {
-            python: PathBuf::from("python"),
             cwd: std::env::temp_dir(),
             python_path_entries: vec![runtime_path],
-            extra_env: Vec::new(),
-            workspace_access: crate::WorkspaceAccess::ReadWrite,
+            ..config
         })
         .await
         {

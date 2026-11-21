@@ -222,7 +222,6 @@ export class ModelSelectorComponent extends Container implements Focusable {
 		this.currentModel = currentModel;
 		this.modelRegistry = modelRegistry;
 		this.scopedModels = scopedModels;
-		this.scope = scopedModels.length > 0 ? "scoped" : "all";
 		this.onSelectCallback = onSelect;
 		this.onCancelCallback = onCancel;
 		this.availableModels = options.availableModels;

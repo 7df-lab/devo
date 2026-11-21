@@ -628,7 +628,7 @@ export interface InteractiveModeOptions {
 	/** Initial stable session id used to scope prompt stash state. */
 	promptStashSessionId?: string;
 	/** Override splash logo/title metadata (e.g. Devo product branding). */
-	brandSplash?: Pick<BrandSplashHeaderOptions, "logo" | "title">;
+	brandSplash?: Pick<BrandSplashHeaderOptions, "logo" | "title" | "getProxy">;
 	/** Display / update-check version label. Defaults to package VERSION. */
 	version?: string;
 	/** Terminal window title prefix. Defaults to APP_TITLE. */
@@ -816,8 +816,10 @@ export class InteractiveMode {
 	private connectionModelCatalog: AgentConnectionModel[] = [];
 	private connectionConfiguredProviders = new Set<string>();
 	private connectionModelsFetchedAt = 0;
+	// A local snapshot does not mean the public directory has been checked yet.
+	private modelPickerCatalogCheckedAt?: number;
 	private connectionModelsRefreshVersion = 0;
-	private connectionModelsRefreshInFlight: { version: number; promise: Promise<AgentConnectionModel[]> } | undefined;
+	private connectionModelsRefreshInFlight: { version: number; remote: boolean; promise: Promise<AgentConnectionModel[]> } | undefined;
 	private closeConfigurationMenu: (() => void) | undefined;
 	private configurationModelSelection: Promise<void> | undefined;
 	private connectionState: AgentConnectionState | undefined;
@@ -2482,14 +2484,18 @@ export class InteractiveMode {
 		connection: AgentConnection,
 		generation: number,
 	): Promise<void> {
-		// Auth changes may start a newer model refresh while these ancillary reads are pending.
+		// This local read must not overwrite a newer auth or model-picker refresh.
 		const modelRefreshVersion = this.connectionModelsRefreshVersion;
+		const previousModelCatalog = this.connectionModelCatalog;
 		const [modelCatalog, resources] = await Promise.all([
 			measureAsync("catalog.get_model_catalog", () => connection.getModelCatalog()),
 			measureAsync("catalog.get_resources", () => connection.getResourceSnapshot()),
 		]);
 		if (!this.isCurrentConnectionGeneration(connection, generation)) return;
-		if (modelRefreshVersion === this.connectionModelsRefreshVersion) {
+		if (
+			modelRefreshVersion === this.connectionModelsRefreshVersion &&
+			previousModelCatalog === this.connectionModelCatalog
+		) {
 			this.applyConnectionModelCatalog(modelCatalog);
 			this.connectionModelsFetchedAt = Date.now();
 		}
@@ -4962,7 +4968,7 @@ export class InteractiveMode {
 					this.editor.setText("");
 					return;
 				}
-				if (text === "/quit") {
+				if (commandName === "quit" && !commandArgs) {
 					this.editor.setText("");
 					await this.shutdown();
 					return;
@@ -8105,7 +8111,13 @@ export class InteractiveMode {
 	private async getConnectionAvailableModels(options: { refreshRemote?: boolean } = {}): Promise<AgentConnectionModel[]> {
 		const inFlight = this.connectionModelsRefreshInFlight;
 		if (inFlight && inFlight.version === this.connectionModelsRefreshVersion) {
-			return [...(await inFlight.promise)];
+			if (!options.refreshRemote || inFlight.remote || !this.agentConnection.refreshModelCatalog) {
+				return [...(await inFlight.promise)];
+			}
+			// A cold local read can finish before the public catalog loads. The
+			// picker still needs its remote refresh, not the earlier snapshot.
+			await inFlight.promise.catch(() => undefined);
+			return this.getConnectionAvailableModels(options);
 		}
 
 		const version = this.connectionModelsRefreshVersion;
@@ -8119,9 +8131,10 @@ export class InteractiveMode {
 			}
 			this.applyConnectionModelCatalog(catalog);
 			this.connectionModelsFetchedAt = Date.now();
+			if (options.refreshRemote) this.modelPickerCatalogCheckedAt = this.connectionModelsFetchedAt;
 			return this.getAvailableConnectionModels();
 		});
-		this.connectionModelsRefreshInFlight = { version, promise };
+		this.connectionModelsRefreshInFlight = { version, remote: options.refreshRemote === true, promise };
 
 		try {
 			return [...(await promise)];
@@ -8151,15 +8164,14 @@ export class InteractiveMode {
 	private getModelSelectorRefreshPromise(
 		options: { force?: boolean } = {},
 	): Promise<AgentConnectionModel[]> | undefined {
-		const refreshCatalog = () => this.getConnectionAvailableModels({ refreshRemote: true }).then(() => this.getCachedModelCandidates());
-		if (this.connectionModelsRefreshInFlight) {
-			return refreshCatalog();
-		}
-		if (options.force || this.connectionModelsFetchedAt === 0) {
-			return refreshCatalog();
-		}
-		if (Date.now() - this.connectionModelsFetchedAt > MODEL_CATALOG_REFRESH_TTL_MS) {
-			return refreshCatalog();
+		const checkedAt = this.modelPickerCatalogCheckedAt;
+		if (
+			options.force ||
+			this.connectionModelsRefreshInFlight ||
+			checkedAt === undefined ||
+			Date.now() - checkedAt >= MODEL_CATALOG_REFRESH_TTL_MS
+		) {
+			return this.getConnectionAvailableModels({ refreshRemote: true }).then(() => this.getCachedModelCandidates());
 		}
 		return undefined;
 	}
@@ -8167,6 +8179,7 @@ export class InteractiveMode {
 	private invalidateConnectionModelRefresh(): void {
 		this.connectionModelsRefreshVersion++;
 		this.connectionModelsRefreshInFlight = undefined;
+		this.modelPickerCatalogCheckedAt = undefined;
 	}
 
 	private invalidateConnectionModels(): void {
@@ -8571,7 +8584,9 @@ export class InteractiveMode {
 				if (!refreshPromise) return;
 				void refreshPromise
 					.then((models) => {
-						if (!settled) menu.updateModels(this.getCurrentModel(), models, this.connectionConfiguredProviders);
+						if (settled) return;
+						menu.updateModels(this.getCurrentModel(), models, this.connectionConfiguredProviders);
+						menu.refreshAuthentication(authFlows.getLoginProviderOptions());
 					})
 					.catch(() => undefined);
 			};
@@ -8696,7 +8711,7 @@ export class InteractiveMode {
 			this.editorContainer.addChild(menu);
 			focus();
 			this.ui.requestRender();
-			refreshModels(initialModelSearch !== undefined);
+			refreshModels(initialModelSearch !== undefined || modelCatalog.length === 0);
 			refreshTimer = setInterval(() => { if (!busy) refreshModels(false); }, MODEL_CATALOG_REFRESH_TTL_MS);
 			refreshTimer.unref();
 		});

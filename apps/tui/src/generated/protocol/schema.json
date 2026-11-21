@@ -41466,7 +41466,7 @@
           ]
         },
         "configureConnection": {
-          "description": "Explicit OAuth connect action: initialize missing transport from its auth adapter. Credential synchronization and token refresh must leave this false.",
+          "description": "Explicit connect action: initialize missing transport from the OAuth adapter or the public API-key provider template. Credential synchronization and token refresh must leave this false.",
           "type": "boolean"
         },
         "enterpriseUrl": {

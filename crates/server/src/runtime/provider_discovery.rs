@@ -162,7 +162,25 @@ impl ServerRuntime {
             .map(|(id, model)| (id.clone(), model.clone()))
             .collect::<BTreeMap<_, _>>();
         for (model_id, discovered_model) in discovered {
-            if next_models.contains_key(&model_id) {
+            if let Some(existing) = next_models.get_mut(&model_id) {
+                // Older Codex selections kept only the route. Return the account's
+                // effort metadata for that exact saved model so it can be repaired
+                // on selection, without replacing authored reasoning or transport.
+                if provider_id == "openai-codex"
+                    && !provider.model_overrides.contains_key(&model_id)
+                    && existing.request_model.as_deref() == Some(model_id.as_str())
+                    && existing.reasoning_capability.is_none()
+                    && existing.reasoning.is_none()
+                    && existing.thinking_level_map.is_none()
+                    && existing.reasoning_implementation.is_none()
+                    && existing.default_reasoning_effort.is_none()
+                    && existing.default_reasoning_selection.is_none()
+                    && existing.variants.is_empty()
+                    && discovered_model.enabled != Some(false)
+                {
+                    existing.reasoning_capability = discovered_model.reasoning_capability;
+                    existing.default_reasoning_effort = discovered_model.default_reasoning_effort;
+                }
                 continue;
             }
             let mut model = match provider.models.remove(&model_id) {

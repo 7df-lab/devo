@@ -17,10 +17,12 @@ User configuration is layered from `$DEVO_HOME/providers.json` and
 Connections pin endpoint, wire API and model IDs; remote metadata cannot silently
 change their request routing. Credentials stay separate in `auth.json`.
 models.dev SDK packages without a supported adapter are omitted, not guessed.
-Native OpenAI/Anthropic/Google endpoint defaults belong to their adapters, not a
-separate catalog; explicit connect pins the resolved `base_url`.
+Known SDK endpoint defaults belong to their adapters, not a separate catalog.
+In the TUI, explicit API-key login pins a usable template's `base_url` and
+`wire_api`; startup auth synchronization never chooses an endpoint. Selecting
+a catalog model on that Connection saves its route, not its public metadata.
 Provider discovery, including authenticated Codex discovery, is explicit and
-read-only. Results become user configuration only when explicitly saved.
+read-only. Results become user configuration only when explicitly selected.
 
 ## Offline or local source
 

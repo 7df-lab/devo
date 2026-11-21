@@ -61,7 +61,12 @@ and updates the user `Path`. It does not require an administrator shell.
 
 ## Build From Source
 
-Use this path when you are contributing to Devo or testing unreleased changes:
+Use this path when you are contributing to Devo or testing unreleased changes.
+When running directly from the source tree, local execution tools need Python
+3.11 or newer on `PATH`. Devo checks `python`, `python3`, and common versioned
+names, skipping incompatible interpreters such as the Python 3.9 supplied by
+some macOS installations. `devo doctor` reports the Python it resolved. Release
+bundles use their own Python and do not depend on `PATH` for it.
 
 ```bash
 git clone https://github.com/7df-lab/devo.git

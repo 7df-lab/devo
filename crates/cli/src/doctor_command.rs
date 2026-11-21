@@ -25,12 +25,8 @@ pub(crate) async fn run_doctor() -> Result<()> {
     let node = bundle
         .as_ref()
         .map_or_else(|| "node".into(), |runtime| runtime.node.clone());
-    let python = bundle.as_ref().map_or_else(
-        || devo_util_paths::runtime::fallback_interpreter(std::env::var_os("PATH").as_deref()),
-        |runtime| runtime.python.clone(),
-    );
     use devo_util_paths::runtime_environment::{Interpreter, remove_interpreter_environment};
-    for (program, interpreter) in [(&node, Interpreter::Node), (&python, Interpreter::Python)] {
+    let report_version = |program: &std::path::Path, interpreter| {
         let mut command = Command::new(program);
         if bundle.is_some() {
             remove_interpreter_environment(&mut command, interpreter);
@@ -42,40 +38,54 @@ pub(crate) async fn run_doctor() -> Result<()> {
                     program.display(),
                     String::from_utf8_lossy(&output.stdout).trim()
                 );
+                true
             }
             result => {
                 println!("  {} {} failed: {result:?}", "✗".red(), program.display());
-                all_ok = false;
+                false
             }
         }
-    }
-    let mut probe = Command::new(&python);
-    probe.args([
-        "-c",
-        "import rlm.repl, mcp, tyro, dill; print('Python kernel dependencies ready')",
-    ]);
-    if let Some(bundle) = &bundle {
-        remove_interpreter_environment(&mut probe, Interpreter::Python);
-        probe
-            .env("PYTHONPATH", &bundle.python_site)
-            .env("PYTHONNOUSERSITE", "1");
-        if !bundle.tui.is_file() {
-            println!(
-                "  {} TUI entry missing; reinstall the full release archive",
-                "✗".red()
-            );
+    };
+    all_ok &= report_version(&node, Interpreter::Node);
+    match devo_kernel::KernelSessionConfig::for_runtime() {
+        Ok(config) => {
+            all_ok &= report_version(&config.python, Interpreter::Python);
+            let mut probe = Command::new(&config.python);
+            if bundle.is_some() {
+                remove_interpreter_environment(&mut probe, Interpreter::Python);
+                probe.args(["-c", "import rlm.repl, mcp, tyro, dill"]);
+            } else {
+                // Source builds can start the kernel without optional dependencies.
+                probe.args(["-c", "import rlm.repl"]);
+            }
+            probe.envs(config.extra_env);
+            if let Ok(paths) = std::env::join_paths(&config.python_path_entries) {
+                probe.env("PYTHONPATH", paths);
+            }
+            match probe.output() {
+                Ok(output) if output.status.success() => {
+                    println!("  Python kernel dependencies ready")
+                }
+                result => {
+                    println!(
+                        "  {} Python kernel dependencies unavailable: {result:?}",
+                        "✗".red()
+                    );
+                    all_ok = false;
+                }
+            }
+        }
+        Err(error) => {
+            println!("  {} {error}", "✗".red());
             all_ok = false;
         }
     }
-    match probe.output() {
-        Ok(output) if output.status.success() => println!("  Python kernel dependencies ready"),
-        result => {
-            println!(
-                "  {} Python kernel dependencies unavailable: {result:?}",
-                "✗".red()
-            );
-            all_ok = false;
-        }
+    if bundle.as_ref().is_some_and(|bundle| !bundle.tui.is_file()) {
+        println!(
+            "  {} TUI entry missing; reinstall the full release archive",
+            "✗".red()
+        );
+        all_ok = false;
     }
     println!();
 

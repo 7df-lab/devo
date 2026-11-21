@@ -360,7 +360,7 @@ async fn mcp_real_kernel_uses_native_dispatch_and_reports_legacy_refresh_failure
             crates_dir.join("kernel/rlm-runtime/src"),
             crates_dir.join("skills/assets/bundled/linear/src"),
         ],
-        ..KernelSessionConfig::default()
+        ..KernelSessionConfig::for_runtime().unwrap()
     };
     config.extra_env.push((
         "DEVO_CODING_AGENT_DIR".into(),

@@ -218,9 +218,9 @@ export class OAuthSelectorComponent extends Container implements Focusable {
 		});
 	}
 
-	refresh(): void {
+	refresh(providers = this.allProviders): void {
 		const selected = this.filteredProviders[this.selectedIndex];
-		this.allProviders = this.sortProviders(this.allProviders);
+		this.allProviders = this.sortProviders(providers);
 		this.filterProviders(this.searchInput.getValue());
 		if (selected) {
 			const selectedIndex = this.filteredProviders.findIndex(

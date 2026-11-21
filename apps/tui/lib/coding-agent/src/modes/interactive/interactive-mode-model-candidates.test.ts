@@ -43,7 +43,7 @@ test("model candidates refresh a missing connection catalog", async () => {
 	assert.equal(refreshCount, 1);
 });
 
-test("picker checks remote in the background and coalesces concurrent refreshes", async () => {
+test("picker checks the public catalog even after a recent connected-only read", async () => {
 	const mode = Object.create(InteractiveMode.prototype) as {
 		agentConnection: AgentConnection;
 		connectionModelsRefreshVersion: number;
@@ -52,9 +52,9 @@ test("picker checks remote in the background and coalesces concurrent refreshes"
 		connectionConfiguredProviders: Set<string>;
 		getScopedModelState(): Array<{ model: AgentConnectionModel }>;
 		getCachedModelCandidates(): AgentConnectionModel[];
-		getModelSelectorRefreshPromise(options: { force: boolean }): Promise<AgentConnectionModel[]>;
+		getModelSelectorRefreshPromise(): Promise<AgentConnectionModel[]> | undefined;
 	};
-	const freshModels = [{ provider: "openai", id: "fresh-model" }] as unknown as AgentConnectionModel[];
+	const freshModels = [...availableModels, { provider: "deepseek", id: "deepseek-flash" }] as AgentConnectionModel[];
 	let complete!: (catalog: AgentConnectionModelCatalog) => void;
 	let remoteChecks = 0;
 	mode.agentConnection = {
@@ -65,14 +65,15 @@ test("picker checks remote in the background and coalesces concurrent refreshes"
 		getModelCatalog: () => { throw new Error("Picker should check remote"); },
 	} as unknown as AgentConnection;
 	mode.connectionModelsRefreshVersion = 0;
-	mode.connectionModelsFetchedAt = 0;
+	mode.connectionModelsFetchedAt = Date.now();
 	mode.connectionModelCatalog = availableModels;
 	mode.connectionConfiguredProviders = new Set(["openai"]);
 	mode.getScopedModelState = () => [];
-	const first = mode.getModelSelectorRefreshPromise({ force: true });
-	const second = mode.getModelSelectorRefreshPromise({ force: true });
+	const first = mode.getModelSelectorRefreshPromise();
+	const second = mode.getModelSelectorRefreshPromise();
 	assert.equal(remoteChecks, 1);
 	assert.deepEqual(mode.getCachedModelCandidates(), availableModels);
 	complete({ models: freshModels, configuredProviders: ["openai"] });
 	assert.deepEqual(await Promise.all([first, second]), [freshModels, freshModels]);
+	assert.equal(mode.getModelSelectorRefreshPromise(), undefined);
 });
