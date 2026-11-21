@@ -521,7 +521,8 @@ main test files are:
 | `test_rlm_shell.py` | Shell approval arguments and denial propagation. |
 | `test_file_helpers.py` | Direct file I/O and host-mediated fallback. |
 | `test_mcp_host_list_tools.py` | MCP host-only listing, calls, failures, and result contracts. |
-| `test_mcp_integrations.py` | Bundled Linear/Notion discovery and parsed-result contracts. |
+| `test_mcp_integrations.py` | Authored integration discovery and parsed-result contracts with a synthetic integration. |
+| `test_mcp_kernel_wire.py` | MCP host requests, denial, and credential rotation over the real kernel wire. |
 | `test_snapshot_files.py` | File-handle rejection in snapshots. |
 | `test_snapshot_staging.py` | Exclusive staging and collision handling. |
 | `test_windows_*` | Windows loop, shell discovery, and environment mapping. |

@@ -13,20 +13,19 @@ import unittest
 class McpKernelWireTests(unittest.IsolatedAsyncioTestCase):
     async def test_real_kernel_discovery_call_denial_and_auth_rotation(self):
         runtime = Path(__file__).resolve().parents[1]
-        bundled = runtime.parents[1] / "skills" / "assets" / "bundled"
         with TemporaryDirectory() as home:
             auth_file = Path(home) / "auth.json"
 
-            def save_grant(expires):
-                auth_file.write_text(json.dumps({"mcp:linear": {
-                    "type": "oauth", "endpoint": "https://mcp.linear.app/mcp",
-                    "access": "wire-synthetic-token", "refresh": "wire-synthetic-refresh",
+            def save_grant(access, expires):
+                auth_file.write_text(json.dumps({"mcp:sample": {
+                    "type": "oauth", "endpoint": "https://sample.invalid/mcp",
+                    "access": access, "refresh": "wire-synthetic-refresh",
                     "expires": expires,
                 }}))
 
-            save_grant(0)
+            save_grant("wire-expired-token", 0)
             env = {**os.environ, "DEVO_CODING_AGENT_DIR": home,
-                   "PYTHONPATH": os.pathsep.join((str(runtime / "src"), str(bundled / "linear" / "src")))}
+                   "PYTHONPATH": str(runtime / "src")}
             process = await asyncio.create_subprocess_exec(
                 sys.executable, "-m", "rlm.repl", env=env,
                 stdin=asyncio.subprocess.PIPE, stdout=asyncio.subprocess.PIPE,
@@ -45,10 +44,14 @@ class McpKernelWireTests(unittest.IsolatedAsyncioTestCase):
             try:
                 self.assertEqual((await read())["event"], "ready")
                 await send({"type": "execute", "id": "mcp-wire", "code": """
-import linear
-from rlm import mcp
+from rlm import McpIntegration, mcp
+
+class SampleIntegration(McpIntegration):
+    server = "sample"
+    url = "https://sample.invalid/mcp"
+
 # The synthetic refresh host updates auth.json; the integration re-reads it.
-assert await linear.linear._resolve_token()
+assert await SampleIntegration()._resolve_token() == "wire-rotated-token"
 servers = await mcp.list_servers()
 assert servers == [{"server": "docs", "status": "not_started", "authStatus": "not_required", "toolCount": 0}]
 assert await mcp.list_tools("docs") == []
@@ -70,7 +73,7 @@ else:
                         calls.append(request)
                         action = request["type"]
                         if action == "mcp.refresh":
-                            save_grant((time.time() + 3600) * 1000)
+                            save_grant("wire-rotated-token", (time.time() + 3600) * 1000)
                             result = {"status": "ok", "result": {}}
                         elif action == "mcp.list_servers":
                             result = {"status": "ok", "result": {"servers": [{
@@ -90,7 +93,7 @@ else:
                         self.assertEqual(frame, {"event": "done", "id": "mcp-wire", "status": "ok"})
                         break
                 self.assertEqual(calls, [
-                    {"type": "mcp.refresh", "server": "linear"},
+                    {"type": "mcp.refresh", "server": "sample"},
                     {"type": "mcp.list_servers"},
                     {"type": "mcp.list_tools", "server": "docs"},
                     {"type": "mcp.call", "server": "docs", "tool": "create", "arguments": {"name": "demo"}},

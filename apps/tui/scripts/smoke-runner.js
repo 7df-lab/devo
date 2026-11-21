@@ -18,7 +18,7 @@ import { startWaitTimerProvider, checkWaitTimer } from "./wait-timer-smoke.mjs";
 
 const repo = resolve(dirname(fileURLToPath(import.meta.url)), "../../..");
 const scenario = process.argv[2] || "T1";
-const scenarios = ["logout", "queue-output", "wait-timer", "subagent-roster", "resize-status", "T1", "T2", "T3", "goal", "bash", "agents", "schedule", "heartbeat", "activity", "effort", "theme", "fork", "clipboard", "resume", "scheduled-timezone", "scheduled-pending", "export", "share", "refine", "steering", "abort-history"];
+const scenarios = ["logout", "queue-output", "wait-timer", "subagent-roster", "resize-status", "T1", "T2", "T3", "goal", "bash", "agents", "schedule", "scheduled-delivery", "activity", "effort", "theme", "fork", "clipboard", "resume", "scheduled-timezone", "scheduled-pending", "export", "share", "refine", "steering", "abort-history"];
 const preloaded = ["clipboard", "scheduled-pending"].includes(scenario);
 const tmux = process.env.DEVO_TMUX_BIN || (process.platform === "win32" ? "psmux" : "tmux");
 const binary = resolve(process.env.DEVO_BIN || process.env.DEVO_SERVER_BIN
@@ -609,11 +609,11 @@ async function run() {
         break;
       case "schedule":
         // An explicit argument avoids the bare slash-command completion step.
-        await send("/schedulestatus");
-        await waitFor("heartbeat status", (_events, text) => /No active scheduled task|Scheduled task\s+Status:/i.test(text));
+        await send("/schedule status");
+        await waitFor("schedule status", (_events, text) => /No active scheduled task|Scheduled task\s+Status:/i.test(text));
         break;
       case "scheduled-pending": {
-        await send("/scheduleevery 1h pending-smoke");
+        await send("/schedule every 1h pending-smoke");
         await waitFor("created", events => events.some(r => r.payload?.result?.action === "set"));
         const screen = () => mux(["capture-pane", "-t", session, "-p"]).stdout;
         const open = async () => {
@@ -641,12 +641,12 @@ async function run() {
           mux(["send-keys","-t",session,"Escape"]);
           await waitFor("close", () => !screen().includes("Enter details"));
         }
-        await send("/scheduleclear");
+        await send("/schedule clear");
         await waitFor("clear", (_events,text) => text.includes("Scheduled task cleared"));
         break;
       }
       case "scheduled-timezone": {
-        await send("/scheduleevery 1h timezone-smoke");
+        await send("/schedule every 1h timezone-smoke");
         await waitFor("scheduled creation", (events) => events.some(r => r.payload?.result?.action === "set" && r.payload.result.job?.nextRunAt));
         const job = records().find(r => r.payload?.result?.action === "set" && r.payload.result.job?.nextRunAt).payload.result.job;
         const expected = new Date(job.nextRunAt).toLocaleString("en-US", {
@@ -690,18 +690,17 @@ async function run() {
           mux(["send-keys", "-t", session, "Left"]);
           await waitFor("scheduled close", () => !screen().includes("Enter details"));
         }
-        await send("/scheduleclear");
+        await send("/schedule clear");
         await waitFor("scheduled cleanup", (_events, text) => text.includes("Scheduled task cleared"));
         break;
       }
-      case "heartbeat": {
-        const marker = `hb-tui-fire-${Date.now()}`;
-        await send(`/scheduleevery 1s ${marker}`);
-        // A slash-command echo also contains the marker. Require a delivered
-        // Native user item rather than matching the echoed command.
-        await waitFor("delivered heartbeat", (events) => scheduledDelivered(events, marker));
-        await send("/scheduleclear");
-        await waitFor("heartbeat clear", (_events, text) => /Scheduled task cleared/i.test(text));
+      case "scheduled-delivery": {
+        const marker = `schedule-tui-fire-${Date.now()}`;
+        await send(`/schedule every 1s ${marker}`);
+        await waitFor("schedule creation", (events) => events.some(r => r.payload?.result?.action === "set"));
+        await waitFor("scheduled delivery", (events) => scheduledDelivered(events, marker));
+        await send("/schedule clear");
+        await waitFor("schedule cleared", (_events, text) => /Scheduled task cleared/i.test(text));
         break;
       }
     }

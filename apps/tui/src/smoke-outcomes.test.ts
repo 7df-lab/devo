@@ -31,10 +31,12 @@ test("smoke interruption must terminate the started user turn", () => {
   assert.equal(turnOutcome([started, item("userMessage"), ended("interrupted")], "interrupted"), true);
 });
 
-test("heartbeat slash echo cannot stand in for scheduler delivery", () => {
-  const marker = "heartbeat-probe";
+test("smoke requires a user item delivered by the scheduler, not an ordinary prompt", () => {
+  const marker = "schedule-probe";
   const content = [{ type: "text", text: marker }];
   assert.equal(scheduledDelivered([{ method: "turn/start", payload: { params: { input: marker } } }], marker), false);
   assert.equal(scheduledDelivered([item("assistantMessage", { content })], marker), false);
-  assert.equal(scheduledDelivered([item("userMessage", { content })], marker), true);
+  assert.equal(scheduledDelivered([item("userMessage", { content })], marker), false);
+  assert.equal(scheduledDelivered([item("userMessage", { content, origin: { source: "agent" } })], marker), false);
+  assert.equal(scheduledDelivered([item("userMessage", { content, origin: { source: "schedule" } })], marker), true);
 });
