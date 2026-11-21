@@ -44,6 +44,7 @@ import type {
   AgentConnectionSessionListCallbacks,
   AgentConnectionToolDefinition,
   AgentConnectionWebStatus,
+  WebSearchChoice,
 } from "@earendil-works/pi-coding-agent/agent-connection";
 import type { ThinkingLevel } from "@earendil-works/pi-agent-core";
 import type { ContextTreeNode } from "../lib/coding-agent/src/core/context-tree.js";
@@ -2227,6 +2228,16 @@ export class NativeAgentConnection implements AgentConnection {
       if (isStale()) return undefined;
       throw error;
     }
+  }
+
+  async setWebSearchChoice(choice: WebSearchChoice): Promise<void> {
+    const sessionId = this.requireSessionId();
+    const transition = this.sessionTransitionGeneration;
+    await this.updateSessionMetadata({ settings: { webSearch: choice } }, () => {
+      if (this.sessionId !== sessionId || this.sessionTransitionGeneration !== transition) {
+        throw new Error("Session changed during web search update");
+      }
+    });
   }
 
   async getSystemPrompt() {

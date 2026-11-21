@@ -493,6 +493,16 @@ fn apply_settings_to_canonical_session(
                 session.settings.python_cell_first_wait_ms = Some(ms);
             }
         }
+        SessionSettingsField::WebSearch => {
+            use devo_protocol::native::session::WebSearchChoice;
+
+            session.settings.web_search =
+                match serde_json::from_value::<Option<WebSearchChoice>>(value) {
+                    Ok(Some(WebSearchChoice::Inherit)) | Ok(None) => None,
+                    Ok(choice) => choice,
+                    Err(_) => session.settings.web_search.clone(),
+                };
+        }
     }
 }
 

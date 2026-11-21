@@ -1960,6 +1960,22 @@ dependencies = [
 ]
 
 [[package]]
+name = "devo-web-mcp"
+version = "0.2.23"
+dependencies = [
+ "devo-core",
+ "devo-network-proxy",
+ "devo-util-paths",
+ "pretty_assertions",
+ "reqwest 0.12.28",
+ "rmcp",
+ "serde",
+ "serde_json",
+ "tokio",
+ "toml",
+]
+
+[[package]]
 name = "devo-windows-sandbox"
 version = "0.2.23"
 dependencies = [

@@ -554,6 +554,8 @@ pub enum SessionSettingsField {
     AutoRefineTurnInterval,
     /// Python cell first foreground wait (`SessionSettings.python_cell_first_wait_ms`).
     PythonCellFirstWaitMs,
+    /// Web-search backend override (`SessionSettings.web_search`).
+    WebSearch,
 }
 
 /// Stores one field-level session settings change in the rollout file.

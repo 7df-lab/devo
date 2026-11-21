@@ -20,7 +20,11 @@ use devo_core::McpToolDescriptor;
 use devo_core::McpToolInfo;
 use devo_core::tools::{PermissionChecker, PermissionGrant};
 
-use super::{HostBridge, handle_fs_read, handle_mcp_call, handle_mcp_list_tools};
+use super::{
+    HostBridge, handle_fs_read, handle_mcp_call, handle_mcp_list_tools, handle_web_fetch,
+    handle_web_search,
+};
+use crate::runtime::web_search_mcp::{McpWebSearchRoute, WebFetchRoute};
 
 struct FakeMcpManager {
     refreshed: Mutex<Vec<McpServerId>>,
@@ -28,6 +32,7 @@ struct FakeMcpManager {
     invocations: AtomicUsize,
     observed_statuses: Vec<McpServerStatus>,
     refresh_state: McpStartupState,
+    successful_call: Option<(McpServerId, String, Value)>,
 }
 
 impl FakeMcpManager {
@@ -38,6 +43,7 @@ impl FakeMcpManager {
             invocations: AtomicUsize::new(0),
             observed_statuses: Vec::new(),
             refresh_state: McpStartupState::Ready,
+            successful_call: None,
         }
     }
 }
@@ -96,9 +102,13 @@ impl McpManager for FakeMcpManager {
         &self,
         server_id: &McpServerId,
         tool_name: &str,
-        _input: Value,
+        input: Value,
     ) -> Result<Value, McpError> {
         self.invocations.fetch_add(1, Ordering::SeqCst);
+        if let Some(expected) = &self.successful_call {
+            assert_eq!(&(server_id.clone(), tool_name.to_owned(), input), expected);
+            return Ok(json!({"content": [{"type":"text", "text":"search result"}]}));
+        }
         Err(McpError::McpToolInvocationFailed {
             server_id: server_id.clone(),
             tool_name: tool_name.to_string(),
@@ -168,6 +178,83 @@ async fn mcp_call_denial_prevents_manager_invocation() {
 
     assert_eq!(reply.get("status").and_then(Value::as_str), Some("error"));
     assert_eq!(manager.invocations.load(Ordering::SeqCst), 0);
+}
+
+#[tokio::test]
+async fn web_search_uses_exact_raw_tool_and_does_not_dispatch_when_denied_or_off() {
+    let id = McpServerId("docs".into());
+    let mut manager = FakeMcpManager::new();
+    let ready = manager.refresh(&id).await.unwrap();
+    manager.observed_statuses.push(ready);
+    manager.successful_call = Some((
+        id.clone(),
+        "search:raw/name".into(),
+        json!({"query":"needle"}),
+    ));
+    let manager = Arc::new(manager);
+    let mut bridge = test_bridge(Arc::clone(&manager));
+    let input = json!({"query":" needle ", "server":"wrong", "tool":"wrong"});
+    assert_eq!(handle_web_search(&bridge, &input).await["status"], "error");
+    bridge.web_routes.search = Some(McpWebSearchRoute {
+        server_id: id,
+        tool_name: "search:raw/name".into(),
+        manager: Ok(manager.clone()),
+    });
+    assert_eq!(
+        handle_web_search(&bridge, &input).await,
+        json!({"status":"ok","result":{"content":[{"type":"text","text":"search result"}]}})
+    );
+    bridge.permission = PermissionChecker::new(|request| {
+        Box::pin(async move {
+            if request.tool_name == "mcp.call" {
+                Err("MCP tool denied".into())
+            } else {
+                Ok(PermissionGrant::default())
+            }
+        })
+    });
+    let reply = handle_web_search(&bridge, &input).await;
+    assert_eq!(reply["status"], "error");
+    assert_eq!(manager.invocations.load(Ordering::SeqCst), 1);
+}
+
+#[tokio::test]
+async fn web_fetch_uses_only_the_selected_supplier_and_url() {
+    let id = McpServerId("devo:builtin:deepseek".into());
+    let mut fake = FakeMcpManager::new();
+    fake.successful_call = Some((
+        id.clone(),
+        "web_fetch".into(),
+        json!({"url":"https://example.com/"}),
+    ));
+    let manager = Arc::new(fake);
+    let mut bridge = test_bridge(manager.clone());
+    bridge.web_routes.fetch = WebFetchRoute::Mcp {
+        server_id: id,
+        manager: Ok(manager.clone()),
+    };
+    assert_eq!(
+        handle_web_fetch(
+            &bridge,
+            &json!({"url":"https://example.com/", "format":"html"})
+        )
+        .await["status"],
+        "error"
+    );
+    assert_eq!(
+        handle_web_fetch(
+            &bridge,
+            &json!({"url":"https://example.com/", "format":"markdown", "timeout":1})
+        )
+        .await["status"],
+        "ok"
+    );
+    bridge.web_routes.fetch = WebFetchRoute::Unavailable("Test fetch is off");
+    assert_eq!(
+        handle_web_fetch(&bridge, &json!({"url":"https://example.com/"})).await,
+        json!({"status":"error", "error":"Test fetch is off"})
+    );
+    assert_eq!(manager.invocations.load(Ordering::SeqCst), 1);
 }
 
 #[tokio::test]

@@ -381,6 +381,8 @@ export type SessionStatus = "idle" | "active";
 
 export type SessionFlag = "waitingApproval" | "waitingUserInput" | "compacting" | "updatingGoal";
 
+export type WebSearchChoice = { "kind": "inherit" } | { "kind": "provider" } | { "kind": "off" } | { "kind": "mcp", serverId: string, toolName: string, };
+
 export type SessionSettings = { permissionProfile: PermissionProfile,
 /**
  * User's reasoning-effort selection as persisted, including the toggle
@@ -417,7 +419,11 @@ autoRefineTurnInterval?: number | null,
 /**
  * First foreground wait (ms) before Python cell wait-policy. Default 180_000 when unset.
  */
-pythonCellFirstWaitMs?: bigint | null, };
+pythonCellFirstWaitMs?: bigint | null,
+/**
+ * Explicit search backend for future turns; absent means inherit defaults.
+ */
+webSearch?: WebSearchChoice | null, };
 
 export type SessionActivity = "idle" | "working";
 
@@ -570,7 +576,9 @@ export type SessionWebStatusReadParams = { sessionId: SessionId, };
 
 export type WebBackendStatus = { backend: string, note?: string, };
 
-export type SessionWebStatusReadResult = { search: WebBackendStatus, fetch: WebBackendStatus, };
+export type WebSearchPickerEntry = { label: string, choice: WebSearchChoice, note?: string, };
+
+export type SessionWebStatusReadResult = { search: WebBackendStatus, fetch: WebBackendStatus, searchChoice: WebSearchChoice, searchChoices: Array<WebSearchPickerEntry>, };
 
 export type SubscriptionReplay = "fromCursor" | "snapshotOnly";
 

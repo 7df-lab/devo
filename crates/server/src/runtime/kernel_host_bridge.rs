@@ -18,6 +18,8 @@ use tokio_util::sync::CancellationToken;
 use uuid::Uuid;
 
 use super::ServerRuntime;
+use super::web_search_mcp::WebFetchRoute;
+pub(crate) use super::web_search_mcp::WebRoutes;
 use devo_core::McpManager;
 use devo_core::tools::contracts::ToolBudgets;
 mod factory;
@@ -62,6 +64,7 @@ pub(crate) struct HostBridge {
     pub mcp_manager: Option<Arc<dyn McpManager>>,
     pub agent_scope: ToolAgentScope,
     pub local_web_search: Option<Value>,
+    pub web_routes: WebRoutes,
     pub network_proxy: Option<String>,
     pub network_no_proxy: Option<String>,
     /// Weak to avoid Arc cycles (runtime → session → kernel → handler → runtime).
@@ -92,6 +95,7 @@ impl HostBridge {
             mcp_manager: None,
             agent_scope: ToolAgentScope::Parent,
             local_web_search: None,
+            web_routes: WebRoutes::default(),
             network_proxy: None,
             network_no_proxy: None,
             runtime: Weak::new(),
@@ -597,27 +601,70 @@ pub(crate) async fn handle_web_search(bridge: &HostBridge, params: &Value) -> Va
     if query.is_empty() {
         return error_reply("web.search requires query");
     }
-    let Some(config) = bridge.local_web_search.as_ref() else {
-        return error_reply("local web_search provider is not configured for this turn");
-    };
-    let mut input = params.clone();
-    input["query"] = json!(query.clone());
-    input[LOCAL_WEB_SEARCH_CONFIG_KEY] = config.clone();
+    let mcp = bridge.web_routes.search.as_ref();
+    if mcp.is_none() && bridge.local_web_search.is_none() {
+        return error_reply("MCP or local web search is not configured for this turn. Check /web.");
+    }
+    let mut input = json!({"query": query});
     let tool_call_id = synthetic_tool_call_id("web_search");
+    let mut summary = format!("Web search: {query}");
+    if let Some(route) = mcp {
+        if !route.is_builtin() && plan_mode_denies_mutation(bridge) {
+            return deny_plan_mutation("mcp.call");
+        }
+        if let Err(error) = &route.manager {
+            return error_reply(error.clone());
+        }
+        input["server"] = json!(route.server_id.0);
+        input["tool"] = json!(route.tool_name);
+        summary = format!(
+            "Web search via {}/{}: {query}",
+            route.server_id.0, route.tool_name
+        );
+    }
     let req = permission_request_with_host(
         bridge,
         tool_call_id.clone(),
         "web_search",
         input.clone(),
         ResourceKind::Network,
-        format!("Web search: {query}"),
+        summary,
         None,
         Some("web_search".to_string()),
-        Some(query),
+        Some(query.clone()),
     );
     if let Err(reply) = check_or_error(bridge, req).await {
         return reply;
     }
+    if let Some(route) = mcp {
+        if !route.is_builtin() {
+            // A search binding does not grant the underlying user MCP tool
+            // permissions it would not have if called directly.
+            let qualified = format!("{}/{}", route.server_id.0, route.tool_name);
+            let req = permission_request(
+                bridge,
+                synthetic_tool_call_id("mcp"),
+                "mcp.call",
+                json!({"server": route.server_id.0, "tool": route.tool_name, "arguments": {"query": query}}),
+                ResourceKind::Custom("mcp.call".into()),
+                format!("Call MCP search tool {qualified}"),
+                None,
+                Some(qualified),
+            );
+            if let Err(reply) = check_or_error(bridge, req).await {
+                return reply;
+            }
+        }
+        return match super::web_search_mcp::invoke(route, &query).await {
+            Ok(result) => json!({"status": "ok", "result": result}),
+            Err(error) => error_reply(error),
+        };
+    }
+    // Add legacy credentials only after approval, never to its visible payload.
+    input[LOCAL_WEB_SEARCH_CONFIG_KEY] = bridge
+        .local_web_search
+        .clone()
+        .expect("local search was selected");
     let ctx = tool_context_from_bridge(bridge, tool_call_id);
     map_tool_outcome(WebSearchHandler::new().handle(ctx, input, None).await)
 }
@@ -632,6 +679,21 @@ pub(crate) async fn handle_web_fetch(bridge: &HostBridge, params: &Value) -> Val
     if url.is_empty() {
         return error_reply("web.fetch requires url");
     }
+    let mcp = match &bridge.web_routes.fetch {
+        WebFetchRoute::Unavailable(reason) => return error_reply(*reason),
+        WebFetchRoute::Mcp { server_id, manager } => Some((server_id, manager)),
+        WebFetchRoute::Direct => None,
+    };
+    if mcp.is_some() && !(url.starts_with("http://") || url.starts_with("https://")) {
+        return error_reply("URL must start with http:// or https://");
+    }
+    if mcp.is_some()
+        && params
+            .get("format")
+            .is_some_and(|format| format.as_str() != Some("markdown"))
+    {
+        return error_reply("Built-in MCP web fetch supports markdown format only.");
+    }
     let input = params.clone();
     let tool_call_id = synthetic_tool_call_id("webfetch");
     let host = host_from_url(&url);
@@ -644,10 +706,35 @@ pub(crate) async fn handle_web_fetch(bridge: &HostBridge, params: &Value) -> Val
         format!("Web fetch: {url}"),
         None,
         host,
-        Some(url),
+        Some(url.clone()),
     );
     if let Err(reply) = check_or_error(bridge, req).await {
         return reply;
+    }
+    if let Some((server_id, manager)) = mcp {
+        let manager = match manager {
+            Ok(manager) => manager,
+            Err(reason) => return error_reply(reason.clone()),
+        };
+        let timeout = std::time::Duration::from_secs(
+            params
+                .get("timeout")
+                .and_then(Value::as_u64)
+                .unwrap_or(10)
+                .clamp(1, 120),
+        );
+        let result = tokio::time::timeout(
+            timeout,
+            manager.invoke_tool(server_id, "web_fetch", json!({"url": url})),
+        )
+        .await;
+        return match result {
+            Ok(Ok(result)) if result.get("isError").and_then(Value::as_bool) != Some(true) => {
+                json!({"status": "ok", "result": result})
+            }
+            Ok(_) => error_reply("The selected built-in web fetch failed."),
+            Err(_) => error_reply("The selected built-in web fetch timed out."),
+        };
     }
     let ctx = tool_context_from_bridge(bridge, tool_call_id);
     map_tool_outcome(WebFetchHandler::new().handle(ctx, input, None).await)

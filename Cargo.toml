@@ -11,6 +11,7 @@ members = [
     "crates/windows-sandbox",
     "crates/tasks",
     "crates/mcp",
+    "crates/web-mcp",
     "crates/network-proxy",
     "crates/protocol",
     "crates/client",

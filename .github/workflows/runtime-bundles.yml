@@ -53,6 +53,7 @@ jobs:
         run: |
           mkdir -p fixture-bin
           printf 'backend checked by Rust CI and release builds\n' > fixture-bin/devo${{ matrix.ext }}
+          printf 'MCP companion checked by Rust CI and release builds\n' > fixture-bin/devo-web-mcp${{ matrix.ext }}
           printf 'ripgrep checked by release builds\n' > fixture-bin/rg${{ matrix.ext }}
           if [ "${{ matrix.ext }}" = ".exe" ]; then
             for helper in devo-windows-sandbox-setup devo-command-runner; do

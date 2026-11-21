@@ -619,12 +619,16 @@ pub async fn query(
                     system.push_str("\n\n");
                 }
                 system.push_str(&crate::tools::websearch_prompt::web_search_prompt());
-            } else if turn_config.web_search.is_local() {
+            } else if matches!(
+                turn_config.web_search,
+                devo_config::ResolvedWebSearchConfig::Local(_)
+                    | devo_config::ResolvedWebSearchConfig::Mcp { .. }
+            ) {
                 if !system.trim().is_empty() {
                     system.push_str("\n\n");
                 }
                 system.push_str(
-                    "Local web search is available through Python as `await rlm.web_search(query)`. Use it for current information when needed.",
+                    "Configured web search is available through Python as `await rlm.web_search(query)`. Use it for current information when needed.",
                 );
             }
             if turn_config.web_fetch.is_local() {
@@ -639,6 +643,16 @@ pub async fn query(
                     system.push_str("\n\n");
                 }
                 system.push_str("Provider-hosted web fetch is available to retrieve a specific URL when needed.");
+            } else if matches!(
+                turn_config.web_fetch,
+                devo_config::ResolvedWebFetchConfig::Mcp { .. }
+            ) {
+                if !system.trim().is_empty() {
+                    system.push_str("\n\n");
+                }
+                system.push_str(
+                    "Configured MCP web fetch is available through Python as `await rlm.web_fetch(url)`. Use it to retrieve a specific URL when needed.",
+                );
             }
             Some(system).filter(|system| !system.trim().is_empty())
         };

@@ -86,8 +86,18 @@ impl WebSearchConfig {
 pub enum WebFetchMode {
     Disabled,
     Provider,
+    Mcp,
     #[default]
     Local,
+}
+
+/// A supported built-in MCP supplier for web tools.
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize, Deserialize)]
+#[serde(rename_all = "snake_case")]
+pub enum BuiltinWebSupplier {
+    Tavily,
+    #[serde(rename = "deepseek")]
+    DeepSeek,
 }
 
 /// Configures the effective `web_fetch` capability.
@@ -95,11 +105,13 @@ pub enum WebFetchMode {
 pub struct WebFetchConfig {
     #[serde(default, skip_serializing_if = "is_default_web_fetch_mode")]
     pub mode: WebFetchMode,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub mcp_provider: Option<BuiltinWebSupplier>,
 }
 
 impl WebFetchConfig {
     pub fn is_default(&self) -> bool {
-        self.mode == WebFetchMode::Local
+        self.mode == WebFetchMode::Local && self.mcp_provider.is_none()
     }
 }
 
@@ -133,6 +145,10 @@ pub enum ResolvedWebSearchConfig {
     Disabled,
     Provider,
     Local(ResolvedLocalWebSearchConfig),
+    Mcp {
+        server_id: String,
+        tool_name: String,
+    },
 }
 
 impl ResolvedWebSearchConfig {
@@ -153,6 +169,9 @@ pub enum ResolvedWebFetchConfig {
     Provider,
     #[default]
     Local,
+    Mcp {
+        provider: BuiltinWebSupplier,
+    },
 }
 
 impl ResolvedWebFetchConfig {
@@ -200,6 +219,11 @@ pub fn resolve_web_fetch_config(
     match effective.mode {
         WebFetchMode::Disabled => ResolvedWebFetchConfig::Disabled,
         WebFetchMode::Provider => ResolvedWebFetchConfig::Provider,
+        WebFetchMode::Mcp => effective
+            .mcp_provider
+            .map_or(ResolvedWebFetchConfig::Disabled, |provider| {
+                ResolvedWebFetchConfig::Mcp { provider }
+            }),
         WebFetchMode::Local => ResolvedWebFetchConfig::Local,
     }
 }
@@ -409,6 +433,24 @@ mod tests {
         assert_eq!(
             resolve_web_fetch_config(&WebFetchConfig::default(), None, None),
             ResolvedWebFetchConfig::Local
+        );
+    }
+
+    #[test]
+    fn mcp_fetch_requires_an_explicit_supplier() {
+        let config: WebFetchConfig = toml::from_str("mode = 'mcp'").expect("MCP mode");
+        assert_eq!(
+            resolve_web_fetch_config(&config, None, None),
+            ResolvedWebFetchConfig::Disabled
+        );
+
+        let config: WebFetchConfig =
+            toml::from_str("mode = 'mcp'\nmcp_provider = 'deepseek'").expect("MCP supplier");
+        assert_eq!(
+            resolve_web_fetch_config(&config, None, None),
+            ResolvedWebFetchConfig::Mcp {
+                provider: BuiltinWebSupplier::DeepSeek
+            }
         );
     }
 

@@ -119,10 +119,9 @@ async def host_request(request_type: str, payload: dict[str, Any] | None = None)
 
 
 async def web_search(query: str) -> dict[str, Any]:
-    """Use the configured local web-search provider through the Rust host.
+    """Use the configured MCP or legacy local web-search backend through the host.
 
-    Provider-hosted web search is attached to the outer model request instead;
-    this helper is for turns configured with local search.
+    Provider-hosted web search is attached to the outer model request instead.
     """
     if not isinstance(query, str) or not query.strip():
         raise ValueError("query must be a non-empty string")

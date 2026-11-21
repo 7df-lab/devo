@@ -255,6 +255,7 @@ pub fn native_session_from_record(
             auto_refine_enabled: None,
             auto_refine_turn_interval: None,
             python_cell_first_wait_ms: None,
+            web_search: None,
         },
         git_info,
         preview: record.first_user_message.clone().unwrap_or_default(),

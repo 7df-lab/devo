@@ -16,7 +16,16 @@
 
 默认值是 **search = provider，fetch = local**。对于 Ollama、LM Studio、vLLM 等只有兼容推理 API 的接入点，通常应显式配置本地搜索，不要把“支持 function calling”理解为“服务端自带联网搜索”。本地搜索中的“本地”指调用代码在 Devo 一侧，**仍会联网发送查询**。
 
-`disabled` 是功能配置，不是断网或安全隔离开关。独立 MCP、技能或其他获准的联网路径不随之关闭；当前 RLM 的 `web.fetch` host bridge 也没有检查 fetch mode，仍执行自身的权限检查。需要禁止联网时，应使用权限和网络隔离策略，不能只依赖这些 mode。
+`disabled` 是功能配置，不是断网或安全隔离开关。独立 MCP、技能或其他获准的联网路径不随之关闭。RLM 的 `web.fetch` 检查该轮的 fetch mode；选择 provider 或 disabled 时不会偷偷执行 Direct HTTP。需要禁止联网时，应使用权限和网络隔离策略，不能只依赖这些 mode。
+
+### 终端：选择本会话的搜索后端
+
+在 TUI 输入 `/web`，用方向键选中搜索后端并按 Enter 保存；Esc 不保存。Fetch 只显示当前设置，不在此处编辑。**Follow defaults** 使用当前模型、provider 和应用的默认设置；显式选择 **Model provider**、MCP 工具或 **Off** 会保存在当前会话，重启或切换模型后仍保留，从下一轮起生效。失败不会自动换后端。
+
+- **Tavily / DeepSeek · Built-in MCP**：需要自己的 API key，保存在用户级 `auth.json` 中相应的 `tavily` 或 `deepseek` 条目。与 `devo` 同目录的 `devo-web-mcp` 独立进程只在实际调用时启动，从现有凭据存储读取选定供应商的 key；不需要新环境变量。两个供应商均使用 `web_search` 与 `web_fetch`。DeepSeek 的搜索和抓取可能另外计费。
+- 在应用、provider 或模型的 `web_fetch` 配置中设置 `mode = "mcp"` 和 `mcp_provider = "deepseek"`（DeepSeek）或 `"tavily"`，即可使用内置 MCP 抓取。MCP 抓取只支持 Markdown；未配置供应商或调用错误时不会回退到 Direct HTTP。
+- **自定义 MCP**：先用现有 MCP 设置连接服务器。`/web` 中可选择能只接收一个字符串 `query` 的工具。保存的是服务器 ID 和工具原始名称，而不是显示名称。
+- 从源码构建 TUI 和内置 MCP 时，运行 `cargo build -p devo-cli -p devo-web-mcp --bins`。
 
 ## 2. 名称与调用链
 

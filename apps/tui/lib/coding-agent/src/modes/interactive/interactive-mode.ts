@@ -261,6 +261,7 @@ import {
 	type PermissionProfile,
 } from "./components/permission-selector.js";
 import { ThinkingSelectorComponent } from "./components/thinking-selector.js";
+import { WebSearchSelectorComponent } from "./components/web-search-selector.js";
 import { ThemeSelectorComponent } from "./components/theme-selector.js";
 import {
 	selectLatestToolExpandHint,
@@ -9779,12 +9780,45 @@ export class InteractiveMode {
 		try {
 			const status = await connection.getWebStatus();
 			if (!status || !isCurrent()) return;
-			const formatRow = (label: string, value: { backend: string; note?: string }) =>
-				`${theme.fg("dim", `${label}:`)} ${value.backend}${value.note ? ` — ${value.note}` : ""}`;
-			this.chatContainer.addChild(
-				new Text(`${formatRow("Search", status.search)}\n${formatRow("Fetch", status.fetch)}`, 1, 0),
-			);
-			this.ui.requestRender();
+			const searchChoices = status.searchChoices;
+			if (!searchChoices?.length) {
+				const formatRow = (label: string, value: { backend: string; note?: string }) =>
+					`${theme.fg("dim", `${label}:`)} ${value.backend}${value.note ? ` — ${value.note}` : ""}`;
+				this.chatContainer.addChild(
+					new Text(`${formatRow("Search", status.search)}\n${formatRow("Fetch", status.fetch)}`, 1, 0),
+				);
+				this.ui.requestRender();
+				return;
+			}
+
+			this.showSelector((done) => {
+				let open = true;
+				let busy = false;
+				const close = () => {
+					open = false;
+					done();
+				};
+				const selector = new WebSearchSelectorComponent(
+					status.searchChoice,
+					searchChoices,
+					status,
+					(choice) => {
+						if (busy || !isCurrent()) return;
+						busy = true;
+						void connection.setWebSearchChoice(choice).then(() => {
+							if (!isCurrent() || !open) return;
+							close();
+							this.showStatus("Web search updated for the next turn.");
+						}).catch((error: unknown) => {
+							if (isCurrent() && open) this.showError(error instanceof Error ? error.message : String(error));
+						}).finally(() => {
+							busy = false;
+						});
+					},
+					close,
+				);
+				return { component: selector, focus: selector.getSelectList() };
+			});
 		} catch {
 			if (isCurrent()) this.showError("Couldn't read web settings.");
 		}

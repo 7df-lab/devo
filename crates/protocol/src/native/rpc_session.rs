@@ -22,7 +22,7 @@ use super::model::PermissionProfile;
 use super::page::Page;
 use super::page::PageParams;
 use super::patch::PatchField;
-use super::session::Session;
+use super::session::{Session, WebSearchChoice};
 
 // ── session/interrupt ──
 
@@ -295,6 +295,9 @@ pub struct SessionSettingsPatch {
     /// First foreground wait (ms) before Python cell wait-policy.
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub python_cell_first_wait_ms: Option<u64>,
+    /// Explicit backend for future turns; `inherit` clears the override.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub web_search: Option<super::session::WebSearchChoice>,
 }
 
 #[derive(Debug, Clone, PartialEq, Serialize, Deserialize, JsonSchema, TS)]
@@ -667,4 +670,16 @@ pub struct WebBackendStatus {
 pub struct SessionWebStatusReadResult {
     pub search: WebBackendStatus,
     pub fetch: WebBackendStatus,
+    pub search_choice: WebSearchChoice,
+    pub search_choices: Vec<WebSearchPickerEntry>,
+}
+
+#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize, JsonSchema, TS)]
+#[serde(rename_all = "camelCase")]
+pub struct WebSearchPickerEntry {
+    pub label: String,
+    pub choice: WebSearchChoice,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    #[ts(optional)]
+    pub note: Option<String>,
 }

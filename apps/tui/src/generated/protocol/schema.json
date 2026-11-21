@@ -7562,6 +7562,17 @@
                 "string",
                 "null"
               ]
+            },
+            "webSearch": {
+              "description": "Explicit search backend for future turns; absent means inherit defaults.",
+              "anyOf": [
+                {
+                  "$ref": "#/definitions/WebSearchChoice"
+                },
+                {
+                  "type": "null"
+                }
+              ]
             }
           }
         },
@@ -8205,6 +8216,75 @@
               "type": "string"
             }
           }
+        },
+        "WebSearchChoice": {
+          "description": "Session-level web-search backend selection. `Inherit` clears the explicit session override so provider defaults apply again.",
+          "oneOf": [
+            {
+              "type": "object",
+              "required": [
+                "kind"
+              ],
+              "properties": {
+                "kind": {
+                  "type": "string",
+                  "enum": [
+                    "inherit"
+                  ]
+                }
+              }
+            },
+            {
+              "type": "object",
+              "required": [
+                "kind"
+              ],
+              "properties": {
+                "kind": {
+                  "type": "string",
+                  "enum": [
+                    "provider"
+                  ]
+                }
+              }
+            },
+            {
+              "type": "object",
+              "required": [
+                "kind"
+              ],
+              "properties": {
+                "kind": {
+                  "type": "string",
+                  "enum": [
+                    "off"
+                  ]
+                }
+              }
+            },
+            {
+              "type": "object",
+              "required": [
+                "kind",
+                "server_id",
+                "tool_name"
+              ],
+              "properties": {
+                "kind": {
+                  "type": "string",
+                  "enum": [
+                    "mcp"
+                  ]
+                },
+                "server_id": {
+                  "type": "string"
+                },
+                "tool_name": {
+                  "type": "string"
+                }
+              }
+            }
+          ]
         },
         "WorkspaceChangeCoverage": {
           "type": "string",
@@ -12486,6 +12566,17 @@
                 "string",
                 "null"
               ]
+            },
+            "webSearch": {
+              "description": "Explicit search backend for future turns; absent means inherit defaults.",
+              "anyOf": [
+                {
+                  "$ref": "#/definitions/WebSearchChoice"
+                },
+                {
+                  "type": "null"
+                }
+              ]
             }
           }
         },
@@ -13129,6 +13220,75 @@
               "type": "string"
             }
           }
+        },
+        "WebSearchChoice": {
+          "description": "Session-level web-search backend selection. `Inherit` clears the explicit session override so provider defaults apply again.",
+          "oneOf": [
+            {
+              "type": "object",
+              "required": [
+                "kind"
+              ],
+              "properties": {
+                "kind": {
+                  "type": "string",
+                  "enum": [
+                    "inherit"
+                  ]
+                }
+              }
+            },
+            {
+              "type": "object",
+              "required": [
+                "kind"
+              ],
+              "properties": {
+                "kind": {
+                  "type": "string",
+                  "enum": [
+                    "provider"
+                  ]
+                }
+              }
+            },
+            {
+              "type": "object",
+              "required": [
+                "kind"
+              ],
+              "properties": {
+                "kind": {
+                  "type": "string",
+                  "enum": [
+                    "off"
+                  ]
+                }
+              }
+            },
+            {
+              "type": "object",
+              "required": [
+                "kind",
+                "server_id",
+                "tool_name"
+              ],
+              "properties": {
+                "kind": {
+                  "type": "string",
+                  "enum": [
+                    "mcp"
+                  ]
+                },
+                "server_id": {
+                  "type": "string"
+                },
+                "tool_name": {
+                  "type": "string"
+                }
+              }
+            }
+          ]
         },
         "WorkspaceChangeCoverage": {
           "type": "string",
@@ -17173,6 +17333,17 @@
                 "string",
                 "null"
               ]
+            },
+            "webSearch": {
+              "description": "Explicit search backend for future turns; absent means inherit defaults.",
+              "anyOf": [
+                {
+                  "$ref": "#/definitions/WebSearchChoice"
+                },
+                {
+                  "type": "null"
+                }
+              ]
             }
           }
         },
@@ -17816,6 +17987,75 @@
               "type": "string"
             }
           }
+        },
+        "WebSearchChoice": {
+          "description": "Session-level web-search backend selection. `Inherit` clears the explicit session override so provider defaults apply again.",
+          "oneOf": [
+            {
+              "type": "object",
+              "required": [
+                "kind"
+              ],
+              "properties": {
+                "kind": {
+                  "type": "string",
+                  "enum": [
+                    "inherit"
+                  ]
+                }
+              }
+            },
+            {
+              "type": "object",
+              "required": [
+                "kind"
+              ],
+              "properties": {
+                "kind": {
+                  "type": "string",
+                  "enum": [
+                    "provider"
+                  ]
+                }
+              }
+            },
+            {
+              "type": "object",
+              "required": [
+                "kind"
+              ],
+              "properties": {
+                "kind": {
+                  "type": "string",
+                  "enum": [
+                    "off"
+                  ]
+                }
+              }
+            },
+            {
+              "type": "object",
+              "required": [
+                "kind",
+                "server_id",
+                "tool_name"
+              ],
+              "properties": {
+                "kind": {
+                  "type": "string",
+                  "enum": [
+                    "mcp"
+                  ]
+                },
+                "server_id": {
+                  "type": "string"
+                },
+                "tool_name": {
+                  "type": "string"
+                }
+              }
+            }
+          ]
         },
         "WorkspaceChangeCoverage": {
           "type": "string",
@@ -20961,6 +21201,17 @@
                 "string",
                 "null"
               ]
+            },
+            "webSearch": {
+              "description": "Explicit search backend for future turns; absent means inherit defaults.",
+              "anyOf": [
+                {
+                  "$ref": "#/definitions/WebSearchChoice"
+                },
+                {
+                  "type": "null"
+                }
+              ]
             }
           }
         },
@@ -21604,6 +21855,75 @@
               "type": "string"
             }
           }
+        },
+        "WebSearchChoice": {
+          "description": "Session-level web-search backend selection. `Inherit` clears the explicit session override so provider defaults apply again.",
+          "oneOf": [
+            {
+              "type": "object",
+              "required": [
+                "kind"
+              ],
+              "properties": {
+                "kind": {
+                  "type": "string",
+                  "enum": [
+                    "inherit"
+                  ]
+                }
+              }
+            },
+            {
+              "type": "object",
+              "required": [
+                "kind"
+              ],
+              "properties": {
+                "kind": {
+                  "type": "string",
+                  "enum": [
+                    "provider"
+                  ]
+                }
+              }
+            },
+            {
+              "type": "object",
+              "required": [
+                "kind"
+              ],
+              "properties": {
+                "kind": {
+                  "type": "string",
+                  "enum": [
+                    "off"
+                  ]
+                }
+              }
+            },
+            {
+              "type": "object",
+              "required": [
+                "kind",
+                "server_id",
+                "tool_name"
+              ],
+              "properties": {
+                "kind": {
+                  "type": "string",
+                  "enum": [
+                    "mcp"
+                  ]
+                },
+                "server_id": {
+                  "type": "string"
+                },
+                "tool_name": {
+                  "type": "string"
+                }
+              }
+            }
+          ]
         },
         "WorkspaceChangeCoverage": {
           "type": "string",
@@ -24181,6 +24501,17 @@
                 "string",
                 "null"
               ]
+            },
+            "webSearch": {
+              "description": "Explicit search backend for future turns; absent means inherit defaults.",
+              "anyOf": [
+                {
+                  "$ref": "#/definitions/WebSearchChoice"
+                },
+                {
+                  "type": "null"
+                }
+              ]
             }
           }
         },
@@ -24824,6 +25155,75 @@
               "type": "string"
             }
           }
+        },
+        "WebSearchChoice": {
+          "description": "Session-level web-search backend selection. `Inherit` clears the explicit session override so provider defaults apply again.",
+          "oneOf": [
+            {
+              "type": "object",
+              "required": [
+                "kind"
+              ],
+              "properties": {
+                "kind": {
+                  "type": "string",
+                  "enum": [
+                    "inherit"
+                  ]
+                }
+              }
+            },
+            {
+              "type": "object",
+              "required": [
+                "kind"
+              ],
+              "properties": {
+                "kind": {
+                  "type": "string",
+                  "enum": [
+                    "provider"
+                  ]
+                }
+              }
+            },
+            {
+              "type": "object",
+              "required": [
+                "kind"
+              ],
+              "properties": {
+                "kind": {
+                  "type": "string",
+                  "enum": [
+                    "off"
+                  ]
+                }
+              }
+            },
+            {
+              "type": "object",
+              "required": [
+                "kind",
+                "server_id",
+                "tool_name"
+              ],
+              "properties": {
+                "kind": {
+                  "type": "string",
+                  "enum": [
+                    "mcp"
+                  ]
+                },
+                "server_id": {
+                  "type": "string"
+                },
+                "tool_name": {
+                  "type": "string"
+                }
+              }
+            }
+          ]
         },
         "WorkspaceChangeCoverage": {
           "type": "string",
@@ -27664,6 +28064,17 @@
                 "string",
                 "null"
               ]
+            },
+            "webSearch": {
+              "description": "Explicit search backend for future turns; absent means inherit defaults.",
+              "anyOf": [
+                {
+                  "$ref": "#/definitions/WebSearchChoice"
+                },
+                {
+                  "type": "null"
+                }
+              ]
             }
           }
         },
@@ -28307,6 +28718,75 @@
               "type": "string"
             }
           }
+        },
+        "WebSearchChoice": {
+          "description": "Session-level web-search backend selection. `Inherit` clears the explicit session override so provider defaults apply again.",
+          "oneOf": [
+            {
+              "type": "object",
+              "required": [
+                "kind"
+              ],
+              "properties": {
+                "kind": {
+                  "type": "string",
+                  "enum": [
+                    "inherit"
+                  ]
+                }
+              }
+            },
+            {
+              "type": "object",
+              "required": [
+                "kind"
+              ],
+              "properties": {
+                "kind": {
+                  "type": "string",
+                  "enum": [
+                    "provider"
+                  ]
+                }
+              }
+            },
+            {
+              "type": "object",
+              "required": [
+                "kind"
+              ],
+              "properties": {
+                "kind": {
+                  "type": "string",
+                  "enum": [
+                    "off"
+                  ]
+                }
+              }
+            },
+            {
+              "type": "object",
+              "required": [
+                "kind",
+                "server_id",
+                "tool_name"
+              ],
+              "properties": {
+                "kind": {
+                  "type": "string",
+                  "enum": [
+                    "mcp"
+                  ]
+                },
+                "server_id": {
+                  "type": "string"
+                },
+                "tool_name": {
+                  "type": "string"
+                }
+              }
+            }
+          ]
         },
         "WorkspaceChangeCoverage": {
           "type": "string",
@@ -30870,6 +31350,17 @@
                 "string",
                 "null"
               ]
+            },
+            "webSearch": {
+              "description": "Explicit search backend for future turns; absent means inherit defaults.",
+              "anyOf": [
+                {
+                  "$ref": "#/definitions/WebSearchChoice"
+                },
+                {
+                  "type": "null"
+                }
+              ]
             }
           }
         },
@@ -31513,6 +32004,75 @@
               "type": "string"
             }
           }
+        },
+        "WebSearchChoice": {
+          "description": "Session-level web-search backend selection. `Inherit` clears the explicit session override so provider defaults apply again.",
+          "oneOf": [
+            {
+              "type": "object",
+              "required": [
+                "kind"
+              ],
+              "properties": {
+                "kind": {
+                  "type": "string",
+                  "enum": [
+                    "inherit"
+                  ]
+                }
+              }
+            },
+            {
+              "type": "object",
+              "required": [
+                "kind"
+              ],
+              "properties": {
+                "kind": {
+                  "type": "string",
+                  "enum": [
+                    "provider"
+                  ]
+                }
+              }
+            },
+            {
+              "type": "object",
+              "required": [
+                "kind"
+              ],
+              "properties": {
+                "kind": {
+                  "type": "string",
+                  "enum": [
+                    "off"
+                  ]
+                }
+              }
+            },
+            {
+              "type": "object",
+              "required": [
+                "kind",
+                "server_id",
+                "tool_name"
+              ],
+              "properties": {
+                "kind": {
+                  "type": "string",
+                  "enum": [
+                    "mcp"
+                  ]
+                },
+                "server_id": {
+                  "type": "string"
+                },
+                "tool_name": {
+                  "type": "string"
+                }
+              }
+            }
+          ]
         },
         "WorkspaceChangeCoverage": {
           "type": "string",
@@ -34080,6 +34640,17 @@
                 "string",
                 "null"
               ]
+            },
+            "webSearch": {
+              "description": "Explicit search backend for future turns; absent means inherit defaults.",
+              "anyOf": [
+                {
+                  "$ref": "#/definitions/WebSearchChoice"
+                },
+                {
+                  "type": "null"
+                }
+              ]
             }
           }
         },
@@ -34723,6 +35294,75 @@
               "type": "string"
             }
           }
+        },
+        "WebSearchChoice": {
+          "description": "Session-level web-search backend selection. `Inherit` clears the explicit session override so provider defaults apply again.",
+          "oneOf": [
+            {
+              "type": "object",
+              "required": [
+                "kind"
+              ],
+              "properties": {
+                "kind": {
+                  "type": "string",
+                  "enum": [
+                    "inherit"
+                  ]
+                }
+              }
+            },
+            {
+              "type": "object",
+              "required": [
+                "kind"
+              ],
+              "properties": {
+                "kind": {
+                  "type": "string",
+                  "enum": [
+                    "provider"
+                  ]
+                }
+              }
+            },
+            {
+              "type": "object",
+              "required": [
+                "kind"
+              ],
+              "properties": {
+                "kind": {
+                  "type": "string",
+                  "enum": [
+                    "off"
+                  ]
+                }
+              }
+            },
+            {
+              "type": "object",
+              "required": [
+                "kind",
+                "server_id",
+                "tool_name"
+              ],
+              "properties": {
+                "kind": {
+                  "type": "string",
+                  "enum": [
+                    "mcp"
+                  ]
+                },
+                "server_id": {
+                  "type": "string"
+                },
+                "tool_name": {
+                  "type": "string"
+                }
+              }
+            }
+          ]
         },
         "WorkspaceChangeCoverage": {
           "type": "string",
@@ -37384,6 +38024,17 @@
                 "string",
                 "null"
               ]
+            },
+            "webSearch": {
+              "description": "Explicit search backend for future turns; absent means inherit defaults.",
+              "anyOf": [
+                {
+                  "$ref": "#/definitions/WebSearchChoice"
+                },
+                {
+                  "type": "null"
+                }
+              ]
             }
           }
         },
@@ -38027,6 +38678,75 @@
               "type": "string"
             }
           }
+        },
+        "WebSearchChoice": {
+          "description": "Session-level web-search backend selection. `Inherit` clears the explicit session override so provider defaults apply again.",
+          "oneOf": [
+            {
+              "type": "object",
+              "required": [
+                "kind"
+              ],
+              "properties": {
+                "kind": {
+                  "type": "string",
+                  "enum": [
+                    "inherit"
+                  ]
+                }
+              }
+            },
+            {
+              "type": "object",
+              "required": [
+                "kind"
+              ],
+              "properties": {
+                "kind": {
+                  "type": "string",
+                  "enum": [
+                    "provider"
+                  ]
+                }
+              }
+            },
+            {
+              "type": "object",
+              "required": [
+                "kind"
+              ],
+              "properties": {
+                "kind": {
+                  "type": "string",
+                  "enum": [
+                    "off"
+                  ]
+                }
+              }
+            },
+            {
+              "type": "object",
+              "required": [
+                "kind",
+                "server_id",
+                "tool_name"
+              ],
+              "properties": {
+                "kind": {
+                  "type": "string",
+                  "enum": [
+                    "mcp"
+                  ]
+                },
+                "server_id": {
+                  "type": "string"
+                },
+                "tool_name": {
+                  "type": "string"
+                }
+              }
+            }
+          ]
         },
         "WorkspaceChangeCoverage": {
           "type": "string",
@@ -40594,6 +41314,17 @@
                 "string",
                 "null"
               ]
+            },
+            "webSearch": {
+              "description": "Explicit search backend for future turns; absent means inherit defaults.",
+              "anyOf": [
+                {
+                  "$ref": "#/definitions/WebSearchChoice"
+                },
+                {
+                  "type": "null"
+                }
+              ]
             }
           }
         },
@@ -41237,6 +41968,75 @@
               "type": "string"
             }
           }
+        },
+        "WebSearchChoice": {
+          "description": "Session-level web-search backend selection. `Inherit` clears the explicit session override so provider defaults apply again.",
+          "oneOf": [
+            {
+              "type": "object",
+              "required": [
+                "kind"
+              ],
+              "properties": {
+                "kind": {
+                  "type": "string",
+                  "enum": [
+                    "inherit"
+                  ]
+                }
+              }
+            },
+            {
+              "type": "object",
+              "required": [
+                "kind"
+              ],
+              "properties": {
+                "kind": {
+                  "type": "string",
+                  "enum": [
+                    "provider"
+                  ]
+                }
+              }
+            },
+            {
+              "type": "object",
+              "required": [
+                "kind"
+              ],
+              "properties": {
+                "kind": {
+                  "type": "string",
+                  "enum": [
+                    "off"
+                  ]
+                }
+              }
+            },
+            {
+              "type": "object",
+              "required": [
+                "kind",
+                "server_id",
+                "tool_name"
+              ],
+              "properties": {
+                "kind": {
+                  "type": "string",
+                  "enum": [
+                    "mcp"
+                  ]
+                },
+                "server_id": {
+                  "type": "string"
+                },
+                "tool_name": {
+                  "type": "string"
+                }
+              }
+            }
+          ]
         },
         "WorkspaceChangeCoverage": {
           "type": "string",
@@ -44011,6 +44811,17 @@
                 "string",
                 "null"
               ]
+            },
+            "webSearch": {
+              "description": "Explicit search backend for future turns; absent means inherit defaults.",
+              "anyOf": [
+                {
+                  "$ref": "#/definitions/WebSearchChoice"
+                },
+                {
+                  "type": "null"
+                }
+              ]
             }
           }
         },
@@ -44654,6 +45465,75 @@
               "type": "string"
             }
           }
+        },
+        "WebSearchChoice": {
+          "description": "Session-level web-search backend selection. `Inherit` clears the explicit session override so provider defaults apply again.",
+          "oneOf": [
+            {
+              "type": "object",
+              "required": [
+                "kind"
+              ],
+              "properties": {
+                "kind": {
+                  "type": "string",
+                  "enum": [
+                    "inherit"
+                  ]
+                }
+              }
+            },
+            {
+              "type": "object",
+              "required": [
+                "kind"
+              ],
+              "properties": {
+                "kind": {
+                  "type": "string",
+                  "enum": [
+                    "provider"
+                  ]
+                }
+              }
+            },
+            {
+              "type": "object",
+              "required": [
+                "kind"
+              ],
+              "properties": {
+                "kind": {
+                  "type": "string",
+                  "enum": [
+                    "off"
+                  ]
+                }
+              }
+            },
+            {
+              "type": "object",
+              "required": [
+                "kind",
+                "server_id",
+                "tool_name"
+              ],
+              "properties": {
+                "kind": {
+                  "type": "string",
+                  "enum": [
+                    "mcp"
+                  ]
+                },
+                "server_id": {
+                  "type": "string"
+                },
+                "tool_name": {
+                  "type": "string"
+                }
+              }
+            }
+          ]
         },
         "WorkspaceChangeCoverage": {
           "type": "string",
@@ -48573,6 +49453,17 @@
                 "string",
                 "null"
               ]
+            },
+            "webSearch": {
+              "description": "Explicit search backend for future turns; absent means inherit defaults.",
+              "anyOf": [
+                {
+                  "$ref": "#/definitions/WebSearchChoice"
+                },
+                {
+                  "type": "null"
+                }
+              ]
             }
           }
         },
@@ -49216,6 +50107,75 @@
               "type": "string"
             }
           }
+        },
+        "WebSearchChoice": {
+          "description": "Session-level web-search backend selection. `Inherit` clears the explicit session override so provider defaults apply again.",
+          "oneOf": [
+            {
+              "type": "object",
+              "required": [
+                "kind"
+              ],
+              "properties": {
+                "kind": {
+                  "type": "string",
+                  "enum": [
+                    "inherit"
+                  ]
+                }
+              }
+            },
+            {
+              "type": "object",
+              "required": [
+                "kind"
+              ],
+              "properties": {
+                "kind": {
+                  "type": "string",
+                  "enum": [
+                    "provider"
+                  ]
+                }
+              }
+            },
+            {
+              "type": "object",
+              "required": [
+                "kind"
+              ],
+              "properties": {
+                "kind": {
+                  "type": "string",
+                  "enum": [
+                    "off"
+                  ]
+                }
+              }
+            },
+            {
+              "type": "object",
+              "required": [
+                "kind",
+                "server_id",
+                "tool_name"
+              ],
+              "properties": {
+                "kind": {
+                  "type": "string",
+                  "enum": [
+                    "mcp"
+                  ]
+                },
+                "server_id": {
+                  "type": "string"
+                },
+                "tool_name": {
+                  "type": "string"
+                }
+              }
+            }
+          ]
         },
         "WorkspaceChangeCoverage": {
           "type": "string",
@@ -51767,6 +52727,17 @@
                 "string",
                 "null"
               ]
+            },
+            "webSearch": {
+              "description": "Explicit search backend for future turns; absent means inherit defaults.",
+              "anyOf": [
+                {
+                  "$ref": "#/definitions/WebSearchChoice"
+                },
+                {
+                  "type": "null"
+                }
+              ]
             }
           }
         },
@@ -52410,6 +53381,75 @@
               "type": "string"
             }
           }
+        },
+        "WebSearchChoice": {
+          "description": "Session-level web-search backend selection. `Inherit` clears the explicit session override so provider defaults apply again.",
+          "oneOf": [
+            {
+              "type": "object",
+              "required": [
+                "kind"
+              ],
+              "properties": {
+                "kind": {
+                  "type": "string",
+                  "enum": [
+                    "inherit"
+                  ]
+                }
+              }
+            },
+            {
+              "type": "object",
+              "required": [
+                "kind"
+              ],
+              "properties": {
+                "kind": {
+                  "type": "string",
+                  "enum": [
+                    "provider"
+                  ]
+                }
+              }
+            },
+            {
+              "type": "object",
+              "required": [
+                "kind"
+              ],
+              "properties": {
+                "kind": {
+                  "type": "string",
+                  "enum": [
+                    "off"
+                  ]
+                }
+              }
+            },
+            {
+              "type": "object",
+              "required": [
+                "kind",
+                "server_id",
+                "tool_name"
+              ],
+              "properties": {
+                "kind": {
+                  "type": "string",
+                  "enum": [
+                    "mcp"
+                  ]
+                },
+                "server_id": {
+                  "type": "string"
+                },
+                "tool_name": {
+                  "type": "string"
+                }
+              }
+            }
+          ]
         },
         "WorkspaceChangeCoverage": {
           "type": "string",
@@ -54969,6 +56009,17 @@
                 "string",
                 "null"
               ]
+            },
+            "webSearch": {
+              "description": "Explicit search backend for future turns; absent means inherit defaults.",
+              "anyOf": [
+                {
+                  "$ref": "#/definitions/WebSearchChoice"
+                },
+                {
+                  "type": "null"
+                }
+              ]
             }
           }
         },
@@ -55612,6 +56663,75 @@
               "type": "string"
             }
           }
+        },
+        "WebSearchChoice": {
+          "description": "Session-level web-search backend selection. `Inherit` clears the explicit session override so provider defaults apply again.",
+          "oneOf": [
+            {
+              "type": "object",
+              "required": [
+                "kind"
+              ],
+              "properties": {
+                "kind": {
+                  "type": "string",
+                  "enum": [
+                    "inherit"
+                  ]
+                }
+              }
+            },
+            {
+              "type": "object",
+              "required": [
+                "kind"
+              ],
+              "properties": {
+                "kind": {
+                  "type": "string",
+                  "enum": [
+                    "provider"
+                  ]
+                }
+              }
+            },
+            {
+              "type": "object",
+              "required": [
+                "kind"
+              ],
+              "properties": {
+                "kind": {
+                  "type": "string",
+                  "enum": [
+                    "off"
+                  ]
+                }
+              }
+            },
+            {
+              "type": "object",
+              "required": [
+                "kind",
+                "server_id",
+                "tool_name"
+              ],
+              "properties": {
+                "kind": {
+                  "type": "string",
+                  "enum": [
+                    "mcp"
+                  ]
+                },
+                "server_id": {
+                  "type": "string"
+                },
+                "tool_name": {
+                  "type": "string"
+                }
+              }
+            }
+          ]
         },
         "WorkspaceChangeCoverage": {
           "type": "string",
@@ -58163,6 +59283,17 @@
                 "string",
                 "null"
               ]
+            },
+            "webSearch": {
+              "description": "Explicit search backend for future turns; absent means inherit defaults.",
+              "anyOf": [
+                {
+                  "$ref": "#/definitions/WebSearchChoice"
+                },
+                {
+                  "type": "null"
+                }
+              ]
             }
           }
         },
@@ -58806,6 +59937,75 @@
               "type": "string"
             }
           }
+        },
+        "WebSearchChoice": {
+          "description": "Session-level web-search backend selection. `Inherit` clears the explicit session override so provider defaults apply again.",
+          "oneOf": [
+            {
+              "type": "object",
+              "required": [
+                "kind"
+              ],
+              "properties": {
+                "kind": {
+                  "type": "string",
+                  "enum": [
+                    "inherit"
+                  ]
+                }
+              }
+            },
+            {
+              "type": "object",
+              "required": [
+                "kind"
+              ],
+              "properties": {
+                "kind": {
+                  "type": "string",
+                  "enum": [
+                    "provider"
+                  ]
+                }
+              }
+            },
+            {
+              "type": "object",
+              "required": [
+                "kind"
+              ],
+              "properties": {
+                "kind": {
+                  "type": "string",
+                  "enum": [
+                    "off"
+                  ]
+                }
+              }
+            },
+            {
+              "type": "object",
+              "required": [
+                "kind",
+                "server_id",
+                "tool_name"
+              ],
+              "properties": {
+                "kind": {
+                  "type": "string",
+                  "enum": [
+                    "mcp"
+                  ]
+                },
+                "server_id": {
+                  "type": "string"
+                },
+                "tool_name": {
+                  "type": "string"
+                }
+              }
+            }
+          ]
         },
         "WorkspaceChangeCoverage": {
           "type": "string",
@@ -61357,6 +62557,17 @@
                 "string",
                 "null"
               ]
+            },
+            "webSearch": {
+              "description": "Explicit search backend for future turns; absent means inherit defaults.",
+              "anyOf": [
+                {
+                  "$ref": "#/definitions/WebSearchChoice"
+                },
+                {
+                  "type": "null"
+                }
+              ]
             }
           }
         },
@@ -62000,6 +63211,75 @@
               "type": "string"
             }
           }
+        },
+        "WebSearchChoice": {
+          "description": "Session-level web-search backend selection. `Inherit` clears the explicit session override so provider defaults apply again.",
+          "oneOf": [
+            {
+              "type": "object",
+              "required": [
+                "kind"
+              ],
+              "properties": {
+                "kind": {
+                  "type": "string",
+                  "enum": [
+                    "inherit"
+                  ]
+                }
+              }
+            },
+            {
+              "type": "object",
+              "required": [
+                "kind"
+              ],
+              "properties": {
+                "kind": {
+                  "type": "string",
+                  "enum": [
+                    "provider"
+                  ]
+                }
+              }
+            },
+            {
+              "type": "object",
+              "required": [
+                "kind"
+              ],
+              "properties": {
+                "kind": {
+                  "type": "string",
+                  "enum": [
+                    "off"
+                  ]
+                }
+              }
+            },
+            {
+              "type": "object",
+              "required": [
+                "kind",
+                "server_id",
+                "tool_name"
+              ],
+              "properties": {
+                "kind": {
+                  "type": "string",
+                  "enum": [
+                    "mcp"
+                  ]
+                },
+                "server_id": {
+                  "type": "string"
+                },
+                "tool_name": {
+                  "type": "string"
+                }
+              }
+            }
+          ]
         },
         "WorkspaceChangeCoverage": {
           "type": "string",
@@ -64559,6 +65839,17 @@
                 "string",
                 "null"
               ]
+            },
+            "webSearch": {
+              "description": "Explicit search backend for future turns; absent means inherit defaults.",
+              "anyOf": [
+                {
+                  "$ref": "#/definitions/WebSearchChoice"
+                },
+                {
+                  "type": "null"
+                }
+              ]
             }
           }
         },
@@ -65202,6 +66493,75 @@
               "type": "string"
             }
           }
+        },
+        "WebSearchChoice": {
+          "description": "Session-level web-search backend selection. `Inherit` clears the explicit session override so provider defaults apply again.",
+          "oneOf": [
+            {
+              "type": "object",
+              "required": [
+                "kind"
+              ],
+              "properties": {
+                "kind": {
+                  "type": "string",
+                  "enum": [
+                    "inherit"
+                  ]
+                }
+              }
+            },
+            {
+              "type": "object",
+              "required": [
+                "kind"
+              ],
+              "properties": {
+                "kind": {
+                  "type": "string",
+                  "enum": [
+                    "provider"
+                  ]
+                }
+              }
+            },
+            {
+              "type": "object",
+              "required": [
+                "kind"
+              ],
+              "properties": {
+                "kind": {
+                  "type": "string",
+                  "enum": [
+                    "off"
+                  ]
+                }
+              }
+            },
+            {
+              "type": "object",
+              "required": [
+                "kind",
+                "server_id",
+                "tool_name"
+              ],
+              "properties": {
+                "kind": {
+                  "type": "string",
+                  "enum": [
+                    "mcp"
+                  ]
+                },
+                "server_id": {
+                  "type": "string"
+                },
+                "tool_name": {
+                  "type": "string"
+                }
+              }
+            }
+          ]
         },
         "WorkspaceChangeCoverage": {
           "type": "string",
@@ -67753,6 +69113,17 @@
                 "string",
                 "null"
               ]
+            },
+            "webSearch": {
+              "description": "Explicit search backend for future turns; absent means inherit defaults.",
+              "anyOf": [
+                {
+                  "$ref": "#/definitions/WebSearchChoice"
+                },
+                {
+                  "type": "null"
+                }
+              ]
             }
           }
         },
@@ -68396,6 +69767,75 @@
               "type": "string"
             }
           }
+        },
+        "WebSearchChoice": {
+          "description": "Session-level web-search backend selection. `Inherit` clears the explicit session override so provider defaults apply again.",
+          "oneOf": [
+            {
+              "type": "object",
+              "required": [
+                "kind"
+              ],
+              "properties": {
+                "kind": {
+                  "type": "string",
+                  "enum": [
+                    "inherit"
+                  ]
+                }
+              }
+            },
+            {
+              "type": "object",
+              "required": [
+                "kind"
+              ],
+              "properties": {
+                "kind": {
+                  "type": "string",
+                  "enum": [
+                    "provider"
+                  ]
+                }
+              }
+            },
+            {
+              "type": "object",
+              "required": [
+                "kind"
+              ],
+              "properties": {
+                "kind": {
+                  "type": "string",
+                  "enum": [
+                    "off"
+                  ]
+                }
+              }
+            },
+            {
+              "type": "object",
+              "required": [
+                "kind",
+                "server_id",
+                "tool_name"
+              ],
+              "properties": {
+                "kind": {
+                  "type": "string",
+                  "enum": [
+                    "mcp"
+                  ]
+                },
+                "server_id": {
+                  "type": "string"
+                },
+                "tool_name": {
+                  "type": "string"
+                }
+              }
+            }
+          ]
         },
         "WorkspaceChangeCoverage": {
           "type": "string",
@@ -70962,6 +72402,17 @@
                 "string",
                 "null"
               ]
+            },
+            "webSearch": {
+              "description": "Explicit search backend for future turns; absent means inherit defaults.",
+              "anyOf": [
+                {
+                  "$ref": "#/definitions/WebSearchChoice"
+                },
+                {
+                  "type": "null"
+                }
+              ]
             }
           }
         },
@@ -71605,6 +73056,75 @@
               "type": "string"
             }
           }
+        },
+        "WebSearchChoice": {
+          "description": "Session-level web-search backend selection. `Inherit` clears the explicit session override so provider defaults apply again.",
+          "oneOf": [
+            {
+              "type": "object",
+              "required": [
+                "kind"
+              ],
+              "properties": {
+                "kind": {
+                  "type": "string",
+                  "enum": [
+                    "inherit"
+                  ]
+                }
+              }
+            },
+            {
+              "type": "object",
+              "required": [
+                "kind"
+              ],
+              "properties": {
+                "kind": {
+                  "type": "string",
+                  "enum": [
+                    "provider"
+                  ]
+                }
+              }
+            },
+            {
+              "type": "object",
+              "required": [
+                "kind"
+              ],
+              "properties": {
+                "kind": {
+                  "type": "string",
+                  "enum": [
+                    "off"
+                  ]
+                }
+              }
+            },
+            {
+              "type": "object",
+              "required": [
+                "kind",
+                "server_id",
+                "tool_name"
+              ],
+              "properties": {
+                "kind": {
+                  "type": "string",
+                  "enum": [
+                    "mcp"
+                  ]
+                },
+                "server_id": {
+                  "type": "string"
+                },
+                "tool_name": {
+                  "type": "string"
+                }
+              }
+            }
+          ]
         },
         "WorkspaceChangeCoverage": {
           "type": "string",
@@ -74164,6 +75684,17 @@
                 "string",
                 "null"
               ]
+            },
+            "webSearch": {
+              "description": "Explicit search backend for future turns; absent means inherit defaults.",
+              "anyOf": [
+                {
+                  "$ref": "#/definitions/WebSearchChoice"
+                },
+                {
+                  "type": "null"
+                }
+              ]
             }
           }
         },
@@ -74807,6 +76338,75 @@
               "type": "string"
             }
           }
+        },
+        "WebSearchChoice": {
+          "description": "Session-level web-search backend selection. `Inherit` clears the explicit session override so provider defaults apply again.",
+          "oneOf": [
+            {
+              "type": "object",
+              "required": [
+                "kind"
+              ],
+              "properties": {
+                "kind": {
+                  "type": "string",
+                  "enum": [
+                    "inherit"
+                  ]
+                }
+              }
+            },
+            {
+              "type": "object",
+              "required": [
+                "kind"
+              ],
+              "properties": {
+                "kind": {
+                  "type": "string",
+                  "enum": [
+                    "provider"
+                  ]
+                }
+              }
+            },
+            {
+              "type": "object",
+              "required": [
+                "kind"
+              ],
+              "properties": {
+                "kind": {
+                  "type": "string",
+                  "enum": [
+                    "off"
+                  ]
+                }
+              }
+            },
+            {
+              "type": "object",
+              "required": [
+                "kind",
+                "server_id",
+                "tool_name"
+              ],
+              "properties": {
+                "kind": {
+                  "type": "string",
+                  "enum": [
+                    "mcp"
+                  ]
+                },
+                "server_id": {
+                  "type": "string"
+                },
+                "tool_name": {
+                  "type": "string"
+                }
+              }
+            }
+          ]
         },
         "WorkspaceChangeCoverage": {
           "type": "string",
@@ -77798,6 +79398,17 @@
                 "string",
                 "null"
               ]
+            },
+            "webSearch": {
+              "description": "Explicit search backend for future turns; absent means inherit defaults.",
+              "anyOf": [
+                {
+                  "$ref": "#/definitions/WebSearchChoice"
+                },
+                {
+                  "type": "null"
+                }
+              ]
             }
           }
         },
@@ -78441,6 +80052,75 @@
               "type": "string"
             }
           }
+        },
+        "WebSearchChoice": {
+          "description": "Session-level web-search backend selection. `Inherit` clears the explicit session override so provider defaults apply again.",
+          "oneOf": [
+            {
+              "type": "object",
+              "required": [
+                "kind"
+              ],
+              "properties": {
+                "kind": {
+                  "type": "string",
+                  "enum": [
+                    "inherit"
+                  ]
+                }
+              }
+            },
+            {
+              "type": "object",
+              "required": [
+                "kind"
+              ],
+              "properties": {
+                "kind": {
+                  "type": "string",
+                  "enum": [
+                    "provider"
+                  ]
+                }
+              }
+            },
+            {
+              "type": "object",
+              "required": [
+                "kind"
+              ],
+              "properties": {
+                "kind": {
+                  "type": "string",
+                  "enum": [
+                    "off"
+                  ]
+                }
+              }
+            },
+            {
+              "type": "object",
+              "required": [
+                "kind",
+                "server_id",
+                "tool_name"
+              ],
+              "properties": {
+                "kind": {
+                  "type": "string",
+                  "enum": [
+                    "mcp"
+                  ]
+                },
+                "server_id": {
+                  "type": "string"
+                },
+                "tool_name": {
+                  "type": "string"
+                }
+              }
+            }
+          ]
         },
         "WorkspaceChangeCoverage": {
           "type": "string",
@@ -81873,6 +83553,17 @@
                 "string",
                 "null"
               ]
+            },
+            "webSearch": {
+              "description": "Explicit search backend for future turns; absent means inherit defaults.",
+              "anyOf": [
+                {
+                  "$ref": "#/definitions/WebSearchChoice"
+                },
+                {
+                  "type": "null"
+                }
+              ]
             }
           }
         },
@@ -82516,6 +84207,75 @@
               "type": "string"
             }
           }
+        },
+        "WebSearchChoice": {
+          "description": "Session-level web-search backend selection. `Inherit` clears the explicit session override so provider defaults apply again.",
+          "oneOf": [
+            {
+              "type": "object",
+              "required": [
+                "kind"
+              ],
+              "properties": {
+                "kind": {
+                  "type": "string",
+                  "enum": [
+                    "inherit"
+                  ]
+                }
+              }
+            },
+            {
+              "type": "object",
+              "required": [
+                "kind"
+              ],
+              "properties": {
+                "kind": {
+                  "type": "string",
+                  "enum": [
+                    "provider"
+                  ]
+                }
+              }
+            },
+            {
+              "type": "object",
+              "required": [
+                "kind"
+              ],
+              "properties": {
+                "kind": {
+                  "type": "string",
+                  "enum": [
+                    "off"
+                  ]
+                }
+              }
+            },
+            {
+              "type": "object",
+              "required": [
+                "kind",
+                "server_id",
+                "tool_name"
+              ],
+              "properties": {
+                "kind": {
+                  "type": "string",
+                  "enum": [
+                    "mcp"
+                  ]
+                },
+                "server_id": {
+                  "type": "string"
+                },
+                "tool_name": {
+                  "type": "string"
+                }
+              }
+            }
+          ]
         },
         "WorkspaceChangeCoverage": {
           "type": "string",
@@ -85124,6 +86884,17 @@
                 "string",
                 "null"
               ]
+            },
+            "webSearch": {
+              "description": "Explicit search backend for future turns; absent means inherit defaults.",
+              "anyOf": [
+                {
+                  "$ref": "#/definitions/WebSearchChoice"
+                },
+                {
+                  "type": "null"
+                }
+              ]
             }
           }
         },
@@ -85767,6 +87538,75 @@
               "type": "string"
             }
           }
+        },
+        "WebSearchChoice": {
+          "description": "Session-level web-search backend selection. `Inherit` clears the explicit session override so provider defaults apply again.",
+          "oneOf": [
+            {
+              "type": "object",
+              "required": [
+                "kind"
+              ],
+              "properties": {
+                "kind": {
+                  "type": "string",
+                  "enum": [
+                    "inherit"
+                  ]
+                }
+              }
+            },
+            {
+              "type": "object",
+              "required": [
+                "kind"
+              ],
+              "properties": {
+                "kind": {
+                  "type": "string",
+                  "enum": [
+                    "provider"
+                  ]
+                }
+              }
+            },
+            {
+              "type": "object",
+              "required": [
+                "kind"
+              ],
+              "properties": {
+                "kind": {
+                  "type": "string",
+                  "enum": [
+                    "off"
+                  ]
+                }
+              }
+            },
+            {
+              "type": "object",
+              "required": [
+                "kind",
+                "server_id",
+                "tool_name"
+              ],
+              "properties": {
+                "kind": {
+                  "type": "string",
+                  "enum": [
+                    "mcp"
+                  ]
+                },
+                "server_id": {
+                  "type": "string"
+                },
+                "tool_name": {
+                  "type": "string"
+                }
+              }
+            }
+          ]
         },
         "WorkspaceChangeCoverage": {
           "type": "string",
@@ -87899,6 +89739,17 @@
                 "string",
                 "null"
               ]
+            },
+            "webSearch": {
+              "description": "Explicit search backend for future turns; absent means inherit defaults.",
+              "anyOf": [
+                {
+                  "$ref": "#/definitions/WebSearchChoice"
+                },
+                {
+                  "type": "null"
+                }
+              ]
             }
           }
         },
@@ -88135,6 +89986,75 @@
               }
             }
           }
+        },
+        "WebSearchChoice": {
+          "description": "Session-level web-search backend selection. `Inherit` clears the explicit session override so provider defaults apply again.",
+          "oneOf": [
+            {
+              "type": "object",
+              "required": [
+                "kind"
+              ],
+              "properties": {
+                "kind": {
+                  "type": "string",
+                  "enum": [
+                    "inherit"
+                  ]
+                }
+              }
+            },
+            {
+              "type": "object",
+              "required": [
+                "kind"
+              ],
+              "properties": {
+                "kind": {
+                  "type": "string",
+                  "enum": [
+                    "provider"
+                  ]
+                }
+              }
+            },
+            {
+              "type": "object",
+              "required": [
+                "kind"
+              ],
+              "properties": {
+                "kind": {
+                  "type": "string",
+                  "enum": [
+                    "off"
+                  ]
+                }
+              }
+            },
+            {
+              "type": "object",
+              "required": [
+                "kind",
+                "server_id",
+                "tool_name"
+              ],
+              "properties": {
+                "kind": {
+                  "type": "string",
+                  "enum": [
+                    "mcp"
+                  ]
+                },
+                "server_id": {
+                  "type": "string"
+                },
+                "tool_name": {
+                  "type": "string"
+                }
+              }
+            }
+          ]
         }
       }
     },
@@ -90998,6 +92918,17 @@
                 "string",
                 "null"
               ]
+            },
+            "webSearch": {
+              "description": "Explicit search backend for future turns; absent means inherit defaults.",
+              "anyOf": [
+                {
+                  "$ref": "#/definitions/WebSearchChoice"
+                },
+                {
+                  "type": "null"
+                }
+              ]
             }
           }
         },
@@ -91641,6 +93572,75 @@
               "type": "string"
             }
           }
+        },
+        "WebSearchChoice": {
+          "description": "Session-level web-search backend selection. `Inherit` clears the explicit session override so provider defaults apply again.",
+          "oneOf": [
+            {
+              "type": "object",
+              "required": [
+                "kind"
+              ],
+              "properties": {
+                "kind": {
+                  "type": "string",
+                  "enum": [
+                    "inherit"
+                  ]
+                }
+              }
+            },
+            {
+              "type": "object",
+              "required": [
+                "kind"
+              ],
+              "properties": {
+                "kind": {
+                  "type": "string",
+                  "enum": [
+                    "provider"
+                  ]
+                }
+              }
+            },
+            {
+              "type": "object",
+              "required": [
+                "kind"
+              ],
+              "properties": {
+                "kind": {
+                  "type": "string",
+                  "enum": [
+                    "off"
+                  ]
+                }
+              }
+            },
+            {
+              "type": "object",
+              "required": [
+                "kind",
+                "server_id",
+                "tool_name"
+              ],
+              "properties": {
+                "kind": {
+                  "type": "string",
+                  "enum": [
+                    "mcp"
+                  ]
+                },
+                "server_id": {
+                  "type": "string"
+                },
+                "tool_name": {
+                  "type": "string"
+                }
+              }
+            }
+          ]
         },
         "WorkspaceChangeCoverage": {
           "type": "string",
@@ -94206,6 +96206,17 @@
                 "string",
                 "null"
               ]
+            },
+            "webSearch": {
+              "description": "Explicit search backend for future turns; absent means inherit defaults.",
+              "anyOf": [
+                {
+                  "$ref": "#/definitions/WebSearchChoice"
+                },
+                {
+                  "type": "null"
+                }
+              ]
             }
           }
         },
@@ -94849,6 +96860,75 @@
               "type": "string"
             }
           }
+        },
+        "WebSearchChoice": {
+          "description": "Session-level web-search backend selection. `Inherit` clears the explicit session override so provider defaults apply again.",
+          "oneOf": [
+            {
+              "type": "object",
+              "required": [
+                "kind"
+              ],
+              "properties": {
+                "kind": {
+                  "type": "string",
+                  "enum": [
+                    "inherit"
+                  ]
+                }
+              }
+            },
+            {
+              "type": "object",
+              "required": [
+                "kind"
+              ],
+              "properties": {
+                "kind": {
+                  "type": "string",
+                  "enum": [
+                    "provider"
+                  ]
+                }
+              }
+            },
+            {
+              "type": "object",
+              "required": [
+                "kind"
+              ],
+              "properties": {
+                "kind": {
+                  "type": "string",
+                  "enum": [
+                    "off"
+                  ]
+                }
+              }
+            },
+            {
+              "type": "object",
+              "required": [
+                "kind",
+                "server_id",
+                "tool_name"
+              ],
+              "properties": {
+                "kind": {
+                  "type": "string",
+                  "enum": [
+                    "mcp"
+                  ]
+                },
+                "server_id": {
+                  "type": "string"
+                },
+                "tool_name": {
+                  "type": "string"
+                }
+              }
+            }
+          ]
         },
         "WorkspaceChangeCoverage": {
           "type": "string",
@@ -100292,6 +102372,17 @@
                 "string",
                 "null"
               ]
+            },
+            "webSearch": {
+              "description": "Explicit search backend for future turns; absent means inherit defaults.",
+              "anyOf": [
+                {
+                  "$ref": "#/definitions/WebSearchChoice"
+                },
+                {
+                  "type": "null"
+                }
+              ]
             }
           }
         },
@@ -100935,6 +103026,75 @@
               "type": "string"
             }
           }
+        },
+        "WebSearchChoice": {
+          "description": "Session-level web-search backend selection. `Inherit` clears the explicit session override so provider defaults apply again.",
+          "oneOf": [
+            {
+              "type": "object",
+              "required": [
+                "kind"
+              ],
+              "properties": {
+                "kind": {
+                  "type": "string",
+                  "enum": [
+                    "inherit"
+                  ]
+                }
+              }
+            },
+            {
+              "type": "object",
+              "required": [
+                "kind"
+              ],
+              "properties": {
+                "kind": {
+                  "type": "string",
+                  "enum": [
+                    "provider"
+                  ]
+                }
+              }
+            },
+            {
+              "type": "object",
+              "required": [
+                "kind"
+              ],
+              "properties": {
+                "kind": {
+                  "type": "string",
+                  "enum": [
+                    "off"
+                  ]
+                }
+              }
+            },
+            {
+              "type": "object",
+              "required": [
+                "kind",
+                "server_id",
+                "tool_name"
+              ],
+              "properties": {
+                "kind": {
+                  "type": "string",
+                  "enum": [
+                    "mcp"
+                  ]
+                },
+                "server_id": {
+                  "type": "string"
+                },
+                "tool_name": {
+                  "type": "string"
+                }
+              }
+            }
+          ]
         },
         "WorkspaceChangeCoverage": {
           "type": "string",
@@ -103551,6 +105711,17 @@
                 "string",
                 "null"
               ]
+            },
+            "webSearch": {
+              "description": "Explicit search backend for future turns; absent means inherit defaults.",
+              "anyOf": [
+                {
+                  "$ref": "#/definitions/WebSearchChoice"
+                },
+                {
+                  "type": "null"
+                }
+              ]
             }
           }
         },
@@ -104194,6 +106365,75 @@
               "type": "string"
             }
           }
+        },
+        "WebSearchChoice": {
+          "description": "Session-level web-search backend selection. `Inherit` clears the explicit session override so provider defaults apply again.",
+          "oneOf": [
+            {
+              "type": "object",
+              "required": [
+                "kind"
+              ],
+              "properties": {
+                "kind": {
+                  "type": "string",
+                  "enum": [
+                    "inherit"
+                  ]
+                }
+              }
+            },
+            {
+              "type": "object",
+              "required": [
+                "kind"
+              ],
+              "properties": {
+                "kind": {
+                  "type": "string",
+                  "enum": [
+                    "provider"
+                  ]
+                }
+              }
+            },
+            {
+              "type": "object",
+              "required": [
+                "kind"
+              ],
+              "properties": {
+                "kind": {
+                  "type": "string",
+                  "enum": [
+                    "off"
+                  ]
+                }
+              }
+            },
+            {
+              "type": "object",
+              "required": [
+                "kind",
+                "server_id",
+                "tool_name"
+              ],
+              "properties": {
+                "kind": {
+                  "type": "string",
+                  "enum": [
+                    "mcp"
+                  ]
+                },
+                "server_id": {
+                  "type": "string"
+                },
+                "tool_name": {
+                  "type": "string"
+                }
+              }
+            }
+          ]
         },
         "WorkspaceChangeCoverage": {
           "type": "string",
@@ -106761,6 +109001,17 @@
                 "string",
                 "null"
               ]
+            },
+            "webSearch": {
+              "description": "Explicit search backend for future turns; absent means inherit defaults.",
+              "anyOf": [
+                {
+                  "$ref": "#/definitions/WebSearchChoice"
+                },
+                {
+                  "type": "null"
+                }
+              ]
             }
           }
         },
@@ -107404,6 +109655,75 @@
               "type": "string"
             }
           }
+        },
+        "WebSearchChoice": {
+          "description": "Session-level web-search backend selection. `Inherit` clears the explicit session override so provider defaults apply again.",
+          "oneOf": [
+            {
+              "type": "object",
+              "required": [
+                "kind"
+              ],
+              "properties": {
+                "kind": {
+                  "type": "string",
+                  "enum": [
+                    "inherit"
+                  ]
+                }
+              }
+            },
+            {
+              "type": "object",
+              "required": [
+                "kind"
+              ],
+              "properties": {
+                "kind": {
+                  "type": "string",
+                  "enum": [
+                    "provider"
+                  ]
+                }
+              }
+            },
+            {
+              "type": "object",
+              "required": [
+                "kind"
+              ],
+              "properties": {
+                "kind": {
+                  "type": "string",
+                  "enum": [
+                    "off"
+                  ]
+                }
+              }
+            },
+            {
+              "type": "object",
+              "required": [
+                "kind",
+                "server_id",
+                "tool_name"
+              ],
+              "properties": {
+                "kind": {
+                  "type": "string",
+                  "enum": [
+                    "mcp"
+                  ]
+                },
+                "server_id": {
+                  "type": "string"
+                },
+                "tool_name": {
+                  "type": "string"
+                }
+              }
+            }
+          ]
         },
         "WorkspaceChangeCoverage": {
           "type": "string",
@@ -109974,6 +112294,17 @@
                 "string",
                 "null"
               ]
+            },
+            "webSearch": {
+              "description": "Explicit search backend for future turns; absent means inherit defaults.",
+              "anyOf": [
+                {
+                  "$ref": "#/definitions/WebSearchChoice"
+                },
+                {
+                  "type": "null"
+                }
+              ]
             }
           }
         },
@@ -110617,6 +112948,75 @@
               "type": "string"
             }
           }
+        },
+        "WebSearchChoice": {
+          "description": "Session-level web-search backend selection. `Inherit` clears the explicit session override so provider defaults apply again.",
+          "oneOf": [
+            {
+              "type": "object",
+              "required": [
+                "kind"
+              ],
+              "properties": {
+                "kind": {
+                  "type": "string",
+                  "enum": [
+                    "inherit"
+                  ]
+                }
+              }
+            },
+            {
+              "type": "object",
+              "required": [
+                "kind"
+              ],
+              "properties": {
+                "kind": {
+                  "type": "string",
+                  "enum": [
+                    "provider"
+                  ]
+                }
+              }
+            },
+            {
+              "type": "object",
+              "required": [
+                "kind"
+              ],
+              "properties": {
+                "kind": {
+                  "type": "string",
+                  "enum": [
+                    "off"
+                  ]
+                }
+              }
+            },
+            {
+              "type": "object",
+              "required": [
+                "kind",
+                "server_id",
+                "tool_name"
+              ],
+              "properties": {
+                "kind": {
+                  "type": "string",
+                  "enum": [
+                    "mcp"
+                  ]
+                },
+                "server_id": {
+                  "type": "string"
+                },
+                "tool_name": {
+                  "type": "string"
+                }
+              }
+            }
+          ]
         },
         "WorkspaceChangeCoverage": {
           "type": "string",
@@ -113168,6 +115568,17 @@
                 "string",
                 "null"
               ]
+            },
+            "webSearch": {
+              "description": "Explicit search backend for future turns; absent means inherit defaults.",
+              "anyOf": [
+                {
+                  "$ref": "#/definitions/WebSearchChoice"
+                },
+                {
+                  "type": "null"
+                }
+              ]
             }
           }
         },
@@ -113811,6 +116222,75 @@
               "type": "string"
             }
           }
+        },
+        "WebSearchChoice": {
+          "description": "Session-level web-search backend selection. `Inherit` clears the explicit session override so provider defaults apply again.",
+          "oneOf": [
+            {
+              "type": "object",
+              "required": [
+                "kind"
+              ],
+              "properties": {
+                "kind": {
+                  "type": "string",
+                  "enum": [
+                    "inherit"
+                  ]
+                }
+              }
+            },
+            {
+              "type": "object",
+              "required": [
+                "kind"
+              ],
+              "properties": {
+                "kind": {
+                  "type": "string",
+                  "enum": [
+                    "provider"
+                  ]
+                }
+              }
+            },
+            {
+              "type": "object",
+              "required": [
+                "kind"
+              ],
+              "properties": {
+                "kind": {
+                  "type": "string",
+                  "enum": [
+                    "off"
+                  ]
+                }
+              }
+            },
+            {
+              "type": "object",
+              "required": [
+                "kind",
+                "server_id",
+                "tool_name"
+              ],
+              "properties": {
+                "kind": {
+                  "type": "string",
+                  "enum": [
+                    "mcp"
+                  ]
+                },
+                "server_id": {
+                  "type": "string"
+                },
+                "tool_name": {
+                  "type": "string"
+                }
+              }
+            }
+          ]
         },
         "WorkspaceChangeCoverage": {
           "type": "string",
@@ -116850,6 +119330,17 @@
                 "string",
                 "null"
               ]
+            },
+            "webSearch": {
+              "description": "Explicit search backend for future turns; absent means inherit defaults.",
+              "anyOf": [
+                {
+                  "$ref": "#/definitions/WebSearchChoice"
+                },
+                {
+                  "type": "null"
+                }
+              ]
             }
           }
         },
@@ -117493,6 +119984,75 @@
               "type": "string"
             }
           }
+        },
+        "WebSearchChoice": {
+          "description": "Session-level web-search backend selection. `Inherit` clears the explicit session override so provider defaults apply again.",
+          "oneOf": [
+            {
+              "type": "object",
+              "required": [
+                "kind"
+              ],
+              "properties": {
+                "kind": {
+                  "type": "string",
+                  "enum": [
+                    "inherit"
+                  ]
+                }
+              }
+            },
+            {
+              "type": "object",
+              "required": [
+                "kind"
+              ],
+              "properties": {
+                "kind": {
+                  "type": "string",
+                  "enum": [
+                    "provider"
+                  ]
+                }
+              }
+            },
+            {
+              "type": "object",
+              "required": [
+                "kind"
+              ],
+              "properties": {
+                "kind": {
+                  "type": "string",
+                  "enum": [
+                    "off"
+                  ]
+                }
+              }
+            },
+            {
+              "type": "object",
+              "required": [
+                "kind",
+                "server_id",
+                "tool_name"
+              ],
+              "properties": {
+                "kind": {
+                  "type": "string",
+                  "enum": [
+                    "mcp"
+                  ]
+                },
+                "server_id": {
+                  "type": "string"
+                },
+                "tool_name": {
+                  "type": "string"
+                }
+              }
+            }
+          ]
         },
         "WorkspaceChangeCoverage": {
           "type": "string",
@@ -120056,6 +122616,17 @@
                 "string",
                 "null"
               ]
+            },
+            "webSearch": {
+              "description": "Explicit search backend for future turns; absent means inherit defaults.",
+              "anyOf": [
+                {
+                  "$ref": "#/definitions/WebSearchChoice"
+                },
+                {
+                  "type": "null"
+                }
+              ]
             }
           }
         },
@@ -120699,6 +123270,75 @@
               "type": "string"
             }
           }
+        },
+        "WebSearchChoice": {
+          "description": "Session-level web-search backend selection. `Inherit` clears the explicit session override so provider defaults apply again.",
+          "oneOf": [
+            {
+              "type": "object",
+              "required": [
+                "kind"
+              ],
+              "properties": {
+                "kind": {
+                  "type": "string",
+                  "enum": [
+                    "inherit"
+                  ]
+                }
+              }
+            },
+            {
+              "type": "object",
+              "required": [
+                "kind"
+              ],
+              "properties": {
+                "kind": {
+                  "type": "string",
+                  "enum": [
+                    "provider"
+                  ]
+                }
+              }
+            },
+            {
+              "type": "object",
+              "required": [
+                "kind"
+              ],
+              "properties": {
+                "kind": {
+                  "type": "string",
+                  "enum": [
+                    "off"
+                  ]
+                }
+              }
+            },
+            {
+              "type": "object",
+              "required": [
+                "kind",
+                "server_id",
+                "tool_name"
+              ],
+              "properties": {
+                "kind": {
+                  "type": "string",
+                  "enum": [
+                    "mcp"
+                  ]
+                },
+                "server_id": {
+                  "type": "string"
+                },
+                "tool_name": {
+                  "type": "string"
+                }
+              }
+            }
+          ]
         },
         "WorkspaceChangeCoverage": {
           "type": "string",
@@ -123272,6 +125912,17 @@
                 "string",
                 "null"
               ]
+            },
+            "webSearch": {
+              "description": "Explicit search backend for future turns; absent means inherit defaults.",
+              "anyOf": [
+                {
+                  "$ref": "#/definitions/WebSearchChoice"
+                },
+                {
+                  "type": "null"
+                }
+              ]
             }
           }
         },
@@ -123915,6 +126566,75 @@
               "type": "string"
             }
           }
+        },
+        "WebSearchChoice": {
+          "description": "Session-level web-search backend selection. `Inherit` clears the explicit session override so provider defaults apply again.",
+          "oneOf": [
+            {
+              "type": "object",
+              "required": [
+                "kind"
+              ],
+              "properties": {
+                "kind": {
+                  "type": "string",
+                  "enum": [
+                    "inherit"
+                  ]
+                }
+              }
+            },
+            {
+              "type": "object",
+              "required": [
+                "kind"
+              ],
+              "properties": {
+                "kind": {
+                  "type": "string",
+                  "enum": [
+                    "provider"
+                  ]
+                }
+              }
+            },
+            {
+              "type": "object",
+              "required": [
+                "kind"
+              ],
+              "properties": {
+                "kind": {
+                  "type": "string",
+                  "enum": [
+                    "off"
+                  ]
+                }
+              }
+            },
+            {
+              "type": "object",
+              "required": [
+                "kind",
+                "server_id",
+                "tool_name"
+              ],
+              "properties": {
+                "kind": {
+                  "type": "string",
+                  "enum": [
+                    "mcp"
+                  ]
+                },
+                "server_id": {
+                  "type": "string"
+                },
+                "tool_name": {
+                  "type": "string"
+                }
+              }
+            }
+          ]
         },
         "WorkspaceChangeCoverage": {
           "type": "string",
@@ -124594,6 +127314,17 @@
                 "string",
                 "null"
               ]
+            },
+            "webSearch": {
+              "description": "Explicit search backend for future turns; absent means inherit defaults.",
+              "anyOf": [
+                {
+                  "$ref": "#/definitions/WebSearchChoice"
+                },
+                {
+                  "type": "null"
+                }
+              ]
             }
           }
         },
@@ -124830,6 +127561,75 @@
               }
             }
           }
+        },
+        "WebSearchChoice": {
+          "description": "Session-level web-search backend selection. `Inherit` clears the explicit session override so provider defaults apply again.",
+          "oneOf": [
+            {
+              "type": "object",
+              "required": [
+                "kind"
+              ],
+              "properties": {
+                "kind": {
+                  "type": "string",
+                  "enum": [
+                    "inherit"
+                  ]
+                }
+              }
+            },
+            {
+              "type": "object",
+              "required": [
+                "kind"
+              ],
+              "properties": {
+                "kind": {
+                  "type": "string",
+                  "enum": [
+                    "provider"
+                  ]
+                }
+              }
+            },
+            {
+              "type": "object",
+              "required": [
+                "kind"
+              ],
+              "properties": {
+                "kind": {
+                  "type": "string",
+                  "enum": [
+                    "off"
+                  ]
+                }
+              }
+            },
+            {
+              "type": "object",
+              "required": [
+                "kind",
+                "server_id",
+                "tool_name"
+              ],
+              "properties": {
+                "kind": {
+                  "type": "string",
+                  "enum": [
+                    "mcp"
+                  ]
+                },
+                "server_id": {
+                  "type": "string"
+                },
+                "tool_name": {
+                  "type": "string"
+                }
+              }
+            }
+          ]
         }
       }
     },
@@ -127285,6 +130085,17 @@
                 "string",
                 "null"
               ]
+            },
+            "webSearch": {
+              "description": "Explicit search backend for future turns; absent means inherit defaults.",
+              "anyOf": [
+                {
+                  "$ref": "#/definitions/WebSearchChoice"
+                },
+                {
+                  "type": "null"
+                }
+              ]
             }
           }
         },
@@ -127928,6 +130739,75 @@
               "type": "string"
             }
           }
+        },
+        "WebSearchChoice": {
+          "description": "Session-level web-search backend selection. `Inherit` clears the explicit session override so provider defaults apply again.",
+          "oneOf": [
+            {
+              "type": "object",
+              "required": [
+                "kind"
+              ],
+              "properties": {
+                "kind": {
+                  "type": "string",
+                  "enum": [
+                    "inherit"
+                  ]
+                }
+              }
+            },
+            {
+              "type": "object",
+              "required": [
+                "kind"
+              ],
+              "properties": {
+                "kind": {
+                  "type": "string",
+                  "enum": [
+                    "provider"
+                  ]
+                }
+              }
+            },
+            {
+              "type": "object",
+              "required": [
+                "kind"
+              ],
+              "properties": {
+                "kind": {
+                  "type": "string",
+                  "enum": [
+                    "off"
+                  ]
+                }
+              }
+            },
+            {
+              "type": "object",
+              "required": [
+                "kind",
+                "server_id",
+                "tool_name"
+              ],
+              "properties": {
+                "kind": {
+                  "type": "string",
+                  "enum": [
+                    "mcp"
+                  ]
+                },
+                "server_id": {
+                  "type": "string"
+                },
+                "tool_name": {
+                  "type": "string"
+                }
+              }
+            }
+          ]
         },
         "WorkspaceChangeCoverage": {
           "type": "string",
@@ -130487,6 +133367,17 @@
                 "string",
                 "null"
               ]
+            },
+            "webSearch": {
+              "description": "Explicit search backend for future turns; absent means inherit defaults.",
+              "anyOf": [
+                {
+                  "$ref": "#/definitions/WebSearchChoice"
+                },
+                {
+                  "type": "null"
+                }
+              ]
             }
           }
         },
@@ -131130,6 +134021,75 @@
               "type": "string"
             }
           }
+        },
+        "WebSearchChoice": {
+          "description": "Session-level web-search backend selection. `Inherit` clears the explicit session override so provider defaults apply again.",
+          "oneOf": [
+            {
+              "type": "object",
+              "required": [
+                "kind"
+              ],
+              "properties": {
+                "kind": {
+                  "type": "string",
+                  "enum": [
+                    "inherit"
+                  ]
+                }
+              }
+            },
+            {
+              "type": "object",
+              "required": [
+                "kind"
+              ],
+              "properties": {
+                "kind": {
+                  "type": "string",
+                  "enum": [
+                    "provider"
+                  ]
+                }
+              }
+            },
+            {
+              "type": "object",
+              "required": [
+                "kind"
+              ],
+              "properties": {
+                "kind": {
+                  "type": "string",
+                  "enum": [
+                    "off"
+                  ]
+                }
+              }
+            },
+            {
+              "type": "object",
+              "required": [
+                "kind",
+                "server_id",
+                "tool_name"
+              ],
+              "properties": {
+                "kind": {
+                  "type": "string",
+                  "enum": [
+                    "mcp"
+                  ]
+                },
+                "server_id": {
+                  "type": "string"
+                },
+                "tool_name": {
+                  "type": "string"
+                }
+              }
+            }
+          ]
         },
         "WorkspaceChangeCoverage": {
           "type": "string",
@@ -133707,6 +136667,17 @@
                 "string",
                 "null"
               ]
+            },
+            "webSearch": {
+              "description": "Explicit search backend for future turns; absent means inherit defaults.",
+              "anyOf": [
+                {
+                  "$ref": "#/definitions/WebSearchChoice"
+                },
+                {
+                  "type": "null"
+                }
+              ]
             }
           }
         },
@@ -134350,6 +137321,75 @@
               "type": "string"
             }
           }
+        },
+        "WebSearchChoice": {
+          "description": "Session-level web-search backend selection. `Inherit` clears the explicit session override so provider defaults apply again.",
+          "oneOf": [
+            {
+              "type": "object",
+              "required": [
+                "kind"
+              ],
+              "properties": {
+                "kind": {
+                  "type": "string",
+                  "enum": [
+                    "inherit"
+                  ]
+                }
+              }
+            },
+            {
+              "type": "object",
+              "required": [
+                "kind"
+              ],
+              "properties": {
+                "kind": {
+                  "type": "string",
+                  "enum": [
+                    "provider"
+                  ]
+                }
+              }
+            },
+            {
+              "type": "object",
+              "required": [
+                "kind"
+              ],
+              "properties": {
+                "kind": {
+                  "type": "string",
+                  "enum": [
+                    "off"
+                  ]
+                }
+              }
+            },
+            {
+              "type": "object",
+              "required": [
+                "kind",
+                "server_id",
+                "tool_name"
+              ],
+              "properties": {
+                "kind": {
+                  "type": "string",
+                  "enum": [
+                    "mcp"
+                  ]
+                },
+                "server_id": {
+                  "type": "string"
+                },
+                "tool_name": {
+                  "type": "string"
+                }
+              }
+            }
+          ]
         },
         "WorkspaceChangeCoverage": {
           "type": "string",
@@ -135030,6 +138070,17 @@
                 "string",
                 "null"
               ]
+            },
+            "webSearch": {
+              "description": "Explicit search backend for future turns; absent means inherit defaults.",
+              "anyOf": [
+                {
+                  "$ref": "#/definitions/WebSearchChoice"
+                },
+                {
+                  "type": "null"
+                }
+              ]
             }
           }
         },
@@ -135266,6 +138317,75 @@
               }
             }
           }
+        },
+        "WebSearchChoice": {
+          "description": "Session-level web-search backend selection. `Inherit` clears the explicit session override so provider defaults apply again.",
+          "oneOf": [
+            {
+              "type": "object",
+              "required": [
+                "kind"
+              ],
+              "properties": {
+                "kind": {
+                  "type": "string",
+                  "enum": [
+                    "inherit"
+                  ]
+                }
+              }
+            },
+            {
+              "type": "object",
+              "required": [
+                "kind"
+              ],
+              "properties": {
+                "kind": {
+                  "type": "string",
+                  "enum": [
+                    "provider"
+                  ]
+                }
+              }
+            },
+            {
+              "type": "object",
+              "required": [
+                "kind"
+              ],
+              "properties": {
+                "kind": {
+                  "type": "string",
+                  "enum": [
+                    "off"
+                  ]
+                }
+              }
+            },
+            {
+              "type": "object",
+              "required": [
+                "kind",
+                "server_id",
+                "tool_name"
+              ],
+              "properties": {
+                "kind": {
+                  "type": "string",
+                  "enum": [
+                    "mcp"
+                  ]
+                },
+                "server_id": {
+                  "type": "string"
+                },
+                "tool_name": {
+                  "type": "string"
+                }
+              }
+            }
+          ]
         }
       }
     },
@@ -137721,6 +140841,17 @@
                 "string",
                 "null"
               ]
+            },
+            "webSearch": {
+              "description": "Explicit search backend for future turns; absent means inherit defaults.",
+              "anyOf": [
+                {
+                  "$ref": "#/definitions/WebSearchChoice"
+                },
+                {
+                  "type": "null"
+                }
+              ]
             }
           }
         },
@@ -138364,6 +141495,75 @@
               "type": "string"
             }
           }
+        },
+        "WebSearchChoice": {
+          "description": "Session-level web-search backend selection. `Inherit` clears the explicit session override so provider defaults apply again.",
+          "oneOf": [
+            {
+              "type": "object",
+              "required": [
+                "kind"
+              ],
+              "properties": {
+                "kind": {
+                  "type": "string",
+                  "enum": [
+                    "inherit"
+                  ]
+                }
+              }
+            },
+            {
+              "type": "object",
+              "required": [
+                "kind"
+              ],
+              "properties": {
+                "kind": {
+                  "type": "string",
+                  "enum": [
+                    "provider"
+                  ]
+                }
+              }
+            },
+            {
+              "type": "object",
+              "required": [
+                "kind"
+              ],
+              "properties": {
+                "kind": {
+                  "type": "string",
+                  "enum": [
+                    "off"
+                  ]
+                }
+              }
+            },
+            {
+              "type": "object",
+              "required": [
+                "kind",
+                "server_id",
+                "tool_name"
+              ],
+              "properties": {
+                "kind": {
+                  "type": "string",
+                  "enum": [
+                    "mcp"
+                  ]
+                },
+                "server_id": {
+                  "type": "string"
+                },
+                "tool_name": {
+                  "type": "string"
+                }
+              }
+            }
+          ]
         },
         "WorkspaceChangeCoverage": {
           "type": "string",
@@ -140952,6 +144152,17 @@
                 "string",
                 "null"
               ]
+            },
+            "webSearch": {
+              "description": "Explicit search backend for future turns; absent means inherit defaults.",
+              "anyOf": [
+                {
+                  "$ref": "#/definitions/WebSearchChoice"
+                },
+                {
+                  "type": "null"
+                }
+              ]
             }
           }
         },
@@ -141595,6 +144806,75 @@
               "type": "string"
             }
           }
+        },
+        "WebSearchChoice": {
+          "description": "Session-level web-search backend selection. `Inherit` clears the explicit session override so provider defaults apply again.",
+          "oneOf": [
+            {
+              "type": "object",
+              "required": [
+                "kind"
+              ],
+              "properties": {
+                "kind": {
+                  "type": "string",
+                  "enum": [
+                    "inherit"
+                  ]
+                }
+              }
+            },
+            {
+              "type": "object",
+              "required": [
+                "kind"
+              ],
+              "properties": {
+                "kind": {
+                  "type": "string",
+                  "enum": [
+                    "provider"
+                  ]
+                }
+              }
+            },
+            {
+              "type": "object",
+              "required": [
+                "kind"
+              ],
+              "properties": {
+                "kind": {
+                  "type": "string",
+                  "enum": [
+                    "off"
+                  ]
+                }
+              }
+            },
+            {
+              "type": "object",
+              "required": [
+                "kind",
+                "server_id",
+                "tool_name"
+              ],
+              "properties": {
+                "kind": {
+                  "type": "string",
+                  "enum": [
+                    "mcp"
+                  ]
+                },
+                "server_id": {
+                  "type": "string"
+                },
+                "tool_name": {
+                  "type": "string"
+                }
+              }
+            }
+          ]
         },
         "WorkspaceChangeCoverage": {
           "type": "string",
@@ -142383,6 +145663,17 @@
                 "string",
                 "null"
               ]
+            },
+            "webSearch": {
+              "description": "Explicit search backend for future turns; absent means inherit defaults.",
+              "anyOf": [
+                {
+                  "$ref": "#/definitions/WebSearchChoice"
+                },
+                {
+                  "type": "null"
+                }
+              ]
             }
           }
         },
@@ -142619,6 +145910,75 @@
               }
             }
           }
+        },
+        "WebSearchChoice": {
+          "description": "Session-level web-search backend selection. `Inherit` clears the explicit session override so provider defaults apply again.",
+          "oneOf": [
+            {
+              "type": "object",
+              "required": [
+                "kind"
+              ],
+              "properties": {
+                "kind": {
+                  "type": "string",
+                  "enum": [
+                    "inherit"
+                  ]
+                }
+              }
+            },
+            {
+              "type": "object",
+              "required": [
+                "kind"
+              ],
+              "properties": {
+                "kind": {
+                  "type": "string",
+                  "enum": [
+                    "provider"
+                  ]
+                }
+              }
+            },
+            {
+              "type": "object",
+              "required": [
+                "kind"
+              ],
+              "properties": {
+                "kind": {
+                  "type": "string",
+                  "enum": [
+                    "off"
+                  ]
+                }
+              }
+            },
+            {
+              "type": "object",
+              "required": [
+                "kind",
+                "server_id",
+                "tool_name"
+              ],
+              "properties": {
+                "kind": {
+                  "type": "string",
+                  "enum": [
+                    "mcp"
+                  ]
+                },
+                "server_id": {
+                  "type": "string"
+                },
+                "tool_name": {
+                  "type": "string"
+                }
+              }
+            }
+          ]
         }
       }
     },
@@ -145079,6 +148439,17 @@
                 "string",
                 "null"
               ]
+            },
+            "webSearch": {
+              "description": "Explicit search backend for future turns; absent means inherit defaults.",
+              "anyOf": [
+                {
+                  "$ref": "#/definitions/WebSearchChoice"
+                },
+                {
+                  "type": "null"
+                }
+              ]
             }
           }
         },
@@ -145722,6 +149093,75 @@
               "type": "string"
             }
           }
+        },
+        "WebSearchChoice": {
+          "description": "Session-level web-search backend selection. `Inherit` clears the explicit session override so provider defaults apply again.",
+          "oneOf": [
+            {
+              "type": "object",
+              "required": [
+                "kind"
+              ],
+              "properties": {
+                "kind": {
+                  "type": "string",
+                  "enum": [
+                    "inherit"
+                  ]
+                }
+              }
+            },
+            {
+              "type": "object",
+              "required": [
+                "kind"
+              ],
+              "properties": {
+                "kind": {
+                  "type": "string",
+                  "enum": [
+                    "provider"
+                  ]
+                }
+              }
+            },
+            {
+              "type": "object",
+              "required": [
+                "kind"
+              ],
+              "properties": {
+                "kind": {
+                  "type": "string",
+                  "enum": [
+                    "off"
+                  ]
+                }
+              }
+            },
+            {
+              "type": "object",
+              "required": [
+                "kind",
+                "server_id",
+                "tool_name"
+              ],
+              "properties": {
+                "kind": {
+                  "type": "string",
+                  "enum": [
+                    "mcp"
+                  ]
+                },
+                "server_id": {
+                  "type": "string"
+                },
+                "tool_name": {
+                  "type": "string"
+                }
+              }
+            }
+          ]
         },
         "WorkspaceChangeCoverage": {
           "type": "string",
@@ -148281,6 +151721,17 @@
                 "string",
                 "null"
               ]
+            },
+            "webSearch": {
+              "description": "Explicit search backend for future turns; absent means inherit defaults.",
+              "anyOf": [
+                {
+                  "$ref": "#/definitions/WebSearchChoice"
+                },
+                {
+                  "type": "null"
+                }
+              ]
             }
           }
         },
@@ -148924,6 +152375,75 @@
               "type": "string"
             }
           }
+        },
+        "WebSearchChoice": {
+          "description": "Session-level web-search backend selection. `Inherit` clears the explicit session override so provider defaults apply again.",
+          "oneOf": [
+            {
+              "type": "object",
+              "required": [
+                "kind"
+              ],
+              "properties": {
+                "kind": {
+                  "type": "string",
+                  "enum": [
+                    "inherit"
+                  ]
+                }
+              }
+            },
+            {
+              "type": "object",
+              "required": [
+                "kind"
+              ],
+              "properties": {
+                "kind": {
+                  "type": "string",
+                  "enum": [
+                    "provider"
+                  ]
+                }
+              }
+            },
+            {
+              "type": "object",
+              "required": [
+                "kind"
+              ],
+              "properties": {
+                "kind": {
+                  "type": "string",
+                  "enum": [
+                    "off"
+                  ]
+                }
+              }
+            },
+            {
+              "type": "object",
+              "required": [
+                "kind",
+                "server_id",
+                "tool_name"
+              ],
+              "properties": {
+                "kind": {
+                  "type": "string",
+                  "enum": [
+                    "mcp"
+                  ]
+                },
+                "server_id": {
+                  "type": "string"
+                },
+                "tool_name": {
+                  "type": "string"
+                }
+              }
+            }
+          ]
         },
         "WorkspaceChangeCoverage": {
           "type": "string",
@@ -151748,6 +155268,17 @@
                 "string",
                 "null"
               ]
+            },
+            "webSearch": {
+              "description": "Explicit search backend for future turns; absent means inherit defaults.",
+              "anyOf": [
+                {
+                  "$ref": "#/definitions/WebSearchChoice"
+                },
+                {
+                  "type": "null"
+                }
+              ]
             }
           }
         },
@@ -152391,6 +155922,75 @@
               "type": "string"
             }
           }
+        },
+        "WebSearchChoice": {
+          "description": "Session-level web-search backend selection. `Inherit` clears the explicit session override so provider defaults apply again.",
+          "oneOf": [
+            {
+              "type": "object",
+              "required": [
+                "kind"
+              ],
+              "properties": {
+                "kind": {
+                  "type": "string",
+                  "enum": [
+                    "inherit"
+                  ]
+                }
+              }
+            },
+            {
+              "type": "object",
+              "required": [
+                "kind"
+              ],
+              "properties": {
+                "kind": {
+                  "type": "string",
+                  "enum": [
+                    "provider"
+                  ]
+                }
+              }
+            },
+            {
+              "type": "object",
+              "required": [
+                "kind"
+              ],
+              "properties": {
+                "kind": {
+                  "type": "string",
+                  "enum": [
+                    "off"
+                  ]
+                }
+              }
+            },
+            {
+              "type": "object",
+              "required": [
+                "kind",
+                "server_id",
+                "tool_name"
+              ],
+              "properties": {
+                "kind": {
+                  "type": "string",
+                  "enum": [
+                    "mcp"
+                  ]
+                },
+                "server_id": {
+                  "type": "string"
+                },
+                "tool_name": {
+                  "type": "string"
+                }
+              }
+            }
+          ]
         },
         "WorkspaceChangeCoverage": {
           "type": "string",
@@ -155261,6 +158861,17 @@
                 "string",
                 "null"
               ]
+            },
+            "webSearch": {
+              "description": "Explicit search backend for future turns; absent means inherit defaults.",
+              "anyOf": [
+                {
+                  "$ref": "#/definitions/WebSearchChoice"
+                },
+                {
+                  "type": "null"
+                }
+              ]
             }
           }
         },
@@ -155904,6 +159515,75 @@
               "type": "string"
             }
           }
+        },
+        "WebSearchChoice": {
+          "description": "Session-level web-search backend selection. `Inherit` clears the explicit session override so provider defaults apply again.",
+          "oneOf": [
+            {
+              "type": "object",
+              "required": [
+                "kind"
+              ],
+              "properties": {
+                "kind": {
+                  "type": "string",
+                  "enum": [
+                    "inherit"
+                  ]
+                }
+              }
+            },
+            {
+              "type": "object",
+              "required": [
+                "kind"
+              ],
+              "properties": {
+                "kind": {
+                  "type": "string",
+                  "enum": [
+                    "provider"
+                  ]
+                }
+              }
+            },
+            {
+              "type": "object",
+              "required": [
+                "kind"
+              ],
+              "properties": {
+                "kind": {
+                  "type": "string",
+                  "enum": [
+                    "off"
+                  ]
+                }
+              }
+            },
+            {
+              "type": "object",
+              "required": [
+                "kind",
+                "server_id",
+                "tool_name"
+              ],
+              "properties": {
+                "kind": {
+                  "type": "string",
+                  "enum": [
+                    "mcp"
+                  ]
+                },
+                "server_id": {
+                  "type": "string"
+                },
+                "tool_name": {
+                  "type": "string"
+                }
+              }
+            }
+          ]
         },
         "WorkspaceChangeCoverage": {
           "type": "string",
@@ -158433,8 +162113,88 @@
                 "string",
                 "null"
               ]
+            },
+            "webSearch": {
+              "description": "Explicit backend for future turns; `inherit` clears the override.",
+              "anyOf": [
+                {
+                  "$ref": "#/definitions/WebSearchChoice"
+                },
+                {
+                  "type": "null"
+                }
+              ]
             }
           }
+        },
+        "WebSearchChoice": {
+          "description": "Session-level web-search backend selection. `Inherit` clears the explicit session override so provider defaults apply again.",
+          "oneOf": [
+            {
+              "type": "object",
+              "required": [
+                "kind"
+              ],
+              "properties": {
+                "kind": {
+                  "type": "string",
+                  "enum": [
+                    "inherit"
+                  ]
+                }
+              }
+            },
+            {
+              "type": "object",
+              "required": [
+                "kind"
+              ],
+              "properties": {
+                "kind": {
+                  "type": "string",
+                  "enum": [
+                    "provider"
+                  ]
+                }
+              }
+            },
+            {
+              "type": "object",
+              "required": [
+                "kind"
+              ],
+              "properties": {
+                "kind": {
+                  "type": "string",
+                  "enum": [
+                    "off"
+                  ]
+                }
+              }
+            },
+            {
+              "type": "object",
+              "required": [
+                "kind",
+                "server_id",
+                "tool_name"
+              ],
+              "properties": {
+                "kind": {
+                  "type": "string",
+                  "enum": [
+                    "mcp"
+                  ]
+                },
+                "server_id": {
+                  "type": "string"
+                },
+                "tool_name": {
+                  "type": "string"
+                }
+              }
+            }
+          ]
         }
       }
     },
@@ -158989,6 +162749,17 @@
                 "string",
                 "null"
               ]
+            },
+            "webSearch": {
+              "description": "Explicit search backend for future turns; absent means inherit defaults.",
+              "anyOf": [
+                {
+                  "$ref": "#/definitions/WebSearchChoice"
+                },
+                {
+                  "type": "null"
+                }
+              ]
             }
           }
         },
@@ -159225,6 +162996,75 @@
               }
             }
           }
+        },
+        "WebSearchChoice": {
+          "description": "Session-level web-search backend selection. `Inherit` clears the explicit session override so provider defaults apply again.",
+          "oneOf": [
+            {
+              "type": "object",
+              "required": [
+                "kind"
+              ],
+              "properties": {
+                "kind": {
+                  "type": "string",
+                  "enum": [
+                    "inherit"
+                  ]
+                }
+              }
+            },
+            {
+              "type": "object",
+              "required": [
+                "kind"
+              ],
+              "properties": {
+                "kind": {
+                  "type": "string",
+                  "enum": [
+                    "provider"
+                  ]
+                }
+              }
+            },
+            {
+              "type": "object",
+              "required": [
+                "kind"
+              ],
+              "properties": {
+                "kind": {
+                  "type": "string",
+                  "enum": [
+                    "off"
+                  ]
+                }
+              }
+            },
+            {
+              "type": "object",
+              "required": [
+                "kind",
+                "server_id",
+                "tool_name"
+              ],
+              "properties": {
+                "kind": {
+                  "type": "string",
+                  "enum": [
+                    "mcp"
+                  ]
+                },
+                "server_id": {
+                  "type": "string"
+                },
+                "tool_name": {
+                  "type": "string"
+                }
+              }
+            }
+          ]
         }
       }
     },
@@ -161676,6 +165516,17 @@
                 "string",
                 "null"
               ]
+            },
+            "webSearch": {
+              "description": "Explicit search backend for future turns; absent means inherit defaults.",
+              "anyOf": [
+                {
+                  "$ref": "#/definitions/WebSearchChoice"
+                },
+                {
+                  "type": "null"
+                }
+              ]
             }
           }
         },
@@ -162319,6 +166170,75 @@
               "type": "string"
             }
           }
+        },
+        "WebSearchChoice": {
+          "description": "Session-level web-search backend selection. `Inherit` clears the explicit session override so provider defaults apply again.",
+          "oneOf": [
+            {
+              "type": "object",
+              "required": [
+                "kind"
+              ],
+              "properties": {
+                "kind": {
+                  "type": "string",
+                  "enum": [
+                    "inherit"
+                  ]
+                }
+              }
+            },
+            {
+              "type": "object",
+              "required": [
+                "kind"
+              ],
+              "properties": {
+                "kind": {
+                  "type": "string",
+                  "enum": [
+                    "provider"
+                  ]
+                }
+              }
+            },
+            {
+              "type": "object",
+              "required": [
+                "kind"
+              ],
+              "properties": {
+                "kind": {
+                  "type": "string",
+                  "enum": [
+                    "off"
+                  ]
+                }
+              }
+            },
+            {
+              "type": "object",
+              "required": [
+                "kind",
+                "server_id",
+                "tool_name"
+              ],
+              "properties": {
+                "kind": {
+                  "type": "string",
+                  "enum": [
+                    "mcp"
+                  ]
+                },
+                "server_id": {
+                  "type": "string"
+                },
+                "tool_name": {
+                  "type": "string"
+                }
+              }
+            }
+          ]
         },
         "WorkspaceChangeCoverage": {
           "type": "string",
@@ -162994,6 +166914,17 @@
                 "string",
                 "null"
               ]
+            },
+            "webSearch": {
+              "description": "Explicit search backend for future turns; absent means inherit defaults.",
+              "anyOf": [
+                {
+                  "$ref": "#/definitions/WebSearchChoice"
+                },
+                {
+                  "type": "null"
+                }
+              ]
             }
           }
         },
@@ -163230,6 +167161,75 @@
               }
             }
           }
+        },
+        "WebSearchChoice": {
+          "description": "Session-level web-search backend selection. `Inherit` clears the explicit session override so provider defaults apply again.",
+          "oneOf": [
+            {
+              "type": "object",
+              "required": [
+                "kind"
+              ],
+              "properties": {
+                "kind": {
+                  "type": "string",
+                  "enum": [
+                    "inherit"
+                  ]
+                }
+              }
+            },
+            {
+              "type": "object",
+              "required": [
+                "kind"
+              ],
+              "properties": {
+                "kind": {
+                  "type": "string",
+                  "enum": [
+                    "provider"
+                  ]
+                }
+              }
+            },
+            {
+              "type": "object",
+              "required": [
+                "kind"
+              ],
+              "properties": {
+                "kind": {
+                  "type": "string",
+                  "enum": [
+                    "off"
+                  ]
+                }
+              }
+            },
+            {
+              "type": "object",
+              "required": [
+                "kind",
+                "server_id",
+                "tool_name"
+              ],
+              "properties": {
+                "kind": {
+                  "type": "string",
+                  "enum": [
+                    "mcp"
+                  ]
+                },
+                "server_id": {
+                  "type": "string"
+                },
+                "tool_name": {
+                  "type": "string"
+                }
+              }
+            }
+          ]
         }
       }
     },
@@ -165883,6 +169883,17 @@
                 "string",
                 "null"
               ]
+            },
+            "webSearch": {
+              "description": "Explicit search backend for future turns; absent means inherit defaults.",
+              "anyOf": [
+                {
+                  "$ref": "#/definitions/WebSearchChoice"
+                },
+                {
+                  "type": "null"
+                }
+              ]
             }
           }
         },
@@ -166119,6 +170130,75 @@
               }
             }
           }
+        },
+        "WebSearchChoice": {
+          "description": "Session-level web-search backend selection. `Inherit` clears the explicit session override so provider defaults apply again.",
+          "oneOf": [
+            {
+              "type": "object",
+              "required": [
+                "kind"
+              ],
+              "properties": {
+                "kind": {
+                  "type": "string",
+                  "enum": [
+                    "inherit"
+                  ]
+                }
+              }
+            },
+            {
+              "type": "object",
+              "required": [
+                "kind"
+              ],
+              "properties": {
+                "kind": {
+                  "type": "string",
+                  "enum": [
+                    "provider"
+                  ]
+                }
+              }
+            },
+            {
+              "type": "object",
+              "required": [
+                "kind"
+              ],
+              "properties": {
+                "kind": {
+                  "type": "string",
+                  "enum": [
+                    "off"
+                  ]
+                }
+              }
+            },
+            {
+              "type": "object",
+              "required": [
+                "kind",
+                "server_id",
+                "tool_name"
+              ],
+              "properties": {
+                "kind": {
+                  "type": "string",
+                  "enum": [
+                    "mcp"
+                  ]
+                },
+                "server_id": {
+                  "type": "string"
+                },
+                "tool_name": {
+                  "type": "string"
+                }
+              }
+            }
+          ]
         }
       }
     },
@@ -166860,6 +170940,17 @@
                 "string",
                 "null"
               ]
+            },
+            "webSearch": {
+              "description": "Explicit search backend for future turns; absent means inherit defaults.",
+              "anyOf": [
+                {
+                  "$ref": "#/definitions/WebSearchChoice"
+                },
+                {
+                  "type": "null"
+                }
+              ]
             }
           }
         },
@@ -167124,6 +171215,75 @@
               }
             }
           }
+        },
+        "WebSearchChoice": {
+          "description": "Session-level web-search backend selection. `Inherit` clears the explicit session override so provider defaults apply again.",
+          "oneOf": [
+            {
+              "type": "object",
+              "required": [
+                "kind"
+              ],
+              "properties": {
+                "kind": {
+                  "type": "string",
+                  "enum": [
+                    "inherit"
+                  ]
+                }
+              }
+            },
+            {
+              "type": "object",
+              "required": [
+                "kind"
+              ],
+              "properties": {
+                "kind": {
+                  "type": "string",
+                  "enum": [
+                    "provider"
+                  ]
+                }
+              }
+            },
+            {
+              "type": "object",
+              "required": [
+                "kind"
+              ],
+              "properties": {
+                "kind": {
+                  "type": "string",
+                  "enum": [
+                    "off"
+                  ]
+                }
+              }
+            },
+            {
+              "type": "object",
+              "required": [
+                "kind",
+                "server_id",
+                "tool_name"
+              ],
+              "properties": {
+                "kind": {
+                  "type": "string",
+                  "enum": [
+                    "mcp"
+                  ]
+                },
+                "server_id": {
+                  "type": "string"
+                },
+                "tool_name": {
+                  "type": "string"
+                }
+              }
+            }
+          ]
         }
       }
     },
@@ -169681,6 +173841,17 @@
                 "string",
                 "null"
               ]
+            },
+            "webSearch": {
+              "description": "Explicit search backend for future turns; absent means inherit defaults.",
+              "anyOf": [
+                {
+                  "$ref": "#/definitions/WebSearchChoice"
+                },
+                {
+                  "type": "null"
+                }
+              ]
             }
           }
         },
@@ -170324,6 +174495,75 @@
               "type": "string"
             }
           }
+        },
+        "WebSearchChoice": {
+          "description": "Session-level web-search backend selection. `Inherit` clears the explicit session override so provider defaults apply again.",
+          "oneOf": [
+            {
+              "type": "object",
+              "required": [
+                "kind"
+              ],
+              "properties": {
+                "kind": {
+                  "type": "string",
+                  "enum": [
+                    "inherit"
+                  ]
+                }
+              }
+            },
+            {
+              "type": "object",
+              "required": [
+                "kind"
+              ],
+              "properties": {
+                "kind": {
+                  "type": "string",
+                  "enum": [
+                    "provider"
+                  ]
+                }
+              }
+            },
+            {
+              "type": "object",
+              "required": [
+                "kind"
+              ],
+              "properties": {
+                "kind": {
+                  "type": "string",
+                  "enum": [
+                    "off"
+                  ]
+                }
+              }
+            },
+            {
+              "type": "object",
+              "required": [
+                "kind",
+                "server_id",
+                "tool_name"
+              ],
+              "properties": {
+                "kind": {
+                  "type": "string",
+                  "enum": [
+                    "mcp"
+                  ]
+                },
+                "server_id": {
+                  "type": "string"
+                },
+                "tool_name": {
+                  "type": "string"
+                }
+              }
+            }
+          ]
         },
         "WorkspaceChangeCoverage": {
           "type": "string",
@@ -171627,6 +175867,17 @@
                 "string",
                 "null"
               ]
+            },
+            "webSearch": {
+              "description": "Explicit search backend for future turns; absent means inherit defaults.",
+              "anyOf": [
+                {
+                  "$ref": "#/definitions/WebSearchChoice"
+                },
+                {
+                  "type": "null"
+                }
+              ]
             }
           }
         },
@@ -171863,6 +176114,75 @@
               }
             }
           }
+        },
+        "WebSearchChoice": {
+          "description": "Session-level web-search backend selection. `Inherit` clears the explicit session override so provider defaults apply again.",
+          "oneOf": [
+            {
+              "type": "object",
+              "required": [
+                "kind"
+              ],
+              "properties": {
+                "kind": {
+                  "type": "string",
+                  "enum": [
+                    "inherit"
+                  ]
+                }
+              }
+            },
+            {
+              "type": "object",
+              "required": [
+                "kind"
+              ],
+              "properties": {
+                "kind": {
+                  "type": "string",
+                  "enum": [
+                    "provider"
+                  ]
+                }
+              }
+            },
+            {
+              "type": "object",
+              "required": [
+                "kind"
+              ],
+              "properties": {
+                "kind": {
+                  "type": "string",
+                  "enum": [
+                    "off"
+                  ]
+                }
+              }
+            },
+            {
+              "type": "object",
+              "required": [
+                "kind",
+                "server_id",
+                "tool_name"
+              ],
+              "properties": {
+                "kind": {
+                  "type": "string",
+                  "enum": [
+                    "mcp"
+                  ]
+                },
+                "server_id": {
+                  "type": "string"
+                },
+                "tool_name": {
+                  "type": "string"
+                }
+              }
+            }
+          ]
         }
       }
     },
@@ -174344,6 +178664,17 @@
                 "string",
                 "null"
               ]
+            },
+            "webSearch": {
+              "description": "Explicit search backend for future turns; absent means inherit defaults.",
+              "anyOf": [
+                {
+                  "$ref": "#/definitions/WebSearchChoice"
+                },
+                {
+                  "type": "null"
+                }
+              ]
             }
           }
         },
@@ -174987,6 +179318,75 @@
               "type": "string"
             }
           }
+        },
+        "WebSearchChoice": {
+          "description": "Session-level web-search backend selection. `Inherit` clears the explicit session override so provider defaults apply again.",
+          "oneOf": [
+            {
+              "type": "object",
+              "required": [
+                "kind"
+              ],
+              "properties": {
+                "kind": {
+                  "type": "string",
+                  "enum": [
+                    "inherit"
+                  ]
+                }
+              }
+            },
+            {
+              "type": "object",
+              "required": [
+                "kind"
+              ],
+              "properties": {
+                "kind": {
+                  "type": "string",
+                  "enum": [
+                    "provider"
+                  ]
+                }
+              }
+            },
+            {
+              "type": "object",
+              "required": [
+                "kind"
+              ],
+              "properties": {
+                "kind": {
+                  "type": "string",
+                  "enum": [
+                    "off"
+                  ]
+                }
+              }
+            },
+            {
+              "type": "object",
+              "required": [
+                "kind",
+                "server_id",
+                "tool_name"
+              ],
+              "properties": {
+                "kind": {
+                  "type": "string",
+                  "enum": [
+                    "mcp"
+                  ]
+                },
+                "server_id": {
+                  "type": "string"
+                },
+                "tool_name": {
+                  "type": "string"
+                }
+              }
+            }
+          ]
         },
         "WorkspaceChangeCoverage": {
           "type": "string",
@@ -179233,6 +183633,17 @@
                 "string",
                 "null"
               ]
+            },
+            "webSearch": {
+              "description": "Explicit search backend for future turns; absent means inherit defaults.",
+              "anyOf": [
+                {
+                  "$ref": "#/definitions/WebSearchChoice"
+                },
+                {
+                  "type": "null"
+                }
+              ]
             }
           }
         },
@@ -179877,6 +184288,75 @@
             }
           }
         },
+        "WebSearchChoice": {
+          "description": "Session-level web-search backend selection. `Inherit` clears the explicit session override so provider defaults apply again.",
+          "oneOf": [
+            {
+              "type": "object",
+              "required": [
+                "kind"
+              ],
+              "properties": {
+                "kind": {
+                  "type": "string",
+                  "enum": [
+                    "inherit"
+                  ]
+                }
+              }
+            },
+            {
+              "type": "object",
+              "required": [
+                "kind"
+              ],
+              "properties": {
+                "kind": {
+                  "type": "string",
+                  "enum": [
+                    "provider"
+                  ]
+                }
+              }
+            },
+            {
+              "type": "object",
+              "required": [
+                "kind"
+              ],
+              "properties": {
+                "kind": {
+                  "type": "string",
+                  "enum": [
+                    "off"
+                  ]
+                }
+              }
+            },
+            {
+              "type": "object",
+              "required": [
+                "kind",
+                "server_id",
+                "tool_name"
+              ],
+              "properties": {
+                "kind": {
+                  "type": "string",
+                  "enum": [
+                    "mcp"
+                  ]
+                },
+                "server_id": {
+                  "type": "string"
+                },
+                "tool_name": {
+                  "type": "string"
+                }
+              }
+            }
+          ]
+        },
         "WorkspaceChangeCoverage": {
           "type": "string",
           "enum": [
@@ -180011,7 +184491,9 @@
       "type": "object",
       "required": [
         "fetch",
-        "search"
+        "search",
+        "searchChoice",
+        "searchChoices"
       ],
       "properties": {
         "fetch": {
@@ -180019,6 +184501,15 @@
         },
         "search": {
           "$ref": "#/definitions/WebBackendStatus"
+        },
+        "searchChoice": {
+          "$ref": "#/definitions/WebSearchChoice"
+        },
+        "searchChoices": {
+          "type": "array",
+          "items": {
+            "$ref": "#/definitions/WebSearchPickerEntry"
+          }
         }
       },
       "definitions": {
@@ -180030,6 +184521,96 @@
           ],
           "properties": {
             "backend": {
+              "type": "string"
+            },
+            "note": {
+              "type": [
+                "string",
+                "null"
+              ]
+            }
+          }
+        },
+        "WebSearchChoice": {
+          "description": "Session-level web-search backend selection. `Inherit` clears the explicit session override so provider defaults apply again.",
+          "oneOf": [
+            {
+              "type": "object",
+              "required": [
+                "kind"
+              ],
+              "properties": {
+                "kind": {
+                  "type": "string",
+                  "enum": [
+                    "inherit"
+                  ]
+                }
+              }
+            },
+            {
+              "type": "object",
+              "required": [
+                "kind"
+              ],
+              "properties": {
+                "kind": {
+                  "type": "string",
+                  "enum": [
+                    "provider"
+                  ]
+                }
+              }
+            },
+            {
+              "type": "object",
+              "required": [
+                "kind"
+              ],
+              "properties": {
+                "kind": {
+                  "type": "string",
+                  "enum": [
+                    "off"
+                  ]
+                }
+              }
+            },
+            {
+              "type": "object",
+              "required": [
+                "kind",
+                "server_id",
+                "tool_name"
+              ],
+              "properties": {
+                "kind": {
+                  "type": "string",
+                  "enum": [
+                    "mcp"
+                  ]
+                },
+                "server_id": {
+                  "type": "string"
+                },
+                "tool_name": {
+                  "type": "string"
+                }
+              }
+            }
+          ]
+        },
+        "WebSearchPickerEntry": {
+          "type": "object",
+          "required": [
+            "choice",
+            "label"
+          ],
+          "properties": {
+            "choice": {
+              "$ref": "#/definitions/WebSearchChoice"
+            },
+            "label": {
               "type": "string"
             },
             "note": {
@@ -185550,6 +190131,17 @@
                 "string",
                 "null"
               ]
+            },
+            "webSearch": {
+              "description": "Explicit search backend for future turns; absent means inherit defaults.",
+              "anyOf": [
+                {
+                  "$ref": "#/definitions/WebSearchChoice"
+                },
+                {
+                  "type": "null"
+                }
+              ]
             }
           }
         },
@@ -186296,6 +190888,75 @@
               "type": "string"
             }
           }
+        },
+        "WebSearchChoice": {
+          "description": "Session-level web-search backend selection. `Inherit` clears the explicit session override so provider defaults apply again.",
+          "oneOf": [
+            {
+              "type": "object",
+              "required": [
+                "kind"
+              ],
+              "properties": {
+                "kind": {
+                  "type": "string",
+                  "enum": [
+                    "inherit"
+                  ]
+                }
+              }
+            },
+            {
+              "type": "object",
+              "required": [
+                "kind"
+              ],
+              "properties": {
+                "kind": {
+                  "type": "string",
+                  "enum": [
+                    "provider"
+                  ]
+                }
+              }
+            },
+            {
+              "type": "object",
+              "required": [
+                "kind"
+              ],
+              "properties": {
+                "kind": {
+                  "type": "string",
+                  "enum": [
+                    "off"
+                  ]
+                }
+              }
+            },
+            {
+              "type": "object",
+              "required": [
+                "kind",
+                "server_id",
+                "tool_name"
+              ],
+              "properties": {
+                "kind": {
+                  "type": "string",
+                  "enum": [
+                    "mcp"
+                  ]
+                },
+                "server_id": {
+                  "type": "string"
+                },
+                "tool_name": {
+                  "type": "string"
+                }
+              }
+            }
+          ]
         },
         "WorkspaceChangeCoverage": {
           "type": "string",
@@ -188969,6 +193630,17 @@
                 "string",
                 "null"
               ]
+            },
+            "webSearch": {
+              "description": "Explicit search backend for future turns; absent means inherit defaults.",
+              "anyOf": [
+                {
+                  "$ref": "#/definitions/WebSearchChoice"
+                },
+                {
+                  "type": "null"
+                }
+              ]
             }
           }
         },
@@ -189612,6 +194284,75 @@
               "type": "string"
             }
           }
+        },
+        "WebSearchChoice": {
+          "description": "Session-level web-search backend selection. `Inherit` clears the explicit session override so provider defaults apply again.",
+          "oneOf": [
+            {
+              "type": "object",
+              "required": [
+                "kind"
+              ],
+              "properties": {
+                "kind": {
+                  "type": "string",
+                  "enum": [
+                    "inherit"
+                  ]
+                }
+              }
+            },
+            {
+              "type": "object",
+              "required": [
+                "kind"
+              ],
+              "properties": {
+                "kind": {
+                  "type": "string",
+                  "enum": [
+                    "provider"
+                  ]
+                }
+              }
+            },
+            {
+              "type": "object",
+              "required": [
+                "kind"
+              ],
+              "properties": {
+                "kind": {
+                  "type": "string",
+                  "enum": [
+                    "off"
+                  ]
+                }
+              }
+            },
+            {
+              "type": "object",
+              "required": [
+                "kind",
+                "server_id",
+                "tool_name"
+              ],
+              "properties": {
+                "kind": {
+                  "type": "string",
+                  "enum": [
+                    "mcp"
+                  ]
+                },
+                "server_id": {
+                  "type": "string"
+                },
+                "tool_name": {
+                  "type": "string"
+                }
+              }
+            }
+          ]
         },
         "WorkspaceChangeCoverage": {
           "type": "string",
@@ -192181,6 +196922,17 @@
                 "string",
                 "null"
               ]
+            },
+            "webSearch": {
+              "description": "Explicit search backend for future turns; absent means inherit defaults.",
+              "anyOf": [
+                {
+                  "$ref": "#/definitions/WebSearchChoice"
+                },
+                {
+                  "type": "null"
+                }
+              ]
             }
           }
         },
@@ -192824,6 +197576,75 @@
               "type": "string"
             }
           }
+        },
+        "WebSearchChoice": {
+          "description": "Session-level web-search backend selection. `Inherit` clears the explicit session override so provider defaults apply again.",
+          "oneOf": [
+            {
+              "type": "object",
+              "required": [
+                "kind"
+              ],
+              "properties": {
+                "kind": {
+                  "type": "string",
+                  "enum": [
+                    "inherit"
+                  ]
+                }
+              }
+            },
+            {
+              "type": "object",
+              "required": [
+                "kind"
+              ],
+              "properties": {
+                "kind": {
+                  "type": "string",
+                  "enum": [
+                    "provider"
+                  ]
+                }
+              }
+            },
+            {
+              "type": "object",
+              "required": [
+                "kind"
+              ],
+              "properties": {
+                "kind": {
+                  "type": "string",
+                  "enum": [
+                    "off"
+                  ]
+                }
+              }
+            },
+            {
+              "type": "object",
+              "required": [
+                "kind",
+                "server_id",
+                "tool_name"
+              ],
+              "properties": {
+                "kind": {
+                  "type": "string",
+                  "enum": [
+                    "mcp"
+                  ]
+                },
+                "server_id": {
+                  "type": "string"
+                },
+                "tool_name": {
+                  "type": "string"
+                }
+              }
+            }
+          ]
         },
         "WorkspaceChangeCoverage": {
           "type": "string",
@@ -197019,6 +201840,17 @@
                 "string",
                 "null"
               ]
+            },
+            "webSearch": {
+              "description": "Explicit search backend for future turns; absent means inherit defaults.",
+              "anyOf": [
+                {
+                  "$ref": "#/definitions/WebSearchChoice"
+                },
+                {
+                  "type": "null"
+                }
+              ]
             }
           }
         },
@@ -197662,6 +202494,75 @@
               "type": "string"
             }
           }
+        },
+        "WebSearchChoice": {
+          "description": "Session-level web-search backend selection. `Inherit` clears the explicit session override so provider defaults apply again.",
+          "oneOf": [
+            {
+              "type": "object",
+              "required": [
+                "kind"
+              ],
+              "properties": {
+                "kind": {
+                  "type": "string",
+                  "enum": [
+                    "inherit"
+                  ]
+                }
+              }
+            },
+            {
+              "type": "object",
+              "required": [
+                "kind"
+              ],
+              "properties": {
+                "kind": {
+                  "type": "string",
+                  "enum": [
+                    "provider"
+                  ]
+                }
+              }
+            },
+            {
+              "type": "object",
+              "required": [
+                "kind"
+              ],
+              "properties": {
+                "kind": {
+                  "type": "string",
+                  "enum": [
+                    "off"
+                  ]
+                }
+              }
+            },
+            {
+              "type": "object",
+              "required": [
+                "kind",
+                "server_id",
+                "tool_name"
+              ],
+              "properties": {
+                "kind": {
+                  "type": "string",
+                  "enum": [
+                    "mcp"
+                  ]
+                },
+                "server_id": {
+                  "type": "string"
+                },
+                "tool_name": {
+                  "type": "string"
+                }
+              }
+            }
+          ]
         },
         "WorkspaceChangeCoverage": {
           "type": "string",
@@ -202023,6 +206924,17 @@
                 "string",
                 "null"
               ]
+            },
+            "webSearch": {
+              "description": "Explicit search backend for future turns; absent means inherit defaults.",
+              "anyOf": [
+                {
+                  "$ref": "#/definitions/WebSearchChoice"
+                },
+                {
+                  "type": "null"
+                }
+              ]
             }
           }
         },
@@ -202666,6 +207578,75 @@
               "type": "string"
             }
           }
+        },
+        "WebSearchChoice": {
+          "description": "Session-level web-search backend selection. `Inherit` clears the explicit session override so provider defaults apply again.",
+          "oneOf": [
+            {
+              "type": "object",
+              "required": [
+                "kind"
+              ],
+              "properties": {
+                "kind": {
+                  "type": "string",
+                  "enum": [
+                    "inherit"
+                  ]
+                }
+              }
+            },
+            {
+              "type": "object",
+              "required": [
+                "kind"
+              ],
+              "properties": {
+                "kind": {
+                  "type": "string",
+                  "enum": [
+                    "provider"
+                  ]
+                }
+              }
+            },
+            {
+              "type": "object",
+              "required": [
+                "kind"
+              ],
+              "properties": {
+                "kind": {
+                  "type": "string",
+                  "enum": [
+                    "off"
+                  ]
+                }
+              }
+            },
+            {
+              "type": "object",
+              "required": [
+                "kind",
+                "server_id",
+                "tool_name"
+              ],
+              "properties": {
+                "kind": {
+                  "type": "string",
+                  "enum": [
+                    "mcp"
+                  ]
+                },
+                "server_id": {
+                  "type": "string"
+                },
+                "tool_name": {
+                  "type": "string"
+                }
+              }
+            }
+          ]
         },
         "WorkspaceChangeCoverage": {
           "type": "string",
@@ -205276,6 +210257,17 @@
                 "string",
                 "null"
               ]
+            },
+            "webSearch": {
+              "description": "Explicit search backend for future turns; absent means inherit defaults.",
+              "anyOf": [
+                {
+                  "$ref": "#/definitions/WebSearchChoice"
+                },
+                {
+                  "type": "null"
+                }
+              ]
             }
           }
         },
@@ -205919,6 +210911,75 @@
               "type": "string"
             }
           }
+        },
+        "WebSearchChoice": {
+          "description": "Session-level web-search backend selection. `Inherit` clears the explicit session override so provider defaults apply again.",
+          "oneOf": [
+            {
+              "type": "object",
+              "required": [
+                "kind"
+              ],
+              "properties": {
+                "kind": {
+                  "type": "string",
+                  "enum": [
+                    "inherit"
+                  ]
+                }
+              }
+            },
+            {
+              "type": "object",
+              "required": [
+                "kind"
+              ],
+              "properties": {
+                "kind": {
+                  "type": "string",
+                  "enum": [
+                    "provider"
+                  ]
+                }
+              }
+            },
+            {
+              "type": "object",
+              "required": [
+                "kind"
+              ],
+              "properties": {
+                "kind": {
+                  "type": "string",
+                  "enum": [
+                    "off"
+                  ]
+                }
+              }
+            },
+            {
+              "type": "object",
+              "required": [
+                "kind",
+                "server_id",
+                "tool_name"
+              ],
+              "properties": {
+                "kind": {
+                  "type": "string",
+                  "enum": [
+                    "mcp"
+                  ]
+                },
+                "server_id": {
+                  "type": "string"
+                },
+                "tool_name": {
+                  "type": "string"
+                }
+              }
+            }
+          ]
         },
         "WorkspaceChangeCoverage": {
           "type": "string",
@@ -208553,6 +213614,17 @@
                 "string",
                 "null"
               ]
+            },
+            "webSearch": {
+              "description": "Explicit search backend for future turns; absent means inherit defaults.",
+              "anyOf": [
+                {
+                  "$ref": "#/definitions/WebSearchChoice"
+                },
+                {
+                  "type": "null"
+                }
+              ]
             }
           }
         },
@@ -209196,6 +214268,75 @@
               "type": "string"
             }
           }
+        },
+        "WebSearchChoice": {
+          "description": "Session-level web-search backend selection. `Inherit` clears the explicit session override so provider defaults apply again.",
+          "oneOf": [
+            {
+              "type": "object",
+              "required": [
+                "kind"
+              ],
+              "properties": {
+                "kind": {
+                  "type": "string",
+                  "enum": [
+                    "inherit"
+                  ]
+                }
+              }
+            },
+            {
+              "type": "object",
+              "required": [
+                "kind"
+              ],
+              "properties": {
+                "kind": {
+                  "type": "string",
+                  "enum": [
+                    "provider"
+                  ]
+                }
+              }
+            },
+            {
+              "type": "object",
+              "required": [
+                "kind"
+              ],
+              "properties": {
+                "kind": {
+                  "type": "string",
+                  "enum": [
+                    "off"
+                  ]
+                }
+              }
+            },
+            {
+              "type": "object",
+              "required": [
+                "kind",
+                "server_id",
+                "tool_name"
+              ],
+              "properties": {
+                "kind": {
+                  "type": "string",
+                  "enum": [
+                    "mcp"
+                  ]
+                },
+                "server_id": {
+                  "type": "string"
+                },
+                "tool_name": {
+                  "type": "string"
+                }
+              }
+            }
+          ]
         },
         "WorkspaceChangeCoverage": {
           "type": "string",
@@ -212288,6 +217429,17 @@
                 "string",
                 "null"
               ]
+            },
+            "webSearch": {
+              "description": "Explicit search backend for future turns; absent means inherit defaults.",
+              "anyOf": [
+                {
+                  "$ref": "#/definitions/WebSearchChoice"
+                },
+                {
+                  "type": "null"
+                }
+              ]
             }
           }
         },
@@ -212931,6 +218083,75 @@
               "type": "string"
             }
           }
+        },
+        "WebSearchChoice": {
+          "description": "Session-level web-search backend selection. `Inherit` clears the explicit session override so provider defaults apply again.",
+          "oneOf": [
+            {
+              "type": "object",
+              "required": [
+                "kind"
+              ],
+              "properties": {
+                "kind": {
+                  "type": "string",
+                  "enum": [
+                    "inherit"
+                  ]
+                }
+              }
+            },
+            {
+              "type": "object",
+              "required": [
+                "kind"
+              ],
+              "properties": {
+                "kind": {
+                  "type": "string",
+                  "enum": [
+                    "provider"
+                  ]
+                }
+              }
+            },
+            {
+              "type": "object",
+              "required": [
+                "kind"
+              ],
+              "properties": {
+                "kind": {
+                  "type": "string",
+                  "enum": [
+                    "off"
+                  ]
+                }
+              }
+            },
+            {
+              "type": "object",
+              "required": [
+                "kind",
+                "server_id",
+                "tool_name"
+              ],
+              "properties": {
+                "kind": {
+                  "type": "string",
+                  "enum": [
+                    "mcp"
+                  ]
+                },
+                "server_id": {
+                  "type": "string"
+                },
+                "tool_name": {
+                  "type": "string"
+                }
+              }
+            }
+          ]
         },
         "WorkspaceChangeCoverage": {
           "type": "string",
@@ -215932,6 +221153,17 @@
                 "string",
                 "null"
               ]
+            },
+            "webSearch": {
+              "description": "Explicit search backend for future turns; absent means inherit defaults.",
+              "anyOf": [
+                {
+                  "$ref": "#/definitions/WebSearchChoice"
+                },
+                {
+                  "type": "null"
+                }
+              ]
             }
           }
         },
@@ -216575,6 +221807,75 @@
               "type": "string"
             }
           }
+        },
+        "WebSearchChoice": {
+          "description": "Session-level web-search backend selection. `Inherit` clears the explicit session override so provider defaults apply again.",
+          "oneOf": [
+            {
+              "type": "object",
+              "required": [
+                "kind"
+              ],
+              "properties": {
+                "kind": {
+                  "type": "string",
+                  "enum": [
+                    "inherit"
+                  ]
+                }
+              }
+            },
+            {
+              "type": "object",
+              "required": [
+                "kind"
+              ],
+              "properties": {
+                "kind": {
+                  "type": "string",
+                  "enum": [
+                    "provider"
+                  ]
+                }
+              }
+            },
+            {
+              "type": "object",
+              "required": [
+                "kind"
+              ],
+              "properties": {
+                "kind": {
+                  "type": "string",
+                  "enum": [
+                    "off"
+                  ]
+                }
+              }
+            },
+            {
+              "type": "object",
+              "required": [
+                "kind",
+                "server_id",
+                "tool_name"
+              ],
+              "properties": {
+                "kind": {
+                  "type": "string",
+                  "enum": [
+                    "mcp"
+                  ]
+                },
+                "server_id": {
+                  "type": "string"
+                },
+                "tool_name": {
+                  "type": "string"
+                }
+              }
+            }
+          ]
         },
         "WorkspaceChangeCoverage": {
           "type": "string",
@@ -219720,6 +225021,17 @@
                 "string",
                 "null"
               ]
+            },
+            "webSearch": {
+              "description": "Explicit search backend for future turns; absent means inherit defaults.",
+              "anyOf": [
+                {
+                  "$ref": "#/definitions/WebSearchChoice"
+                },
+                {
+                  "type": "null"
+                }
+              ]
             }
           }
         },
@@ -220363,6 +225675,75 @@
               "type": "string"
             }
           }
+        },
+        "WebSearchChoice": {
+          "description": "Session-level web-search backend selection. `Inherit` clears the explicit session override so provider defaults apply again.",
+          "oneOf": [
+            {
+              "type": "object",
+              "required": [
+                "kind"
+              ],
+              "properties": {
+                "kind": {
+                  "type": "string",
+                  "enum": [
+                    "inherit"
+                  ]
+                }
+              }
+            },
+            {
+              "type": "object",
+              "required": [
+                "kind"
+              ],
+              "properties": {
+                "kind": {
+                  "type": "string",
+                  "enum": [
+                    "provider"
+                  ]
+                }
+              }
+            },
+            {
+              "type": "object",
+              "required": [
+                "kind"
+              ],
+              "properties": {
+                "kind": {
+                  "type": "string",
+                  "enum": [
+                    "off"
+                  ]
+                }
+              }
+            },
+            {
+              "type": "object",
+              "required": [
+                "kind",
+                "server_id",
+                "tool_name"
+              ],
+              "properties": {
+                "kind": {
+                  "type": "string",
+                  "enum": [
+                    "mcp"
+                  ]
+                },
+                "server_id": {
+                  "type": "string"
+                },
+                "tool_name": {
+                  "type": "string"
+                }
+              }
+            }
+          ]
         },
         "WorkspaceChangeCoverage": {
           "type": "string",
@@ -222926,6 +228307,17 @@
                 "string",
                 "null"
               ]
+            },
+            "webSearch": {
+              "description": "Explicit search backend for future turns; absent means inherit defaults.",
+              "anyOf": [
+                {
+                  "$ref": "#/definitions/WebSearchChoice"
+                },
+                {
+                  "type": "null"
+                }
+              ]
             }
           }
         },
@@ -223569,6 +228961,75 @@
               "type": "string"
             }
           }
+        },
+        "WebSearchChoice": {
+          "description": "Session-level web-search backend selection. `Inherit` clears the explicit session override so provider defaults apply again.",
+          "oneOf": [
+            {
+              "type": "object",
+              "required": [
+                "kind"
+              ],
+              "properties": {
+                "kind": {
+                  "type": "string",
+                  "enum": [
+                    "inherit"
+                  ]
+                }
+              }
+            },
+            {
+              "type": "object",
+              "required": [
+                "kind"
+              ],
+              "properties": {
+                "kind": {
+                  "type": "string",
+                  "enum": [
+                    "provider"
+                  ]
+                }
+              }
+            },
+            {
+              "type": "object",
+              "required": [
+                "kind"
+              ],
+              "properties": {
+                "kind": {
+                  "type": "string",
+                  "enum": [
+                    "off"
+                  ]
+                }
+              }
+            },
+            {
+              "type": "object",
+              "required": [
+                "kind",
+                "server_id",
+                "tool_name"
+              ],
+              "properties": {
+                "kind": {
+                  "type": "string",
+                  "enum": [
+                    "mcp"
+                  ]
+                },
+                "server_id": {
+                  "type": "string"
+                },
+                "tool_name": {
+                  "type": "string"
+                }
+              }
+            }
+          ]
         },
         "WorkspaceChangeCoverage": {
           "type": "string",
@@ -226686,6 +232147,17 @@
                 "string",
                 "null"
               ]
+            },
+            "webSearch": {
+              "description": "Explicit search backend for future turns; absent means inherit defaults.",
+              "anyOf": [
+                {
+                  "$ref": "#/definitions/WebSearchChoice"
+                },
+                {
+                  "type": "null"
+                }
+              ]
             }
           }
         },
@@ -227329,6 +232801,75 @@
               "type": "string"
             }
           }
+        },
+        "WebSearchChoice": {
+          "description": "Session-level web-search backend selection. `Inherit` clears the explicit session override so provider defaults apply again.",
+          "oneOf": [
+            {
+              "type": "object",
+              "required": [
+                "kind"
+              ],
+              "properties": {
+                "kind": {
+                  "type": "string",
+                  "enum": [
+                    "inherit"
+                  ]
+                }
+              }
+            },
+            {
+              "type": "object",
+              "required": [
+                "kind"
+              ],
+              "properties": {
+                "kind": {
+                  "type": "string",
+                  "enum": [
+                    "provider"
+                  ]
+                }
+              }
+            },
+            {
+              "type": "object",
+              "required": [
+                "kind"
+              ],
+              "properties": {
+                "kind": {
+                  "type": "string",
+                  "enum": [
+                    "off"
+                  ]
+                }
+              }
+            },
+            {
+              "type": "object",
+              "required": [
+                "kind",
+                "server_id",
+                "tool_name"
+              ],
+              "properties": {
+                "kind": {
+                  "type": "string",
+                  "enum": [
+                    "mcp"
+                  ]
+                },
+                "server_id": {
+                  "type": "string"
+                },
+                "tool_name": {
+                  "type": "string"
+                }
+              }
+            }
+          ]
         },
         "WorkspaceChangeCoverage": {
           "type": "string",
@@ -229920,6 +235461,17 @@
                 "string",
                 "null"
               ]
+            },
+            "webSearch": {
+              "description": "Explicit search backend for future turns; absent means inherit defaults.",
+              "anyOf": [
+                {
+                  "$ref": "#/definitions/WebSearchChoice"
+                },
+                {
+                  "type": "null"
+                }
+              ]
             }
           }
         },
@@ -230563,6 +236115,75 @@
               "type": "string"
             }
           }
+        },
+        "WebSearchChoice": {
+          "description": "Session-level web-search backend selection. `Inherit` clears the explicit session override so provider defaults apply again.",
+          "oneOf": [
+            {
+              "type": "object",
+              "required": [
+                "kind"
+              ],
+              "properties": {
+                "kind": {
+                  "type": "string",
+                  "enum": [
+                    "inherit"
+                  ]
+                }
+              }
+            },
+            {
+              "type": "object",
+              "required": [
+                "kind"
+              ],
+              "properties": {
+                "kind": {
+                  "type": "string",
+                  "enum": [
+                    "provider"
+                  ]
+                }
+              }
+            },
+            {
+              "type": "object",
+              "required": [
+                "kind"
+              ],
+              "properties": {
+                "kind": {
+                  "type": "string",
+                  "enum": [
+                    "off"
+                  ]
+                }
+              }
+            },
+            {
+              "type": "object",
+              "required": [
+                "kind",
+                "server_id",
+                "tool_name"
+              ],
+              "properties": {
+                "kind": {
+                  "type": "string",
+                  "enum": [
+                    "mcp"
+                  ]
+                },
+                "server_id": {
+                  "type": "string"
+                },
+                "tool_name": {
+                  "type": "string"
+                }
+              }
+            }
+          ]
         },
         "WorkspaceChangeCoverage": {
           "type": "string",
@@ -233806,6 +239427,17 @@
                 "string",
                 "null"
               ]
+            },
+            "webSearch": {
+              "description": "Explicit search backend for future turns; absent means inherit defaults.",
+              "anyOf": [
+                {
+                  "$ref": "#/definitions/WebSearchChoice"
+                },
+                {
+                  "type": "null"
+                }
+              ]
             }
           }
         },
@@ -234449,6 +240081,75 @@
               "type": "string"
             }
           }
+        },
+        "WebSearchChoice": {
+          "description": "Session-level web-search backend selection. `Inherit` clears the explicit session override so provider defaults apply again.",
+          "oneOf": [
+            {
+              "type": "object",
+              "required": [
+                "kind"
+              ],
+              "properties": {
+                "kind": {
+                  "type": "string",
+                  "enum": [
+                    "inherit"
+                  ]
+                }
+              }
+            },
+            {
+              "type": "object",
+              "required": [
+                "kind"
+              ],
+              "properties": {
+                "kind": {
+                  "type": "string",
+                  "enum": [
+                    "provider"
+                  ]
+                }
+              }
+            },
+            {
+              "type": "object",
+              "required": [
+                "kind"
+              ],
+              "properties": {
+                "kind": {
+                  "type": "string",
+                  "enum": [
+                    "off"
+                  ]
+                }
+              }
+            },
+            {
+              "type": "object",
+              "required": [
+                "kind",
+                "server_id",
+                "tool_name"
+              ],
+              "properties": {
+                "kind": {
+                  "type": "string",
+                  "enum": [
+                    "mcp"
+                  ]
+                },
+                "server_id": {
+                  "type": "string"
+                },
+                "tool_name": {
+                  "type": "string"
+                }
+              }
+            }
+          ]
         },
         "WorkspaceChangeCoverage": {
           "type": "string",
@@ -237026,6 +242727,17 @@
                 "string",
                 "null"
               ]
+            },
+            "webSearch": {
+              "description": "Explicit search backend for future turns; absent means inherit defaults.",
+              "anyOf": [
+                {
+                  "$ref": "#/definitions/WebSearchChoice"
+                },
+                {
+                  "type": "null"
+                }
+              ]
             }
           }
         },
@@ -237669,6 +243381,75 @@
               "type": "string"
             }
           }
+        },
+        "WebSearchChoice": {
+          "description": "Session-level web-search backend selection. `Inherit` clears the explicit session override so provider defaults apply again.",
+          "oneOf": [
+            {
+              "type": "object",
+              "required": [
+                "kind"
+              ],
+              "properties": {
+                "kind": {
+                  "type": "string",
+                  "enum": [
+                    "inherit"
+                  ]
+                }
+              }
+            },
+            {
+              "type": "object",
+              "required": [
+                "kind"
+              ],
+              "properties": {
+                "kind": {
+                  "type": "string",
+                  "enum": [
+                    "provider"
+                  ]
+                }
+              }
+            },
+            {
+              "type": "object",
+              "required": [
+                "kind"
+              ],
+              "properties": {
+                "kind": {
+                  "type": "string",
+                  "enum": [
+                    "off"
+                  ]
+                }
+              }
+            },
+            {
+              "type": "object",
+              "required": [
+                "kind",
+                "server_id",
+                "tool_name"
+              ],
+              "properties": {
+                "kind": {
+                  "type": "string",
+                  "enum": [
+                    "mcp"
+                  ]
+                },
+                "server_id": {
+                  "type": "string"
+                },
+                "tool_name": {
+                  "type": "string"
+                }
+              }
+            }
+          ]
         },
         "WorkspaceChangeCoverage": {
           "type": "string",
@@ -240232,6 +246013,17 @@
                 "string",
                 "null"
               ]
+            },
+            "webSearch": {
+              "description": "Explicit search backend for future turns; absent means inherit defaults.",
+              "anyOf": [
+                {
+                  "$ref": "#/definitions/WebSearchChoice"
+                },
+                {
+                  "type": "null"
+                }
+              ]
             }
           }
         },
@@ -240875,6 +246667,75 @@
               "type": "string"
             }
           }
+        },
+        "WebSearchChoice": {
+          "description": "Session-level web-search backend selection. `Inherit` clears the explicit session override so provider defaults apply again.",
+          "oneOf": [
+            {
+              "type": "object",
+              "required": [
+                "kind"
+              ],
+              "properties": {
+                "kind": {
+                  "type": "string",
+                  "enum": [
+                    "inherit"
+                  ]
+                }
+              }
+            },
+            {
+              "type": "object",
+              "required": [
+                "kind"
+              ],
+              "properties": {
+                "kind": {
+                  "type": "string",
+                  "enum": [
+                    "provider"
+                  ]
+                }
+              }
+            },
+            {
+              "type": "object",
+              "required": [
+                "kind"
+              ],
+              "properties": {
+                "kind": {
+                  "type": "string",
+                  "enum": [
+                    "off"
+                  ]
+                }
+              }
+            },
+            {
+              "type": "object",
+              "required": [
+                "kind",
+                "server_id",
+                "tool_name"
+              ],
+              "properties": {
+                "kind": {
+                  "type": "string",
+                  "enum": [
+                    "mcp"
+                  ]
+                },
+                "server_id": {
+                  "type": "string"
+                },
+                "tool_name": {
+                  "type": "string"
+                }
+              }
+            }
+          ]
         },
         "WorkspaceChangeCoverage": {
           "type": "string",

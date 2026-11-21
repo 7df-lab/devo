@@ -168,6 +168,8 @@ mod turn_exec;
 mod turn_lifecycle;
 mod turn_reservation;
 mod user_input;
+mod web_search_builtin;
+mod web_search_mcp;
 mod web_status;
 mod workspace_baseline;
 mod worktrees;

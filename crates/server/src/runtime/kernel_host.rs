@@ -560,6 +560,7 @@ mod tests {
             mcp_manager: None,
             agent_scope: ToolAgentScope::Parent,
             local_web_search: None,
+            web_routes: crate::runtime::kernel_host_bridge::WebRoutes::default(),
             network_proxy: None,
             network_no_proxy: None,
             runtime: Arc::downgrade(&runtime),

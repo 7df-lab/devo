@@ -429,8 +429,34 @@ impl ServerRuntime {
                 ),
             ),
         };
+        use devo_protocol::native::session::WebSearchChoice;
+        let search_choice = summary
+            .settings
+            .web_search
+            .clone()
+            .unwrap_or(WebSearchChoice::Inherit);
+        let statuses = context.mcp_manager.statuses().await.unwrap_or_default();
+        let hosted_search = hosted(Capability::Search);
+        let search_choices = super::web_search_mcp::picker_entries(
+            &context,
+            &statuses,
+            &search_choice,
+            hosted_search.note.clone(),
+        );
         let search = match &config.web_search {
-            ResolvedWebSearchConfig::Provider => hosted(Capability::Search),
+            ResolvedWebSearchConfig::Provider => hosted_search,
+            ResolvedWebSearchConfig::Mcp {
+                server_id,
+                tool_name,
+            } => {
+                let entry = super::web_search_mcp::mcp_picker_entry(
+                    &context, &statuses, server_id, tool_name,
+                );
+                WebBackendStatus {
+                    backend: entry.label,
+                    note: entry.note,
+                }
+            }
             ResolvedWebSearchConfig::Local(local) => WebBackendStatus {
                 backend: local.provider_id.clone(),
                 note: None,
@@ -442,6 +468,10 @@ impl ServerRuntime {
         };
         let fetch = match config.web_fetch {
             ResolvedWebFetchConfig::Provider => hosted(Capability::Fetch),
+            ResolvedWebFetchConfig::Mcp { provider } => WebBackendStatus {
+                backend: super::web_search_builtin::label(provider).into(),
+                note: super::web_search_builtin::status_note(&context, provider),
+            },
             ResolvedWebFetchConfig::Local => WebBackendStatus {
                 backend: "Direct HTTP".into(),
                 note: None,
@@ -453,7 +483,12 @@ impl ServerRuntime {
         };
         serde_json::to_value(SuccessResponse {
             id,
-            result: SessionWebStatusReadResult { search, fetch },
+            result: SessionWebStatusReadResult {
+                search,
+                fetch,
+                search_choice,
+                search_choices,
+            },
         })
         .expect("serialize session web status")
     }

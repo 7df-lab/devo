@@ -452,9 +452,23 @@ export interface AgentConnectionResourceSnapshot {
 	diagnostics: AgentConnectionResourceDiagnostics;
 }
 
+export type WebSearchChoice =
+	| { kind: "inherit" }
+	| { kind: "provider" }
+	| { kind: "off" }
+	| { kind: "mcp"; serverId: string; toolName: string };
+
+export interface AgentConnectionWebSearchChoice {
+	label: string;
+	choice: WebSearchChoice;
+	note?: string;
+}
+
 export interface AgentConnectionWebStatus {
 	search: { backend: string; note?: string };
 	fetch: { backend: string; note?: string };
+	searchChoice?: WebSearchChoice;
+	searchChoices?: AgentConnectionWebSearchChoice[];
 }
 
 export interface AgentConnectionToolDefinition {
@@ -761,6 +775,7 @@ export interface AgentConnection {
 	getLastAssistantText(): Promise<string | undefined>;
 	getSystemPrompt(): Promise<string>;
 	getWebStatus(): Promise<AgentConnectionWebStatus | undefined>;
+	setWebSearchChoice(choice: WebSearchChoice): Promise<void>;
 	getToolDefinition(name: string): Promise<AgentConnectionToolDefinition | undefined>;
 	setSessionEntryLabel(entryId: string, label: string | undefined): Promise<void>;
 	respondToExtensionUiRequest(requestId: string, response: AgentConnectionExtensionUiResponse): Promise<void>;

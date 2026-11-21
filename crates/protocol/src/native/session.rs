@@ -188,6 +188,24 @@ pub enum SessionParent {
     },
 }
 
+/// Session-level web-search backend selection. `Inherit` clears the explicit
+/// session override so provider defaults apply again.
+#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize, JsonSchema, TS)]
+#[serde(
+    tag = "kind",
+    rename_all = "camelCase",
+    rename_all_fields = "camelCase"
+)]
+pub enum WebSearchChoice {
+    Inherit,
+    Provider,
+    Off,
+    Mcp {
+        server_id: String,
+        tool_name: String,
+    },
+}
+
 #[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize, JsonSchema, TS)]
 #[serde(rename_all = "camelCase")]
 pub struct SessionSettings {
@@ -221,6 +239,9 @@ pub struct SessionSettings {
     /// First foreground wait (ms) before Python cell wait-policy. Default 180_000 when unset.
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub python_cell_first_wait_ms: Option<u64>,
+    /// Explicit search backend for future turns; absent means inherit defaults.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub web_search: Option<WebSearchChoice>,
 }
 
 /// Snapshot semantics: the current value is *copied* into the record at
@@ -259,6 +280,7 @@ mod tests {
                 auto_refine_enabled: None,
                 auto_refine_turn_interval: None,
                 python_cell_first_wait_ms: None,
+                web_search: None,
             };
             let json = serde_json::to_value(&settings).expect("serialize settings");
             assert_eq!(

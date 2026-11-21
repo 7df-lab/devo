@@ -496,6 +496,9 @@ install_bundle() (
     }
     trap rollback_bundle EXIT
     bundle_components="runtime tui rg"
+    if [ -f "$bundle_source/devo-web-mcp" ]; then
+        bundle_components="$bundle_components devo-web-mcp"
+    fi
     bundle_components="$bundle_components devo"
     for component in $bundle_components; do cp -R "$bundle_source/$component" "$bundle_stage/new/$component"; done
     for component in $bundle_components; do
