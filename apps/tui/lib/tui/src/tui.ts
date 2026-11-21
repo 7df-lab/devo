@@ -26,6 +26,7 @@ import {
 } from "./utils.js";
 
 const KITTY_SEQUENCE_PREFIX = "\x1b_G";
+const SHELL_INTEGRATION_MARK = /\x1b\]133;[^\x07\x1b]*(?:\x07|\x1b\\)/g;
 
 function extractKittyImageIds(line: string): number[] {
 	const sequenceStart = line.indexOf(KITTY_SEQUENCE_PREFIX);
@@ -1513,29 +1514,32 @@ export class TUI extends Container {
 			return fullscreen.dock.render(width);
 		});
 
-		let frame = fullscreen.viewport.composeFrame(transcript, dock, height, selectionRegions);
+		let followHint: string | undefined;
+		if (fullscreen.viewportControls && !fullscreen.viewport.isFollowing()) {
+			const followKey = getKeybindings().getKeys("tui.viewport.follow")[0];
+			if (followKey) {
+				const label = ` ${followKey} to follow `;
+				const labelWidth = visibleWidth(label);
+				if (labelWidth <= width) {
+					followHint = `${" ".repeat(Math.floor((width - labelWidth) / 2))}\x1b[7m${label}\x1b[27m`;
+				}
+			}
+		}
+		let frame = fullscreen.viewport.composeFrame(transcript, dock, height, selectionRegions, followHint);
 		this.overlaySelectionRegions.push(
 			...this.createDockSelectionRegions(frame, fullscreen.viewport.windowHeight(), width),
 		);
-		const scrollInfo = fullscreen.viewport.scrollInfo();
-		const followKey = getKeybindings().getKeys("tui.viewport.follow")[0];
-		if (fullscreen.viewportControls && !scrollInfo.following && followKey) {
-			// Follow hint composited over the bottom of the transcript window,
-			// just above the dock. Overlays still paint on top of it.
-			const label = ` ${followKey} to follow `;
-			const labelWidth = visibleWidth(label);
-			const row = fullscreen.viewport.windowHeight() - 1;
-			if (row >= 0 && row < frame.length && labelWidth <= width) {
-				const col = Math.floor((width - labelWidth) / 2);
-				frame[row] = this.compositeLineAt(frame[row], `\x1b[7m${label}\x1b[27m`, col, labelWidth, width);
-			}
-		}
 		if (this.overlayStack.length > 0) {
 			frame = withFullscreenImageFallback(() => this.compositeOverlays(frame, width, height));
 		}
 		const cursorPos = this.extractCursorPosition(frame, height);
 		fullscreen.viewport.applyFrameSelection(frame, height, this.overlaySelectionRegions);
 		this.applyLineResets(frame);
+		// Fullscreen rows move as the transcript scrolls. Replaying OSC 133 here
+		// would leave native shell-prompt marks on unrelated screen rows.
+		for (let i = 0; i < frame.length; i++) {
+			frame[i] = frame[i].replace(SHELL_INTEGRATION_MARK, "");
+		}
 		fullscreen.viewport.paint((data) => this.terminal.write(data), frame, width, height, cursorPos);
 		if (cursorPos && this.showHardwareCursor) {
 			this.terminal.showCursor();

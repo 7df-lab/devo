@@ -38,6 +38,8 @@ export class CustomEditor extends Editor {
 	public onAgentsBack?: () => boolean;
 	/** When set, the returned line is rendered inside the top of the editor box. */
 	public getHeaderLine?: () => string | undefined;
+	/** Row budget for a borderless composer, including its optional header. */
+	public getCompactRows?: () => number | undefined;
 	/** Handler for extension-registered shortcuts. Returns true if handled. */
 	public onExtensionShortcut?: (data: string) => boolean;
 
@@ -144,11 +146,18 @@ export class CustomEditor extends Editor {
 		const commandMatch = COMMAND_TOKEN_PATTERN.exec(this.getLines()[0] ?? "");
 		const isArgumentCommandLine = commandMatch !== null && this.isArgumentCommand(commandMatch[2]!);
 		this.argTokenHighlighter.reset(this.getLines(), isArgumentCommandLine);
-		let lines = super.render(width);
+		const headerLine = this.getHeaderLine?.();
+		const compactRows = this.getCompactRows?.();
+		let lines = compactRows === undefined
+			? super.render(width)
+			: this.renderInput(width, Math.max(1, compactRows - (headerLine === undefined ? 0 : 1)));
 		if (this.placeholder && this.getText().length === 0 && lines.length >= 2) {
 			lines = [lines[0]!, this.renderPlaceholderLine(width), ...lines.slice(2)];
 		}
-		const headerLine = this.getHeaderLine?.();
+		if (compactRows !== undefined) {
+			const content = lines.slice(1, -1);
+			return headerLine === undefined ? content : [this.renderHeaderContentLine(headerLine, width), ...content];
+		}
 		if (headerLine !== undefined && lines.length >= 2) {
 			lines = [
 				lines[0]!,

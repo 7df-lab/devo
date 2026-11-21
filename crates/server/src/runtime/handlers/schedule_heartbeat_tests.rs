@@ -93,40 +93,52 @@ async fn heartbeat_pause_and_clear_wait_for_dispatch_before_mutating_due_job() -
 }
 
 #[tokio::test]
-async fn rlm_heartbeat_mutations_wait_for_dispatch_lock() -> Result<()> {
+async fn rlm_schedule_mutations_wait_for_dispatch_lock() -> Result<()> {
+    use crate::runtime::kernel_host::dispatch_host_request_with_bridge;
+    use crate::runtime::kernel_host_bridge::HostBridge;
     use devo_protocol::native::rpc_schedule::ScheduleJobStatus;
+    use serde_json::json;
 
     let data_root = TempDir::new()?;
     let runtime = TestRuntime::new(Arc::new(crate::test_support::NoopProvider::failing()))
         .runtime(data_root.path());
     let session_id = devo_protocol::native::ids::SessionId::new();
+    let mut bridge = HostBridge::for_tests(session_id);
+    bridge.runtime = Arc::downgrade(&runtime);
+    let bridge = Arc::new(bridge);
     let dispatch_guard = runtime.schedule_store.lock_dispatch().await;
-    let create_runtime = Arc::clone(&runtime);
+    let create_bridge = Arc::clone(&bridge);
     let mut create = tokio::spawn(async move {
-        create_runtime
-            .host_rlm_heartbeat_create(
-                session_id.as_str(),
-                &serde_json::json!({ "instruction": "check work", "interval": "1h" }),
-            )
-            .await
+        dispatch_host_request_with_bridge(
+            &create_bridge,
+            json!({
+                "action": "rlm_schedule.create",
+                "params": { "instruction": "check work", "interval": "1h", "label": "work" }
+            }),
+        )
+        .await
     });
     assert!(
         tokio::time::timeout(Duration::from_millis(100), &mut create)
             .await
             .is_err(),
-        "RLM heartbeat create must wait for dispatch"
+        "RLM schedule create must wait for dispatch"
     );
     assert_eq!(
         runtime.schedule_store.list(Some(&session_id), None)?,
         vec![]
     );
     drop(dispatch_guard);
-    let created = create.await.context("RLM heartbeat create task")?;
+    let created = create.await.context("RLM schedule create task")?;
     assert_eq!(created["status"], "ok");
+    assert_eq!(
+        dispatch_host_request_with_bridge(&bridge, json!({ "action": "rlm_schedule.list" })).await,
+        json!({ "status": "ok", "result": { "schedules": [created["result"]] } })
+    );
     let job_id = devo_protocol::native::ids::JobId::from_string(
         created["result"]["id"]
             .as_str()
-            .context("created heartbeat id")?
+            .context("created scheduled check id")?
             .to_string(),
     );
 
@@ -142,21 +154,23 @@ async fn rlm_heartbeat_mutations_wait_for_dispatch_lock() -> Result<()> {
     ] {
         let before = runtime.schedule_store.get_job(&job_id)?;
         let dispatch_guard = runtime.schedule_store.lock_dispatch().await;
-        let update_runtime = Arc::clone(&runtime);
+        let update_bridge = Arc::clone(&bridge);
         let mut update = tokio::spawn(async move {
-            update_runtime
-                .host_rlm_heartbeat_update(session_id.as_str(), &params)
-                .await
+            dispatch_host_request_with_bridge(
+                &update_bridge,
+                json!({ "action": "rlm_schedule.update", "params": params }),
+            )
+            .await
         });
         assert!(
             tokio::time::timeout(Duration::from_millis(100), &mut update)
                 .await
                 .is_err(),
-            "RLM heartbeat update must wait for dispatch"
+            "RLM schedule update must wait for dispatch"
         );
         assert_eq!(runtime.schedule_store.get_job(&job_id)?, before);
         drop(dispatch_guard);
-        let updated = update.await.context("RLM heartbeat update task")?;
+        let updated = update.await.context("RLM schedule update task")?;
         assert_eq!(updated["status"], "ok");
         assert_eq!(
             runtime
@@ -169,21 +183,22 @@ async fn rlm_heartbeat_mutations_wait_for_dispatch_lock() -> Result<()> {
 
     let before = runtime.schedule_store.get_job(&job_id)?;
     let dispatch_guard = runtime.schedule_store.lock_dispatch().await;
-    let delete_runtime = Arc::clone(&runtime);
     let mut delete = tokio::spawn(async move {
-        delete_runtime
-            .host_rlm_heartbeat_delete(session_id.as_str(), &serde_json::json!({ "id": job_id }))
-            .await
+        dispatch_host_request_with_bridge(
+            &bridge,
+            json!({ "action": "rlm_schedule.delete", "params": { "id": job_id } }),
+        )
+        .await
     });
     assert!(
         tokio::time::timeout(Duration::from_millis(100), &mut delete)
             .await
             .is_err(),
-        "RLM heartbeat delete must wait for dispatch"
+        "RLM schedule delete must wait for dispatch"
     );
     assert_eq!(runtime.schedule_store.get_job(&job_id)?, before);
     drop(dispatch_guard);
-    let deleted = delete.await.context("RLM heartbeat delete task")?;
+    let deleted = delete.await.context("RLM schedule delete task")?;
     assert_eq!(deleted["status"], "ok");
     assert_eq!(runtime.schedule_store.get_job(&job_id)?, None);
     Ok(())

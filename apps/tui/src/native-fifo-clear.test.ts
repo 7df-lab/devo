@@ -161,12 +161,105 @@ test("held queue rows render the partial-execution warning and explicit recovery
   mode.pendingMessagesContainer = new Container();
   mode.pendingBashComponents = [];
   mode.queuedMessagesContainer = new Container();
+  mode.ui = { terminal: { rows: 25 } };
   mode.getAppKeyDisplay = () => "Alt+Up";
   mode.isRecognizedSlashCommand = () => false;
   mode.updatePendingMessagesDisplay();
   const output = mode.queuedMessagesContainer.render(120).join("\n").replace(/\x1b\[[0-9;]*m/g, "");
   assert.match(output, /Held · review required/);
-  assert.match(output, /may already have partially executed/);
+  assert.match(output, /Held input held-id may already have partially executed/);
   assert.match(output, /session\/queue\/retry/);
   assert.match(output, /no automatic retry/);
+});
+
+test("queue previews summarize bursts and adapt to resize without changing the queue", async () => {
+  const { QueuedMessagesPreview } = await import("../lib/coding-agent/src/modes/interactive/queued-preview.js");
+  const { initTheme } = await import("@earendil-works/pi-coding-agent/theme");
+  initTheme("dark", true);
+  let rows = 18;
+  const entries = Array.from({ length: 8 }, (_, index) => ({
+    id: `queue-${index}`, text: `output-${index}`, delivery: "steer" as const, blocked: false,
+    editable: false, recoveryRequired: index === 7,
+  }));
+  const preview = new QueuedMessagesPreview(entries, {
+    numbered: true, browseKey: "Alt+Up", getRows: () => rows, isRecognizedSlashCommand: () => false,
+  });
+  const render = (width: number) => preview.render(width).map(line => line.replace(/\x1b\[[0-9;]*m/g, "").trim());
+  assert.deepEqual(render(62), [
+    "1. Steering: output-0", "2. Steering: output-1", "Held input may have partially run · no auto retry",
+    "╰─ +6 more · Alt+Up to browse",
+  ]);
+  rows = 9;
+  assert.deepEqual(render(52), ["╰─ 8 queued (1 held) · Alt+Up to browse"]);
+  rows = 30;
+  assert.match(render(120).join("\n"), /4\. Steering: output-3[\s\S]*\+4 more/);
+  assert.deepEqual(entries.map(item => item.id), Array.from({ length: 8 }, (_, index) => `queue-${index}`));
+});
+
+test("a 9–10 row fullscreen dock keeps the queue above the composer", async () => {
+  const { InteractiveMode } = await import("../lib/coding-agent/src/modes/interactive/interactive-mode.js");
+  const { CustomEditor } = await import("../lib/coding-agent/src/modes/interactive/components/custom-editor.js");
+  const { SubagentSummaryLine } = await import("../lib/coding-agent/src/modes/interactive/components/subagent-summary-line.js");
+  const { KeybindingsManager } = await import("../lib/coding-agent/src/core/keybindings.js");
+  const { FullscreenViewport, CURSOR_MARKER, Container } = await import("@earendil-works/pi-tui");
+  const { stripAnsi } = await import("../lib/tui/src/utils.js");
+  const { initTheme, getEditorTheme } = await import("@earendil-works/pi-coding-agent/theme");
+  initTheme("dark", true);
+  const mode = Object.create(InteractiveMode.prototype) as any;
+  let fullscreen = true;
+  mode.ui = { terminal: { rows: 9 }, isFullscreen: () => fullscreen, requestRender() {} };
+  mode.getAppKeyDisplay = (key: string) => key.endsWith("Older") ? "Alt+Up" : "Alt+Down";
+  mode.isRecognizedSlashCommand = () => false;
+  mode.pendingMessagesContainer = new Container();
+  mode.pendingBashComponents = [];
+  mode.recapContainer = new Container();
+  mode.recapContainer.addChild({ render: () => ["Conversation details"], invalidate() {} });
+  mode.queuedMessagesContainer = new Container();
+  mode.footerSlot = new Container();
+  mode.editorContainer = new Container();
+  const editor = new CustomEditor(mode.ui, getEditorTheme(), new KeybindingsManager());
+  mode.defaultEditor = editor;
+  editor.focused = true;
+  editor.getCompactRows = () => mode.getCompactQueueEditorRows();
+  editor.getHeaderLine = () => mode.getQueueSelectionHeader();
+  mode.editorContainer.addChild(editor);
+  mode.subagentSummaryLine = new SubagentSummaryLine(() => "manage", () => "model");
+  mode.subagentSummaryLine.getCompactLayout = () => mode.getCompactQueueEditorRows() !== undefined;
+  mode.subagentSummaryLine.setScheduledCounts({ total: 0, active: 0, paused: 0 });
+  mode.subagentSummaryLine.setShellCounts({ total: 1, running: 0 });
+  mode.queueSelection = {};
+  mode.connectionState = { sessionActions: {
+    steering: [], followUps: [], ordered: Array.from({ length: 8 }, (_, index) => ({
+      id: `queue-${index}`, text: `output-${index}`, delivery: "steer", blocked: false, editable: false,
+    })),
+  } };
+  mode.updatePendingMessagesDisplay();
+  const viewport = new FullscreenViewport();
+  const transcript = ["Transcript one", "Transcript two", "Executing"];
+  const dock = new Container();
+  for (const component of mode.getPromptDockComponents()) dock.addChild(component);
+  const frame = () => viewport.composeFrame(transcript, dock.render(52), mode.ui.terminal.rows);
+  for (const rows of [9, 10]) {
+    mode.ui.terminal.rows = rows;
+    mode.queueSelection.selected = undefined;
+    editor.setText("");
+    for (const draft of ["", "draft\n".repeat(7) + "draft cursor"]) {
+      editor.setText(draft);
+      const lines = frame();
+      assert.deepEqual(lines.slice(0, 3), transcript);
+      const summary = lines.findIndex(line => line.includes("8 queued · Alt+Up to browse"));
+      const cursor = lines.findIndex(line => line.includes(CURSOR_MARKER));
+      assert.ok(summary >= 3 && cursor > summary, `queue and cursor at ${rows} rows`);
+      assert.match(stripAnsi(lines.at(-1)!), /Subagents 0 · Scheduled 0 · Shells 0/);
+      assert.equal(editor.getText(), draft);
+    }
+    mode.queueSelection.selected = { id: "queue-7", lane: "steering", index: 7 };
+    editor.setText("Shell output\noutput-7");
+    assert.match(stripAnsi(frame().join("\n")), /8 queued[^\n]*\n[^\n]*read-only[^\n]*\n[^\n]*Shell output[^\n]*\n[^\n]*output-7/);
+  }
+  mode.ui.terminal.rows = 11;
+  assert.equal(mode.getCompactQueueEditorRows(), undefined);
+  mode.ui.terminal.rows = 9;
+  fullscreen = false;
+  assert.equal(mode.getCompactQueueEditorRows(), undefined);
 });

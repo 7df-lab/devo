@@ -95,6 +95,8 @@ export class SubagentSummaryLine implements Component, Focusable {
 	onOpenShells?: () => void;
 	onCancel?: () => void;
 	onChatAction?: (data: string) => void;
+	/** Fit the tray into at most two rows in a short prompt dock. */
+	getCompactLayout?: () => boolean;
 
 	constructor(
 		private readonly getLocationLabel: () => string | undefined = () => undefined,
@@ -169,7 +171,8 @@ export class SubagentSummaryLine implements Component, Focusable {
 		if (this.getPickerOpen() || width < 1) return [];
 		const info = this.renderInfoLine(width);
 		const lines: string[] = [];
-		const innerWidth = Math.max(1, width - 4);
+		const compactLayout = this.getCompactLayout?.() === true;
+		const innerWidth = compactLayout ? width : Math.max(1, width - 4);
 		const goal = this.getGoalLabel()?.trim();
 		const colors = ["accent", "warning", "success"] as const;
 		const scheduledCount = this.scheduledState === "ready" ? String(this.scheduledTasks.total) : this.scheduledState;
@@ -183,6 +186,7 @@ export class SubagentSummaryLine implements Component, Focusable {
 			const coloredGroups = groups.map((group, index) => theme.fg(colors[index]!, group));
 			if (goal) coloredGroups.push(theme.fg("mdHeading", goal));
 			const compact = coloredGroups.join(theme.fg("dim", " · "));
+			if (compactLayout) return [...info, truncateToWidth(compact, width, "…")];
 			// Narrow terminals retain each group instead of silently clipping the last group.
 			const rows = visibleWidth(compact) <= innerWidth ? [compact] : coloredGroups;
 			return [...info, ...this.frame(rows, width)];
@@ -205,6 +209,7 @@ export class SubagentSummaryLine implements Component, Focusable {
 			const row = theme.fg(colors[index]!, truncateToWidth(`${index === this.selected ? "›" : " "} ${detail}`, innerWidth, "…"));
 			lines.push(index === this.selected ? theme.bg("selectedBg", row) : row);
 		}
+		if (compactLayout) return [...info, lines[this.selected]!];
 		if (goal) lines.push(theme.fg("mdHeading", goal));
 		lines.push(theme.fg("dim", truncateToWidth(`↑/↓/tab select · ${keyText("tui.select.confirm")} open · ${keyText("tui.select.cancel")} back`, innerWidth, "…")));
 		return [...info, ...this.frame(lines, width)];

@@ -189,13 +189,12 @@ const CANONICAL_BUILTIN_SLASH_COMMANDS: ReadonlyArray<BuiltinSlashCommand> = [
 		takesArgument: true,
 	},
 	{
-		name: "heartbeat",
-		description:
-			"Set or view a persistent heartbeat; delivery defaults to steer, use --follow-up to queue; supports pause, resume, stop, and clear",
-		argumentHint: "[status|pause|resume|stop|[every <duration>] [--steer|--follow-up] <instruction>]",
+		name: "schedule",
+		description: "Set, view, pause, resume, or clear your recurring check for this session",
+		argumentHint: "[status|pause|resume|clear|[every <duration>] [--steer|--follow-up] <instruction>]",
 		takesArgument: true,
 	},
-	{ name: "heartbeats", description: "View and manage all user and agent heartbeats" },
+	{ name: "schedules", description: "View and manage scheduled tasks from you and your agents" },
 	{
 		name: "resume",
 		description: "Open the agents view, or resume a session by id or path",
@@ -218,6 +217,8 @@ const BUILTIN_SLASH_COMMAND_ALIASES: ReadonlyArray<BuiltinSlashCommandAlias> = [
 	{ name: "thinking", aliasFor: "effort" },
 	{ name: "rename", aliasFor: "name" },
 	{ name: "side", aliasFor: "btw" },
+	{ name: "heartbeat", aliasFor: "schedule" },
+	{ name: "heartbeats", aliasFor: "schedules" },
 	{ name: "exit", aliasFor: "quit" },
 ];
 

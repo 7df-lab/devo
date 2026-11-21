@@ -320,7 +320,7 @@ impl ServerRuntime {
                 .prompt
                 .clone()
                 .or_else(|| job.instruction.clone())
-                .unwrap_or_else(|| "Scheduled heartbeat.".to_string());
+                .unwrap_or_else(|| "Scheduled check.".to_string());
 
             // The wake loop is detached from any client, so the session actor
             // may not be resident (LRU-evicted or never loaded in this process).

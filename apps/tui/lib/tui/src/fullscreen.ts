@@ -94,21 +94,27 @@ export class FullscreenViewport {
 	/**
 	 * Compose a frame of exactly `height` lines: scrolled transcript window on
 	 * top, dock pinned to the bottom. Following pins the window to the
-	 * transcript end; otherwise it stays frozen while content appends.
+	 * transcript end; otherwise it stays frozen while content appends. A status
+	 * line separates the two only when it fits without clipping the dock or
+	 * reducing the transcript below its minimum height.
 	 */
 	composeFrame(
 		transcript: string[],
 		dock: string[],
 		height: number,
 		tableCellSelectionRegions: ReadonlyArray<TableCellSelectionRegion> = [],
+		statusLine?: string,
 	): string[] {
 		let dockLines = dock;
 		const dockHeight = clippedFullscreenDockHeight(dockLines.length, height);
 		if (dockLines.length > dockHeight) {
 			dockLines = dockLines.slice(dockLines.length - dockHeight);
 		}
-		const windowHeight = height - dockLines.length;
-		const maxScroll = Math.max(0, transcript.length - windowHeight);
+		const availableRows = height - dockLines.length;
+		const showStatus = statusLine !== undefined && availableRows > FULLSCREEN_MIN_TRANSCRIPT_ROWS;
+		const windowHeight = availableRows - (showStatus ? 1 : 0);
+		// Reaching the bottom restores the row reserved for the paused status.
+		const maxScroll = Math.max(0, transcript.length - availableRows);
 
 		if (this.following) {
 			this.scrollTop = maxScroll;
@@ -128,6 +134,7 @@ export class FullscreenViewport {
 		while (window.length < windowHeight) {
 			window.push("");
 		}
+		if (showStatus) window.push(statusLine);
 		return [...window, ...dockLines];
 	}
 
@@ -708,7 +715,7 @@ export class FullscreenViewport {
 	scrollInfo(): ScrollInfo {
 		return {
 			following: this.following,
-			linesBelow: Math.max(0, this.lastMaxScroll - this.scrollTop),
+			linesBelow: this.following ? 0 : Math.max(0, this.lastTranscript.length - this.lastWindowHeight - this.scrollTop),
 			linesAbove: this.scrollTop,
 		};
 	}
