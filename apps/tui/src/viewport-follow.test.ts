@@ -9,6 +9,7 @@ import {
 } from "../lib/tui/src/keybindings.js";
 import type { Terminal } from "../lib/tui/src/terminal.js";
 import { TUI } from "../lib/tui/src/tui.js";
+import { stripAnsi } from "../lib/tui/src/utils.js";
 
 function createViewport(t: TestContext, bindings: KeybindingsConfig = {}) {
   const previous = getKeybindings();
@@ -48,8 +49,11 @@ function createViewport(t: TestContext, bindings: KeybindingsConfig = {}) {
     handleInput(data: string) { draft += data; },
   };
   const ui = new TUI(terminal);
+  const transcript = { render: () => lines, invalidate() {} };
+  ui.addChild(transcript);
+  ui.addChild(editor);
   ui.start();
-  ui.enterFullscreen({ scroll: [{ render: () => lines, invalidate() {} }], dock: editor });
+  ui.enterFullscreen({ scroll: [transcript], dock: editor });
   ui.setFocus(editor);
   t.after(() => {
     ui.stop({ flushFullscreen: false });
@@ -113,6 +117,50 @@ test("Ctrl+End resumes following after keyboard or mouse scrolling without chang
     });
     assert.equal(viewport.draft(), "unfinished draft");
   }
+});
+
+test("the paused follow hint occupies its own row instead of painting over transcript text", async (t) => {
+  const viewport = createViewport(t);
+  const fullWidthLine = "const value = ".padEnd(80, "X");
+  viewport.lines.fill(fullWidthLine);
+  await viewport.render();
+  viewport.send("\x1b[5~");
+
+  const paused = stripAnsi((await viewport.render()).split(/\x1b\[\d+;1H\x1b\[2K/).slice(1).join("\n"));
+  assert.deepEqual(paused.split("\n").map(line => line.trim()), [
+    ...Array(10).fill(fullWidthLine),
+    "ctrl+end to follow",
+    ">",
+  ]);
+
+  viewport.resize(80, 4);
+  const cramped = await viewport.render();
+  assert.doesNotMatch(cramped, /to follow/);
+  assert.equal(cramped.split(fullWidthLine).length - 1, 3);
+  assert.equal(viewport.ui.getScrollInfo()?.following, false);
+});
+
+test("fullscreen repaints omit shell integration marks without removing styles or links", async (t) => {
+  const viewport = createViewport(t);
+  const markStart = "\x1b]133;A\x07";
+  const markEnd = "\x1b]133;B\x07\x1b]133;C\x1b\\";
+  const link = "\x1b]8;;https://example.com\x1b\\\x1b[1mLink\x1b[22m\x1b]8;;\x1b\\";
+  for (const [index, line] of viewport.lines.entries()) {
+    viewport.lines[index] = `${markStart}${line} ${link}${markEnd}`;
+  }
+
+  for (const repaint of [() => {}, () => viewport.send("\x1b[5~"), () => viewport.resize(64, 10)]) {
+    repaint();
+    const output = await viewport.render();
+    assert.doesNotMatch(output, /\x1b\]133;/);
+    assert.ok(output.includes(link));
+  }
+
+  viewport.ui.exitFullscreen({ flush: false });
+  const inline = await viewport.render();
+  assert.ok(inline.includes(markStart));
+  assert.ok(inline.includes(markEnd));
+  assert.ok(inline.includes(link));
 });
 
 test("the legacy follow shortcut still resumes following when delivered by the terminal", async (t) => {

@@ -519,6 +519,11 @@ export class Editor implements Component, Focusable {
 	}
 
 	render(width: number): string[] {
+		return this.renderInput(width, Math.max(5, Math.floor(this.tui.terminal.rows * 0.3)));
+	}
+
+	/** Render the same scrollable input with an explicit budget for content rows. */
+	protected renderInput(width: number, maxVisibleLines: number): string[] {
 		const { useBackgroundSurface, paddingX, promptPrefixText, promptPrefixWidth, inputWidth } =
 			this.getRenderMetrics(width);
 		const promptPrefix =
@@ -533,9 +538,6 @@ export class Editor implements Component, Focusable {
 		const horizontal = this.borderColor("─");
 
 		const layoutLines = this.layoutText(layoutWidth);
-
-		const terminalRows = this.tui.terminal.rows;
-		const maxVisibleLines = Math.max(5, Math.floor(terminalRows * 0.3));
 
 		let cursorLineIndex = layoutLines.findIndex((line) => line.hasCursor);
 		if (cursorLineIndex === -1) cursorLineIndex = 0;

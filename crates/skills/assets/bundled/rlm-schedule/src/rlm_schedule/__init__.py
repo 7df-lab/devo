@@ -1,6 +1,6 @@
-"""Agent RLM heartbeat skill: internal recurring session checks.
+"""Schedule recurring checks in the current Devo agent session.
 
-All heartbeat state lives in the TypeScript host; these functions are thin
+All schedule state lives in the Devo server; these functions are thin
 typed wrappers over the generic host bridge (`rlm.host_request`). They only
 work inside the agent Python kernel.
 """
@@ -26,10 +26,10 @@ def _normalize_delivery_mode(delivery_mode: DeliveryMode | None) -> str | None:
 
 
 async def list(include_inactive: bool = False) -> dict[str, Any]:
-    """List internal RLM heartbeats for the current agent session."""
+    """List the current session's recurring checks under the schedules key."""
     if not isinstance(include_inactive, bool):
         raise TypeError(f"include_inactive must be bool, got {type(include_inactive).__name__}")
-    return await host_request("rlm_heartbeat.list", {"include_inactive": include_inactive})
+    return await host_request("rlm_schedule.list", {"include_inactive": include_inactive})
 
 
 async def create(
@@ -38,11 +38,11 @@ async def create(
     label: str | None = None,
     delivery_mode: DeliveryMode | None = None,
 ) -> dict[str, Any]:
-    """Create an internal recurring heartbeat for the current agent session.
+    """Schedule a recurring check for the current agent session.
 
-    delivery_mode controls how the scheduled prompt is delivered when the
-    session is busy: "steer" (default) interrupts the current turn, "follow_up"
-    waits for it to finish.
+    Use a non-empty label to avoid replacing the user's `/schedule`.
+    When the session is busy, "steer" (default) delivers at a model boundary
+    without canceling the current response; "follow_up" waits for the turn to end.
     """
     if not isinstance(instruction, str):
         raise TypeError(f"instruction must be str, got {type(instruction).__name__}")
@@ -58,7 +58,7 @@ async def create(
     normalized_delivery_mode = _normalize_delivery_mode(delivery_mode)
     if normalized_delivery_mode is not None:
         payload["delivery_mode"] = normalized_delivery_mode
-    return await host_request("rlm_heartbeat.create", payload)
+    return await host_request("rlm_schedule.create", payload)
 
 
 async def update(
@@ -69,7 +69,7 @@ async def update(
     status: StatusUpdate | None = None,
     delivery_mode: DeliveryMode | None = None,
 ) -> dict[str, Any]:
-    """Update one internal RLM heartbeat for the current agent session."""
+    """Update one recurring check for the current agent session."""
     if not isinstance(id, str):
         raise TypeError(f"id must be str, got {type(id).__name__}")
     payload: dict[str, Any] = {"id": id}
@@ -92,11 +92,11 @@ async def update(
     normalized_delivery_mode = _normalize_delivery_mode(delivery_mode)
     if normalized_delivery_mode is not None:
         payload["delivery_mode"] = normalized_delivery_mode
-    return await host_request("rlm_heartbeat.update", payload)
+    return await host_request("rlm_schedule.update", payload)
 
 
 async def delete(id: str) -> dict[str, Any]:
-    """Cancel one internal RLM heartbeat for the current agent session."""
+    """Cancel one recurring check for the current agent session."""
     if not isinstance(id, str):
         raise TypeError(f"id must be str, got {type(id).__name__}")
-    return await host_request("rlm_heartbeat.delete", {"id": id})
+    return await host_request("rlm_schedule.delete", {"id": id})

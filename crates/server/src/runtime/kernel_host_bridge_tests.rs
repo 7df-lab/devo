@@ -348,7 +348,7 @@ async fn mcp_real_kernel_uses_native_dispatch_and_reports_legacy_refresh_failure
     let home = tempfile::tempdir().unwrap();
     std::fs::write(
         home.path().join("auth.json"),
-        r#"{"mcp:linear":{"type":"oauth","endpoint":"https://mcp.linear.app/mcp","access":"synthetic-expired","expires":0}}"#,
+        r#"{"mcp:sample":{"type":"oauth","endpoint":"https://sample.invalid/mcp","access":"synthetic-expired","expires":0}}"#,
     )
     .unwrap();
     let crates_dir = std::path::Path::new(env!("CARGO_MANIFEST_DIR"))
@@ -356,10 +356,7 @@ async fn mcp_real_kernel_uses_native_dispatch_and_reports_legacy_refresh_failure
         .unwrap();
     let mut config = KernelSessionConfig {
         cwd: home.path().to_path_buf(),
-        python_path_entries: vec![
-            crates_dir.join("kernel/rlm-runtime/src"),
-            crates_dir.join("skills/assets/bundled/linear/src"),
-        ],
+        python_path_entries: vec![crates_dir.join("kernel/rlm-runtime/src")],
         ..KernelSessionConfig::for_runtime().unwrap()
     };
     config.extra_env.push((
@@ -377,8 +374,13 @@ async fn mcp_real_kernel_uses_native_dispatch_and_reports_legacy_refresh_failure
     let output = kernel
         .execute(
             r#"
-from rlm import mcp
-import linear
+from rlm import McpIntegration, mcp
+from rlm.mcp_base import NotEnabled
+
+class SampleIntegration(McpIntegration):
+    server = "sample"
+    url = "https://sample.invalid/mcp"
+
 assert await mcp.list_servers() == []
 assert await mcp.list_tools("docs") == [{
     "name": "search:raw/name", "description": "Search docs",
@@ -391,10 +393,9 @@ except PermissionError:
 else:
     raise AssertionError("host denial was ignored")
 try:
-    await linear.linear._resolve_token()
+    await SampleIntegration()._resolve_token()
 except RuntimeError as error:
     assert "Rust host" in str(error)
-    from rlm.mcp_base import NotEnabled
     assert not isinstance(error, NotEnabled)
 else:
     raise AssertionError("native host falsely refreshed legacy credentials")

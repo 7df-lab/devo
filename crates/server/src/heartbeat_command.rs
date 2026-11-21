@@ -1,6 +1,6 @@
-//! User `/heartbeat` command parsing and apply (server-owned).
+//! User `/schedule` command parsing and apply (server-owned).
 //!
-//! Clients send the raw args after `/heartbeat`; this module interprets them
+//! Clients send the raw args after `/schedule`; this module interprets them
 //! and mutates [`crate::schedule_store::ScheduleStore`]. Interval parsing and
 //! wake remain in the schedule store / wake loop.
 
@@ -15,6 +15,8 @@ use devo_protocol::native::rpc_schedule::{
 use crate::schedule_store::{ScheduleStore, parse_interval_ms};
 
 pub(crate) const DEFAULT_HEARTBEAT_SCHEDULE: &str = "every 5m";
+const SCHEDULE_COMMAND_USAGE: &str =
+    "Usage: /schedule [--every <interval>] [--steer|--follow-up] <instruction>";
 
 #[derive(Debug, Clone, PartialEq, Eq)]
 enum ParsedHeartbeatCommand {
@@ -29,7 +31,7 @@ enum ParsedHeartbeatCommand {
     },
 }
 
-/// Parse + apply a user `/heartbeat` command against the schedule store.
+/// Parse + apply a user `/schedule` command against the schedule store.
 pub(crate) fn run_heartbeat_command(
     store: &ScheduleStore,
     params: SessionHeartbeatCommandParams,
@@ -71,7 +73,7 @@ pub(crate) fn run_heartbeat_command(
             delivery_mode,
         } => {
             if parse_interval_ms(&schedule).is_none() {
-                bail!("invalid heartbeat schedule: {schedule}");
+                bail!("invalid schedule: {schedule}");
             }
             let job = store.upsert(SessionScheduleUpsertParams {
                 kind: ScheduleJobKind::Heartbeat,
@@ -125,12 +127,12 @@ fn find_user_heartbeat(
 }
 
 fn parse_heartbeat_command(input: &str) -> Result<ParsedHeartbeatCommand> {
-    let text = input
-        .trim()
-        .strip_prefix("/heartbeat")
-        .map(str::trim)
-        .unwrap_or_else(|| input.trim())
-        .trim();
+    let text = input.trim();
+    let (first, args) = text.split_once(char::is_whitespace).unwrap_or((text, ""));
+    let text = match first {
+        "/schedule" | "/heartbeat" => args.trim(),
+        _ => text,
+    };
     if text.is_empty() || text.eq_ignore_ascii_case("status") {
         return Ok(ParsedHeartbeatCommand::Status);
     }
@@ -147,12 +149,12 @@ fn parse_heartbeat_command(input: &str) -> Result<ParsedHeartbeatCommand> {
     let (delivery_mode, remaining) = extract_delivery_mode(text)?;
     let remaining = remaining.trim();
     if remaining.is_empty() {
-        bail!("Usage: /heartbeat [--every <interval>] [--steer|--follow-up] <instruction>");
+        bail!("{SCHEDULE_COMMAND_USAGE}");
     }
 
     if let Some((schedule, instruction)) = split_leading_every(remaining) {
         if instruction.is_empty() {
-            bail!("Usage: /heartbeat [--every <interval>] [--steer|--follow-up] <instruction>");
+            bail!("{SCHEDULE_COMMAND_USAGE}");
         }
         return Ok(ParsedHeartbeatCommand::Set {
             schedule: normalize_heartbeat_schedule(&schedule),
@@ -169,7 +171,7 @@ fn parse_heartbeat_command(input: &str) -> Result<ParsedHeartbeatCommand> {
             .trim_start();
         let (schedule, instruction) = split_first_interval_token(rest)?;
         if instruction.is_empty() {
-            bail!("Usage: /heartbeat [--every <interval>] [--steer|--follow-up] <instruction>");
+            bail!("{SCHEDULE_COMMAND_USAGE}");
         }
         return Ok(ParsedHeartbeatCommand::Set {
             schedule: normalize_heartbeat_schedule(&schedule),
@@ -179,11 +181,11 @@ fn parse_heartbeat_command(input: &str) -> Result<ParsedHeartbeatCommand> {
     }
 
     // A bare leading duration is the spelling users reach for first
-    // (`/heartbeat 40s check the build`); swallowing it into the instruction
+    // (`/schedule 40s check the build`); swallowing it into the instruction
     // silently changed the cadence to the 5m default.
     if let Some((schedule, instruction)) = split_leading_bare_duration(remaining) {
         if instruction.is_empty() {
-            bail!("Usage: /heartbeat [--every <interval>] [--steer|--follow-up] <instruction>");
+            bail!("{SCHEDULE_COMMAND_USAGE}");
         }
         return Ok(ParsedHeartbeatCommand::Set {
             schedule: normalize_heartbeat_schedule(&schedule),
@@ -235,7 +237,7 @@ fn extract_delivery_mode(text: &str) -> Result<(ScheduleDeliveryMode, String)> {
         }
         if lower == "--deliver" {
             let value = tokens.get(i + 1).copied().ok_or_else(|| {
-                anyhow::anyhow!("Heartbeat delivery mode must be \"steer\" or \"follow_up\"")
+                anyhow::anyhow!("Schedule delivery mode must be \"steer\" or \"follow_up\"")
             })?;
             mode = parse_delivery_mode_token(value)?;
             tokens.remove(i + 1);
@@ -251,7 +253,7 @@ fn parse_delivery_mode_token(token: &str) -> Result<ScheduleDeliveryMode> {
     match token.to_ascii_lowercase().replace('-', "_").as_str() {
         "steer" => Ok(ScheduleDeliveryMode::Steer),
         "follow_up" => Ok(ScheduleDeliveryMode::FollowUp),
-        _ => bail!("Heartbeat delivery mode must be \"steer\" or \"follow_up\""),
+        _ => bail!("Schedule delivery mode must be \"steer\" or \"follow_up\""),
     }
 }
 
@@ -290,12 +292,12 @@ fn split_leading_every(text: &str) -> Option<(String, String)> {
 fn split_first_interval_token(text: &str) -> Result<(String, String)> {
     let text = text.trim();
     if text.is_empty() {
-        bail!("Usage: /heartbeat [--every <interval>] [--steer|--follow-up] <instruction>");
+        bail!("{SCHEDULE_COMMAND_USAGE}");
     }
     if let Some(rest) = text.strip_prefix('"') {
         let end = rest
             .find('"')
-            .ok_or_else(|| anyhow::anyhow!("unclosed quoted heartbeat interval"))?;
+            .ok_or_else(|| anyhow::anyhow!("unclosed quoted schedule interval"))?;
         return Ok((rest[..end].to_string(), rest[end + 1..].trim().to_string()));
     }
     let mut parts = text.splitn(2, char::is_whitespace);
@@ -385,6 +387,28 @@ mod tests {
     }
 
     #[test]
+    fn accepts_canonical_and_legacy_slash_prefixes() {
+        for command in ["/schedule", "/heartbeat"] {
+            assert_eq!(
+                parse_heartbeat_command(command).unwrap(),
+                ParsedHeartbeatCommand::Status
+            );
+            assert_eq!(
+                parse_heartbeat_command(&format!("{command}\tresume")).unwrap(),
+                ParsedHeartbeatCommand::Resume
+            );
+        }
+        assert_eq!(
+            parse_heartbeat_command("/schedules review the list").unwrap(),
+            ParsedHeartbeatCommand::Set {
+                schedule: DEFAULT_HEARTBEAT_SCHEDULE.into(),
+                instruction: "/schedules review the list".into(),
+                delivery_mode: ScheduleDeliveryMode::Steer,
+            }
+        );
+    }
+
+    #[test]
     fn parses_set_with_every_schedule() {
         assert_eq!(
             parse_heartbeat_command("every 30s QA_USER_HB").unwrap(),
@@ -431,7 +455,10 @@ mod tests {
             }
         );
         // A duration alone is not a heartbeat (no instruction).
-        assert!(parse_heartbeat_command("40s").is_err());
+        assert_eq!(
+            parse_heartbeat_command("40s").unwrap_err().to_string(),
+            SCHEDULE_COMMAND_USAGE
+        );
     }
 
     #[test]

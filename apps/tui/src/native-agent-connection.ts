@@ -2084,7 +2084,7 @@ export class NativeAgentConnection implements AgentConnection {
         .join(" "),
     );
     if (!result.job) {
-      throw new Error("Heartbeat was not set");
+      throw new Error("Scheduled task was not set");
     }
     return result.job;
   }

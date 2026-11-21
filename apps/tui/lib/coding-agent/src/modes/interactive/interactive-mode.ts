@@ -35,6 +35,7 @@ import {
 	CombinedAutocompleteProvider,
 	type Component,
 	Container,
+	FULLSCREEN_MIN_TRANSCRIPT_ROWS,
 	Loader,
 	type LoaderIndicatorOptions,
 	Markdown,
@@ -312,7 +313,7 @@ import { setWorkingPulseFrame, WORKING_ICON_INTERVAL_MS } from "./theme/working-
 import { ExpandableText, isExpandable, hasEditDiffsExpansion } from "./expandable-text.js";
 export { ExpandableText } from "./expandable-text.js";
 export { formatQueuedMessagePreview, styleQueuedMessagePreview } from "./queued-preview.js";
-import { formatQueuedMessagePreview, styleQueuedMessagePreview } from "./queued-preview.js";
+import { QueuedMessagesPreview } from "./queued-preview.js";
 
 interface PendingToolCallRenderInput {
 	id: string;
@@ -365,12 +366,12 @@ const SCHEDULED_ARGUMENT_COMPLETIONS: AutocompleteItem[] = [
 	{
 		value: "every ",
 		label: "every <duration> <instruction>",
-		description: "Set an interval, then add an instruction: /heartbeat every 10s Scan the logs",
+		description: "Set an interval, then add an instruction: /schedule every 5m Check build progress",
 	},
 	{
 		value: "--steer ",
 		label: "--steer <instruction>",
-		description: "Deliver by interrupting the current turn (default)",
+		description: "Deliver at the next model boundary without interrupting the response (default)",
 	},
 	{
 		value: "--follow-up ",
@@ -964,6 +965,7 @@ export class InteractiveMode {
 			autocompleteMaxVisible,
 			isArgumentCommand: builtinSlashCommandTakesArgument,
 		});
+		this.defaultEditor.getCompactRows = () => this.getCompactQueueEditorRows();
 		this.editor = this.defaultEditor;
 		this.mainContainer = new Container();
 		this.mainViewContainer = new Container();
@@ -982,6 +984,7 @@ export class InteractiveMode {
 			() => this.isInlinePickerOpen(),
 			() => this.getTrayGoalLabel(),
 		);
+		this.subagentSummaryLine.getCompactLayout = () => this.getCompactQueueEditorRows() !== undefined;
 		this.subagentSummaryLine.setOpenable(this.options.returnToAgentsView === true);
 		this.subagentSummaryLine.onOpen = () => void this.openScopedAgentsView();
 		this.subagentSummaryLine.onOpenScheduledTasks = () => void this.showScheduledManager();
@@ -1210,7 +1213,7 @@ export class InteractiveMode {
 				this.getThemeCompletions(prefix);
 		}
 
-		const scheduledCommand = slashCommands.find((command) => command.name === "heartbeat");
+		const scheduledCommand = slashCommands.find((command) => command.name === "schedule");
 		if (scheduledCommand) {
 			scheduledCommand.getArgumentCompletions = (prefix: string): AutocompleteItem[] | null =>
 				this.getScheduledArgumentCompletions(prefix);
@@ -4844,12 +4847,12 @@ export class InteractiveMode {
 					this.editor.setText("");
 					return;
 				}
-				if (commandName === "heartbeat") {
-					await this.handleScheduledCommand(canonicalCommandText);
+				if (commandName === "schedule") {
+					await this.handleScheduledCommand(commandArgs);
 					this.editor.setText("");
 					return;
 				}
-				if (commandName === "heartbeats") {
+				if (commandName === "schedules") {
 					this.editor.setText("");
 					await this.showScheduledManager();
 					return;
@@ -7564,7 +7567,11 @@ export class InteractiveMode {
 		const entryLabel = `${lane} ${selected.index + 1}`;
 		const browse = `${older}/${newer} browse`;
 		const ordered = this.connectionState?.sessionActions.ordered;
-		if (ordered?.find((entry) => entry.id === selected.id)?.editable === false) {
+		const entry = ordered?.find((item) => item.id === selected.id);
+		if (entry?.recoveryRequired) {
+			return theme.fg("warning", `Held · review required · ${browse} · ${entry.id}`);
+		}
+		if (entry?.editable === false) {
 			return theme.fg("dim", `${entryLabel} · read-only · ${browse}`);
 		}
 		const hints = [entryLabel, browse];
@@ -7583,6 +7590,15 @@ export class InteractiveMode {
 		this.editor.borderColor = editorTheme.borderColor;
 		this.editor.backgroundColor = editorTheme.backgroundColor;
 		this.ui.requestRender();
+	}
+
+	private getCompactQueueEditorRows(): number | undefined {
+		const rows = this.ui.terminal.rows;
+		if (rows < 9 || rows > 10 || !this.ui.isFullscreen() || this.queuedMessagesContainer.children.length === 0 ||
+			this.editorContainer.children[0] !== this.defaultEditor) return undefined;
+		// The fullscreen dock clips from the top. Reserve one row for the queue
+		// and up to two for the compact tray before budgeting the composer.
+		return rows - FULLSCREEN_MIN_TRANSCRIPT_ROWS - 1 - 2;
 	}
 
 	private getPromptDockComponents(): Component[] {
@@ -7792,20 +7808,12 @@ export class InteractiveMode {
 			...followUpMessages.map((text) => ({ id: "", text, delivery: "followUp" as const, blocked: false })),
 		];
 		if (entries.length) {
-			this.queuedMessagesContainer.addChild(new Spacer(1));
-			for (const [index, entry] of entries.entries()) {
-				const mode = entry.recoveryRequired ? "Held · review required" : entry.delivery === "steer" ? "Steering" : "Follow-up";
-				const label = ordered ? `${index + 1}. ${mode}${entry.blocked ? " · waiting behind earlier input" : ""}` : mode;
-				const text = styleQueuedMessagePreview(entry.preview ?? entry.text, label, (name) => this.isRecognizedSlashCommand(name));
-				this.queuedMessagesContainer.addChild(new TruncatedText(text, 1, 0));
-			}
-			for (const entry of entries.filter((item) => item.recoveryRequired)) {
-				this.queuedMessagesContainer.addChild(new Text(theme.fg("warning", `Held input ${entry.id} is held after interruption, recovery, or a turn limit and may already have partially executed. Browse and remove it to discard. Explicit retry through Native session/queue/retry requires reviewing the prior turn and may be rejected while the turn limit applies; there is no automatic retry.`), 1, 0));
-			}
-			const dequeueHint = this.getAppKeyDisplay("app.message.navigateOlder");
-			const editHint = entries.some((entry) => entry.editable !== false) ? " and edit" : "";
-			const hintText = theme.fg("dim", `╰─ ${dequeueHint} to browse${editHint} queued messages`);
-			this.queuedMessagesContainer.addChild(new TruncatedText(hintText, 1, 0));
+			this.queuedMessagesContainer.addChild(new QueuedMessagesPreview(entries, {
+				numbered: Boolean(ordered),
+				browseKey: this.getAppKeyDisplay("app.message.navigateOlder"),
+				getRows: () => this.ui.terminal.rows,
+				isRecognizedSlashCommand: (name) => this.isRecognizedSlashCommand(name),
+			}));
 		}
 	}
 
@@ -10013,9 +10021,8 @@ export class InteractiveMode {
 		this.ui.requestRender();
 	}
 
-	private async handleScheduledCommand(text: string): Promise<void> {
+	private async handleScheduledCommand(args: string): Promise<void> {
 		try {
-			const args = text.replace(/^\/heartbeat\b/i, "").trim();
 			const result = await this.agentConnection.runScheduledCommand(args);
 			const scheduled = result.job;
 			switch (result.action) {

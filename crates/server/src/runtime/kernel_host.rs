@@ -50,32 +50,32 @@ pub async fn dispatch_host_request_with_bridge(bridge: &HostBridge, data: Value)
             crate::runtime::kernel_host_bridge::handle_harness(bridge, action, &params).await
         }
         "rlm.create_session" => super::kernel_host_session::create_session(bridge, &params).await,
-        "rlm_heartbeat.list" => {
+        "rlm_schedule.list" => {
             let Some(runtime) = bridge.runtime() else {
-                return error_reply("runtime not available for rlm_heartbeat.list");
+                return error_reply("runtime not available for rlm_schedule.list");
             };
-            runtime.host_rlm_heartbeat_list(session_id, &params)
+            runtime.host_rlm_schedule_list(session_id, &params)
         }
-        "rlm_heartbeat.create" => {
+        "rlm_schedule.create" => {
             let Some(runtime) = bridge.runtime() else {
-                return error_reply("runtime not available for rlm_heartbeat.create");
+                return error_reply("runtime not available for rlm_schedule.create");
             };
-            runtime.host_rlm_heartbeat_create(session_id, &params).await
+            runtime.host_rlm_schedule_create(session_id, &params).await
         }
-        "rlm_heartbeat.update" => {
+        "rlm_schedule.update" => {
             let Some(runtime) = bridge.runtime() else {
-                return error_reply("runtime not available for rlm_heartbeat.update");
+                return error_reply("runtime not available for rlm_schedule.update");
             };
-            runtime.host_rlm_heartbeat_update(session_id, &params).await
+            runtime.host_rlm_schedule_update(session_id, &params).await
         }
-        "rlm_heartbeat.delete" => {
+        "rlm_schedule.delete" => {
             let Some(runtime) = bridge.runtime() else {
-                return error_reply("runtime not available for rlm_heartbeat.delete");
+                return error_reply("runtime not available for rlm_schedule.delete");
             };
-            runtime.host_rlm_heartbeat_delete(session_id, &params).await
+            runtime.host_rlm_schedule_delete(session_id, &params).await
         }
-        a if a.starts_with("rlm_heartbeat") => {
-            error_reply(format!("unknown rlm_heartbeat action: {a}"))
+        a if a.starts_with("rlm_schedule.") => {
+            error_reply(format!("unknown rlm_schedule action: {a}"))
         }
         "rlm.run" => super::kernel_host_models::spawn(bridge, &params).await,
         "rlm.collect" => super::kernel_host_controls::collect(bridge, &params).await,

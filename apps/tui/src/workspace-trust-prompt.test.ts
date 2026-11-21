@@ -5,15 +5,16 @@ import { setTimeout as sleep } from "node:timers/promises";
 import type { Terminal } from "@earendil-works/pi-tui";
 import { runWorkspaceTrustPrompt } from "./workspace-trust-prompt.js";
 
-function fixture() {
+function fixture(initialColumns = 100, initialRows = 30) {
   const writes: string[] = [];
   let onInput = (_data: string) => {};
   let onResize = () => {};
   let stops = 0;
-  let columns = 100;
+  let columns = initialColumns;
+  let rows = initialRows;
   const input = new PassThrough();
   const terminal: Terminal = {
-    get columns() { return columns; }, rows: 30, kittyProtocolActive: false, altScreenActive: false, mouseTrackingActive: false,
+    get columns() { return columns; }, get rows() { return rows; }, kittyProtocolActive: false, altScreenActive: false, mouseTrackingActive: false,
     start(data, resize) { onInput = data; onResize = resize; },
     stop() { stops++; },
     async drainInput() {},
@@ -21,7 +22,11 @@ function fixture() {
     moveBy() {}, hideCursor() {}, showCursor() {}, clearLine() {}, clearFromCursor() {}, clearScreen() {},
     enterAltScreen() {}, leaveAltScreen() {}, setMouseTracking() {}, setTitle() {}, setProgress() {},
   };
-  return { terminal, input, writes, key: (data: string) => onInput(data), resize: (width: number) => { columns = width; onResize(); }, stops: () => stops };
+  return {
+    terminal, input, writes, key: (data: string) => onInput(data),
+    resize: (width: number, height = rows) => { columns = width; rows = height; onResize(); },
+    stops: () => stops,
+  };
 }
 
 for (const [keys, expected] of [
@@ -80,4 +85,44 @@ test("startup copy, safe path, default choice and resize repaint", async () => {
   await sleep(40);
   assert.match(f.writes.join(""), /› Yes, I trust this folder/);
   f.key("\x1b"); assert.equal(await result, false);
+});
+
+test("a short pane keeps the folder, warning and default decision visible", async () => {
+  const f = fixture(52, 9);
+  const path = `/benchmark/${"long-folder/".repeat(6)}target-workspace`;
+  const result = runWorkspaceTrustPrompt(path, f.terminal, f.input);
+  await sleep(40);
+  const initial = f.writes.join("");
+  assert.match(initial, /Workspace trust/);
+  assert.match(initial, /\/benchmark\//);
+  assert.match(initial, /target-workspace/);
+  assert.match(initial, /Trust does not enable a sandbox/);
+  assert.match(initial, /› No, exit/);
+  assert.match(initial, /Yes, I trust this folder/);
+  assert.match(initial, /PgUp\/PgDn details/);
+
+  f.writes.length = 0;
+  f.key("\x1b[6~");
+  await sleep(40);
+  assert.match(f.writes.join(""), /Only continue if you trust/);
+  f.writes.length = 0;
+  f.key("\x1b[5~");
+  await sleep(40);
+  assert.match(f.writes.join(""), /\/benchmark\//);
+  f.key("\r");
+  assert.equal(await result, false);
+});
+
+test("an unusably small pane cannot approve trust using invisible choices", async () => {
+  const f = fixture(30, 4);
+  const result = runWorkspaceTrustPrompt("/project", f.terminal, f.input);
+  await sleep(40);
+  assert.match(f.writes.join(""), /Resize to review workspace/);
+  f.key("\x1b[B"); f.key("\r");
+  assert.equal(f.stops(), 0);
+  f.resize(52, 9);
+  await sleep(40);
+  assert.match(f.writes.join(""), /› No, exit/);
+  f.key("\x1b[B"); f.key("\r");
+  assert.equal(await result, true);
 });

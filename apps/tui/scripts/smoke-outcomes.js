@@ -22,6 +22,7 @@ export function scheduledDelivered(records, marker) {
   return records.some((record) => {
     const item = record.payload?.params?.item?.item;
     return record.method === "item/completed" && item?.type === "userMessage"
+      && item.origin?.source === "schedule"
       && item.content?.some((block) => block.type === "text" && block.text?.includes(marker));
   });
 }

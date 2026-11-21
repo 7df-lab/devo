@@ -2258,7 +2258,7 @@ export class AgentsViewMode implements Component, Focusable {
 		if (pendingDelete || pendingKill) {
 			const armed = row.summary.hasActiveHeartbeat === true || (row.scheduled?.activeCount ?? 0) > 0;
 			const title =
-				(armed ? "has an armed heartbeat — " : "") +
+				(armed ? "has an active schedule — " : "") +
 				(pendingDelete
 					? this.getPendingDeleteTitle()
 					: `${keyText("app.agents.delete")} again to ${hasLiveWork(row) ? "stop" : "delete"}`);

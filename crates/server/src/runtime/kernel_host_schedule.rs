@@ -1,4 +1,4 @@
-//! Kernel `host_request("rlm_heartbeat.*")` → durable [`ScheduleStore`] heartbeats.
+//! Route kernel `host_request("rlm_schedule.*")` calls to the durable schedule store.
 
 use serde_json::{Value, json};
 
@@ -13,7 +13,7 @@ use devo_protocol::native::rpc_schedule::{
 const DEFAULT_INTERVAL: &str = "5m";
 
 impl ServerRuntime {
-    pub(crate) fn host_rlm_heartbeat_list(&self, session_id: &str, params: &Value) -> Value {
+    pub(crate) fn host_rlm_schedule_list(&self, session_id: &str, params: &Value) -> Value {
         let Some(sid) = parse_sid(session_id) else {
             return error_reply("invalid session id");
         };
@@ -28,7 +28,7 @@ impl ServerRuntime {
             /*include_stopped*/ include_inactive,
         ) {
             Ok(jobs) => {
-                let heartbeats: Vec<Value> = jobs
+                let schedules: Vec<Value> = jobs
                     .into_iter()
                     .filter(|job| job.kind == ScheduleJobKind::Heartbeat)
                     .filter(|job| {
@@ -38,19 +38,15 @@ impl ServerRuntime {
                                 ScheduleJobStatus::Active | ScheduleJobStatus::Paused
                             )
                     })
-                    .map(job_to_heartbeat_json)
+                    .map(job_to_schedule_json)
                     .collect();
-                ok_result(json!({ "heartbeats": heartbeats }))
+                ok_result(json!({ "schedules": schedules }))
             }
             Err(err) => error_reply(err.to_string()),
         }
     }
 
-    pub(crate) async fn host_rlm_heartbeat_create(
-        &self,
-        session_id: &str,
-        params: &Value,
-    ) -> Value {
+    pub(crate) async fn host_rlm_schedule_create(&self, session_id: &str, params: &Value) -> Value {
         let Some(sid) = parse_sid(session_id) else {
             return error_reply("invalid session id");
         };
@@ -62,7 +58,7 @@ impl ServerRuntime {
             .trim()
             .to_string();
         if instruction.is_empty() {
-            return error_reply("rlm_heartbeat.create requires instruction");
+            return error_reply("rlm_schedule.create requires instruction");
         }
         let interval = params
             .get("interval")
@@ -98,16 +94,12 @@ impl ServerRuntime {
         };
         let _dispatch_guard = self.schedule_store.lock_dispatch().await;
         match self.schedule_store.upsert(upsert) {
-            Ok(job) => ok_result(job_to_heartbeat_json(job)),
+            Ok(job) => ok_result(job_to_schedule_json(job)),
             Err(err) => error_reply(err.to_string()),
         }
     }
 
-    pub(crate) async fn host_rlm_heartbeat_update(
-        &self,
-        session_id: &str,
-        params: &Value,
-    ) -> Value {
+    pub(crate) async fn host_rlm_schedule_update(&self, session_id: &str, params: &Value) -> Value {
         let Some(sid) = parse_sid(session_id) else {
             return error_reply("invalid session id");
         };
@@ -118,7 +110,7 @@ impl ServerRuntime {
             .and_then(|v| v.as_str())
             .map(|s| JobId::from_string(s.to_owned()))
         else {
-            return error_reply("rlm_heartbeat.update requires id");
+            return error_reply("rlm_schedule.update requires id");
         };
 
         // Keep ownership checks and subsequent updates atomic with dispatch.
@@ -129,20 +121,20 @@ impl ServerRuntime {
                 "resume" => ScheduleUpdateAction::Resume,
                 other => {
                     return error_reply(format!(
-                        "rlm_heartbeat.update status must be pause|resume, got '{other}'"
+                        "rlm_schedule.update status must be pause|resume, got '{other}'"
                     ));
                 }
             };
-            if let Err(err) = self.require_session_heartbeat(&sid, &job_id) {
+            if let Err(err) = self.require_session_recurring_schedule(&sid, &job_id) {
                 return error_reply(err);
             }
             return match self.schedule_store.update(&job_id, action) {
-                Ok(job) => ok_result(job_to_heartbeat_json(job)),
+                Ok(job) => ok_result(job_to_schedule_json(job)),
                 Err(err) => error_reply(err.to_string()),
             };
         }
 
-        let existing = match self.require_session_heartbeat(&sid, &job_id) {
+        let existing = match self.require_session_recurring_schedule(&sid, &job_id) {
             Ok(job) => job,
             Err(err) => return error_reply(err),
         };
@@ -199,16 +191,12 @@ impl ServerRuntime {
             label,
         };
         match self.schedule_store.upsert(upsert) {
-            Ok(job) => ok_result(job_to_heartbeat_json(job)),
+            Ok(job) => ok_result(job_to_schedule_json(job)),
             Err(err) => error_reply(err.to_string()),
         }
     }
 
-    pub(crate) async fn host_rlm_heartbeat_delete(
-        &self,
-        session_id: &str,
-        params: &Value,
-    ) -> Value {
+    pub(crate) async fn host_rlm_schedule_delete(&self, session_id: &str, params: &Value) -> Value {
         let Some(sid) = parse_sid(session_id) else {
             return error_reply("invalid session id");
         };
@@ -219,19 +207,19 @@ impl ServerRuntime {
             .and_then(|v| v.as_str())
             .map(|s| JobId::from_string(s.to_owned()))
         else {
-            return error_reply("rlm_heartbeat.delete requires id");
+            return error_reply("rlm_schedule.delete requires id");
         };
         let _dispatch_guard = self.schedule_store.lock_dispatch().await;
-        if let Err(err) = self.require_session_heartbeat(&sid, &job_id) {
+        if let Err(err) = self.require_session_recurring_schedule(&sid, &job_id) {
             return error_reply(err);
         }
         match self.schedule_store.delete(&job_id) {
-            Ok(job) => ok_result(job_to_heartbeat_json(job)),
+            Ok(job) => ok_result(job_to_schedule_json(job)),
             Err(err) => error_reply(err.to_string()),
         }
     }
 
-    fn require_session_heartbeat(
+    fn require_session_recurring_schedule(
         &self,
         session_id: &SessionId,
         job_id: &JobId,
@@ -242,7 +230,7 @@ impl ServerRuntime {
             .map_err(|e| e.to_string())?;
         jobs.into_iter()
             .find(|job| &job.job_id == job_id && job.kind == ScheduleJobKind::Heartbeat)
-            .ok_or_else(|| format!("heartbeat not found: {}", job_id.as_str()))
+            .ok_or_else(|| format!("scheduled check not found: {}", job_id.as_str()))
     }
 }
 
@@ -266,7 +254,7 @@ fn normalize_every_schedule(interval: &str) -> String {
     }
 }
 
-fn job_to_heartbeat_json(job: ScheduleJob) -> Value {
+fn job_to_schedule_json(job: ScheduleJob) -> Value {
     let status = match job.status {
         ScheduleJobStatus::Active => "active",
         ScheduleJobStatus::Paused => "paused",

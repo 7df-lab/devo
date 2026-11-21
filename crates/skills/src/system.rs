@@ -205,6 +205,45 @@ mod tests {
         assert_eq!(reinstalled, installed);
     }
 
+    #[test]
+    fn upgrade_removes_retired_bundles_but_keeps_user_skills() {
+        let devo_home = TempDir::new().expect("devo home");
+        let installed_root = system_cache_root_dir(devo_home.path());
+        let user_root = devo_home.path().join("skills");
+        for root in [&installed_root, &user_root] {
+            for name in ["linear", "notion", "rlm-heartbeat"] {
+                let dir = root.join(name);
+                fs::create_dir_all(&dir).expect("create prior skill directory");
+                fs::write(dir.join("SKILL.md"), name).expect("write prior skill");
+            }
+        }
+        fs::write(
+            installed_root.join(SYSTEM_SKILLS_MARKER_FILENAME),
+            "previous-version",
+        )
+        .expect("write outdated cache marker");
+
+        install_system_skills(devo_home.path()).expect("upgrade system skills");
+
+        for name in ["linear", "notion", "rlm-heartbeat"] {
+            assert!(!installed_root.join(name).exists());
+            assert_eq!(
+                fs::read_to_string(user_root.join(name).join("SKILL.md")).expect("read user skill"),
+                name
+            );
+        }
+        let skill_path = installed_root.join("rlm-schedule/SKILL.md");
+        assert!(skill_path.is_file());
+        assert_eq!(
+            crate::python::PythonSkill::from_skill("rlm-schedule", &skill_path),
+            Some(crate::python::PythonSkill {
+                skill_path,
+                module: "rlm_schedule".into(),
+                package_dir: installed_root.join("rlm-schedule/src/rlm_schedule"),
+            })
+        );
+    }
+
     fn files_under(root: &Path) -> BTreeMap<PathBuf, Vec<u8>> {
         let mut files = BTreeMap::new();
         let mut pending = vec![root.to_path_buf()];

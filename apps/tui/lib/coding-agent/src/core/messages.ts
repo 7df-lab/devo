@@ -592,7 +592,7 @@ export function createScheduledPromptMessage(job: AgentCronJob, timestamp = Date
 	return {
 		role: "custom",
 		customType: SCHEDULED_PROMPT_CUSTOM_TYPE,
-		content: `[heartbeat: ${sanitizeMessageHeaderValue(job.schedule.expression)} run#${job.runCount}]\n\n${job.prompt}`,
+		content: `[scheduled: ${sanitizeMessageHeaderValue(job.schedule.expression)} run#${job.runCount}]\n\n${job.prompt}`,
 		display: true,
 		details: {
 			jobId: job.id,

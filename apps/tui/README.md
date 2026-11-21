@@ -86,6 +86,17 @@ Deferred history from an abandoned path is invalidated; overlapping navigation r
 serialized so a late snapshot cannot append an old branch or overwrite the latest draft.
 Normal live model deltas do not delay initial history rendering.
 
+## Scheduled tasks
+
+- `/schedule every 5m Check build progress` sets your recurring check for this session.
+- `/schedule` shows its status; `/schedule pause`, `/schedule resume`, and
+  `/schedule clear` manage it.
+- `/schedules` opens the task list for schedules created by you and your agents.
+
+The bundled `rlm-schedule` skill manages agent-owned checks. In the Python REPL,
+use `import rlm_schedule` and read `rlm_schedule.list()` results from the
+`schedules` key. Existing scheduled jobs do not need to be recreated.
+
 ## Tests
 
 ```bash
@@ -94,8 +105,8 @@ npm run test:tmux -- T1
 ```
 
 Smoke scenarios: `T1` startup, `T2` completed model turn, `T3` interruption,
-`goal` set/pause, `bash` shell output, `agents` agent manager, `schedule`
-heartbeat status, and `heartbeat` scheduled delivery/clear.
+`goal` set/pause, `bash` shell output, `agents` agent manager, and `schedule`
+status. The suite also checks scheduled delivery and cleanup.
 
 The shared Node runner uses tmux (Unix) or psmux (Windows), an explicit repository
 cwd, a unique session, and an isolated temporary Devo home. It copies local
@@ -106,7 +117,7 @@ manager; Ctrl+O continues to change conversation detail.
 
 Startup requires successful Native session creation and visible chat chrome.
 Model and interrupt checks require matching Native turn outcomes, without
-asserting exact model text. Heartbeat delivery requires a Native user item,
+asserting exact model text. Scheduled delivery requires a Native user item,
 which avoids passing on the echoed scheduling command. Failures exit nonzero
 and print the last captured pane.
 
