@@ -15,6 +15,29 @@ Discover is read-only: save selected suggestions explicitly to configure them.
 Older sparse connections without pinned endpoints must be reconnected explicitly.
 Existing configuration files are preserved; old snapshots are ignored, not deleted.
 
+## TUI setup
+
+`/model` opens in All mode, showing configured models, supported public models
+from models.dev (including providers you haven't signed in to), and models
+discovered for signed-in subscriptions. The public catalog and connected OAuth
+providers' model lists load in the background when needed. After restarting Devo,
+`/model` can rediscover models using your saved OAuth connection without requiring
+another sign-in. If you've saved a model scope, use **Alt+S** to switch to it.
+Choose a public API-key model to sign in and save its Connection. Devo saves the
+provider endpoint and protocol on explicit login, then saves the selected model's
+route without copying the rest of the public catalog. An existing custom endpoint
+is not replaced.
+
+Use `/login` or press **Ctrl+L** in the default `/model` picker to open Providers.
+OpenAI Codex subscription models are discovered after ChatGPT OAuth; they are
+not the OpenAI API-key models in the public catalog. Devo saves the selected
+subscription model and its advertised effort settings. Sign in again and
+reselect a previously saved subscription model if its effort picker is missing.
+
+`/effort` uses the levels advertised by the selected provider: models.dev for
+public API-key models when it specifies effort options, and authenticated model
+discovery for Codex subscription models.
+
 ## Provider and model identity
 
 Provider ids and nested model ids are map keys. The optional `request_model` field overrides the upstream request ID without

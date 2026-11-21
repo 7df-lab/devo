@@ -21,6 +21,18 @@ test("zero activity appears immediately without keyboard input", () => {
 	assert.equal(component.isSelectable(), true);
 });
 
+test("bottom tray counts only running child agents", () => {
+	const component = dock();
+	component.setOpenable(true);
+	component.setSubagentCounts({ total: 3, running: 1, idle: 1, inactive: 1 });
+	assert.match(plain(component.render(80)), /Subagents 1 · Scheduled/);
+	component.setSubagentCounts({ total: 3, running: 0, idle: 2, inactive: 1 });
+	assert.match(plain(component.render(80)), /Subagents 0 · Scheduled/);
+	component.focused = true;
+	assert.match(plain(component.render(80)), /Subagents · 0 running +│/);
+	assert.doesNotMatch(plain(component.render(80)), /\bidle\b|\binactive\b/);
+});
+
 test("all three empty groups remain selectable including unavailable subagent details", () => {
 	const component = dock();
 	component.focused = true;
@@ -46,7 +58,7 @@ test("focus expands details, up and escape return to editor, ordinary text is fo
 	component.setShellCounts({ total: 5, running: 2, persistent: 1 });
 	component.focused = true;
 	const output = plain(component.render(120));
-	assert.match(output, /1 running · 2 idle · 3 inactive/);
+	assert.match(output, /Subagents · 1 running +│/);
 	assert.match(output, /1 active · 2 paused/);
 	assert.match(output, /2 running · 5 total · 1 persistent/);
 	const actions: string[] = [];
@@ -101,12 +113,17 @@ test("picker hides dock and blocks actions without clearing session data", () =>
 	assert.match(plain(component.render(80)), /Scheduled loading/);
 });
 
-test("override label replaces location while preserving context", () => {
+test("override label replaces location and takes priority over context in a narrow pane", () => {
 	initTheme();
-	const component = new SubagentSummaryLine(() => "project", () => "model", () => "override");
-	const output = plain(component.render(80));
-	assert.match(output, /override.*model/);
-	assert.doesNotMatch(output, /project/);
+	const action = "Option+Enter to queue message";
+	const context = "deepseek-v4-flash · 7.5k (4%)";
+	const component = new SubagentSummaryLine(() => "project", () => context, () => action);
+	assert.match(plain(component.render(80)), /Option\+Enter to queue message +deepseek-v4-flash/);
+	assert.doesNotMatch(plain(component.render(80)), /project/);
+	const narrow = component.render(52);
+	assert.ok(plain(narrow).startsWith(action));
+	assert.ok(narrow.every((line) => visibleWidth(line) <= 52));
+	assert.equal(plain(component.render(action.length)).split("\n")[0], action);
 });
 
  test("Goal is conditional and does not change activity keyboard routing", () => {

@@ -45,6 +45,8 @@ Devo 工作时，status surface 会显示任务正在 active，并提示 `Esc` �
 
 Tool use 会内联显示。文件编辑、shell commands、MCP calls、search results 和其他 tool results 会渲染为 transcript cells，而不是隐藏日志。
 
+后台 shell 结束时，聊天记录会显示命令、退出状态（如果有）和捕获的输出。等待投递的 shell 结果和定时指令会在输入框上方的队列中标为 `Shell:` 或 `Scheduled:`。按 `Alt+Up`（macOS 上为 `Option+Up`）可查看完整内容。
+
 如果 tool request 需要 approval，Devo 会打开 permission overlay。请求会显示 action summary、reason、resource，以及工具要访问的 path、host 或 target。
 
 ## Session Lifecycle

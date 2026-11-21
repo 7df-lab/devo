@@ -189,11 +189,9 @@ pub async fn ensure_kernel_with_skills(
     let startup_started = std::time::Instant::now();
     let mut config = devo_kernel::KernelSessionConfig {
         cwd: cwd.to_path_buf(),
-        ..Default::default()
+        ..devo_kernel::KernelSessionConfig::for_runtime()
+            .map_err(|error| ToolCallError::InternalError(error.to_string()))?
     };
-    if let Some(runtime) = resolve_runtime_pythonpath() {
-        config.python_path_entries.push(runtime);
-    }
     // dill is host-provisioned for namespace snapshots and restore.
     ensure_kernel_dill(&mut config);
     config.extra_env.extend(kernel_environment(session_dir));
@@ -394,25 +392,4 @@ fn kernel_environment(session_dir: Option<&std::path::Path>) -> Vec<(String, Str
         agent_dir.display().to_string(),
     ));
     env
-}
-
-fn resolve_runtime_pythonpath() -> Option<std::path::PathBuf> {
-    if let Ok(path) = std::env::var("DEVO_RLM_RUNTIME_SRC") {
-        let p = std::path::PathBuf::from(path);
-        if p.join("rlm").is_dir() {
-            return Some(p);
-        }
-    }
-    let manifest = std::path::PathBuf::from(env!("CARGO_MANIFEST_DIR"));
-    for base in [&manifest, manifest.parent().unwrap_or(&manifest)] {
-        if let Some(p) = devo_kernel::default_runtime_pythonpath(base) {
-            return Some(p);
-        }
-        if let Some(parent) = base.parent()
-            && let Some(p) = devo_kernel::default_runtime_pythonpath(parent)
-        {
-            return Some(p);
-        }
-    }
-    devo_kernel::default_runtime_pythonpath(std::path::Path::new("."))
 }

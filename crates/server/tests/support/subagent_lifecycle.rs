@@ -35,11 +35,13 @@ use devo_server::ClientTransportKind;
 use devo_server::ServerRuntime;
 use pretty_assertions::assert_eq;
 use tokio::sync::mpsc;
+use tokio::sync::oneshot;
 use tokio::time::timeout;
 
 pub enum StreamScript {
     Events(Vec<StreamEvent>),
     Delayed(Duration, Vec<StreamEvent>),
+    Gated(oneshot::Receiver<()>, Vec<StreamEvent>),
     Pending,
 }
 
@@ -83,6 +85,14 @@ impl ScriptedProvider {
 
     pub fn completed(text: &str) -> StreamScript {
         StreamScript::Events(text_response_events(text))
+    }
+
+    pub fn gated_completion(text: &str) -> (StreamScript, oneshot::Sender<()>) {
+        let (release, gate) = oneshot::channel();
+        (
+            StreamScript::Gated(gate, text_response_events(text)),
+            release,
+        )
     }
 
     pub fn completed_after(delay: Duration, text: &str) -> StreamScript {
@@ -227,6 +237,10 @@ impl ModelProviderSDK for ScriptedProvider {
             StreamScript::Events(events) => {
                 let events = events.into_iter().map(Ok).collect::<Vec<Result<_>>>();
                 Ok(Box::pin(futures::stream::iter(events)))
+            }
+            StreamScript::Gated(gate, events) => {
+                gate.await.context("test dropped the provider gate")?;
+                Ok(Box::pin(futures::stream::iter(events.into_iter().map(Ok))))
             }
             StreamScript::Delayed(delay, events) => {
                 let state = (Some(delay), VecDeque::from(events));

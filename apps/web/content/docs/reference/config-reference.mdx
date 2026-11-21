@@ -81,6 +81,11 @@ TOML provider fields remain readable only for migration.
 | --- | --- | --- |
 | `no_proxy` | string | Optional comma-separated host bypass list, such as `localhost,127.0.0.1,::1`. |
 
+For TUI requests such as OAuth token exchange, set `http_proxy` and
+`https_proxy` (or `HTTP_PROXY` and `HTTPS_PROXY`) before starting Devo.
+Lowercase values take precedence over uppercase values. Use `no_proxy` or
+`NO_PROXY` to exclude hosts, for example `localhost,127.0.0.1`.
+
 Desktop Server network proxy settings override these values only inside the
 Desktop-managed runtime process. They do not modify `config.toml`.
 

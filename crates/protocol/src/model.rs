@@ -580,7 +580,15 @@ impl Model {
                             } else {
                                 let request_reasoning_effort = normalized_selection
                                     .as_deref()
-                                    .and_then(|selection| selection.parse::<ReasoningEffort>().ok())
+                                    .and_then(|selection| {
+                                        if selection == "off" {
+                                            // An advertised `none` is a wire effort,
+                                            // unlike a model's logical on/off toggle.
+                                            self.thinking_wire_value(selection)?.parse().ok()
+                                        } else {
+                                            selection.parse::<ReasoningEffort>().ok()
+                                        }
+                                    })
                                     .map(|effort| self.nearest_supported_reasoning_effort(effort))
                                     .or(self.default_reasoning_effort);
                                 (
@@ -949,6 +957,35 @@ mod tests {
             resolved.effective_reasoning_effort,
             Some(ReasoningEffort::High)
         );
+    }
+
+    #[test]
+    fn resolve_reasoning_effort_selection_preserves_advertised_wire_efforts() {
+        let mut preset = model("o-model");
+        preset.reasoning_capability = ReasoningCapability::Levels(vec![
+            ReasoningEffort::None.into(),
+            ReasoningEffort::High.into(),
+            ReasoningEffort::XHigh.into(),
+            ReasoningEffort::Max.into(),
+        ]);
+        preset.default_reasoning_effort = Some(ReasoningEffort::High);
+
+        for (selection, wire, effort) in [
+            ("off", "none", ReasoningEffort::None),
+            ("xhigh", "xhigh", ReasoningEffort::XHigh),
+            ("max", "max", ReasoningEffort::Max),
+        ] {
+            assert_eq!(
+                preset.resolve_reasoning_effort_selection(Some(selection)),
+                ResolvedReasoningRequest {
+                    request_model: "o-model".to_string(),
+                    request_thinking: Some(wire.to_string()),
+                    request_reasoning_effort: Some(effort),
+                    effective_reasoning_effort: Some(effort),
+                    extra_body: None,
+                }
+            );
+        }
     }
 
     #[test]

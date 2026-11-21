@@ -628,7 +628,7 @@ export interface InteractiveModeOptions {
 	/** Initial stable session id used to scope prompt stash state. */
 	promptStashSessionId?: string;
 	/** Override splash logo/title metadata (e.g. Devo product branding). */
-	brandSplash?: Pick<BrandSplashHeaderOptions, "logo" | "title">;
+	brandSplash?: Pick<BrandSplashHeaderOptions, "logo" | "title" | "getProxy">;
 	/** Display / update-check version label. Defaults to package VERSION. */
 	version?: string;
 	/** Terminal window title prefix. Defaults to APP_TITLE. */
@@ -816,8 +816,10 @@ export class InteractiveMode {
 	private connectionModelCatalog: AgentConnectionModel[] = [];
 	private connectionConfiguredProviders = new Set<string>();
 	private connectionModelsFetchedAt = 0;
+	// A local snapshot does not mean the public directory has been checked yet.
+	private modelPickerCatalogCheckedAt?: number;
 	private connectionModelsRefreshVersion = 0;
-	private connectionModelsRefreshInFlight: { version: number; promise: Promise<AgentConnectionModel[]> } | undefined;
+	private connectionModelsRefreshInFlight: { version: number; remote: boolean; promise: Promise<AgentConnectionModel[]> } | undefined;
 	private closeConfigurationMenu: (() => void) | undefined;
 	private configurationModelSelection: Promise<void> | undefined;
 	private connectionState: AgentConnectionState | undefined;
@@ -1336,10 +1338,9 @@ export class InteractiveMode {
 		this.renderWidgets();
 		this.mainContainer.addChild(this.widgetContainerAbove);
 		this.renderRecap();
-		for (const container of this.getPromptContextContainers()) {
-			this.mainContainer.addChild(container);
-		}
+		this.mainContainer.addChild(this.sideQuestionContainer);
 		this.mainContainer.addChild(this.recapContainer);
+		this.mainContainer.addChild(this.queuedMessagesContainer);
 		this.mainContainer.addChild(this.editorContainer);
 		this.mainContainer.addChild(this.subagentSummaryLine);
 		this.mainContainer.addChild(this.widgetContainerBelow);
@@ -2483,14 +2484,18 @@ export class InteractiveMode {
 		connection: AgentConnection,
 		generation: number,
 	): Promise<void> {
-		// Auth changes may start a newer model refresh while these ancillary reads are pending.
+		// This local read must not overwrite a newer auth or model-picker refresh.
 		const modelRefreshVersion = this.connectionModelsRefreshVersion;
+		const previousModelCatalog = this.connectionModelCatalog;
 		const [modelCatalog, resources] = await Promise.all([
 			measureAsync("catalog.get_model_catalog", () => connection.getModelCatalog()),
 			measureAsync("catalog.get_resources", () => connection.getResourceSnapshot()),
 		]);
 		if (!this.isCurrentConnectionGeneration(connection, generation)) return;
-		if (modelRefreshVersion === this.connectionModelsRefreshVersion) {
+		if (
+			modelRefreshVersion === this.connectionModelsRefreshVersion &&
+			previousModelCatalog === this.connectionModelCatalog
+		) {
 			this.applyConnectionModelCatalog(modelCatalog);
 			this.connectionModelsFetchedAt = Date.now();
 		}
@@ -4963,7 +4968,7 @@ export class InteractiveMode {
 					this.editor.setText("");
 					return;
 				}
-				if (text === "/quit") {
+				if (commandName === "quit" && !commandArgs) {
 					this.editor.setText("");
 					await this.shutdown();
 					return;
@@ -6318,7 +6323,7 @@ export class InteractiveMode {
 			return clearKey ? `Press ${clearKey} again to exit` : "Press again to exit";
 		}
 		const text = this.editor.getExpandedText?.() ?? this.editor.getText();
-		if (!this.isAgentStreaming() || !text.trim()) {
+		if (this.queueSelection.isBrowsing || !this.isAgentStreaming() || !text.trim()) {
 			return undefined;
 		}
 		return `${keyText("app.message.followUp")} to queue message`;
@@ -7556,13 +7561,21 @@ export class InteractiveMode {
 		const lane = selected.lane === "steering" ? "steering" : "follow-up";
 		const older = this.getAppKeyDisplay("app.message.navigateOlder");
 		const newer = this.getAppKeyDisplay("app.message.navigateNewer");
-		const earlier = this.getAppKeyDisplay("app.message.moveEarlier");
-		const later = this.getAppKeyDisplay("app.message.moveLater");
+		const entryLabel = `${lane} ${selected.index + 1}`;
+		const browse = `${older}/${newer} browse`;
+		const ordered = this.connectionState?.sessionActions.ordered;
+		if (ordered?.find((entry) => entry.id === selected.id)?.editable === false) {
+			return theme.fg("dim", `${entryLabel} · read-only · ${browse}`);
+		}
+		const hints = [entryLabel, browse];
+		if (!ordered) {
+			const earlier = this.getAppKeyDisplay("app.message.moveEarlier");
+			const later = this.getAppKeyDisplay("app.message.moveLater");
+			hints.push(`${earlier}/${later} reorder`);
+		}
 		const queue = this.getAppKeyDisplay("app.message.followUp");
-		return theme.fg(
-			"dim",
-			`${lane} ${selected.index + 1} · ${older}/${newer} browse · ${earlier}/${later} reorder · enter steers · ${queue} queues · empty deletes`,
-		);
+		hints.push("enter steers", `${queue} queues`, "empty deletes");
+		return theme.fg("dim", hints.join(" · "));
 	}
 
 	private updateEditorBorderColor(): void {
@@ -7572,12 +7585,8 @@ export class InteractiveMode {
 		this.ui.requestRender();
 	}
 
-	private getPromptContextContainers(): Container[] {
-		return [this.queuedMessagesContainer, this.sideQuestionContainer];
-	}
-
 	private getPromptDockComponents(): Component[] {
-		return [this.recapContainer, this.editorContainer, this.subagentSummaryLine, this.footerSlot];
+		return [this.recapContainer, this.queuedMessagesContainer, this.editorContainer, this.subagentSummaryLine, this.footerSlot];
 	}
 
 	/** Enter or leave fullscreen rendering without touching the persisted setting. */
@@ -7589,7 +7598,7 @@ export class InteractiveMode {
 					this.headerContainer,
 					this.mainViewContainer,
 					this.widgetContainerAbove,
-					...this.getPromptContextContainers(),
+					this.sideQuestionContainer,
 					this.widgetContainerBelow,
 				],
 				dock: this.promptDock,
@@ -7775,17 +7784,15 @@ export class InteractiveMode {
 		for (const component of this.pendingBashComponents) {
 			this.pendingMessagesContainer.addChild(component);
 		}
-		// Queued steering/follow-up previews are future turns, so they render in
-		// their own container below the execution indicator and recap.
+		// Pending inputs stay with the composer, not the scrollable transcript.
 		this.queuedMessagesContainer.clear();
 		const { steering: steeringMessages, followUp: followUpMessages, ordered } = this.getAllQueuedMessages();
-		const hasQueuedMessages = steeringMessages.length > 0 || followUpMessages.length > 0;
-		if (hasQueuedMessages) {
+		const entries: NonNullable<AgentConnectionQueueState["ordered"]> = ordered ?? [
+			...steeringMessages.map((text) => ({ id: "", text, delivery: "steer" as const, blocked: false })),
+			...followUpMessages.map((text) => ({ id: "", text, delivery: "followUp" as const, blocked: false })),
+		];
+		if (entries.length) {
 			this.queuedMessagesContainer.addChild(new Spacer(1));
-			const entries: NonNullable<AgentConnectionQueueState["ordered"]> = ordered ?? [
-				...steeringMessages.map((text) => ({ id: "", text, delivery: "steer" as const, blocked: false })),
-				...followUpMessages.map((text) => ({ id: "", text, delivery: "followUp" as const, blocked: false })),
-			];
 			for (const [index, entry] of entries.entries()) {
 				const mode = entry.recoveryRequired ? "Held · review required" : entry.delivery === "steer" ? "Steering" : "Follow-up";
 				const label = ordered ? `${index + 1}. ${mode}${entry.blocked ? " · waiting behind earlier input" : ""}` : mode;
@@ -7796,7 +7803,8 @@ export class InteractiveMode {
 				this.queuedMessagesContainer.addChild(new Text(theme.fg("warning", `Held input ${entry.id} is held after interruption, recovery, or a turn limit and may already have partially executed. Browse and remove it to discard. Explicit retry through Native session/queue/retry requires reviewing the prior turn and may be rejected while the turn limit applies; there is no automatic retry.`), 1, 0));
 			}
 			const dequeueHint = this.getAppKeyDisplay("app.message.navigateOlder");
-			const hintText = theme.fg("dim", `╰─ ${dequeueHint} to browse and edit queued messages`);
+			const editHint = entries.some((entry) => entry.editable !== false) ? " and edit" : "";
+			const hintText = theme.fg("dim", `╰─ ${dequeueHint} to browse${editHint} queued messages`);
 			this.queuedMessagesContainer.addChild(new TruncatedText(hintText, 1, 0));
 		}
 	}
@@ -8111,7 +8119,13 @@ export class InteractiveMode {
 	private async getConnectionAvailableModels(options: { refreshRemote?: boolean } = {}): Promise<AgentConnectionModel[]> {
 		const inFlight = this.connectionModelsRefreshInFlight;
 		if (inFlight && inFlight.version === this.connectionModelsRefreshVersion) {
-			return [...(await inFlight.promise)];
+			if (!options.refreshRemote || inFlight.remote || !this.agentConnection.refreshModelCatalog) {
+				return [...(await inFlight.promise)];
+			}
+			// A cold local read can finish before the public catalog loads. The
+			// picker still needs its remote refresh, not the earlier snapshot.
+			await inFlight.promise.catch(() => undefined);
+			return this.getConnectionAvailableModels(options);
 		}
 
 		const version = this.connectionModelsRefreshVersion;
@@ -8125,9 +8139,10 @@ export class InteractiveMode {
 			}
 			this.applyConnectionModelCatalog(catalog);
 			this.connectionModelsFetchedAt = Date.now();
+			if (options.refreshRemote) this.modelPickerCatalogCheckedAt = this.connectionModelsFetchedAt;
 			return this.getAvailableConnectionModels();
 		});
-		this.connectionModelsRefreshInFlight = { version, promise };
+		this.connectionModelsRefreshInFlight = { version, remote: options.refreshRemote === true, promise };
 
 		try {
 			return [...(await promise)];
@@ -8157,15 +8172,14 @@ export class InteractiveMode {
 	private getModelSelectorRefreshPromise(
 		options: { force?: boolean } = {},
 	): Promise<AgentConnectionModel[]> | undefined {
-		const refreshCatalog = () => this.getConnectionAvailableModels({ refreshRemote: true }).then(() => this.getCachedModelCandidates());
-		if (this.connectionModelsRefreshInFlight) {
-			return refreshCatalog();
-		}
-		if (options.force || this.connectionModelsFetchedAt === 0) {
-			return refreshCatalog();
-		}
-		if (Date.now() - this.connectionModelsFetchedAt > MODEL_CATALOG_REFRESH_TTL_MS) {
-			return refreshCatalog();
+		const checkedAt = this.modelPickerCatalogCheckedAt;
+		if (
+			options.force ||
+			this.connectionModelsRefreshInFlight ||
+			checkedAt === undefined ||
+			Date.now() - checkedAt >= MODEL_CATALOG_REFRESH_TTL_MS
+		) {
+			return this.getConnectionAvailableModels({ refreshRemote: true }).then(() => this.getCachedModelCandidates());
 		}
 		return undefined;
 	}
@@ -8173,6 +8187,7 @@ export class InteractiveMode {
 	private invalidateConnectionModelRefresh(): void {
 		this.connectionModelsRefreshVersion++;
 		this.connectionModelsRefreshInFlight = undefined;
+		this.modelPickerCatalogCheckedAt = undefined;
 	}
 
 	private invalidateConnectionModels(): void {
@@ -8577,7 +8592,9 @@ export class InteractiveMode {
 				if (!refreshPromise) return;
 				void refreshPromise
 					.then((models) => {
-						if (!settled) menu.updateModels(this.getCurrentModel(), models, this.connectionConfiguredProviders);
+						if (settled) return;
+						menu.updateModels(this.getCurrentModel(), models, this.connectionConfiguredProviders);
+						menu.refreshAuthentication(authFlows.getLoginProviderOptions());
 					})
 					.catch(() => undefined);
 			};
@@ -8702,7 +8719,7 @@ export class InteractiveMode {
 			this.editorContainer.addChild(menu);
 			focus();
 			this.ui.requestRender();
-			refreshModels(initialModelSearch !== undefined);
+			refreshModels(initialModelSearch !== undefined || modelCatalog.length === 0);
 			refreshTimer = setInterval(() => { if (!busy) refreshModels(false); }, MODEL_CATALOG_REFRESH_TTL_MS);
 			refreshTimer.unref();
 		});

@@ -326,14 +326,11 @@ function projectItemStarted(
     // Inbox admission can precede the previous model response's completion.
     // Keep its component alive so the authoritative item/completed updates it,
     // rather than creating a second assistant cell after this user message.
-    events.push({
-      type: "message_start",
-      message: nativeItemToAgentMessages(envelope)[0],
-    });
-    events.push({
-      type: "message_end",
-      message: nativeItemToAgentMessages(envelope)[0],
-    });
+    const [message] = nativeItemToAgentMessages(envelope);
+    if (message) {
+      events.push({ type: "message_start", message });
+      events.push({ type: "message_end", message });
+    }
   } else if (type === "assistantMessage") {
     state.openAssistantItem = key;
     state.assistantTextByItem.set(key, String(item.text ?? ""));

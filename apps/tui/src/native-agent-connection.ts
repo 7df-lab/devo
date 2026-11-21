@@ -74,7 +74,7 @@ import {
   applyGoalFromWire,
   countMessageStats,
   credentialSetParamsFromAuth,
-  hostMessagePrefix,
+  hostMessageForkText,
   mapMcpToExtensions,
   mapSkillSourceInfo,
   mapSkillsToResourceSkills,
@@ -1542,8 +1542,34 @@ export class NativeAgentConnection implements AgentConnection {
   }
 
   async refreshModelCatalog(): Promise<AgentConnectionModelCatalog> {
-    await this.modelCatalogRefresh.refresh();
+    await Promise.all([
+      this.modelCatalogRefresh.refresh(),
+      this.refreshSignedInProviderModels().catch(() => undefined),
+    ]);
     return this.getModelCatalog();
+  }
+
+  private async refreshSignedInProviderModels(): Promise<void> {
+    const generation = this.authStateGeneration;
+    const { credentials: listed } = await this.listCredentials();
+    const credentials = listed as Array<{ id?: string; provider?: string; kind?: string }>;
+    if (!credentials.some(({ kind }) => kind === "oauth")) return;
+    const { providers, connectedProviderIds } = await this.rpc.request("provider/list", {}) as {
+      providers?: Array<{ id: string; credential?: string; enabled?: boolean; baseUrl?: string }>;
+      connectedProviderIds?: string[];
+    };
+    if (this.disposed || generation !== this.authStateGeneration) return;
+
+    const connected = new Set(connectedProviderIds);
+    const byId = new Map(credentials.map((credential) => [credential.id, credential]));
+    await Promise.allSettled((providers ?? []).flatMap(({ id, credential, enabled, baseUrl }) => {
+      if (!connected.has(id) || enabled === false || !baseUrl?.trim() ||
+          this.providerLogout.isLoggedOut(id) || this.explicitProviderLogins.has(id)) return [];
+      const binding = credential?.trim();
+      const matched = (binding ? byId.get(binding) ?? byId.get(binding.replace(/(.+)(_api_key|_oauth)$/, "$1")) : undefined)
+        ?? byId.get(id) ?? credentials.find((entry) => entry.provider === id);
+      return matched?.kind === "oauth" ? [this.explicitLoginModels.discover(id, { force: false })] : [];
+    }));
   }
 
   async getAvailableModels(): Promise<AgentConnectionModel[]> {
@@ -1636,6 +1662,9 @@ export class NativeAgentConnection implements AgentConnection {
         for (const [providerId, models] of Object.entries(providers.connectionModels)) {
           markConfigured(providerId);
           for (const [modelId, info] of Object.entries(models)) {
+            // Sparse saved routes are only a fallback: the effective catalog
+            // already includes them and carries inherited capabilities.
+            if (byKey.has(`${providerId}/${modelId}`)) continue;
             add(
               normalizeAgentModel({
                 ...(info as Record<string, unknown>),
@@ -1658,6 +1687,7 @@ export class NativeAgentConnection implements AgentConnection {
       // optional enrichment
     }
     for (const model of this.explicitLoginModels.models()) {
+      if (this.providerLogout.unavailable(String(model.provider))) continue;
       if (!byKey.has(`${model.provider}/${model.id}`)) add(normalizeAgentModel(model));
     }
     const models = [...byKey.values()];
@@ -2136,7 +2166,7 @@ export class NativeAgentConnection implements AgentConnection {
       const turnId = String(env.turnId ?? env.turn_id ?? "");
       if (!turnId || seenTurns.has(turnId)) continue;
       seenTurns.add(turnId);
-      out.push({ entryId: turnId, text: hostMessagePrefix(item.origin) + extractText(item.content) });
+      out.push({ entryId: turnId, text: hostMessageForkText(item.origin, extractText(item.content)) });
     }
     return out;
   }
@@ -3622,6 +3652,7 @@ export class NativeAgentConnection implements AgentConnection {
   providerLogoutStarted(provider: string): void {
     this.authStateGeneration += 1;
     this.providerLogout.logout(provider);
+    this.explicitLoginModels.clear(provider);
     if (this.selectedModel?.provider === provider && this.sessionId) this.clearedModelSessions.add(this.sessionId);
   }
 
@@ -3632,7 +3663,6 @@ export class NativeAgentConnection implements AgentConnection {
     const login = this.explicitProviderLogins.get(provider);
     const revoke = (async () => {
       await Promise.all([pendingWrites, previous, login].map(promise => Promise.resolve(promise).catch(() => {})));
-      this.explicitLoginModels.clear(provider);
       const listed = await this.listCredentials();
       // AuthStorage shares auth.json with Native and may already have removed
       // this key. Idempotent deletion is still required to invalidate live
@@ -3674,7 +3704,10 @@ export class NativeAgentConnection implements AgentConnection {
 
   /** Explicit API-key login is allowed while automatic sync is blocked by logout. */
   async completeExplicitStoredLogin(provider: string, credential: AuthCredentialLike): Promise<void> {
-    await this.rpc.request("credential/set", credentialSetParamsFromAuth(provider, credential));
+    await this.rpc.request("credential/set", {
+      ...credentialSetParamsFromAuth(provider, credential),
+      configureConnection: true,
+    });
   }
 
   /** Only an explicit successful login may undo a logout in this client. */
@@ -3689,8 +3722,15 @@ export class NativeAgentConnection implements AgentConnection {
     });
     this.explicitLoginModels.clear(provider);
     const catalog = await this.getAvailableModels();
-    if (!catalog.some((model) => model.provider === provider && model.id !== "unknown")) {
-      await this.explicitLoginModels.discover(provider);
+    const hasModels = catalog.some((model) => model.provider === provider && model.id !== "unknown");
+    // Codex models are account-specific. One saved model must not prevent
+    // rediscovery after restart or when signing in to a different account.
+    if (provider === "openai-codex" || !hasModels) {
+      try {
+        await this.explicitLoginModels.discover(provider);
+      } catch (error) {
+        if (!hasModels) throw error;
+      }
     }
   }
 
@@ -3861,34 +3901,23 @@ function extractText(content: unknown): string {
 
 export function normalizeAgentModel(model: Record<string, unknown> | null | undefined): AgentConnectionModel | null {
   if (!model || typeof model !== "object") return null;
-  const rawId = String(
-    model.id ?? model.modelId ?? model.model_id ?? model.model ?? model.slug ?? "",
-  );
-  // ModelInfo.provider is the wire API; prefer providerId for the vendor key.
-  let rawProvider = String(
-    model.providerId ?? model.provider_id ?? model.provider ?? "unknown",
-  );
+  const explicitId = model.id ?? model.modelId ?? model.model_id;
+  const rawId = String(explicitId ?? model.model ?? model.slug ?? "");
   if (!rawId) return null;
-  // Session snapshots often send ModelBinding as provider=slug and model=slug
-  // (e.g. both "deepseek/deepseek-v4-flash"). Treat slug-shaped providers as
-  // vendor/model pairs so catalog matching and /effort levels work.
-  if (rawProvider.includes("/") && !looksLikeWireApi(rawProvider)) {
-    rawProvider = rawProvider.slice(0, rawProvider.indexOf("/"));
+  // ModelInfo.provider is the wire API; prefer providerId for the vendor key.
+  let normalizedProvider = String(model.providerId ?? model.provider_id ?? model.provider ?? "unknown");
+  // Session snapshots can carry ModelBinding as provider=slug and model=slug.
+  if (normalizedProvider.includes("/") && !looksLikeWireApi(normalizedProvider)) {
+    normalizedProvider = normalizedProvider.slice(0, normalizedProvider.indexOf("/"));
   }
-  const slash = rawId.indexOf("/");
-  const normalizedId =
-    slash >= 0 && model.id == null && model.modelId == null && model.model_id == null
-      ? rawId.slice(slash + 1)
-      : rawId.includes("/")
-        ? rawId.slice(rawId.lastIndexOf("/") + 1)
-        : rawId;
-  let normalizedProvider = rawProvider;
-  if (slash >= 0 && (normalizedProvider === "unknown" || looksLikeWireApi(normalizedProvider))) {
-    normalizedProvider = rawId.slice(0, slash);
-  } else if (looksLikeWireApi(normalizedProvider) && typeof model.slug === "string") {
-    const slugSlash = String(model.slug).indexOf("/");
-    if (slugSlash >= 0) normalizedProvider = String(model.slug).slice(0, slugSlash);
+  if (normalizedProvider === "unknown" || looksLikeWireApi(normalizedProvider)) {
+    const reference = typeof model.slug === "string" ? model.slug : rawId;
+    const slash = reference.indexOf("/");
+    if (slash >= 0) normalizedProvider = reference.slice(0, slash);
   }
+  // Catalog IDs are opaque: publisher/model is an ID, not a provider/model reference.
+  const prefix = `${normalizedProvider}/`;
+  const normalizedId = explicitId == null && rawId.startsWith(prefix) ? rawId.slice(prefix.length) : rawId;
   const input = Array.isArray(model.input)
     ? (model.input as string[])
     : modalitiesToInput(model.inputModalities ?? model.input_modalities);

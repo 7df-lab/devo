@@ -146,7 +146,7 @@ async fn live_kernel_checkpoint_survives_kernel_replacement() -> anyhow::Result<
     let config = KernelSessionConfig {
         cwd: home.path().to_path_buf(),
         python_path_entries: vec![runtime_path],
-        ..Default::default()
+        ..KernelSessionConfig::for_runtime()?
     };
     let mut bridge = HostBridge::for_tests("ses_00000000-0000-0000-0000-000000000001");
     bridge.session_dir = Some(home.path().to_path_buf());

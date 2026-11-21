@@ -65,17 +65,13 @@ Subagents 不适合：
 - 搜索一个 symbol 或 string；
 - 在任务不明确时委派 "understand this and fix it"。
 
-Parent 仍负责综合判断。Subagent result 是 parent 的输入，不替代 parent judgment。
+Parent 仍负责综合判断。子代理的结果可以在下一次允许的模型调用边界进入当前轮次，而不会打断正在生成的回复。如果 parent 空闲，结果可以启动新一轮；它不会越过已排队的 follow-up 消息。
 
 ## 监控 Subagents
 
-存在 live direct subagents 时，footer 会显示 `ctrl + x agents` 提示。
+队列紧贴在输入框上方，全屏滚动对话记录时也保持在原位。队列显示待处理代理消息的发送者和首行。按 `Alt+Up`（macOS 上为 `Option+Up`）可查看全文。消息进入轮次后直接离开队列，不再显示单独的通知。
 
-按 `Ctrl+X` 打开 `Sub-agents` selector。使用 `Up` 和 `Down` 选择 live child，`Enter` 打开 transcript overlay，`q` 或 `Esc` 关闭 selector。
-
-Subagent transcript overlay 是只读的。它允许你查看 child output、tool activity、plan updates 和 terminal status，而不会把 child transcript 混入 parent transcript。
-
-没有 live child agents 时，该提示会消失。
+输入框下方的 **Subagents** 一行只统计运行中的子代理。启用 daemon 时，按 `Alt+A` 聚焦活动栏，在 **Subagents** 上按 `Enter` 打开当前会话的子代理列表。已完成的子代理仍可打开，查看其对话记录和工具活动。
 
 ## `/btw` 与 Subagents
 

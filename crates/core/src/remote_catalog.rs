@@ -5,8 +5,10 @@ use crate::{
     CatalogConfig, InputModality, ProviderConfigEntry, ProviderConfigFile, ProviderModelConfig,
     ProviderWireApi, ReasoningCapability, ReasoningEffort, levels_with_leading_off,
 };
+use devo_protocol::ReasoningLevelChoice;
 use serde_json::Value;
 use std::collections::BTreeMap;
+use std::io::Read;
 use std::path::{Path, PathBuf};
 use std::sync::{Mutex, OnceLock};
 use std::time::{Duration, Instant};
@@ -177,12 +179,14 @@ fn failure(stage: CatalogRefreshStage, message: impl std::fmt::Display) -> Catal
 async fn download_models_dev(url: &str) -> Result<Vec<u8>, CatalogRefreshOutcome> {
     let client = reqwest::Client::builder()
         .connect_timeout(Duration::from_secs(5))
-        .timeout(Duration::from_secs(15))
+        .timeout(Duration::from_secs(45))
         .user_agent(format!("devo/{}", env!("CARGO_PKG_VERSION")))
         .build()
         .map_err(|error| failure(CatalogRefreshStage::HttpRequest, error))?;
+    // The live JSON is several megabytes; request gzip without changing other clients.
     let mut response = client
         .get(url)
+        .header(reqwest::header::ACCEPT_ENCODING, "gzip")
         .send()
         .await
         .map_err(|error| failure(CatalogRefreshStage::HttpRequest, error))?;
@@ -201,6 +205,10 @@ async fn download_models_dev(url: &str) -> Result<Vec<u8>, CatalogRefreshOutcome
             "catalog exceeds size limit",
         ));
     }
+    let gzip = response
+        .headers()
+        .get(reqwest::header::CONTENT_ENCODING)
+        .is_some_and(|encoding| encoding.as_bytes().eq_ignore_ascii_case(b"gzip"));
     let mut raw = Vec::new();
     while let Some(chunk) = response
         .chunk()
@@ -215,7 +223,21 @@ async fn download_models_dev(url: &str) -> Result<Vec<u8>, CatalogRefreshOutcome
         }
         raw.extend_from_slice(&chunk);
     }
-    Ok(raw)
+    if !gzip {
+        return Ok(raw);
+    }
+    let mut decoded = Vec::new();
+    flate2::read::MultiGzDecoder::new(raw.as_slice())
+        .take((MAX_CATALOG_BYTES + 1) as u64)
+        .read_to_end(&mut decoded)
+        .map_err(|error| failure(CatalogRefreshStage::Parse, error))?;
+    if decoded.len() > MAX_CATALOG_BYTES {
+        return Err(failure(
+            CatalogRefreshStage::HttpRequest,
+            "catalog exceeds size limit",
+        ));
+    }
+    Ok(decoded)
 }
 
 /// Adapter capabilities, not provider identities, determine supported protocols.
@@ -242,6 +264,9 @@ fn default_endpoint_for_npm(npm: &str) -> Option<&'static str> {
         "@ai-sdk/openai" => Some("https://api.openai.com/v1"),
         "@ai-sdk/anthropic" => Some("https://api.anthropic.com"),
         "@ai-sdk/google" => Some("https://generativelanguage.googleapis.com/v1beta"),
+        "@ai-sdk/xai" => Some("https://api.x.ai/v1"),
+        "@ai-sdk/groq" => Some("https://api.groq.com/openai/v1"),
+        "@ai-sdk/togetherai" => Some("https://api.together.xyz/v1"),
         _ => None,
     }
 }
@@ -360,21 +385,41 @@ fn model_from_models_dev(remote: &Value) -> ProviderModelConfig {
         model.max_tokens = Some(output);
     }
 
-    let reasoning = remote.get("reasoning").and_then(Value::as_bool) == Some(true);
-    if reasoning {
-        model.reasoning = Some(true);
-        if matches!(
-            model.reasoning_capability,
-            None | Some(ReasoningCapability::Unsupported)
-        ) {
-            model.reasoning_capability =
-                Some(ReasoningCapability::Levels(levels_with_leading_off([
-                    ReasoningEffort::Low,
-                    ReasoningEffort::Medium,
-                    ReasoningEffort::High,
-                ])));
+    if remote.get("reasoning").and_then(Value::as_bool) == Some(true) {
+        let mut levels = Vec::new();
+        for option in remote
+            .get("reasoning_options")
+            .and_then(Value::as_array)
+            .into_iter()
+            .flatten()
+            .filter(|option| option.get("type").and_then(Value::as_str) == Some("effort"))
+        {
+            for value in option
+                .get("values")
+                .and_then(Value::as_array)
+                .into_iter()
+                .flatten()
+            {
+                if let Some(effort) = value.as_str().and_then(|value| value.parse().ok())
+                    && !levels.contains(&ReasoningLevelChoice::Effort(effort))
+                {
+                    levels.push(ReasoningLevelChoice::Effort(effort));
+                }
+            }
+        }
+        if levels.is_empty() {
+            // Preserve the fallback for catalog entries without usable effort metadata.
+            levels = levels_with_leading_off([
+                ReasoningEffort::Low,
+                ReasoningEffort::Medium,
+                ReasoningEffort::High,
+            ]);
+        }
+        if levels.contains(&ReasoningLevelChoice::Effort(ReasoningEffort::High)) {
             model.default_reasoning_effort = Some(ReasoningEffort::High);
         }
+        model.reasoning = Some(true);
+        model.reasoning_capability = Some(ReasoningCapability::Levels(levels));
     }
 
     if let Some(inputs) = remote
@@ -422,6 +467,48 @@ mod tests {
         }}})
     }
 
+    #[tokio::test]
+    async fn catalog_download_requests_and_decodes_gzip() {
+        use std::io::Write;
+        use tokio::io::{AsyncBufReadExt, AsyncWriteExt, BufReader};
+        use tokio::net::TcpListener;
+
+        let listener = TcpListener::bind("127.0.0.1:0").await.unwrap();
+        let address = listener.local_addr().unwrap();
+        let expected = serde_json::to_vec(&fixture()).unwrap();
+        let mut encoder = flate2::write::GzEncoder::new(Vec::new(), flate2::Compression::fast());
+        encoder.write_all(&expected).unwrap();
+        let compressed = encoder.finish().unwrap();
+        let server = tokio::spawn(async move {
+            let (stream, _) = listener.accept().await.unwrap();
+            let mut stream = BufReader::new(stream);
+            let mut accepts_gzip = false;
+            loop {
+                let mut line = String::new();
+                if stream.read_line(&mut line).await.unwrap() == 0 || line == "\r\n" {
+                    break;
+                }
+                accepts_gzip |= line
+                    .trim_end()
+                    .eq_ignore_ascii_case("accept-encoding: gzip");
+            }
+            let length = compressed.len();
+            let headers = format!(
+                "HTTP/1.1 200 OK\r\nContent-Encoding: gzip\r\nContent-Length: {length}\r\nConnection: close\r\n\r\n"
+            );
+            stream.write_all(headers.as_bytes()).await.unwrap();
+            stream.write_all(&compressed).await.unwrap();
+            accepts_gzip
+        });
+        assert_eq!(
+            download_models_dev(&format!("http://{address}/api.json"))
+                .await
+                .unwrap(),
+            expected
+        );
+        assert!(server.await.unwrap());
+    }
+
     #[test]
     fn discovers_unknown_provider_and_model_adapter_overrides() {
         let (catalog, providers, models) = convert_models_dev_api(&fixture()).unwrap();
@@ -440,6 +527,96 @@ mod tests {
                 Some("https://messages.example"),
                 Some("wire-id")
             )
+        );
+    }
+
+    #[test]
+    fn honors_explicit_effort_levels_without_inventing_off() {
+        let (catalog, _, _) = convert_models_dev_api(&json!({
+            "openai": {"npm": "@ai-sdk/openai", "models": {
+                "gpt-6.2-sol": {"reasoning": true, "reasoning_options": [
+                    {"type": "effort", "values": ["low", "medium", "high", "xhigh", "max"]}
+                ]},
+                "with-none": {"reasoning": true, "reasoning_options": [
+                    {"type": "effort", "values": ["none", "low", "low", "unknown"]}
+                ]},
+                "legacy": {"reasoning": true}
+            }}
+        }))
+        .unwrap();
+        let models = &catalog.providers["openai"].models;
+        let fields = |model_id: &str| {
+            let model = &models[model_id];
+            (
+                model.reasoning_capability.clone(),
+                model.default_reasoning_effort,
+            )
+        };
+        use ReasoningEffort::{High, Low, Max, Medium, XHigh};
+        assert_eq!(
+            fields("gpt-6.2-sol"),
+            (
+                Some(ReasoningCapability::Levels(
+                    [Low, Medium, High, XHigh, Max]
+                        .into_iter()
+                        .map(ReasoningLevelChoice::Effort)
+                        .collect()
+                )),
+                Some(High)
+            )
+        );
+        assert_eq!(
+            fields("with-none"),
+            (
+                Some(ReasoningCapability::Levels(vec![
+                    ReasoningLevelChoice::Effort(ReasoningEffort::None),
+                    ReasoningLevelChoice::Effort(Low),
+                ])),
+                None
+            )
+        );
+        assert_eq!(
+            fields("legacy"),
+            (
+                Some(ReasoningCapability::Levels(levels_with_leading_off([
+                    Low, Medium, High
+                ]))),
+                Some(High)
+            )
+        );
+    }
+
+    #[test]
+    fn known_sdk_defaults_cover_catalog_entries_without_explicit_endpoints() {
+        let (catalog, _, _) = convert_models_dev_api(&json!({
+            "xai": {"npm": "@ai-sdk/xai", "models": {"example": {}}},
+            "groq": {"npm": "@ai-sdk/groq", "models": {"example": {}}},
+            "togetherai": {"npm": "@ai-sdk/togetherai", "models": {"example": {}}},
+        }))
+        .unwrap();
+        assert_eq!(
+            catalog
+                .providers
+                .into_iter()
+                .map(|(id, provider)| (id, provider.base_url.unwrap(), provider.wire_api.unwrap()))
+                .collect::<Vec<_>>(),
+            vec![
+                (
+                    "groq".to_string(),
+                    "https://api.groq.com/openai/v1".to_string(),
+                    ProviderWireApi::OpenAIChatCompletions
+                ),
+                (
+                    "togetherai".to_string(),
+                    "https://api.together.xyz/v1".to_string(),
+                    ProviderWireApi::OpenAIChatCompletions
+                ),
+                (
+                    "xai".to_string(),
+                    "https://api.x.ai/v1".to_string(),
+                    ProviderWireApi::OpenAIChatCompletions
+                ),
+            ]
         );
     }
 

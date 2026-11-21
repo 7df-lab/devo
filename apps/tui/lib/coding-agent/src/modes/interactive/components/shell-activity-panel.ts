@@ -1,5 +1,5 @@
 import { stripVTControlCharacters } from "node:util";
-import { type Component, type Focusable, getKeybindings, truncateToWidth } from "@earendil-works/pi-tui";
+import { type Component, type Focusable, getKeybindings, truncateToWidth, wrapTextWithAnsi } from "@earendil-works/pi-tui";
 import type { AgentConnectionShellTask } from "../../agent-connection/types.js";
 import { shouldTreatAsBack } from "./modal-back.js";
 import { theme } from "../theme/theme.js";
@@ -20,6 +20,7 @@ export class ShellActivityPanel implements Component, Focusable {
 	private selectedId: string | undefined;
 	private details = false;
 	private outputOffset = 0;
+	private wrappedOutput?: { text: string; width: number; lines: string[] };
 
 	constructor(private readonly options: ShellActivityPanelOptions) {}
 
@@ -41,8 +42,7 @@ export class ShellActivityPanel implements Component, Focusable {
 		const direction = keys.matches(data, "tui.select.up") ? -1 : keys.matches(data, "tui.select.down") ? 1 : 0;
 		if (direction !== 0) {
 			if (this.details) {
-				const lineCount = this.outputLines(tasks[index]).length;
-				this.outputOffset = Math.max(0, Math.min(lineCount - 1, this.outputOffset + direction));
+				this.outputOffset = Math.max(0, this.outputOffset + direction);
 			} else {
 				this.selectedId = tasks[Math.max(0, Math.min(tasks.length - 1, index + direction))]?.id;
 			}
@@ -80,11 +80,17 @@ export class ShellActivityPanel implements Component, Focusable {
 		if (state === "ready" && !error && tasks.length === 0) {
 			lines.push(theme.fg("muted", "No background shell tasks in this session."));
 		} else if (task && this.details) {
-			lines.push(this.singleLine(task.command), theme.fg("muted", `${task.state}${task.exitCode === undefined ? "" : ` · exit ${task.exitCode}`}`));
-			if (task.cwd) lines.push(theme.fg("dim", this.singleLine(task.cwd)));
-			const output = this.outputLines(task);
+			const status = `${task.state}${task.exitCode === undefined ? "" : ` · exit ${task.exitCode}`}`;
+			// Leave room for output and navigation even when the pane is short.
+			if (rows - lines.length >= 4) {
+				lines.push(this.singleLine(task.command), theme.fg("muted", status));
+				if (task.cwd && rows - lines.length >= 3) lines.push(theme.fg("dim", this.singleLine(task.cwd)));
+			} else {
+				lines[0] = theme.fg("accent", `Shells · ${status}`);
+			}
+			const output = this.outputLines(task, width);
 			const available = Math.max(0, rows - lines.length - 1);
-			this.outputOffset = Math.min(this.outputOffset, Math.max(0, output.length - 1));
+			this.outputOffset = Math.min(this.outputOffset, available > 0 ? Math.max(0, output.length - available) : 0);
 			lines.push(...output.slice(this.outputOffset, this.outputOffset + available));
 		} else if (tasks.length > 0) {
 			const selected = tasks.findIndex((entry) => entry.id === this.selectedId);
@@ -100,9 +106,13 @@ export class ShellActivityPanel implements Component, Focusable {
 		return bounded.map((line) => truncateToWidth(line, width, "…"));
 	}
 
-	private outputLines(task: AgentConnectionShellTask | undefined): string[] {
-		if (!task?.output) return ["No captured output."];
-		return stripVTControlCharacters(task.output).replace(/\r\n/g, "\n").split("\n").map((line) => this.singleLine(line));
+	private outputLines(task: AgentConnectionShellTask, width: number): string[] {
+		const text = task.output || "No captured output.";
+		if (this.wrappedOutput?.text === text && this.wrappedOutput.width === width) return this.wrappedOutput.lines;
+		const clean = stripVTControlCharacters(text).replace(/\r\n/g, "\n").replace(/\n$/, "").replace(/[\x00-\x09\x0b-\x1f\x7f-\x9f]/g, " ");
+		const lines = wrapTextWithAnsi(clean, width);
+		this.wrappedOutput = { text, width, lines };
+		return lines;
 	}
 
 	private singleLine(value: string): string {

@@ -5,8 +5,9 @@
  * toolCall + toolResult pairs so InteractiveMode rebuilds tool rows on resume.
  */
 
-import { IPYTHON_STATE_RESTORED_CUSTOM_TYPE } from "@earendil-works/pi-coding-agent/messages";
-import { agentCompletionDisplay } from "./agent-display.js";
+import { IPYTHON_STATE_RESTORED_CUSTOM_TYPE, NATIVE_SHELL_COMPLETION_CUSTOM_TYPE } from "@earendil-works/pi-coding-agent/messages";
+import { childCompletionStatus } from "./agent-display.js";
+import { backgroundShellDisplay, cleanHostDisplayText, hostMessageLabel, hostMessageSender } from "./host-message-display.js";
 import { shapeHostedToolResult, toolResultName } from "./tool-results.js";
 import {
   bashResultFromCommandExecution,
@@ -182,17 +183,16 @@ export function nativeItemToAgentMessages(envelope: unknown): AgentMessageLike[]
     // Host content is a custom notification, never a user-editable prompt.
     if (item.origin != null && typeof item.origin === "object") {
       const origin = item.origin as Record<string, unknown>;
-      const labels: Record<string, string> = {
-        agent: "Agent message",
-        backgroundTask: "Background notification",
-        schedule: "Scheduled notification",
-      };
-      const display = agentCompletionDisplay(origin, String(content[0]?.text ?? ""));
-      const visibleContent = [{ ...content[0], text: display.text }, ...content.slice(1)];
+      if (childCompletionStatus(origin)) return [];
+      const shell = content.length === 1 ? backgroundShellDisplay(origin, String(content[0]!.text)) : undefined;
+      const sender = hostMessageSender(origin);
       return [{
         role: "custom",
-        customType: labels[String(origin.source)] ?? "Host notification",
-        content: [{ type: "text", text: `From: ${String(origin.senderName ?? origin.sender_name ?? origin.sender ?? "Host")}${display.status ? ` · ${display.status}` : ""}` }, ...visibleContent],
+        customType: shell ? NATIVE_SHELL_COMPLETION_CUSTOM_TYPE : hostMessageLabel(origin),
+        content: shell ? (shell.output ? `${shell.summary}\n${shell.output}` : shell.summary) : [
+          ...(sender ? [{ type: "text", text: `From: ${sender}` }] : []),
+          ...content.map(part => ({ type: "text", text: cleanHostDisplayText(String(part.text)) })),
+        ],
         display: true,
         details: { origin: item.origin },
         timestamp: ts,
@@ -201,17 +201,9 @@ export function nativeItemToAgentMessages(envelope: unknown): AgentMessageLike[]
     return [{ role: "user", content, timestamp: ts }];
   }
 
-  if (type === "subAgent" || type === "subagent" || type === "sub_agent") {
-    const name = String(item.agentNickname ?? item.agent_nickname ?? item.role ?? "agent");
-    return [{
-      role: "custom",
-      customType: "Agent spawned",
-      content: [{ type: "text", text: `Spawned ${name}` }, { type: "text", text: String(item.task ?? "") }],
-      display: true,
-      details: { agentSessionId: item.agentSessionId ?? item.agent_session_id },
-      timestamp: ts,
-    }];
-  }
+  // Spawned child work is represented by the Subagents monitor, not a routine
+  // transcript card. The Native event still drives the monitor projection.
+  if (type === "subAgent" || type === "subagent" || type === "sub_agent") return [];
 
   if (type === "assistantMessage") {
     return [

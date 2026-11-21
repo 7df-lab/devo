@@ -209,7 +209,7 @@ const CANONICAL_BUILTIN_SLASH_COMMANDS: ReadonlyArray<BuiltinSlashCommand> = [
 		argumentHint: "[on|off]",
 		takesArgument: true,
 	},
-	{ name: "quit", description: `Quit ${APP_NAME}` },
+	{ name: "quit", description: `Quit ${APP_NAME} (alias: /exit)` },
 ];
 
 const BUILTIN_SLASH_COMMAND_ALIASES: ReadonlyArray<BuiltinSlashCommandAlias> = [
@@ -218,6 +218,7 @@ const BUILTIN_SLASH_COMMAND_ALIASES: ReadonlyArray<BuiltinSlashCommandAlias> = [
 	{ name: "thinking", aliasFor: "effort" },
 	{ name: "rename", aliasFor: "name" },
 	{ name: "side", aliasFor: "btw" },
+	{ name: "exit", aliasFor: "quit" },
 ];
 
 function buildBuiltinSlashCommands(): ReadonlyArray<BuiltinSlashCommand> {

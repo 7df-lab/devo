@@ -14,7 +14,9 @@ use crate::ProtocolErrorCode;
 use crate::SuccessResponse;
 
 use super::ServerRuntime;
-use super::credential_binding::{bind_provider_credential_id, oauth_transport_defaults};
+use super::credential_binding::{
+    CredentialBinding, oauth_transport_defaults, prepare_provider_credential_binding,
+};
 
 fn mask_secret(secret: &str) -> String {
     let trimmed = secret.trim();
@@ -260,26 +262,19 @@ impl ServerRuntime {
             .unwrap_or("api_key")
             .trim()
             .to_ascii_lowercase();
-        let transport = if params.configure_connection {
-            if kind != "oauth" {
+        let binding = if !params.configure_connection {
+            CredentialBinding::Sync
+        } else if kind == "oauth" {
+            let Some(transport) = oauth_transport_defaults(provider) else {
                 return self.error_response(
                     request_id,
                     ProtocolErrorCode::InvalidParams,
-                    "configureConnection is only valid for OAuth credentials",
+                    format!("provider {provider} has no retained OAuth transport adapter"),
                 );
-            }
-            match oauth_transport_defaults(provider) {
-                Some(transport) => Some(transport),
-                None => {
-                    return self.error_response(
-                        request_id,
-                        ProtocolErrorCode::InvalidParams,
-                        format!("provider {provider} has no retained OAuth transport adapter"),
-                    );
-                }
-            }
+            };
+            CredentialBinding::OAuth(transport)
         } else {
-            None
+            CredentialBinding::CatalogTemplate
         };
         // Use the same config home as the process store and session contexts.
         // This also keeps isolated runtimes from writing credentials to the
@@ -330,7 +325,8 @@ impl ServerRuntime {
                 );
             }
             if let Err(error) =
-                bind_provider_credential_id(&user_dir, provider, &credential_id, transport)
+                prepare_provider_credential_binding(&user_dir, provider, &credential_id, binding)
+                    .and_then(super::credential_binding::PreparedCredentialBinding::persist)
             {
                 return self.error_response(
                     request_id,
@@ -360,6 +356,22 @@ impl ServerRuntime {
                 .filter(|id| !id.trim().is_empty())
                 .map(|id| devo_core::provider_id_from_credential_id(&id))
                 .unwrap_or_else(|| devo_core::default_provider_credential_id(provider));
+            let binding = match prepare_provider_credential_binding(
+                &user_dir,
+                provider,
+                &credential_id,
+                binding,
+            ) {
+                Ok(binding) => binding,
+                Err(error) => {
+                    let code = if params.configure_connection {
+                        ProtocolErrorCode::InvalidParams
+                    } else {
+                        ProtocolErrorCode::InternalError
+                    };
+                    return self.error_response(request_id, code, error);
+                }
+            };
             if let Err(error) =
                 devo_core::upsert_user_auth_api_key(&user_dir, &credential_id, secret)
             {
@@ -369,9 +381,7 @@ impl ServerRuntime {
                     format!("failed to persist api key credential: {error}"),
                 );
             }
-            if let Err(error) =
-                bind_provider_credential_id(&user_dir, provider, &credential_id, transport)
-            {
+            if let Err(error) = binding.persist() {
                 return self.error_response(
                     request_id,
                     ProtocolErrorCode::InternalError,
@@ -1125,8 +1135,15 @@ mod tests {
         )
         .expect("write custom provider catalog");
 
-        bind_provider_credential_id(dir.path(), "ccproxy", "ccproxy", /*transport*/ None)
-            .expect("bind");
+        prepare_provider_credential_binding(
+            dir.path(),
+            "ccproxy",
+            "ccproxy",
+            CredentialBinding::Sync,
+        )
+        .expect("prepare binding")
+        .persist()
+        .expect("bind");
 
         let connection = devo_core::read_provider_catalog_config(
             &dir.path().join(devo_core::PROVIDER_CONFIG_FILE_NAME),
@@ -1156,12 +1173,14 @@ mod tests {
     #[test]
     fn binding_credentials_requires_explicit_connection_transport() {
         let dir = tempfile::tempdir().expect("tempdir");
-        bind_provider_credential_id(
+        prepare_provider_credential_binding(
             dir.path(),
             "anthropic",
             "anthropic",
-            /*transport*/ None,
+            CredentialBinding::Sync,
         )
+        .expect("prepare binding")
+        .persist()
         .expect("bind credential");
         let user = devo_core::read_provider_catalog_config(
             &dir.path().join(devo_core::PROVIDER_CONFIG_FILE_NAME),
@@ -1231,7 +1250,9 @@ mod tests {
         )
         .expect("write custom provider catalog");
 
-        bind_provider_credential_id(dir.path(), "fresh", "fresh", /*transport*/ None)
+        prepare_provider_credential_binding(dir.path(), "fresh", "fresh", CredentialBinding::Sync)
+            .expect("prepare binding")
+            .persist()
             .expect("bind");
 
         let connection = devo_core::read_provider_catalog_config(

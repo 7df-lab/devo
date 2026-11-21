@@ -28,12 +28,45 @@ test("empty discovery surfaces a selection blocker and cannot write configuratio
   const calls: unknown[] = [];
   const models = new ExplicitLoginModels({ request: async (method, params) => {
     calls.push({ method, params });
-    return { models: {} };
+    return { models: { hidden: { enabled: false } } };
   } });
   await assert.rejects(models.discover("openai-codex"), /no models were returned/);
-  await models.pinSelected("openai-codex", "missing");
+  await models.pinSelected("openai-codex", "hidden");
   assert.deepEqual(models.models(), []);
-  assert.deepEqual(calls, [{ method: "provider/discover", params: { providerId: "openai-codex", forceRefresh: true } }]);
+  assert.deepEqual(calls, [
+    { method: "provider/discover", params: { providerId: "openai-codex", forceRefresh: true } },
+    { method: "provider/list", params: {} },
+  ]);
+});
+
+test("public catalog picks pin only the selected model on an existing connection", async () => {
+  const writes: unknown[] = [];
+  const connection = {
+    id: "deepseek", name: "DeepSeek", baseUrl: "https://pinned.example",
+    wireApis: ["openai_chat_completions"], credential: "deepseek",
+    models: {
+      chosen: { name: "Remote name", cost: { input: 2 }, baseUrl: "https://untrusted.example" },
+      other: { name: "Other model" },
+    },
+  };
+  let connected = false;
+  const models = new ExplicitLoginModels({ request: async (method, params) => {
+    if (method === "provider/list") return {
+      providers: [connection], connectedProviderIds: connected ? [connection.id] : [],
+    };
+    writes.push({ method, params });
+    return {};
+  } });
+  await models.pinSelected("deepseek", "chosen");
+  assert.deepEqual(writes, []);
+  connected = true;
+  await models.pinSelected("deepseek", "chosen");
+  assert.deepEqual(writes, [{ method: "provider/upsert", params: { defaultModel: "deepseek/chosen", provider: {
+    ...connection, enabled: true, modelOverrides: {},
+    models: { chosen: {
+      origin: "remote", baseUrl: "https://pinned.example", wireApi: "openai_chat_completions", requestModel: "chosen",
+    } },
+  } } }]);
 });
 
 test("failed selected model save blocks session-selection caller", async () => {
@@ -72,6 +105,29 @@ test("pinning drops stale selection suggestions and never overwrites an already 
   assert.deepEqual(models.models(), []);
 });
 
+test("reselecting a legacy Codex pin fills in effort without changing its route or the default", async () => {
+  const provider = { id: "openai-codex", name: "Codex", baseUrl: "https://pinned.example", wireApis: ["openai_responses"] };
+  const route = { origin: "user", baseUrl: "https://saved.example", requestModel: "gpt-6.2-sol", wireApi: "openai_responses" };
+  const reasoning = { reasoningCapability: { levels: ["medium", "xhigh"] }, defaultReasoningEffort: "medium" };
+  let saved: Record<string, unknown> = { ...route, name: "Keep my label" };
+  const writes: unknown[] = [];
+  const models = new ExplicitLoginModels({ request: async (method, params) => {
+    if (method === "provider/discover") return { models: { "gpt-6.2-sol": { ...route, ...reasoning, baseUrl: "https://different.example" } } };
+    if (method === "provider/list") return { providers: [provider], connectionModels: { "openai-codex": { "gpt-6.2-sol": saved } } };
+    writes.push(params);
+    return {};
+  } });
+  await models.discover("openai-codex");
+  await models.pinSelected("openai-codex", "gpt-6.2-sol");
+  saved = { ...saved, reasoning: false };
+  await models.discover("openai-codex");
+  await models.pinSelected("openai-codex", "gpt-6.2-sol");
+  assert.deepEqual(writes, [{ provider: {
+    ...provider, enabled: true, modelOverrides: {},
+    models: { "gpt-6.2-sol": { ...route, name: "Keep my label", ...reasoning } },
+  } }]);
+});
+
 test("pin preserves provider settings while excluding unrelated models and discovered metadata", async () => {
   const connection = {
     id: "custom", name: "My provider", description: "Private gateway",
@@ -93,7 +149,7 @@ test("pin preserves provider settings while excluding unrelated models and disco
   } });
   await models.discover("custom");
   await models.pinSelected("custom", "chosen");
-  assert.deepEqual(writes, [{ provider: {
+  assert.deepEqual(writes, [{ defaultModel: "custom/chosen", provider: {
     ...connection,
     models: { chosen: { origin: "user", baseUrl: "https://pinned.example", wireApi: "openai_responses", requestModel: "chosen" } },
     modelOverrides: {},

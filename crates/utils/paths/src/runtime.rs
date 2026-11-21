@@ -67,31 +67,70 @@ fn runtime_root(root: &Path, kind: &str) -> PathBuf {
     root.join(format!("runtime/invalid-{kind}-reference"))
 }
 
-/// Interpreter used when no runtime bundle is installed (source builds).
+/// Find a Python 3.11+ interpreter for source builds in PATH order.
 ///
-/// Prefers a name that already exists on `PATH`: the historical `python`
-/// first, then `python3` — stock macOS ships no unversioned `python`, only
-/// `python3` from the Command Line Tools, so a bare `Command::new("python")`
-/// fails with ENOENT there. Windows keeps the bare `python` name: its
-/// `python3.exe` may be a Microsoft Store alias stub that opens the Store
-/// instead of running Python, so probing for it would be misleading.
-pub fn fallback_interpreter(path_var: Option<&std::ffi::OsStr>) -> PathBuf {
-    #[cfg(windows)]
-    {
-        let _ = path_var;
-        PathBuf::from("python")
-    }
-    #[cfg(not(windows))]
-    {
-        for name in ["python", "python3"] {
-            if let Some(paths) = path_var
-                && std::env::split_paths(paths).any(|dir| dir.join(name).is_file())
+/// An activated environment keeps priority, but an old system interpreter
+/// cannot hide a suitable interpreter under a versioned name elsewhere on PATH.
+/// Return the selected path itself, not the bare name or its symlink target.
+pub fn find_source_python(path_var: Option<&std::ffi::OsStr>) -> Option<PathBuf> {
+    find_python_with_probe(path_var, |path| {
+        std::process::Command::new(path)
+            .args(["-I", "-S", "--version"])
+            .output()
+            .is_ok_and(|output| {
+                output.status.success()
+                    && (supported_python_version(&output.stdout)
+                        || supported_python_version(&output.stderr))
+            })
+    })
+}
+
+fn supported_python_version(output: &[u8]) -> bool {
+    let Ok(version) = std::str::from_utf8(output) else {
+        return false;
+    };
+    let Some(version) = version.trim().strip_prefix("Python ") else {
+        return false;
+    };
+    let mut parts = version.split('.');
+    let major = parts.next().and_then(|part| part.parse::<u32>().ok());
+    let minor = parts.next().and_then(|part| part.parse::<u32>().ok());
+    matches!((major, minor), (Some(3), Some(11..)) | (Some(4..), Some(_)))
+}
+
+fn find_python_with_probe(
+    path_var: Option<&std::ffi::OsStr>,
+    mut supported: impl FnMut(&Path) -> bool,
+) -> Option<PathBuf> {
+    for dir in std::env::split_paths(path_var?) {
+        // App Execution Alias stubs can open the Microsoft Store instead of
+        // starting Python. Skip the alias directory, not normal installations.
+        if cfg!(windows)
+            && dir
+                .file_name()
+                .and_then(|name| name.to_str())
+                .is_some_and(|name| name.eq_ignore_ascii_case("WindowsApps"))
+        {
+            continue;
+        }
+        for name in [
+            "python",
+            "python3",
+            "python3.14",
+            "python3.13",
+            "python3.12",
+            "python3.11",
+        ] {
+            let candidate = dir.join(format!("{name}{}", std::env::consts::EXE_SUFFIX));
+            if candidate.is_file()
+                && let Ok(path) = std::path::absolute(candidate)
+                && supported(&path)
             {
-                return PathBuf::from(name);
+                return Some(path);
             }
         }
-        PathBuf::from("python")
     }
+    None
 }
 
 #[cfg(test)]
@@ -109,44 +148,47 @@ mod tests {
     }
 
     #[test]
-    fn fallback_interpreter_prefers_existing_names_on_path() {
-        let with_python = tempfile::tempdir().unwrap();
-        std::fs::write(with_python.path().join("python"), "").unwrap();
-        let with_python3 = tempfile::tempdir().unwrap();
-        std::fs::write(with_python3.path().join("python3"), "").unwrap();
-
-        let join_paths = |dir: &std::path::Path| {
-            std::env::join_paths([dir, std::path::Path::new("/nonexistent")]).unwrap()
+    fn source_python_skips_old_system_python_and_preserves_environment_priority() {
+        let system = tempfile::tempdir().unwrap();
+        let user = tempfile::tempdir().unwrap();
+        let venv = tempfile::tempdir().unwrap();
+        let create = |dir: &Path, name: &str| {
+            let path = dir.join(format!("{name}{}", std::env::consts::EXE_SUFFIX));
+            std::fs::write(&path, "").unwrap();
+            path
         };
+        let old = create(system.path(), "python3");
+        let versioned = create(user.path(), "python3.13");
+        let activated = create(venv.path(), "python");
+        let supported = |path: &Path| path != old;
 
-        if cfg!(windows) {
-            // Windows never probes PATH: the python3.exe Store alias stub
-            // would satisfy an existence check without running Python.
-            assert_eq!(
-                fallback_interpreter(Some(join_paths(with_python.path()).as_os_str())),
-                PathBuf::from("python")
-            );
-        } else {
-            // Historical name wins when both exist (no behavior change on Linux).
-            assert_eq!(
-                fallback_interpreter(Some(join_paths(with_python.path()).as_os_str())),
-                PathBuf::from("python")
-            );
-            // macOS shape: only python3 exists.
-            assert_eq!(
-                fallback_interpreter(Some(join_paths(with_python3.path()).as_os_str())),
-                PathBuf::from("python3")
-            );
-        }
-        // Nothing found (or no PATH at all): keep the historical bare name so
-        // the spawn error stays recognizable.
+        let mixed = std::env::join_paths([system.path(), user.path()]).unwrap();
         assert_eq!(
-            fallback_interpreter(Some(
-                join_paths(std::path::Path::new("/nonexistent")).as_os_str()
-            )),
-            PathBuf::from("python")
+            find_python_with_probe(Some(&mixed), supported),
+            Some(versioned)
         );
-        assert_eq!(fallback_interpreter(None), PathBuf::from("python"));
+        let mixed = std::env::join_paths([venv.path(), system.path(), user.path()]).unwrap();
+        assert_eq!(
+            find_python_with_probe(Some(&mixed), supported),
+            Some(activated)
+        );
+        let system_only = std::env::join_paths([system.path()]).unwrap();
+        assert_eq!(find_python_with_probe(Some(&system_only), supported), None);
+        assert_eq!(find_source_python(None), None);
+    }
+
+    #[test]
+    fn python_version_must_meet_the_kernel_minimum() {
+        for (version, expected) in [
+            (b"Python 3.9.6\n".as_slice(), false),
+            (b"Python 3.10.19", false),
+            (b"Python 3.11.0", true),
+            (b"Python 3.13.5", true),
+            (b"Python 3.invalid.13", false),
+            (b"command unavailable", false),
+        ] {
+            assert_eq!(supported_python_version(version), expected, "{version:?}");
+        }
     }
 
     #[test]

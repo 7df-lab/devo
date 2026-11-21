@@ -109,7 +109,7 @@ export interface AgentsViewModeOptions {
 	/** Native session/agent RPCs. Devo Agents View is Native-only. */
 	nativeBackend: AgentsViewNativeBackend;
 	/** Optional Devo/skinnned splash overrides (logo + title). */
-	brandSplash?: Pick<BrandSplashHeaderOptions, "logo" | "title">;
+	brandSplash?: Pick<BrandSplashHeaderOptions, "logo" | "title" | "getProxy">;
 	version?: string;
 	/** Terminal / product title when opening chat from Agents View. */
 	appTitle?: string;

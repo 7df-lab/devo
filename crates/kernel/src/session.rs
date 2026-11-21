@@ -167,37 +167,47 @@ pub struct KernelSessionConfig {
     pub workspace_access: WorkspaceAccess,
 }
 
-impl Default for KernelSessionConfig {
-    /// Use the packaged runtime when present, otherwise a PATH-resolved
-    /// interpreter. The working directory is the process cwd. Packaged
-    /// sessions get the bundled site dir on `PYTHONPATH` and
-    /// `PYTHONNOUSERSITE=1`.
-    fn default() -> Self {
-        let bundle = devo_util_paths::runtime::RuntimeBundle::current();
-        Self {
-            python: bundle.as_ref().map_or_else(
-                || {
-                    devo_util_paths::runtime::fallback_interpreter(
-                        std::env::var_os("PATH").as_deref(),
-                    )
-                },
-                |runtime| runtime.python.clone(),
-            ),
+impl KernelSessionConfig {
+    /// Resolve the bundled interpreter or, for a source build, a compatible Python on PATH.
+    /// Packaged sessions use the bundled site dir and disable the user site.
+    pub fn for_runtime() -> Result<Self, SpawnError> {
+        use devo_util_paths::runtime::{RuntimeBundle, find_source_python};
+
+        let (python, python_path_entries, extra_env) =
+            if let Some(bundle) = RuntimeBundle::current() {
+                (
+                    bundle.python,
+                    vec![bundle.python_site],
+                    vec![("PYTHONNOUSERSITE".to_string(), "1".to_string())],
+                )
+            } else {
+                let python = find_source_python(std::env::var_os("PATH").as_deref())
+                    .ok_or(SpawnError::SourcePythonUnavailable)?;
+                let source = std::env::var_os("DEVO_RLM_RUNTIME_SRC")
+                    .map(PathBuf::from)
+                    .filter(|path| path.join("rlm").is_dir())
+                    .or_else(|| default_runtime_pythonpath(Path::new(env!("CARGO_MANIFEST_DIR"))))
+                    .or_else(|| default_runtime_pythonpath(Path::new(".")));
+                (python, source.into_iter().collect(), Vec::new())
+            };
+        Ok(Self {
+            python,
             cwd: std::env::current_dir().unwrap_or_else(|_| PathBuf::from(".")),
-            python_path_entries: bundle
-                .as_ref()
-                .map_or_else(Vec::new, |runtime| vec![runtime.python_site.clone()]),
-            extra_env: bundle.map_or_else(Vec::new, |_| {
-                vec![("PYTHONNOUSERSITE".to_string(), "1".to_string())]
-            }),
+            python_path_entries,
+            extra_env,
             workspace_access: WorkspaceAccess::ReadWrite,
-        }
+        })
     }
 }
 
 /// Why [`KernelSession::spawn`] or [`KernelSession::spawn_command`] failed.
 #[derive(Debug, thiserror::Error)]
 pub enum SpawnError {
+    /// No compatible interpreter is available for a source build.
+    #[error(
+        "Python 3.11 or newer is required for local tools; no compatible interpreter was found on PATH"
+    )]
+    SourcePythonUnavailable,
     /// Protocol setup or the handshake failed after the child started.
     #[error(transparent)]
     Repl(#[from] ReplError),
@@ -651,13 +661,16 @@ mod credential_env_tests {
     #[test]
     fn extra_env_cannot_reintroduce_credentials() {
         let config = KernelSessionConfig {
+            python: "not-run-in-this-test".into(),
+            cwd: std::env::temp_dir(),
+            python_path_entries: Vec::new(),
             extra_env: vec![
                 ("PGPASSWORD".into(), "password".into()),
                 ("DATABASE_URL".into(), "postgres://u:p@host/db".into()),
                 ("REDIS_URL".into(), "redis://cache.example:6379/0".into()),
                 ("RLM_SESSION_DIR".into(), "/tmp/session".into()),
             ],
-            ..KernelSessionConfig::default()
+            workspace_access: super::WorkspaceAccess::ReadWrite,
         };
         assert_eq!(
             kernel_env_overrides(&config),
@@ -733,9 +746,12 @@ impl KernelSession {
                     )
                     .await;
                 }
-                let stderr_tail: String = stderr_tail.chars().take(400).collect();
+                let stderr = stderr_tail.trim_end();
+                let start = stderr.char_indices().rev().nth(399).map_or(0, |(i, _)| i);
+                let python = config.python.display();
                 return Err(ReplError::Other(format!(
-                    "kernel handshake failed: {error}; stderr tail: {stderr_tail:?}"
+                    "kernel handshake with `{python}` failed: {error}; stderr tail: {:?}",
+                    &stderr[start..]
                 ))
                 .into());
             }
@@ -1328,7 +1344,7 @@ mod tests {
     use super::*;
     use pretty_assertions::assert_eq;
 
-    /// Build a config for a live kernel when the runtime source can be found;
+    /// Build a config for a live kernel when a compatible runtime can be found;
     /// tests skip when it returns `None`.
     fn live_config() -> Option<KernelSessionConfig> {
         let runtime = std::env::var_os("DEVO_RLM_RUNTIME_SRC")
@@ -1343,11 +1359,9 @@ mod tests {
                     .or_else(|| default_runtime_pythonpath(&manifest))
             })?;
         Some(KernelSessionConfig {
-            python: PathBuf::from("python"),
             cwd: std::env::temp_dir(),
             python_path_entries: vec![runtime],
-            extra_env: Vec::new(),
-            workspace_access: WorkspaceAccess::ReadWrite,
+            ..KernelSessionConfig::for_runtime().ok()?
         })
     }
 

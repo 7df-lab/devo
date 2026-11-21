@@ -75,9 +75,8 @@ mod tests {
         let runtime = default_runtime_pythonpath(Path::new(env!("CARGO_MANIFEST_DIR")))
             .expect("runtime source");
         let session = KernelSession::spawn(KernelSessionConfig {
-            python: PathBuf::from("python"),
             python_path_entries: vec![runtime],
-            ..KernelSessionConfig::default()
+            ..KernelSessionConfig::for_runtime().expect("compatible Python runtime")
         })
         .await
         .expect("real CPython runtime");

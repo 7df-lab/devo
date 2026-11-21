@@ -1486,6 +1486,7 @@ dependencies = [
  "devo-util-process",
  "devo-windows-sandbox",
  "diffy",
+ "flate2",
  "futures",
  "iana-time-zone",
  "libc",

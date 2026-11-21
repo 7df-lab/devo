@@ -269,6 +269,86 @@ async fn two_rlm_spawns_in_one_ipython_cell_do_not_deadlock_parent_turn() -> Res
 }
 
 #[tokio::test]
+async fn child_completion_reaches_the_model_in_the_active_parent_turn() -> Result<()> {
+    let data_root = TempDir::new()?;
+    let (parent, release_parent) = ScriptedProvider::gated_completion("parent first response");
+    let (child, release_child) = ScriptedProvider::gated_completion("worker result 1353");
+    let provider = Arc::new(ScriptedProvider::for_agent_tasks([parent, child]));
+    let runtime = build_runtime(data_root.path(), Arc::clone(&provider) as _)?;
+    let (connection_id, mut notifications) = initialize_connection(&runtime).await?;
+    let parent_id = start_parent_session(&runtime, connection_id, data_root.path()).await?;
+    let original = start_turn(&runtime, connection_id, parent_id, "delegated math task").await?;
+    wait_for_task_stream_calls(&provider, 1).await?;
+    let worker = spawn_child_named(
+        &runtime,
+        parent_id,
+        "compute 11 * 123",
+        Some("none"),
+        Some("math-worker"),
+    )
+    .await?;
+    let started =
+        wait_for_session_notification(&mut notifications, "turn/started", worker.child_session_id)
+            .await?;
+    let child_turn = started["params"]["turn"]["id"]
+        .as_str()
+        .context("child turn ID")?;
+    let origin = serde_json::json!({
+        "source": "agent",
+        "sender": worker.child_session_id,
+        "senderName": "math-worker",
+        "eventId": format!("child:{}:{child_turn}:completed", worker.child_session_id),
+        "delivery": "steer",
+    });
+    let subscription = runtime
+        .handle_incoming(
+            connection_id,
+            serde_json::json!({
+                "id": "parent-queue-subscription", "method": "subscription/create",
+                "params": {"selectors": [{"kind": "session", "sessionId": parent_id}], "includeSnapshot": false}
+            }),
+        )
+        .await
+        .context("subscribe to parent inbox")?;
+    assert!(subscription.get("error").is_none(), "{subscription}");
+    release_child
+        .send(())
+        .ok()
+        .context("release child stream")?;
+
+    // Observe durable admission with the parent still blocked at its model call.
+    let queued =
+        wait_for_session_notification(&mut notifications, "queue/updated", parent_id).await?;
+    let entry = &queued["params"]["queue"][0];
+    assert_eq!(
+        (&entry["origin"], &entry["delivery"]),
+        (&origin, &serde_json::json!("steer"))
+    );
+    assert!(provider.completion_requests().is_empty());
+    release_parent
+        .send(())
+        .ok()
+        .context("release parent stream")?;
+
+    let terminal =
+        wait_for_session_notification(&mut notifications, "turn/completed", parent_id).await?;
+    assert_eq!(
+        terminal["params"]["turn"]["id"],
+        serde_json::json!(original.turn.id)
+    );
+    let completions = provider.completion_requests();
+    assert_eq!(
+        completions.len(),
+        1,
+        "result must reach the original turn's model before it ends"
+    );
+    let request = serde_json::to_string(&completions[0])?;
+    assert!(request.contains("worker result 1353"), "{request}");
+    runtime.shutdown().await;
+    Ok(())
+}
+
+#[tokio::test]
 async fn wait_agent_reports_child_output_and_terminal_status() -> Result<()> {
     let data_root = TempDir::new()?;
     let provider = Arc::new(ScriptedProvider::for_agent_tasks([

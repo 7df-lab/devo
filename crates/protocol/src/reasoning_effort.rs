@@ -390,7 +390,12 @@ pub(crate) fn nearest_effort(
     supported
         .iter()
         .copied()
-        .min_by_key(|candidate| (effort_rank(*candidate) - target_rank).abs())
+        .min_by_key(|candidate| {
+            (
+                (effort_rank(*candidate) - target_rank).abs(),
+                *candidate != target,
+            )
+        })
         .unwrap_or(target)
 }
 

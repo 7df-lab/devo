@@ -9,6 +9,7 @@ import { applyDevoAgentDirEnv, runInteractiveHost } from "./host.js";
 import { applyCliSessionOverrides, nativeServerArgs } from "./cli-session-overrides.js";
 import { WorkspaceTrust, promptWorkspaceTrust } from "./workspace-trust.js";
 import { DEVO_TUI_VERSION } from "./devo-brand.js";
+import { configureFetchProxy } from "./fetch-proxy.js";
 
 export function assertInheritedTty(): void {
   if (!process.stdin.isTTY || !process.stdout.isTTY) {
@@ -24,6 +25,7 @@ function resolveServerBin(): string {
 
 export async function main(): Promise<void> {
   assertInheritedTty();
+  configureFetchProxy(process.env);
   const home = applyDevoAgentDirEnv();
   const trust = new WorkspaceTrust(home, promptWorkspaceTrust);
   const cwd = await trust.require(process.cwd());

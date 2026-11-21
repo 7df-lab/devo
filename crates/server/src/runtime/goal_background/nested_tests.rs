@@ -123,8 +123,13 @@ async fn nested_completion_targets_busy_and_idle_direct_parent_only() -> Result<
         .await?
         .child_session_id;
     tokio::time::timeout(Duration::from_secs(20), provider.child.started.acquire())
-        .await??
+        .await
+        .context("child did not start its initial request")??
         .forget();
+    let child_turn = runtime
+        .active_turn_id_for_session(child)
+        .await
+        .context("child has no active turn")?;
     let grandchild = runtime
         .clone()
         .spawn_agent(SpawnAgentParams {
@@ -144,7 +149,8 @@ async fn nested_completion_targets_busy_and_idle_direct_parent_only() -> Result<
         Duration::from_secs(20),
         provider.grandchild.started.acquire(),
     )
-    .await??
+    .await
+    .context("grandchild did not start while the child was busy")??
     .forget();
     provider.grandchild.release.add_permits(1);
     tokio::time::timeout(Duration::from_secs(20), async {
@@ -193,23 +199,41 @@ async fn nested_completion_targets_busy_and_idle_direct_parent_only() -> Result<
     );
     provider.child.release.add_permits(1);
     tokio::time::timeout(Duration::from_secs(20), provider.child.started.acquire())
-        .await??
+        .await
+        .context("grandchild result did not steer the busy child")??
         .forget();
     let second =
         serde_json::to_string(&provider.child.requests.lock().expect("child requests")[1])?;
     assert!(second.contains("grandchild-result-marker"), "{second}");
+    assert_eq!(
+        runtime.active_turn_id_for_session(child).await,
+        Some(child_turn)
+    );
+    assert!(
+        provider
+            .root
+            .requests
+            .lock()
+            .expect("root requests")
+            .is_empty()
+    );
+
+    // The steered request is still part of the child's turn. Root only wakes once
+    // that turn finishes and sends its own completion, not after the first request.
+    provider.child.release.add_permits(1);
     tokio::time::timeout(Duration::from_secs(20), provider.root.started.acquire())
-        .await??
+        .await
+        .context("child completion did not wake the root")??
         .forget();
     let root_input =
         serde_json::to_string(&provider.root.requests.lock().expect("root requests")[0])?;
+    assert!(root_input.contains(child.as_str()), "{root_input}");
     assert!(
         !root_input.contains(grandchild.as_str()),
         "grandchild sent directly to root: {root_input}"
     );
 
-    // Let child settle. Root remains busy in its own request, independently.
-    provider.child.release.add_permits(1);
+    // Let the child's turn cleanup finish while root remains busy in its own request.
     tokio::time::timeout(Duration::from_secs(20), async {
         while runtime.active_turn_id_for_session(child).await.is_some() {
             tokio::task::yield_now().await;
@@ -236,12 +260,19 @@ async fn nested_completion_targets_busy_and_idle_direct_parent_only() -> Result<
         Duration::from_secs(20),
         provider.grandchild.started.acquire(),
     )
-    .await??
+    .await
+    .context("second grandchild did not start")??
     .forget();
     provider.grandchild.release.add_permits(1);
     tokio::time::timeout(Duration::from_secs(20), provider.child.started.acquire())
-        .await??
+        .await
+        .context("second grandchild completion did not wake the idle child")??
         .forget();
+    let woken_turn = runtime
+        .active_turn_id_for_session(child)
+        .await
+        .context("woken child has no active turn")?;
+    assert_ne!(woken_turn, child_turn);
     assert_eq!(
         provider
             .child

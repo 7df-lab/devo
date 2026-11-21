@@ -49,6 +49,8 @@ export const RLM_CHILD_FAILURE_CUSTOM_TYPE = "rlm_child_failure";
 export const RLM_CHILD_TERMINAL_NOTICE_CUSTOM_TYPE = "rlm_child_terminal_notice";
 export const ASYNC_BASH_COMPLETION_CUSTOM_TYPE = "async_bash_completion";
 export const ASYNC_BASH_COMPLETION_PREVIEW_LABEL = "Background command finished";
+/** Display-only custom message projected from a Native shell result. */
+export const NATIVE_SHELL_COMPLETION_CUSTOM_TYPE = "Background shell";
 
 /**
  * Names and other metadata interpolated into a `[<kind> ...]` header line must not
