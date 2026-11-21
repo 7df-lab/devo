@@ -74,7 +74,7 @@ import {
   applyGoalFromWire,
   countMessageStats,
   credentialSetParamsFromAuth,
-  hostMessagePrefix,
+  hostMessageForkText,
   mapMcpToExtensions,
   mapSkillSourceInfo,
   mapSkillsToResourceSkills,
@@ -2166,7 +2166,7 @@ export class NativeAgentConnection implements AgentConnection {
       const turnId = String(env.turnId ?? env.turn_id ?? "");
       if (!turnId || seenTurns.has(turnId)) continue;
       seenTurns.add(turnId);
-      out.push({ entryId: turnId, text: hostMessagePrefix(item.origin) + extractText(item.content) });
+      out.push({ entryId: turnId, text: hostMessageForkText(item.origin, extractText(item.content)) });
     }
     return out;
   }

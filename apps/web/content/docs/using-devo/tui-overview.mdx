@@ -57,6 +57,11 @@ When Devo is working, the status surface shows that the task is active and that
 Tool use appears inline. File edits, shell commands, MCP calls, search results,
 and other tool results are rendered as transcript cells instead of hidden logs.
 
+When a background shell finishes, the transcript shows its command, exit
+status when available, and captured output. While a shell result or scheduled
+instruction is pending, the queue above the composer labels it `Shell:` or
+`Scheduled:`. Use `Alt+Up` (`Option+Up` on macOS) to read the full queued text.
+
 If a tool request needs approval, Devo opens a permission overlay. The request
 shows the action summary, reason, resource, and any path, host, or target that
 the tool wants to access.

@@ -3,9 +3,9 @@
  */
 
 import { randomUUID } from "node:crypto";
-import { stripVTControlCharacters } from "node:util";
 import { nativeGoalToAgentGoal, emptyGoalState } from "./native-to-pi/messages.js";
 import { childCompletionBody, childCompletionStatus } from "./native-to-pi/agent-display.js";
+import { backgroundShellDisplay, cleanHostDisplayText, hostMessageLabel, hostMessageSender } from "./native-to-pi/host-message-display.js";
 import { DEFAULT_PREVIEW_LIMIT, MAX_PREVIEW_LIMIT } from "./native-traffic-log.js";
 
 export type QueueWireEntry = {
@@ -56,12 +56,14 @@ export function parseQueueWireEntries(value: unknown): QueueWireEntry[] {
     .sort((left, right) => left.position - right.position);
 }
 
-/** Prefix host content on selection/queue surfaces without changing its identity. */
-export function hostMessagePrefix(origin: unknown): string {
-  if (origin == null || typeof origin !== "object") return "";
+/** Label fork targets without replacing their canonical turn IDs or context. */
+export function hostMessageForkText(origin: unknown, text: string): string {
+  if (origin == null || typeof origin !== "object") return text;
   const metadata = origin as Record<string, unknown>;
-  const labels: Record<string, string> = { agent: "Agent message", backgroundTask: "Background notification", schedule: "Scheduled notification" };
-  return `[${labels[String(metadata.source)] ?? "Host notification"} · ${String(metadata.senderName ?? metadata.sender_name ?? metadata.sender ?? "Host")}] `;
+  const label = hostMessageLabel(metadata);
+  const sender = hostMessageSender(metadata);
+  const shell = backgroundShellDisplay(metadata, text);
+  return shell ? `Shell: ${shell.summary}` : `[${label}${sender ? ` · ${sender}` : ""}] ${cleanHostDisplayText(text)}`;
 }
 
 function queueInputText(parts: unknown): string {
@@ -78,16 +80,29 @@ function agentQueueText(origin: Record<string, unknown>, text: string): string {
     ? childCompletionBody(origin, status, text) || (status === "completed" ? "" : status.replaceAll("_", " "))
     : text.trim();
   const message = body ? `${name}: ${body}` : name;
-  return stripVTControlCharacters(message).replace(/\r\n?/g, "\n").replace(/[\u0000-\u0008\u000b\u000c\u000e-\u001f\u007f-\u009f]/g, "");
+  return cleanHostDisplayText(message);
+}
+
+function hostQueueText(entry: QueueWireEntry, origin: Record<string, unknown>): string {
+  // The server's short preview may contain a child header or partial JSON.
+  // Format the full payload first; only then take the first display line.
+  const input = queueInputText(entry.input);
+  const text = input || (entry.preview ?? "");
+  if (origin.source === "agent") return agentQueueText(origin, text);
+  const shell = backgroundShellDisplay(origin, text);
+  if (shell) return shell.output ? `Shell: ${shell.summary}\n${shell.output}` : `Shell: ${shell.summary}`;
+  const label = origin.source === "schedule" ? "Scheduled" : origin.source === "backgroundTask" ? "Background" : hostMessageLabel(origin);
+  const sender = hostMessageSender(origin);
+  const heading = sender ? `${label} · ${sender}` : label;
+  // A JSON fragment alone cannot identify a result or its exit status.
+  const body = !input && origin.source === "backgroundTask" && text.trimStart().startsWith("{") ? "" : cleanHostDisplayText(text).trim();
+  return body ? `${heading}: ${body}` : heading;
 }
 
 export function queuePreviewText(entry: QueueWireEntry): string {
-  if (entry.origin?.source === "agent") {
-    // Native's short preview is the first line; for child results that line
-    // is host metadata. Format the real input before taking the visible line.
-    return agentQueueText(entry.origin, queueInputText(entry.input) || (entry.preview ?? "")).split(/\r?\n/, 1)[0]!;
-  }
-  return hostMessagePrefix(entry.origin) + (entry.preview || queueInputText(entry.input));
+  return entry.origin
+    ? hostQueueText(entry, entry.origin).split("\n", 1)[0]!
+    : entry.preview || queueInputText(entry.input);
 }
 
 /** Full text is editable only when every payload part can be represented losslessly. */
@@ -100,10 +115,7 @@ export function queueEditableText(entry: QueueWireEntry): string | undefined {
 export function queueSelectionText(entry: QueueWireEntry): string {
   const editable = queueEditableText(entry);
   if (editable !== undefined) return editable;
-  if (entry.origin?.source === "agent") {
-    return agentQueueText(entry.origin, queueInputText(entry.input) || (entry.preview ?? ""));
-  }
-  return queuePreviewText(entry);
+  return entry.origin ? hostQueueText(entry, entry.origin) : queuePreviewText(entry);
 }
 
 export type GoalSlashAction =

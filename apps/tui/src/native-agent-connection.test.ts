@@ -2515,7 +2515,7 @@ for (const [source, label] of Object.entries({ agent: "Agent message", backgroun
       const messages = await conn.getUserMessagesForForking();
       assert.deepEqual(messages, [
         { entryId: "turn_human", text: "Human request" },
-        { entryId: "turn_host", text: `[${label} · worker-1] Host result ready` },
+        { entryId: "turn_host", text: `[${label}${source === "agent" ? " · worker-1" : ""}] Host result ready` },
       ]);
       const { UserMessageSelectorComponent } = await import("../lib/coding-agent/src/modes/interactive/components/user-message-selector.js");
       const { initTheme } = await import("../lib/coding-agent/src/modes/interactive/theme/theme.js");
@@ -2523,7 +2523,7 @@ for (const [source, label] of Object.entries({ agent: "Agent message", backgroun
       const selector = new UserMessageSelectorComponent(messages.map(message => ({ id: message.entryId, text: message.text })), () => {}, () => {}, "turn_host");
       const rendered = selector.render(120).join("\n").replace(/\x1b\[[0-9;]*m/g, "");
       assert.ok(rendered.includes(label));
-      assert.ok(rendered.includes("worker-1"));
+      assert.equal(rendered.includes("worker-1"), source === "agent");
       assert.ok(rendered.includes("Host result ready"));
       assert.ok(rendered.includes("Select a message"));
       const result = await conn.fork(messages[1].entryId);

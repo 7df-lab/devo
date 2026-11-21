@@ -5,8 +5,9 @@
  * toolCall + toolResult pairs so InteractiveMode rebuilds tool rows on resume.
  */
 
-import { IPYTHON_STATE_RESTORED_CUSTOM_TYPE } from "@earendil-works/pi-coding-agent/messages";
+import { IPYTHON_STATE_RESTORED_CUSTOM_TYPE, NATIVE_SHELL_COMPLETION_CUSTOM_TYPE } from "@earendil-works/pi-coding-agent/messages";
 import { childCompletionStatus } from "./agent-display.js";
+import { backgroundShellDisplay, cleanHostDisplayText, hostMessageLabel, hostMessageSender } from "./host-message-display.js";
 import { shapeHostedToolResult, toolResultName } from "./tool-results.js";
 import {
   bashResultFromCommandExecution,
@@ -183,15 +184,15 @@ export function nativeItemToAgentMessages(envelope: unknown): AgentMessageLike[]
     if (item.origin != null && typeof item.origin === "object") {
       const origin = item.origin as Record<string, unknown>;
       if (childCompletionStatus(origin)) return [];
-      const labels: Record<string, string> = {
-        agent: "Agent message",
-        backgroundTask: "Background notification",
-        schedule: "Scheduled notification",
-      };
+      const shell = content.length === 1 ? backgroundShellDisplay(origin, String(content[0]!.text)) : undefined;
+      const sender = hostMessageSender(origin);
       return [{
         role: "custom",
-        customType: labels[String(origin.source)] ?? "Host notification",
-        content: [{ type: "text", text: `From: ${String(origin.senderName ?? origin.sender_name ?? origin.sender ?? "Host")}` }, ...content],
+        customType: shell ? NATIVE_SHELL_COMPLETION_CUSTOM_TYPE : hostMessageLabel(origin),
+        content: shell ? (shell.output ? `${shell.summary}\n${shell.output}` : shell.summary) : [
+          ...(sender ? [{ type: "text", text: `From: ${sender}` }] : []),
+          ...content.map(part => ({ type: "text", text: cleanHostDisplayText(String(part.text)) })),
+        ],
         display: true,
         details: { origin: item.origin },
         timestamp: ts,

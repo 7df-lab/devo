@@ -9,6 +9,7 @@ import {
 	isRefinementOutcomeMessage,
 	isSessionSlashCommandMessage,
 	isSessionSlashCommandResultMessage,
+	NATIVE_SHELL_COMPLETION_CUSTOM_TYPE,
 	REFINEMENT_OUTCOME_CUSTOM_TYPE,
 	SESSION_SLASH_COMMAND_CUSTOM_TYPE,
 	SESSION_SLASH_COMMAND_RESULT_CUSTOM_TYPE,
@@ -269,7 +270,7 @@ export function buildConversationComponents(
 			component.setExpanded(expanded);
 			components.push(component);
 		} else if (message.role === "custom" && message.display &&
-			["Agent message", "Background notification", "Scheduled notification", "Host notification"].includes(message.customType)) {
+			["Agent message", "Background notification", "Scheduled notification", "Host notification", NATIVE_SHELL_COMPLETION_CUSTOM_TYPE].includes(message.customType)) {
 			components.push(new CustomMessageComponent(message, undefined, options.markdownTheme));
 		} else if (message.role === "compactionSummary") {
 			const component = new CompactionSummaryMessageComponent(message, options.markdownTheme);

@@ -2,7 +2,7 @@ import assert from "node:assert/strict";
 import { test } from "node:test";
 import { NativeAgentConnection } from "./native-agent-connection.js";
 import { nativeNotificationSessionId } from "./native-notification-session.js";
-import { hostMessagePrefix, queuePreviewText, queueSelectionText } from "./native-connection-ops.js";
+import { hostMessageForkText, queuePreviewText, queueSelectionText } from "./native-connection-ops.js";
 import { nativeItemsToAgentMessages } from "./native-to-pi/messages.js";
 import { createStreamState, nativeNotificationToPiEvents } from "./native-to-pi/events.js";
 
@@ -58,7 +58,7 @@ test("named incoming sender keeps stable identity in live, replay and queue labe
   assert.deepEqual(nativeNotificationToPiEvents("item/started", { item: envelope }, createStreamState()), [
     { type: "message_start", message }, { type: "message_end", message },
   ]);
-  assert.equal(hostMessagePrefix(origin), "[Agent message · reviewer] ");
+  assert.equal(hostMessageForkText(origin, "Result"), "[Agent message · reviewer] Result");
   assert.deepEqual(nativeNotificationToPiEvents("queue/updated", { queue: [{ origin, preview: "Result" }] }, createStreamState()), [
     { type: "session_action_update", actions: { queuedCount: 1, steering: [], followUps: ["reviewer: Result"], ordered: [{ id: "", text: "reviewer: Result", delivery: "followUp", blocked: false, editable: false }] } },
   ]);
