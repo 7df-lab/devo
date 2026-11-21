@@ -23,7 +23,11 @@ export class WebToolCellComponent implements Component {
 
 	render(width: number): string[] {
 		const safeWidth = Math.max(1, width);
-		const { name, args, output, details, expanded, status } = this.state;
+		const { name, args, output: rawOutput, details, expanded, status } = this.state;
+		// A hosted search may return only a completion placeholder; the checkmark already shows it succeeded.
+		const output = status === "done" && /^web[_-]?search$/i.test(name) && rawOutput.trim() === "status: completed"
+			? ""
+			: rawOutput;
 		const marker = status === "running"
 			? theme.fg("bashMode", workingIconFrame(getWorkingPulseFrame()))
 			: status === "error" ? theme.fg("error", "✗")

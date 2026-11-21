@@ -72,6 +72,34 @@ test("hosted completion without a start still carries its arguments", () => {
   assert.equal(events.at(-1)?.type, "tool_execution_end");
 });
 
+test("status-only hosted search completion renders no result row live or on restore", () => {
+  initTheme();
+  const query = "Rust asynchronous programming documentation and tutorials";
+  const envelope = {
+    id: "hosted-search",
+    state: "completed",
+    item: {
+      type: "hostedToolCall",
+      callId: "call",
+      toolName: "web_search",
+      input: { query },
+      displayContent: "status: completed",
+    },
+  };
+  const end = nativeNotificationToPiEvents("item/completed", envelope, createStreamState())
+    .find((event) => event.type === "tool_execution_end")!;
+  const restored = nativeItemsToAgentMessages([envelope])[1]!;
+  for (const result of [{ ...end.result, isError: end.isError }, restored]) {
+    const cell = new ToolExecutionComponent("web_search", "call", { query }, {}, undefined, ui, process.cwd());
+    cell.updateResult(result as Parameters<ToolExecutionComponent["updateResult"]>[0]);
+    assert.equal(plain(cell, 80), ` ✓ web_search · ${query}`);
+    cell.setExpanded(true);
+    const expanded = plain(cell, 100);
+    assert.ok(expanded.includes(`query: ${query}`));
+    assert.doesNotMatch(expanded, /›|status: completed/);
+  }
+});
+
 test("legacy hosted calls without call IDs use the envelope ID live and on restore", () => {
   for (const callId of [undefined, ""]) {
     const envelope = { id: "legacy-web", state: "completed", item: { type: "hostedToolCall", callId, toolName: "web_search", output: hits } };
