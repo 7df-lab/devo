@@ -104,7 +104,10 @@ pub(crate) enum RuntimeSessionToolRegistryUpdate {
 }
 
 impl ServerRuntime {
-    fn session_missing(&self, request_id: serde_json::Value) -> serde_json::Value {
+    pub(in crate::runtime) fn session_missing(
+        &self,
+        request_id: serde_json::Value,
+    ) -> serde_json::Value {
         self.error_response(
             request_id,
             ProtocolErrorCode::SessionNotFound,
@@ -112,7 +115,7 @@ impl ServerRuntime {
         )
     }
 
-    fn parse_rpc_params<T: serde::de::DeserializeOwned>(
+    pub(in crate::runtime) fn parse_rpc_params<T: serde::de::DeserializeOwned>(
         &self,
         request_id: serde_json::Value,
         params: serde_json::Value,
@@ -1410,6 +1413,9 @@ impl ServerRuntime {
             };
             index_session.clone()
         };
+        if overlay_model.is_some() || model_binding_update.is_some() {
+            self.enqueue_hosted_web_checks(legacy_session_id);
+        }
         // Echo applied model effective window for older clients. Do not fan out
         // a global compaction preference — that product surface is removed.
         if let Some(applied) = applied_window {
@@ -1476,6 +1482,7 @@ impl ServerRuntime {
                 .lock()
                 .await
                 .insert(params.idempotency_key, session_id);
+            self.enqueue_hosted_web_checks(session_id);
             if let Some(result) = self
                 .native_session_snapshot_response(request_id, session_id)
                 .await
@@ -1945,6 +1952,8 @@ impl ServerRuntime {
         self.runtime_arc()
             .reissue_pending_controls_if_subscribed(connection_id, &params.session_id)
             .await;
+        self.runtime_arc()
+            .enqueue_hosted_web_checks(legacy_session_id);
         self.native_session_resume_response(request_id, legacy_session_id)
             .await
             .unwrap_or(response)

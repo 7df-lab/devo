@@ -103,7 +103,7 @@ rlm.web_fetch(url)    → host_request("web.fetch", ...)  → 权限检查 → W
 
 重要边界：
 
-- **协议兼容不等于能力兼容。** 没有按 endpoint、模型或账户自动探测原生 web 能力，兼容代理可能拒绝、忽略或自行实现这些字段。
+- **协议兼容不等于能力兼容。** Devo 会为已配置的 Messages / Responses 连接在后台分别检查 hosted search 和 hosted fetch（设为 `disabled` 的能力不检查）。添加连接、切换模型、启动或恢复会话时会尝试检查；结果按运行中的连接、协议及具体模型缓存。检查使用固定的公开查询或 URL，不发送会话内容，但可能产生供应商费用。协议不受 Devo 支持、供应商明确拒绝和无法验证是不同情况；超时或未调用工具不等于不支持。`/web` 显示当前选择及必要提示。检查仅用于提示，不自动修改设置、路由或切换搜索服务。
 - Chat Completions 的底层适配器能序列化 `web_search_options`，但正常 core turn 的 search gate 只允许 Responses 和 Anthropic，因此不能照旧 README 描述期待它自动启用。官方 Chat Completions 搜索需要适配的模型，这与当前 Devo 正常路径是否发送参数是两件事。
 - OpenAI 官方 Web Search 文档描述了搜索过程中的 `open_page` / `find_in_page`，不能据此推导出独立 `web_fetch` 工具或 `web_fetch_options` 受支持。对普通 OpenAI 接入点保留 `fetch = local` 更稳妥；只有接入点明确提供相应扩展且经过验证时才使用当前 provider fetch 序列化。
 - Anthropic 的版本化工具需与模型、平台及账户匹配。当前 Devo 固定使用上述 20260209 版本，不会自动回退到旧版，也不会自动跟随官方新版。官方动态过滤功能有模型要求；不能仅看 `anthropic_messages` 就认定可用。

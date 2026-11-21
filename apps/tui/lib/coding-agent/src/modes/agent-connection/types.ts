@@ -452,6 +452,11 @@ export interface AgentConnectionResourceSnapshot {
 	diagnostics: AgentConnectionResourceDiagnostics;
 }
 
+export interface AgentConnectionWebStatus {
+	search: { backend: string; note?: string };
+	fetch: { backend: string; note?: string };
+}
+
 export interface AgentConnectionToolDefinition {
 	name: string;
 	label: string;
@@ -755,6 +760,7 @@ export interface AgentConnection {
 	getUserMessagesForForking(): Promise<AgentConnectionUserMessage[]>;
 	getLastAssistantText(): Promise<string | undefined>;
 	getSystemPrompt(): Promise<string>;
+	getWebStatus(): Promise<AgentConnectionWebStatus | undefined>;
 	getToolDefinition(name: string): Promise<AgentConnectionToolDefinition | undefined>;
 	setSessionEntryLabel(entryId: string, label: string | undefined): Promise<void>;
 	respondToExtensionUiRequest(requestId: string, response: AgentConnectionExtensionUiResponse): Promise<void>;

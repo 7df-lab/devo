@@ -356,6 +356,11 @@ impl ServerRuntime {
             }
         }
         self.deps.invalidate_workspace_contexts();
+        if let Some(model) = params.patch.model.as_deref() {
+            let config = runtime_context
+                .resolve_turn_config(Some(model), params.patch.reasoning_effort.clone());
+            self.check_hosted_web(&runtime_context, &config);
+        }
 
         let options = self.acp_model_config_options_for_context(&runtime_context);
         serde_json::to_value(SuccessResponse {

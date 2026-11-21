@@ -127,6 +127,7 @@ const CANONICAL_BUILTIN_SLASH_COMMANDS: ReadonlyArray<BuiltinSlashCommand> = [
 		takesArgument: true,
 	},
 	{ name: "session", description: "Show session info" },
+	{ name: "web", description: "Show web search and fetch availability" },
 	{ name: "system-prompt", description: "Show the exact system prompt sent to the model" },
 	{
 		name: "traces",

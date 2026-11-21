@@ -587,6 +587,27 @@ test("connect initializes, creates session, and returns InteractiveMode snapshot
   );
 });
 
+test("getWebStatus reads session-scoped Native web status", async () => {
+  const { conn, fake } = await bootConnection([
+    (method, params, respond) => {
+      if (method !== "session/web/status/read") return false;
+      assert.deepEqual(params, { sessionId: "sess_test" });
+      respond({
+        search: { backend: "exa" },
+        fetch: { backend: "native", note: "Some pages may be unavailable." },
+      });
+      return true;
+    },
+  ]);
+
+  assert.deepEqual(await conn.getWebStatus(), {
+    search: { backend: "exa" },
+    fetch: { backend: "native", note: "Some pages may be unavailable." },
+  });
+  assert.equal(fake.requests.filter((request) => request.method === "session/web/status/read").length, 1);
+  await conn.dispose();
+});
+
 test("getModelCatalog marks connected and credentialed providers as configured", async () => {
   const { conn } = await bootConnection([
     (method, _params, respond) => {

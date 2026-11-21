@@ -643,3 +643,28 @@ pub struct SessionSystemPromptReadResult {
     /// Exact system prompt text the server would send on the next model call.
     pub prompt: String,
 }
+
+// ── session/web/status/read ──
+
+#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize, JsonSchema, TS)]
+#[serde(rename_all = "camelCase")]
+pub struct SessionWebStatusReadParams {
+    pub session_id: SessionId,
+}
+
+/// Safe UI projection of a selected web backend. It never contains credentials.
+#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize, JsonSchema, TS)]
+#[serde(rename_all = "camelCase")]
+pub struct WebBackendStatus {
+    pub backend: String,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    #[ts(optional)]
+    pub note: Option<String>,
+}
+
+#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize, JsonSchema, TS)]
+#[serde(rename_all = "camelCase")]
+pub struct SessionWebStatusReadResult {
+    pub search: WebBackendStatus,
+    pub fetch: WebBackendStatus,
+}

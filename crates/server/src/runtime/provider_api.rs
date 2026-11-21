@@ -546,6 +546,26 @@ impl ServerRuntime {
         };
         self.deps.invalidate_workspace_contexts();
         self.reload_live_provider_routers().await;
+        // Check the connection's chosen model (or its first stored model), not
+        // every model the provider happens to make available in the catalog.
+        let provider_prefix = format!("{}/", provider.id);
+        let probe_model = default_model
+            .as_deref()
+            .and_then(|model| {
+                model
+                    .strip_prefix(&provider_prefix)
+                    .or_else(|| provider.models.contains_key(model).then_some(model))
+            })
+            .or_else(|| provider.models.keys().next().map(String::as_str));
+        if let Some(model) = probe_model {
+            let context = &self.deps.process_context;
+            let config =
+                context.resolve_turn_config(Some(&format!("{provider_prefix}{model}")), None);
+            if matches!(&config.provider_route, devo_provider::ProviderRoute::Connection { provider_id, .. } if provider_id == &provider.id)
+            {
+                self.check_hosted_web(context, &config);
+            }
+        }
 
         serde_json::to_value(SuccessResponse {
             id: request_id,

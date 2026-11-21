@@ -566,6 +566,12 @@ cut?: SessionForkCut | null, };
 
 export type SessionForkResult = { session: Session, };
 
+export type SessionWebStatusReadParams = { sessionId: SessionId, };
+
+export type WebBackendStatus = { backend: string, note?: string, };
+
+export type SessionWebStatusReadResult = { search: WebBackendStatus, fetch: WebBackendStatus, };
+
 export type SubscriptionReplay = "fromCursor" | "snapshotOnly";
 
 export type SubscriptionId = string;
