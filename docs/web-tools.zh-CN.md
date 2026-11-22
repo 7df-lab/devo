@@ -271,7 +271,7 @@ mcp_provider = "serper"
 
 `devo-web-mcp` 使用 [Serper Search 和 Scrape API](https://serper.dev/playground) 或 [Exa Search](https://exa.ai/docs/reference/search) 和 [Contents](https://exa.ai/docs/reference/get-contents)。两者沿用现有凭据存储和 `[provider_http]` 代理配置。不会在请求失败时自动切换供应商。现有 `mode = "local"` 的 Exa 配置也可以继续使用。
 
-bundled `websearch` 技能优先使用模型可直接调用的 `web_search`，否则用 `rlm.web_search(query)`，由当前 turn 路由至所选 MCP 或本地搜索。`websearch.run(query, max_output=8192)` 仍可用于获取截断后的文本；旧的 `timeout` 和 `num_results` 参数仍可传入，但不再覆盖后端设置。关闭、无配置、拒绝或错误均不会触发回退。
+bundled `websearch` 技能只使用当前 turn 提供的能力。搜索用模型直接可调用的 `web_search` 或已启用的 `rlm.web_search(query)`；读取页面用原生 `web_fetch`、当前 turn 指定的 `web_search.open_page`，或已启用的 `rlm.web_fetch(url)`。`websearch.run(query, max_output=8192)` 仍只封装 Python 搜索并返回截断文本；旧的 `timeout` 和 `num_results` 参数仍可传入，但不覆盖后端设置。关闭、无配置、拒绝或错误均不会触发回退。
 
 ### 通用 MCP 可以接其他搜索/抓取服务
 
@@ -348,7 +348,7 @@ no_proxy = "localhost,127.0.0.1"
 - [RLM helpers](../crates/kernel/rlm-runtime/src/rlm/__init__.py) / [host bridge 与权限](../crates/server/src/runtime/kernel_host_bridge.rs)
 - [内置搜索实现及测试](../crates/core/src/tools/handlers/websearch.rs) / [Parallel 实现](../crates/core/src/tools/handlers/websearch/parallel.rs)
 - [本地抓取实现及测试](../crates/core/src/tools/handlers/webfetch.rs)
-- [Serper 技能实现](../crates/skills/assets/bundled/websearch/src/websearch/websearch.py) / [登录入口](../apps/tui/lib/coding-agent/src/modes/interactive/auth-flows.ts)
+- [内置 `websearch` 技能](../crates/skills/assets/bundled/websearch/SKILL.md) / [登录入口](../apps/tui/lib/coding-agent/src/modes/interactive/auth-flows.ts)
 - [MCP 配置结构](../crates/config/src/mcp.rs) / [HTTP header 解析](../crates/rmcp-client/src/utils.rs)
 - [共享代理逻辑](../crates/network-proxy/src/lib.rs)
 
