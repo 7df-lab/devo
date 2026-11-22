@@ -111,7 +111,10 @@ test("Native-only logged-out model opens the actual API key dialog and cancellat
   const options = flows.getLoginProviderOptions();
   assert.equal(options.find(p=>p.id === "deepseek")?.authType,"api_key");
   assert.equal(options.some(p=>p.id === "excluded-native"),false);
-  assert.equal(options.find(p=>p.id === "serper")?.category,"service");
+  assert.deepEqual(options.filter(p=>p.id === "exa" || p.id === "serper").map(p=>[p.id,p.authType,p.category]),[
+    ["exa","api_key","service"],
+    ["serper","api_key","service"],
+  ]);
   const result = mode.ensureModelProviderConfigured(mode.connectionModelCatalog[0], flows);
   assert.match(overlay!.render(100).join("\n"), /Enter API key:/);
   overlay!.handleInput("\x1b");

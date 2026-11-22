@@ -666,7 +666,13 @@ pub(crate) async fn handle_web_search(bridge: &HostBridge, params: &Value) -> Va
         .clone()
         .expect("local search was selected");
     let ctx = tool_context_from_bridge(bridge, tool_call_id);
-    map_tool_outcome(WebSearchHandler::new().handle(ctx, input, None).await)
+    let reply = map_tool_outcome(WebSearchHandler::new().handle(ctx, input, None).await);
+    if reply["status"] == "ok" {
+        // The typed Python host helper reads `result`, not top-level `stdout`.
+        json!({"status": "ok", "result": {"stdout": reply["stdout"]}})
+    } else {
+        reply
+    }
 }
 
 pub(crate) async fn handle_web_fetch(bridge: &HostBridge, params: &Value) -> Value {

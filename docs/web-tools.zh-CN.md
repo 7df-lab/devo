@@ -22,8 +22,8 @@
 
 在 TUI 输入 `/web`，用方向键选中搜索后端并按 Enter 保存；Esc 不保存。Fetch 只显示当前设置，不在此处编辑。**Follow defaults** 使用当前模型、provider 和应用的默认设置；显式选择 **Model provider**、MCP 工具或 **Off** 会保存在当前会话，重启或切换模型后仍保留，从下一轮起生效。失败不会自动换后端。
 
-- **Tavily / DeepSeek · Built-in MCP**：需要自己的 API key，保存在用户级 `auth.json` 中相应的 `tavily` 或 `deepseek` 条目。与 `devo` 同目录的 `devo-web-mcp` 独立进程只在实际调用时启动，从现有凭据存储读取选定供应商的 key；不需要新环境变量。两个供应商均使用 `web_search` 与 `web_fetch`。DeepSeek 的搜索和抓取可能另外计费。
-- 在应用、provider 或模型的 `web_fetch` 配置中设置 `mode = "mcp"` 和 `mcp_provider = "deepseek"`（DeepSeek）或 `"tavily"`，即可使用内置 MCP 抓取。MCP 抓取只支持 Markdown；未配置供应商或调用错误时不会回退到 Direct HTTP。
+- **Tavily / DeepSeek / Serper / Exa · Built-in**：每个供应商都需要自己的 API key，保存在用户级 `auth.json` 中相应的 `tavily`、`deepseek`、`serper` 或 `exa` 条目。与 `devo` 同目录的 `devo-web-mcp` 独立进程只在实际调用时启动，从现有凭据存储读取选定供应商的 key；不需要环境变量。四个供应商均提供 `web_search` 与 `web_fetch`，实际调用可能消耗供应商额度或产生费用。
+- 在应用、provider 或模型的 `web_fetch` 配置中设置 `mode = "mcp"` 和 `mcp_provider = "deepseek"`、`"tavily"`、`"serper"` 或 `"exa"`，即可使用对应供应商的内置 MCP 抓取。MCP 抓取只支持 Markdown；未配置供应商或调用错误时不会回退到 Direct HTTP。
 - **自定义 MCP**：先用现有 MCP 设置连接服务器。`/web` 中可选择能只接收一个字符串 `query` 的工具。保存的是服务器 ID 和工具原始名称，而不是显示名称。
 - 从源码构建 TUI 和内置 MCP 时，运行 `cargo build -p devo-cli -p devo-web-mcp --bins`。
 
@@ -255,35 +255,22 @@ mode = "local"
 
 403、登录墙、验证码、JS-only 页面不会自动交给浏览器或第三方抓取服务。返回成功也应检查正文是否实际上是登录页面。`allowed_domains` 等 hosted 内部字段不约束本地 HTTP fetch；访问限制要在权限/网络层落实。
 
-## 7. Serper 技能回退与通用 MCP
+## 7. 内置搜索供应商与通用 MCP
 
-### Serper 是另一条技能路径
+### 显式选择 Serper 或 Exa
 
-bundled `websearch` 技能实现 `websearch.run(...)`，与 `tools.web_search.local_providers` 不是同一种配置：
+1. 从 [Serper](https://serper.dev) 或 [Exa](https://exa.ai) 获取 API key。在 TUI 用 `/login` → **MCP Connections** → **Serper (web search and fetch)** 或 **Exa (web search and fetch)** 保存。用户级 `auth.json` 中已有的 `serper` 或 `exa` API key 不必重录；此前只通过环境变量提供 key 的用户需要用 `/login` 保存。
+2. 在 `/web` 选择 **Serper · Built-in** 或 **Exa · Built-in** 启用当前会话的搜索。抓取独立配置（用 Exa 时将供应商改为 `"exa"`）：
 
-1. 先尝试 host `web.search`，即当前 turn 的本地搜索配置（包括 Parallel）。函数名称中的 hosted 不表示调用 provider 原生搜索。
-2. 只有捕获到“未配置 / needs configuration”类错误，或没有得到可用文本时，才尝试 Serper；一般网络错误、认证错误不构成自动切换条件。
-3. 无 key 时给配置提示，不生成伪造结果。
-
-配置入口：TUI `/login` → **MCP Connections** → **Serper (web search)**；它是 service credential，名称出现在 MCP 分类不代表启动了 MCP server。源码在 auth flow 中单独注册了它。也可将以下条目合并到用户 auth.json：
-
-```json
-{
-  "serper": {"type": "api_key", "key": "REPLACE_WITH_SERPER_KEY"}
-}
+```toml
+[tools.web_fetch]
+mode = "mcp"
+mcp_provider = "serper"
 ```
 
-技能调用示例（技能已加载且内核运行）：
+`devo-web-mcp` 使用 [Serper Search 和 Scrape API](https://serper.dev/playground) 或 [Exa Search](https://exa.ai/docs/reference/search) 和 [Contents](https://exa.ai/docs/reference/get-contents)。两者沿用现有凭据存储和 `[provider_http]` 代理配置。不会在请求失败时自动切换供应商。现有 `mode = "local"` 的 Exa 配置也可以继续使用。
 
-```python
-print(await websearch.run("Rust 最新发布", max_output=8192, timeout=45, num_results=5))
-```
-
-技能 POST 到 `https://google.serper.dev/search`，header 为 `X-API-KEY`，body 为 `{"q": query}`。`num_results` 限制本地输出中的 organic 条目，不控制请求的搜索结果数量；还可能输出 knowledge graph 与最多三个相关问答。`max_output` 默认 8192 字符，超出会截断。
-
-Serper key 查找顺序为 `SERPER_API_KEY` 环境变量，然后 auth.json 的 `serper.type/key`。技能配置目录依次看 `DEVO_CODING_AGENT_DIR`、`DEVO_HOME`、`PI_CODING_AGENT_DIR`，最后 `~/.devo`；这与 Rust host 目录要保持一致。可选环境覆盖 `DEVO_WEBSEARCH_TIMEOUT`（默认 45）和 `DEVO_WEBSEARCH_NUM_RESULTS`（默认 5），显式函数参数优先。一般用户用 `/login` 即可，无需设置环境变量。获取 key 见 [Serper 官网](https://serper.dev)。
-
-技能依赖 bundled skill 与 Python/httpx 可用；禁用或不加载技能时不会凭空出现这条回退。它的 HTTP 客户端不同于 Rust 网络代理客户端，不应假定 `[provider_http]` 会自动套用到 Serper。
+bundled `websearch` 技能优先使用模型可直接调用的 `web_search`，否则用 `rlm.web_search(query)`，由当前 turn 路由至所选 MCP 或本地搜索。`websearch.run(query, max_output=8192)` 仍可用于获取截断后的文本；旧的 `timeout` 和 `num_results` 参数仍可传入，但不再覆盖后端设置。关闭、无配置、拒绝或错误均不会触发回退。
 
 ### 通用 MCP 可以接其他搜索/抓取服务
 
@@ -322,7 +309,7 @@ no_proxy = "localhost,127.0.0.1"
 - 原生模式：查询/对话与工具执行交给模型接入点及其搜索基础设施。
 - 本地搜索：查询和必要认证发给所选服务；Parallel 额外带 session_id。结果进入模型上下文，可能进入会话记录。
 - 本地 fetch：目标网站/代理接收 URL、IP 和 HTTP 请求元数据，响应进入模型上下文。
-- Serper / MCP：分别遵守各自客户端与服务的数据处理规则。
+- 内置 MCP 将查询或 URL 发送给选定的供应商；自定义 MCP 遵守其客户端与服务的数据处理规则。
 
 匿名、read-only 或 local 都不代表离线、免费无限、零留存或无需权限。不要发送秘密、私有 URL token 或不必要的个人数据；不要把认证文件提交到仓库。日志中的 HTTP 错误可能含服务返回正文，分享排障材料前应脱敏。网页、搜索摘要和 MCP 返回内容属于外部不可信数据，不应被当成操作授权或系统指令。
 
@@ -343,7 +330,7 @@ no_proxy = "localhost,127.0.0.1"
 | `invalid JSON` / MCP schema 错误 | base_url 是否完整正确、网关是否返回 HTML、服务是否改了返回协议 |
 | fetch 超时/过大/内容乱码 | 网络与代理、1–120 秒超时、5 MiB、JS 页面或不支持的文档格式 |
 | 有配置但没有工具可用 | RLM 是否启动、execution_surface 是否 discrete、权限是否拒绝、模型是否支持客户端工具调用 |
-| Serper 已登录仍提示配置 | 技能目录与 host 目录是否一致、auth key 是否为 serper、技能/内核是否可用 |
+| Serper 已登录仍提示配置 | 核对 `/web` 的搜索后端、服务端用户级 `auth.json` 的 `serper` 条目及 `devo-web-mcp` 是否与 `devo` 同目录 |
 
 不要通过“隐藏错误后编答案”验证搜索；成功标准包括真实请求路径、可读结果、可核对的来源。没有对所有 provider/model 做付费真实服务测试时，应明确区分源码与 mock 测试覆盖和线上可用性。
 

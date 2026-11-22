@@ -21,12 +21,17 @@ use serde::Deserialize;
 use serde_json::json;
 
 mod deepseek;
+mod exa;
+mod serper;
 mod tavily;
+mod upstream;
 
 #[derive(Clone, Copy, Debug, PartialEq, Eq)]
 enum Supplier {
     Tavily,
     DeepSeek,
+    Serper,
+    Exa,
 }
 
 impl Supplier {
@@ -34,6 +39,8 @@ impl Supplier {
         match self {
             Self::Tavily => "tavily",
             Self::DeepSeek => "deepseek",
+            Self::Serper => "serper",
+            Self::Exa => "exa",
         }
     }
 }
@@ -90,6 +97,8 @@ impl ServerHandler for WebMcpServer {
                 match self.supplier {
                     Supplier::Tavily => tavily::search(&self.http, &self.api_key, query).await,
                     Supplier::DeepSeek => deepseek::search(&self.http, &self.api_key, query).await,
+                    Supplier::Serper => serper::search(&self.http, &self.api_key, query).await,
+                    Supplier::Exa => exa::search(&self.http, &self.api_key, query).await,
                 }
             }
             "web_fetch" => {
@@ -97,6 +106,8 @@ impl ServerHandler for WebMcpServer {
                 match self.supplier {
                     Supplier::Tavily => tavily::fetch(&self.http, &self.api_key, url).await,
                     Supplier::DeepSeek => deepseek::fetch(&self.http, &self.api_key, url).await,
+                    Supplier::Serper => serper::fetch(&self.http, &self.api_key, url).await,
+                    Supplier::Exa => exa::fetch(&self.http, &self.api_key, url).await,
                 }
             }
             _ => Err(ErrorData::invalid_params("unknown tool", None)),
@@ -153,7 +164,7 @@ fn valid_fetch_url(input: &str) -> bool {
 }
 
 const USAGE: &str =
-    "usage: devo-web-mcp <tavily|deepseek> --config-dir PATH [--workspace-root PATH]";
+    "usage: devo-web-mcp <tavily|deepseek|serper|exa> --config-dir PATH [--workspace-root PATH]";
 
 struct Launch {
     supplier: Supplier,
@@ -166,6 +177,8 @@ fn parse_launch() -> Result<Launch, &'static str> {
     let supplier = match args.next().as_deref().and_then(std::ffi::OsStr::to_str) {
         Some("tavily") => Supplier::Tavily,
         Some("deepseek") => Supplier::DeepSeek,
+        Some("serper") => Supplier::Serper,
+        Some("exa") => Supplier::Exa,
         _ => return Err(USAGE),
     };
     if args.next().as_deref().and_then(std::ffi::OsStr::to_str) != Some("--config-dir") {

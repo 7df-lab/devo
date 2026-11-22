@@ -219,6 +219,54 @@ async fn web_search_uses_exact_raw_tool_and_does_not_dispatch_when_denied_or_off
 }
 
 #[tokio::test]
+async fn local_web_search_returns_text_in_the_python_result_envelope() {
+    use tokio::io::{AsyncBufReadExt, AsyncReadExt, AsyncWriteExt, BufReader};
+
+    let listener = tokio::net::TcpListener::bind("127.0.0.1:0").await.unwrap();
+    let endpoint = format!("http://{}/search", listener.local_addr().unwrap());
+    let upstream = tokio::spawn(async move {
+        let (socket, _) = listener.accept().await.unwrap();
+        let mut socket = BufReader::new(socket);
+        let mut length = 0;
+        loop {
+            let mut line = String::new();
+            assert_ne!(socket.read_line(&mut line).await.unwrap(), 0);
+            if line == "\r\n" {
+                break;
+            }
+            if let Some((name, value)) = line.split_once(':')
+                && name.eq_ignore_ascii_case("content-length")
+            {
+                length = value.trim().parse().unwrap();
+            }
+        }
+        let mut body = vec![0; length];
+        socket.read_exact(&mut body).await.unwrap();
+        let body = r#"{"results":[{"title":"Docs","url":"https://example.com/"}]}"#;
+        let response = format!(
+            "HTTP/1.1 200 OK\r\nContent-Type: application/json\r\nContent-Length: {}\r\nConnection: close\r\n\r\n{body}",
+            body.len()
+        );
+        socket.write_all(response.as_bytes()).await.unwrap();
+    });
+    let mut bridge = test_bridge(Arc::new(FakeMcpManager::new()));
+    bridge.local_web_search = Some(json!({
+        "provider_id": "exa",
+        "kind": "exa",
+        "api_key": "synthetic-test-key",
+        "base_url": endpoint,
+        "max_results": 1
+    }));
+    bridge.network_no_proxy = Some("127.0.0.1".into());
+    let reply = handle_web_search(&bridge, &json!({"query":"needle"})).await;
+    assert_eq!(
+        reply,
+        json!({"status":"ok","result":{"stdout":"Search results for: needle\n\n1. [Docs](https://example.com/)\n"}})
+    );
+    upstream.await.unwrap();
+}
+
+#[tokio::test]
 async fn web_fetch_uses_only_the_selected_supplier_and_url() {
     let id = McpServerId("devo:builtin:deepseek".into());
     let mut fake = FakeMcpManager::new();

@@ -18,7 +18,7 @@ import {
 	resolvePrimeInferenceAuthConfig,
 } from "../../core/prime-inference-auth.js";
 import { BUILT_IN_PROVIDER_DISPLAY_NAMES } from "../../core/provider-display-names.js";
-import { SERPER_CREDENTIAL_ID, SERPER_CREDENTIAL_NAME } from "../../core/websearch-credential.js";
+import { WEB_SERVICE_CREDENTIALS } from "../../core/websearch-credential.js";
 import { showFullPaneOverlay } from "./components/centered-overlay.js";
 import { ExtensionSelectorComponent } from "./components/extension-selector.js";
 import { LoginDialogComponent } from "./components/login-dialog.js";
@@ -201,7 +201,13 @@ export class ProviderAuthFlows {
 		try {
 			for (const credential of await this.host.getStoredProviderCredentials?.() ?? []) {
 				if (providerOptions.some((option) => option.id === credential.provider)) continue;
-				providerOptions.push({ id: credential.provider, name: this.host.modelRegistry.getProviderDisplayName(credential.provider), authType: credential.kind === "oauth" ? "oauth" : "api_key", category: credential.provider === "serper" ? "service" : "provider" });
+				const webServiceName = WEB_SERVICE_CREDENTIALS.get(credential.provider);
+				providerOptions.push({
+					id: credential.provider,
+					name: webServiceName ?? this.host.modelRegistry.getProviderDisplayName(credential.provider),
+					authType: credential.kind === "oauth" ? "oauth" : "api_key",
+					category: webServiceName ? "service" : "provider",
+				});
 			}
 		} catch (error) {
 			this.host.showError(`Could not list provider credentials: ${error instanceof Error ? error.message : String(error)}`);
@@ -273,7 +279,7 @@ export class ProviderAuthFlows {
 			...(this.host.getModelProviderIds?.() ?? []),
 		]);
 		for (const providerId of modelProviders) {
-			if (!isApiKeyLoginProvider(providerId, oauthProviderIds)) {
+			if (WEB_SERVICE_CREDENTIALS.has(providerId) || !isApiKeyLoginProvider(providerId, oauthProviderIds)) {
 				continue;
 			}
 			options.push({
@@ -283,13 +289,10 @@ export class ProviderAuthFlows {
 			});
 		}
 
-		// Serper is a skill credential, not a model provider, so add it manually.
-		options.push({
-			id: SERPER_CREDENTIAL_ID,
-			name: SERPER_CREDENTIAL_NAME,
-			authType: "api_key",
-			category: "service",
-		});
+		// These web MCP services don't supply models, so add them manually.
+		for (const [id, name] of WEB_SERVICE_CREDENTIALS) {
+			options.push({ id, name, authType: "api_key", category: "service" });
+		}
 
 		const filteredOptions = authType ? options.filter((option) => option.authType === authType) : options;
 		const excluded = new Set(this.host.excludedLoginProviderIds ?? []);
@@ -308,18 +311,16 @@ export class ProviderAuthFlows {
 			if (!credential || (credential.type !== "oauth" && credential.type !== "api_key")) {
 				continue;
 			}
-			const isSerper = providerId === SERPER_CREDENTIAL_ID;
+			const webServiceName = WEB_SERVICE_CREDENTIALS.get(providerId);
 			const isMcp = providerId.startsWith("mcp:");
-			const name = isSerper
-				? SERPER_CREDENTIAL_NAME
-				: isMcp
-					? (oauthProvidersById.get(providerId)?.name ?? providerId.slice("mcp:".length))
-					: this.host.modelRegistry.getProviderDisplayName(providerId);
+			const name = webServiceName ?? (isMcp
+				? (oauthProvidersById.get(providerId)?.name ?? providerId.slice("mcp:".length))
+				: this.host.modelRegistry.getProviderDisplayName(providerId));
 			options.push({
 				id: providerId,
 				name,
 				authType: credential.type,
-				category: isSerper || isMcp ? "service" : "provider",
+				category: webServiceName || isMcp ? "service" : "provider",
 			});
 		}
 

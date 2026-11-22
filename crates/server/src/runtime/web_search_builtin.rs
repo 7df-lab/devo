@@ -14,8 +14,12 @@ use devo_mcp::manager::RmcpMcpManager;
 use crate::session_context::SessionRuntimeContext;
 
 pub(super) const SEARCH_TOOL: &str = "web_search";
-pub(super) const SUPPLIERS: [BuiltinWebSupplier; 2] =
-    [BuiltinWebSupplier::Tavily, BuiltinWebSupplier::DeepSeek];
+pub(super) const SUPPLIERS: [BuiltinWebSupplier; 4] = [
+    BuiltinWebSupplier::Tavily,
+    BuiltinWebSupplier::DeepSeek,
+    BuiltinWebSupplier::Serper,
+    BuiltinWebSupplier::Exa,
+];
 const BINARY_NAME: &str = if cfg!(windows) {
     "devo-web-mcp.exe"
 } else {
@@ -28,6 +32,8 @@ pub(super) fn server_id(supplier: BuiltinWebSupplier) -> &'static str {
     match supplier {
         BuiltinWebSupplier::Tavily => "devo:builtin:tavily",
         BuiltinWebSupplier::DeepSeek => "devo:builtin:deepseek",
+        BuiltinWebSupplier::Serper => "devo:builtin:serper",
+        BuiltinWebSupplier::Exa => "devo:builtin:exa",
     }
 }
 
@@ -39,8 +45,10 @@ pub(super) fn supplier_for_server_id(id: &str) -> Option<BuiltinWebSupplier> {
 
 pub(super) fn label(supplier: BuiltinWebSupplier) -> &'static str {
     match supplier {
-        BuiltinWebSupplier::Tavily => "Tavily · Built-in MCP",
-        BuiltinWebSupplier::DeepSeek => "DeepSeek · Built-in MCP",
+        BuiltinWebSupplier::Tavily => "Tavily · Built-in",
+        BuiltinWebSupplier::DeepSeek => "DeepSeek · Built-in",
+        BuiltinWebSupplier::Serper => "Serper · Built-in",
+        BuiltinWebSupplier::Exa => "Exa · Built-in",
     }
 }
 
@@ -48,6 +56,8 @@ fn credential_id(supplier: BuiltinWebSupplier) -> &'static str {
     match supplier {
         BuiltinWebSupplier::Tavily => "tavily",
         BuiltinWebSupplier::DeepSeek => "deepseek",
+        BuiltinWebSupplier::Serper => "serper",
+        BuiltinWebSupplier::Exa => "exa",
     }
 }
 

@@ -98,6 +98,8 @@ pub enum BuiltinWebSupplier {
     Tavily,
     #[serde(rename = "deepseek")]
     DeepSeek,
+    Serper,
+    Exa,
 }
 
 /// Configures the effective `web_fetch` capability.
@@ -444,14 +446,20 @@ mod tests {
             ResolvedWebFetchConfig::Disabled
         );
 
-        let config: WebFetchConfig =
-            toml::from_str("mode = 'mcp'\nmcp_provider = 'deepseek'").expect("MCP supplier");
-        assert_eq!(
-            resolve_web_fetch_config(&config, None, None),
-            ResolvedWebFetchConfig::Mcp {
-                provider: BuiltinWebSupplier::DeepSeek
-            }
-        );
+        for (id, provider) in [
+            ("tavily", BuiltinWebSupplier::Tavily),
+            ("deepseek", BuiltinWebSupplier::DeepSeek),
+            ("serper", BuiltinWebSupplier::Serper),
+            ("exa", BuiltinWebSupplier::Exa),
+        ] {
+            let config: WebFetchConfig =
+                toml::from_str(&format!("mode = 'mcp'\nmcp_provider = '{id}'"))
+                    .expect("MCP supplier");
+            assert_eq!(
+                resolve_web_fetch_config(&config, None, None),
+                ResolvedWebFetchConfig::Mcp { provider }
+            );
+        }
     }
 
     #[test]
