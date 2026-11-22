@@ -64,7 +64,7 @@ export class WebSearchSelectorComponent extends Container implements Focusable {
 		super();
 		this.choices = choices;
 		this.status = status;
-		this.selectedIndex = Math.max(0, this.getRows().findIndex((row) => row.active));
+		this.selectedIndex = Math.max(0, this.getRows().findIndex((row) => row.active && row.choice?.kind !== "inherit"));
 	}
 
 	get focused(): boolean {
@@ -129,8 +129,9 @@ export class WebSearchSelectorComponent extends Container implements Focusable {
 		const lines: string[] = [];
 		if (this.menu !== "root") {
 			lines.push(theme.fg("dim", this.menu === "builtin" ? "Built-in" : "My MCP tools"), "");
-		} else if (this.status.currentBackend) {
-			lines.push(theme.fg("dim", `Current: ${singleLine(this.status.currentBackend)}`), "");
+		} else if (this.status.currentBackend && !this.activeChoice() && this.currentChoice && this.currentChoice.kind !== "inherit") {
+			// A legacy search-only override does not match a unified picker entry.
+			lines.push(`${theme.fg("success", "✓")} ${theme.fg("dim", "Existing setup")}`, "");
 		}
 		const columnWidth = Math.min(width, 82);
 		for (const [index, row] of rows.entries()) {
@@ -170,11 +171,16 @@ export class WebSearchSelectorComponent extends Container implements Focusable {
 		const off = this.choices.find((entry) => this.backendOf(entry.choice)?.kind === "off");
 		if (off) rows.push(this.entryRow(off));
 		const inherit = this.choices.find((entry) => entry.choice.kind === "inherit");
-		if (inherit && this.currentChoice && this.currentChoice.kind !== "inherit") {
+		const usingDefault = !this.currentChoice || this.currentChoice.kind === "inherit";
+		if (inherit && (!usingDefault || (this.status.currentBackend && !this.activeChoice()))) {
+			// Keep named-backend previews, but don't surface split routing here.
+			const configured = this.choices.find((entry) =>
+				entry.choice.kind !== "inherit" && entry.label === this.status.configuredBackend);
 			rows.push({
-				...this.entryRow(inherit),
-				label: "Use configured backend",
-				note: this.status.configuredBackend ? `→ ${this.status.configuredBackend}` : undefined,
+				choice: inherit.choice,
+				label: usingDefault ? "Default setup" : "Use default setup",
+				active: usingDefault,
+				note: !usingDefault && configured ? `→ ${this.supplierName(configured)}` : undefined,
 			});
 		}
 		return rows;
@@ -298,6 +304,10 @@ export class WebSearchSelectorComponent extends Container implements Focusable {
 			if (row.unavailable) this.onUnavailable(row.note ?? `${row.label} is unavailable.`);
 			return;
 		}
-		this.onSelect(row.choice, singleLine(row.choice.kind === "inherit" ? this.status.configuredBackend ?? "configured backend" : row.label));
+		if (row.choice.kind === "inherit" && row.active) {
+			this.onCancel();
+			return;
+		}
+		this.onSelect(row.choice, row.choice.kind === "inherit" ? "Default setup" : singleLine(row.label));
 	}
 }
