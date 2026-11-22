@@ -367,6 +367,36 @@ fn parse_response_extracts_web_search_call_as_hosted_tool_use() {
 }
 
 #[test]
+fn parse_response_preserves_open_page_action_from_hosted_web_search() {
+    let response = parse_response(json!({
+        "id": "resp_open_page",
+        "status": "completed",
+        "output": [{
+            "type": "web_search_call",
+            "id": "ws_open_page",
+            "status": "completed",
+            "action": {
+                "type": "open_page",
+                "url": "https://example.test/docs"
+            },
+            "output": "Page contents"
+        }]
+    }))
+    .expect("parse response");
+
+    assert_eq!(
+        response.content,
+        vec![ResponseContent::HostedToolUse {
+            id: "ws_open_page".to_string(),
+            name: "web_search".to_string(),
+            input: json!({"type": "open_page", "url": "https://example.test/docs"}),
+            output: Some(json!("Page contents")),
+            status: Some("completed".to_string()),
+        }]
+    );
+}
+
+#[test]
 fn parse_response_extracts_web_fetch_call_as_hosted_tool_use() {
     let response = parse_response(json!({
         "id": "resp_fetch",

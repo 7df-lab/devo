@@ -12,6 +12,7 @@ use devo_core::AUTH_CONFIG_FILE_NAME;
 use devo_core::AgentsMdConfig;
 use devo_core::AppConfig;
 use devo_core::AppConfigStore;
+use devo_core::AuthCredentialKind;
 use devo_core::FileSystemSkillCatalog;
 use devo_core::McpManager;
 use devo_core::Model;
@@ -56,6 +57,7 @@ use devo_provider::ProviderRoute;
 use devo_provider::ProviderRouter;
 use devo_provider::UsageObserver;
 use futures::Stream;
+use sha2::{Digest, Sha256};
 
 use crate::SkillRecord;
 use crate::load_server_provider;
@@ -201,6 +203,103 @@ impl SessionRuntimeContext {
                 .provider_router
                 .lock()
                 .expect("provider router mutex should not be poisoned"),
+        )
+    }
+
+    /// Snapshot the installed router and its credential/config inputs together.
+    /// Hash the captured binding, not current files that a reload may not yet use.
+    pub(crate) fn hosted_web_probe_snapshot(
+        &self,
+        route: &ProviderRoute,
+    ) -> (Arc<dyn ProviderRouter>, Option<String>) {
+        let router = self.provider_router.lock().expect("provider router mutex");
+        let identity = self
+            .child_route_inputs
+            .lock()
+            .ok()
+            .and_then(|inputs| Self::hosted_web_probe_identity(route, &inputs));
+        (Arc::clone(&router), identity)
+    }
+
+    fn hosted_web_probe_identity(
+        route: &ProviderRoute,
+        inputs: &child_models::ChildRouteInputs,
+    ) -> Option<String> {
+        let ProviderRoute::Connection {
+            provider_id,
+            wire_api,
+            model_id,
+        } = route
+        else {
+            return None;
+        };
+        // The provider catalog only supplies metadata; configured routes must
+        // declare their own endpoint. Without a captured binding, don't persist.
+        let provider = inputs.providers.providers.get(provider_id)?;
+        let configured_endpoint = model_id
+            .as_ref()
+            .and_then(|model_id| provider.models.get(model_id))
+            .and_then(|model| model.base_url.as_ref())
+            .or(provider.base_url.as_ref())?;
+        if configured_endpoint.trim().is_empty() {
+            return None;
+        }
+        let base_url = match wire_api {
+            devo_protocol::ProviderWireApi::AnthropicMessages => configured_endpoint
+                .trim_end_matches('/')
+                .strip_suffix("/v1")
+                .unwrap_or(configured_endpoint.trim_end_matches('/'))
+                .to_string(),
+            devo_protocol::ProviderWireApi::OpenAIChatCompletions
+            | devo_protocol::ProviderWireApi::OpenAIResponses => {
+                crate::provider_config::normalize_openai_base_url(configured_endpoint)
+            }
+            devo_protocol::ProviderWireApi::GoogleGenerativeAi => configured_endpoint.clone(),
+        };
+        let auth = inputs.auth.as_ref()?;
+        let credential_id =
+            crate::provider_config::resolve_provider_credential_id(provider_id, provider, auth)?;
+        let credential = auth.credentials.get(&credential_id)?;
+        let credential_identity = match credential.kind {
+            AuthCredentialKind::ApiKey if !credential.value.is_empty() => {
+                let value_hash = Sha256::digest(credential.value.as_bytes());
+                format!(
+                    "api-key:{}",
+                    value_hash
+                        .iter()
+                        .map(|byte| format!("{byte:02x}"))
+                        .collect::<String>()
+                )
+            }
+            AuthCredentialKind::Oauth => {
+                let account_id = credential.account_id.as_deref()?.trim();
+                if account_id.is_empty() {
+                    return None;
+                }
+                format!("oauth:{credential_id}:{account_id}")
+            }
+            AuthCredentialKind::ApiKey => return None,
+        };
+        let headers = serde_json::to_vec(&provider.headers.as_ref()).ok()?;
+        let transport = serde_json::to_vec(&inputs.http).ok()?;
+        let mut identity = Vec::new();
+        for part in [
+            provider_id.as_bytes(),
+            wire_api.as_str().as_bytes(),
+            base_url.as_bytes(),
+            model_id.as_deref().unwrap_or_default().as_bytes(),
+            credential_identity.as_bytes(),
+            &headers,
+            &transport,
+        ] {
+            identity.extend_from_slice(&(part.len() as u64).to_be_bytes());
+            identity.extend_from_slice(part);
+        }
+        Some(
+            Sha256::digest(identity)
+                .iter()
+                .map(|byte| format!("{byte:02x}"))
+                .collect(),
         )
     }
 

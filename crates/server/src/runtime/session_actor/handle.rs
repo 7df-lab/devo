@@ -785,12 +785,14 @@ impl SessionHandle {
         auto_refine_enabled: Option<bool>,
         auto_refine_turn_interval: Option<u32>,
         python_cell_first_wait_ms: Option<u64>,
+        web_search: Option<devo_protocol::native::session::WebSearchChoice>,
     ) {
         let (reply_tx, _reply_rx) = oneshot::channel();
         let _ = self.try_send(SessionCommand::UpdateNativeSessionSettings {
             auto_refine_enabled,
             auto_refine_turn_interval,
             python_cell_first_wait_ms,
+            web_search,
             reply: reply_tx,
         });
     }

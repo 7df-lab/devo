@@ -381,6 +381,10 @@ export type SessionStatus = "idle" | "active";
 
 export type SessionFlag = "waitingApproval" | "waitingUserInput" | "compacting" | "updatingGoal";
 
+export type WebBackendChoice = { "kind": "provider" } | { "kind": "off" } | { "kind": "mcp", serverId: string, toolName: string, };
+
+export type WebSearchChoice = { "kind": "inherit" } | { "kind": "provider" } | { "kind": "off" } | { "kind": "mcp", serverId: string, toolName: string, } | { "kind": "unified", backend: WebBackendChoice, };
+
 export type SessionSettings = { permissionProfile: PermissionProfile,
 /**
  * User's reasoning-effort selection as persisted, including the toggle
@@ -417,7 +421,11 @@ autoRefineTurnInterval?: number | null,
 /**
  * First foreground wait (ms) before Python cell wait-policy. Default 180_000 when unset.
  */
-pythonCellFirstWaitMs?: bigint | null, };
+pythonCellFirstWaitMs?: bigint | null,
+/**
+ * Explicit search backend for future turns; absent means inherit defaults.
+ */
+webSearch?: WebSearchChoice | null, };
 
 export type SessionActivity = "idle" | "working";
 
@@ -565,6 +573,30 @@ export type SessionForkParams = { sessionId: SessionId, atTurnId?: TurnId | null
 cut?: SessionForkCut | null, };
 
 export type SessionForkResult = { session: Session, };
+
+export type SessionWebStatusReadParams = { sessionId: SessionId, };
+
+export type WebBackendStatus = { backend: string, note?: string, };
+
+export type WebPickerGroup = "builtin" | "custom";
+
+export type WebApiKeyStatus = "required" | "saved" | "rejected";
+
+export type WebSearchPickerEntry = { label: string, choice: WebSearchChoice, note?: string, group?: WebPickerGroup, keyStatus?: WebApiKeyStatus, unavailable?: boolean, };
+
+export type SessionWebStatusReadResult = { search: WebBackendStatus, fetch: WebBackendStatus, searchChoice: WebSearchChoice, searchChoices: Array<WebSearchPickerEntry>,
+/**
+ * Configured backend(s) without an explicit session choice, for reset preview.
+ */
+configuredBackend?: string,
+/**
+ * The current picker entry, if the configured route matches one entry.
+ */
+activeChoice?: WebSearchChoice,
+/**
+ * Current mixed or legacy configuration when it has no exact picker entry.
+ */
+currentBackend?: string, };
 
 export type SubscriptionReplay = "fromCursor" | "snapshotOnly";
 

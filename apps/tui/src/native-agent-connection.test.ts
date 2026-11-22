@@ -587,6 +587,51 @@ test("connect initializes, creates session, and returns InteractiveMode snapshot
   );
 });
 
+test("getWebStatus reads session-scoped Native web status", async () => {
+  const { conn, fake } = await bootConnection([
+    (method, params, respond) => {
+      if (method !== "session/web/status/read") return false;
+      assert.deepEqual(params, { sessionId: "sess_test" });
+      respond({
+        search: { backend: "exa" },
+        fetch: { backend: "native", note: "Some pages may be unavailable." },
+        searchChoice: { kind: "inherit" },
+        searchChoices: [{ label: "Follow defaults", choice: { kind: "inherit" } }],
+      });
+      return true;
+    },
+  ]);
+
+  assert.deepEqual(await conn.getWebStatus(), {
+    search: { backend: "exa" },
+    fetch: { backend: "native", note: "Some pages may be unavailable." },
+    searchChoice: { kind: "inherit" },
+    searchChoices: [{ label: "Follow defaults", choice: { kind: "inherit" } }],
+  });
+  assert.equal(fake.requests.filter((request) => request.method === "session/web/status/read").length, 1);
+  await conn.dispose();
+});
+
+test("setWebSearchChoice writes the choice through session settings with the live version", async () => {
+  const { conn, fake } = await bootConnection([
+    (method, params, respond) => {
+      if (method !== "session/read") return false;
+      assert.deepEqual(params, { sessionId: "sess_test" });
+      respond({ session: { id: "sess_test", version: 7, settings: {} } });
+      return true;
+    },
+  ]);
+
+  await conn.setWebSearchChoice({ kind: "mcp", serverId: "custom-search", toolName: "search" });
+  const update = fake.requests.find((request) => request.method === "session/metadata/update");
+  assert.deepEqual(update?.params, {
+    sessionId: "sess_test",
+    expectedVersion: 7,
+    settings: { webSearch: { kind: "mcp", serverId: "custom-search", toolName: "search" } },
+  });
+  await conn.dispose();
+});
+
 test("getModelCatalog marks connected and credentialed providers as configured", async () => {
   const { conn } = await bootConnection([
     (method, _params, respond) => {

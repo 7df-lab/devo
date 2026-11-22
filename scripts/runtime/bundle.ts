@@ -33,7 +33,7 @@ export async function bundleRuntime(target: string, output: string, rg: string, 
   const platform = target.includes("windows") ? "win32" : target.includes("darwin") ? "darwin" : "linux";
   const arch = target.startsWith("aarch64-") ? "arm64" : "x64";
   const ext = platform === "win32" ? ".exe" : "";
-  const backendNames = [`devo${ext}`, ...(platform === "win32" ? WINDOWS_SANDBOX_HELPERS : [])];
+  const backendNames = [`devo${ext}`, `devo-web-mcp${ext}`, ...(platform === "win32" ? WINDOWS_SANDBOX_HELPERS : [])];
   // Git Bash's GNU tar treats C: paths as remote hosts. Use native bsdtar.
   const tar = process.platform === "win32" ? join(process.env.SystemRoot ?? "C:/Windows", "System32/tar.exe") : "tar";
   for (const file of [...backendNames.map(name => join(binaryDir, name)), rg]) {

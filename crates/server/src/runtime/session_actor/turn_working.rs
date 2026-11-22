@@ -72,6 +72,7 @@ impl SessionActorState {
         let session_model = self.summary.model_name().map(str::to_string);
         let session_model_binding_id = self.summary.model_binding_id().map(str::to_string);
         let session_effort = self.summary.settings.reasoning_effort.clone();
+        let session_web_search = self.summary.settings.web_search.clone();
         let session_effective_context_window = self.summary.settings.effective_context_window;
         let session_title = self.summary.title.clone();
         let session_title_state = self.summary.title_state.clone();
@@ -98,6 +99,7 @@ impl SessionActorState {
         if session_effort.is_some() {
             self.summary.settings.reasoning_effort = session_effort;
         }
+        self.summary.settings.web_search = session_web_search;
         if session_effective_context_window.is_some() {
             self.summary.settings.effective_context_window = session_effective_context_window;
         }

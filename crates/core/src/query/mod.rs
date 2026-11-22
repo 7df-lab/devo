@@ -98,25 +98,34 @@ use crate::response_item::message_to_response_items;
 
 const SUBAGENT_MODE_REMINDER: &str = include_str!("../../prompts/subagent_mode_reminder.md");
 
-fn supports_provider_hosted_web_search(wire_api: ProviderWireApi) -> bool {
+fn supports_provider_hosted_web_tools(wire_api: ProviderWireApi) -> bool {
     matches!(
         wire_api,
         ProviderWireApi::AnthropicMessages | ProviderWireApi::OpenAIResponses
     )
 }
 
+fn provider_route_wire_api(route: &devo_provider::ProviderRoute) -> Option<ProviderWireApi> {
+    match route {
+        devo_provider::ProviderRoute::Default => None,
+        devo_provider::ProviderRoute::Connection { wire_api, .. } => Some(*wire_api),
+    }
+}
+
 fn hosted_tools_for_web_capabilities(
     web_search: &devo_config::ResolvedWebSearchConfig,
-    web_fetch: devo_config::ResolvedWebFetchConfig,
+    web_fetch: &devo_config::ResolvedWebFetchConfig,
     wire_api: ProviderWireApi,
 ) -> Vec<HostedToolDefinition> {
     let mut hosted_tools = Vec::new();
-    if matches!(web_search, devo_config::ResolvedWebSearchConfig::Provider)
-        && supports_provider_hosted_web_search(wire_api)
-    {
+    let provider_search = matches!(web_search, devo_config::ResolvedWebSearchConfig::Provider)
+        && supports_provider_hosted_web_tools(wire_api);
+    let fetch_via_search =
+        web_fetch.is_provider_via_search() && wire_api == ProviderWireApi::OpenAIResponses;
+    if provider_search || fetch_via_search {
         hosted_tools.push(HostedToolDefinition::WebSearch(HostedWebSearchTool::new()));
     }
-    if web_fetch.is_provider() {
+    if web_fetch.is_provider() && supports_provider_hosted_web_tools(wire_api) {
         hosted_tools.push(HostedToolDefinition::WebFetch(HostedWebFetchTool::new()));
     }
     hosted_tools
@@ -128,7 +137,7 @@ fn hosted_tools_for_web_search(
 ) -> Vec<HostedToolDefinition> {
     hosted_tools_for_web_capabilities(
         web_search,
-        devo_config::ResolvedWebFetchConfig::Disabled,
+        &devo_config::ResolvedWebFetchConfig::Disabled,
         ProviderWireApi::AnthropicMessages,
     )
 }
@@ -619,26 +628,61 @@ pub async fn query(
                     system.push_str("\n\n");
                 }
                 system.push_str(&crate::tools::websearch_prompt::web_search_prompt());
-            } else if turn_config.web_search.is_local() {
+            } else if matches!(
+                turn_config.web_search,
+                devo_config::ResolvedWebSearchConfig::Local(_)
+                    | devo_config::ResolvedWebSearchConfig::Mcp { .. }
+            ) {
                 if !system.trim().is_empty() {
                     system.push_str("\n\n");
                 }
                 system.push_str(
-                    "Local web search is available through Python as `await rlm.web_search(query)`. Use it for current information when needed.",
+                    "Configured web search is available through Python as `await rlm.web_search(query)`. Use it for current information when needed.",
                 );
             }
-            if turn_config.web_fetch.is_local() {
+            if turn_config.web_fetch.is_provider_via_search()
+                && provider_route_wire_api(&turn_config.provider_route)
+                    == Some(ProviderWireApi::OpenAIResponses)
+            {
+                if !system.trim().is_empty() {
+                    system.push_str("\n\n");
+                }
+                system.push_str("To read a specific URL, use the OpenAI Responses hosted web_search `open_page` action. Do not use Python, direct HTTP, or another fetch backend. Keep the configured provider and supplier unchanged.");
+            } else if turn_config.web_fetch.is_local() {
                 if !system.trim().is_empty() {
                     system.push_str("\n\n");
                 }
                 system.push_str(
                     "Local web fetch is available through Python as `await rlm.web_fetch(url)`. Use it to retrieve a specific URL when needed.",
                 );
-            } else if turn_config.web_fetch.is_provider() {
+            } else if turn_config.web_fetch.is_provider()
+                && provider_route_wire_api(&turn_config.provider_route)
+                    .is_none_or(supports_provider_hosted_web_tools)
+            {
                 if !system.trim().is_empty() {
                     system.push_str("\n\n");
                 }
                 system.push_str("Provider-hosted web fetch is available to retrieve a specific URL when needed.");
+            } else if matches!(
+                &turn_config.web_fetch,
+                devo_config::ResolvedWebFetchConfig::CustomMcp { .. }
+            ) {
+                if !system.trim().is_empty() {
+                    system.push_str("\n\n");
+                }
+                system.push_str(
+                    "The selected MCP search server may also provide a compatible web_fetch tool through `await rlm.web_fetch(url)`. Use it only when available; otherwise continue with search and do not fall back to another fetch backend.",
+                );
+            } else if matches!(
+                &turn_config.web_fetch,
+                devo_config::ResolvedWebFetchConfig::Mcp { .. }
+            ) {
+                if !system.trim().is_empty() {
+                    system.push_str("\n\n");
+                }
+                system.push_str(
+                    "Configured MCP web fetch is available through Python as `await rlm.web_fetch(url)`. Use it to retrieve a specific URL when needed.",
+                );
             }
             Some(system).filter(|system| !system.trim().is_empty())
         };
@@ -721,7 +765,7 @@ pub async fn query(
 
         let hosted_tools = hosted_tools_for_web_capabilities(
             &turn_config.web_search,
-            turn_config.web_fetch,
+            &turn_config.web_fetch,
             active_turn_config.model.provider,
         );
         let mut request = ModelRequest {

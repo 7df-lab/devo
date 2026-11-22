@@ -16,8 +16,8 @@ pub(crate) struct ChildModelEntry {
 /// Inputs associated with the installed adapters, never serialized or logged.
 #[derive(Clone)]
 pub(super) struct ChildRouteInputs {
-    providers: ProviderConfigFile,
-    http: ProviderHttpConfig,
+    pub(super) providers: ProviderConfigFile,
+    pub(super) http: ProviderHttpConfig,
     pub(super) auth: Option<UserAuthConfigFile>,
 }
 

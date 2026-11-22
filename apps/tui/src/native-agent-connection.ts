@@ -43,6 +43,8 @@ import type {
   AgentConnectionSavedSessionScope,
   AgentConnectionSessionListCallbacks,
   AgentConnectionToolDefinition,
+  AgentConnectionWebStatus,
+  WebSearchChoice,
 } from "@earendil-works/pi-coding-agent/agent-connection";
 import type { ThinkingLevel } from "@earendil-works/pi-agent-core";
 import type { ContextTreeNode } from "../lib/coding-agent/src/core/context-tree.js";
@@ -2213,6 +2215,29 @@ export class NativeAgentConnection implements AgentConnection {
       if (m.role === "assistant") return extractText(m.content);
     }
     return undefined;
+  }
+
+  async getWebStatus(): Promise<AgentConnectionWebStatus | undefined> {
+    const sessionId = this.requireSessionId();
+    const transition = this.sessionTransitionGeneration;
+    const isStale = () => this.disposed || this.sessionId !== sessionId || this.sessionTransitionGeneration !== transition;
+    try {
+      const result = (await this.rpc.request("session/web/status/read", { sessionId })) as AgentConnectionWebStatus;
+      return isStale() ? undefined : result;
+    } catch (error) {
+      if (isStale()) return undefined;
+      throw error;
+    }
+  }
+
+  async setWebSearchChoice(choice: WebSearchChoice): Promise<void> {
+    const sessionId = this.requireSessionId();
+    const transition = this.sessionTransitionGeneration;
+    await this.updateSessionMetadata({ settings: { webSearch: choice } }, () => {
+      if (this.sessionId !== sessionId || this.sessionTransitionGeneration !== transition) {
+        throw new Error("Session changed during web search update");
+      }
+    });
   }
 
   async getSystemPrompt() {

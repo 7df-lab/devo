@@ -22,7 +22,7 @@ use super::model::PermissionProfile;
 use super::page::Page;
 use super::page::PageParams;
 use super::patch::PatchField;
-use super::session::Session;
+use super::session::{Session, WebSearchChoice};
 
 // ── session/interrupt ──
 
@@ -295,6 +295,9 @@ pub struct SessionSettingsPatch {
     /// First foreground wait (ms) before Python cell wait-policy.
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub python_cell_first_wait_ms: Option<u64>,
+    /// Explicit backend for future turns; `inherit` clears the override.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub web_search: Option<super::session::WebSearchChoice>,
 }
 
 #[derive(Debug, Clone, PartialEq, Serialize, Deserialize, JsonSchema, TS)]
@@ -642,4 +645,79 @@ pub struct SessionSystemPromptReadParams {
 pub struct SessionSystemPromptReadResult {
     /// Exact system prompt text the server would send on the next model call.
     pub prompt: String,
+}
+
+// ── session/web/status/read ──
+
+#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize, JsonSchema, TS)]
+#[serde(rename_all = "camelCase")]
+pub struct SessionWebStatusReadParams {
+    pub session_id: SessionId,
+}
+
+/// Safe UI projection of a selected web backend. It never contains credentials.
+#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize, JsonSchema, TS)]
+#[serde(rename_all = "camelCase")]
+pub struct WebBackendStatus {
+    pub backend: String,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    #[ts(optional)]
+    pub note: Option<String>,
+}
+
+#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize, JsonSchema, TS)]
+#[serde(rename_all = "camelCase")]
+pub struct SessionWebStatusReadResult {
+    pub search: WebBackendStatus,
+    pub fetch: WebBackendStatus,
+    pub search_choice: WebSearchChoice,
+    pub search_choices: Vec<WebSearchPickerEntry>,
+    /// Configured backend(s) without an explicit session choice, for reset preview.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    #[ts(optional)]
+    pub configured_backend: Option<String>,
+    /// The current picker entry, if the configured route matches one entry.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    #[ts(optional)]
+    pub active_choice: Option<WebSearchChoice>,
+    /// Current mixed or legacy configuration when it has no exact picker entry.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    #[ts(optional)]
+    pub current_backend: Option<String>,
+}
+
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize, Deserialize, JsonSchema, TS)]
+#[serde(rename_all = "camelCase")]
+pub enum WebPickerGroup {
+    Builtin,
+    Custom,
+}
+
+/// Local credential presence or an explicit rejection of the current key.
+/// `Saved` is not evidence that the credential has been tested.
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize, Deserialize, JsonSchema, TS)]
+#[serde(rename_all = "camelCase")]
+pub enum WebApiKeyStatus {
+    Required,
+    Saved,
+    Rejected,
+}
+
+#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize, JsonSchema, TS)]
+#[serde(rename_all = "camelCase")]
+pub struct WebSearchPickerEntry {
+    pub label: String,
+    pub choice: WebSearchChoice,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    #[ts(optional)]
+    pub note: Option<String>,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    #[ts(optional)]
+    pub group: Option<WebPickerGroup>,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    #[ts(optional)]
+    pub key_status: Option<WebApiKeyStatus>,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    #[ts(optional)]
+    pub unavailable: Option<bool>,
 }

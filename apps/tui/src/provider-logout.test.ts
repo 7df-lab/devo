@@ -105,13 +105,17 @@ test("Native-only logged-out model opens the actual API key dialog and cancellat
   mode.connectionConfiguredProviders = new Set();
   mode.showError = message => errors.push(message);
   const flows = mode.createAuthFlows();
-  assert.equal(flows.getLoginProviderOptions().some(p=>p.id === "deepseek"),false);
+  assert.equal(flows.getLoginProviderOptions().find(p=>p.id === "deepseek")?.category,"service");
   // Simulate a catalog arriving after the menu/auth flow was created.
   mode.connectionModelCatalog = [{provider:"deepseek",id:"deepseek-v4-flash"},{provider:"excluded-native",id:"hidden"}];
   const options = flows.getLoginProviderOptions();
-  assert.equal(options.find(p=>p.id === "deepseek")?.authType,"api_key");
+  assert.deepEqual(options.filter(p=>p.id === "deepseek").map(p=>[p.authType,p.category]),[["api_key",undefined]]);
   assert.equal(options.some(p=>p.id === "excluded-native"),false);
-  assert.equal(options.find(p=>p.id === "serper")?.category,"service");
+  assert.deepEqual(options.filter(p=>["exa","serper","tavily"].includes(p.id)).map(p=>[p.id,p.authType,p.category]),[
+    ["exa","api_key","service"],
+    ["serper","api_key","service"],
+    ["tavily","api_key","service"],
+  ]);
   const result = mode.ensureModelProviderConfigured(mode.connectionModelCatalog[0], flows);
   assert.match(overlay!.render(100).join("\n"), /Enter API key:/);
   overlay!.handleInput("\x1b");

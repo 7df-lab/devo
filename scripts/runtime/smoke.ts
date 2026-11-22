@@ -13,6 +13,8 @@ export function smokeBundle(bundle: string): void {
       if (!existsSync(join(bundle, name))) throw new Error(`Incomplete Windows sandbox: ${name}`);
     }
   }
+  const sidecar = platform === "win32" ? "devo-web-mcp.exe" : "devo-web-mcp";
+  if (!existsSync(join(bundle, sidecar))) throw new Error(`Incomplete bundle: ${sidecar}`);
   const pythonRelative = platform === "win32" ? "runtime/python/python.exe" : "runtime/python/bin/python3";
   const nodeRelative = platform === "win32" ? "runtime/node/node.exe" : "runtime/node/bin/node";
   const runtimePath = (root: string, kind: string, relative: string) => {

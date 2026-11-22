@@ -1,0 +1,26 @@
+[package]
+edition.workspace = true
+license.workspace = true
+name = "devo-web-mcp"
+version.workspace = true
+
+[[bin]]
+name = "devo-web-mcp"
+path = "src/main.rs"
+
+[lints]
+workspace = true
+
+[dependencies]
+devo-core = { path = "../core" }
+devo-network-proxy = { path = "../network-proxy" }
+devo-util-paths = { workspace = true }
+reqwest = { workspace = true }
+rmcp = { workspace = true, features = ["server", "transport-io"] }
+serde = { workspace = true, features = ["derive"] }
+serde_json = { workspace = true }
+tokio = { workspace = true, features = ["full"] }
+toml = { workspace = true }
+
+[dev-dependencies]
+pretty_assertions = { workspace = true }

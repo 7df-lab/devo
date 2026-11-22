@@ -505,6 +505,7 @@ impl ServerRuntime {
                 );
             }
         };
+        self.check_hosted_web(&runtime_context, &turn_config);
         let model_binding_id = turn_config
             .model_binding_id
             .clone()

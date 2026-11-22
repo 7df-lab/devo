@@ -349,7 +349,8 @@ export function ConnectProviderDialog({
 					<DialogDescription>
 						{provider.id === ZEN_PROVIDER_ID
 							? "Curated, optimized models for coding agents with a single API key."
-							: `Add your credentials to start using ${provider.name} models`}
+							: `Add your credentials to start using ${provider.name} models.`}{" "}
+						Devo may send small hosted web-tool checks. Your provider may charge for these checks.
 					</DialogDescription>
 				</DialogHeader>
 

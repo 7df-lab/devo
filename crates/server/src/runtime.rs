@@ -168,6 +168,10 @@ mod turn_exec;
 mod turn_lifecycle;
 mod turn_reservation;
 mod user_input;
+mod web_probe_persistence;
+mod web_search_builtin;
+mod web_search_mcp;
+mod web_status;
 mod workspace_baseline;
 mod worktrees;
 
@@ -280,6 +284,7 @@ pub struct ServerRuntime {
     title_polish_pending: Mutex<HashMap<SessionId, TitlePolishPending>>,
     /// Cap concurrent auxiliary model calls (title polish, refine, …) to 1.
     auxiliary_model_slots: Arc<Semaphore>,
+    hosted_web_checks: web_status::HostedWebChecks,
     /// Weak back-reference used when session actors need the owning runtime `Arc`.
     self_weak: std::sync::Weak<ServerRuntime>,
     /// LRU order for loaded root session actors.
@@ -512,6 +517,7 @@ impl ServerRuntime {
             title_generation_in_flight: Mutex::new(HashSet::new()),
             title_polish_pending: Mutex::new(HashMap::new()),
             auxiliary_model_slots: Arc::new(Semaphore::new(1)),
+            hosted_web_checks: web_status::HostedWebChecks::open(&server_home),
             self_weak: self_weak.clone(),
             session_lru: Mutex::new(session_cache::ParentSessionLru::new(
                 session_cache::PARENT_SESSION_LRU_CAPACITY,

@@ -12,11 +12,21 @@
 | 已确认接入点支持 Anthropic 原生抓取 | `web_fetch.mode = "provider"` | 模型服务端 |
 | 不提供对应的常规工具入口 | `mode = "disabled"` | 不在该能力的常规入口启用 |
 
-**当前没有 `auto` 模式，也没有“探测 provider 不支持 → 自动切换 Exa/Tavily/Parallel”的逻辑。** 原生工具报错不会触发第三方重试；配置多个搜索服务也不构成轮询或故障转移列表。搜索与抓取独立选择，可以“原生搜索 + 本地抓取”，也可以两者都走本地。
+**没有自动切换供应商的逻辑。** 原生工具报错不会触发第三方重试；配置多个搜索服务也不构成轮询或故障转移列表。配置文件仍可独立设置搜索与抓取（例如“原生搜索 + 本地抓取”）；在 `/web` 显式选择后，则由同一个后端提供两项能力，不支持的能力不会回退到其他服务。
 
 默认值是 **search = provider，fetch = local**。对于 Ollama、LM Studio、vLLM 等只有兼容推理 API 的接入点，通常应显式配置本地搜索，不要把“支持 function calling”理解为“服务端自带联网搜索”。本地搜索中的“本地”指调用代码在 Devo 一侧，**仍会联网发送查询**。
 
-`disabled` 是功能配置，不是断网或安全隔离开关。独立 MCP、技能或其他获准的联网路径不随之关闭；当前 RLM 的 `web.fetch` host bridge 也没有检查 fetch mode，仍执行自身的权限检查。需要禁止联网时，应使用权限和网络隔离策略，不能只依赖这些 mode。
+`disabled` 是功能配置，不是断网或安全隔离开关。独立 MCP、技能或其他获准的联网路径不随之关闭。RLM 的 `web.fetch` 检查该轮的 fetch mode；选择 provider 或 disabled 时不会偷偷执行 Direct HTTP。需要禁止联网时，应使用权限和网络隔离策略，不能只依赖这些 mode。
+
+### 终端：选择本会话的联网后端
+
+在 TUI 输入 `/web`，用上下方向键移动，按 Enter 选择，左方向键返回上一层，Esc 关闭菜单。命令与保存确认不进入对话记录。显式选择同时作用于搜索与抓取；不支持的能力不会换服务，**Off** 关闭两项能力。选择从下一轮起生效，重启或切换模型后仍保留。菜单只列出可显式选择的后端；旧会话的仅搜索选择及已有的独立配置不会静默改动，也不会在菜单中分开列出。
+
+- **Model provider** 会显示当前模型连接的自动检查结果，例如 **Search + fetch**、**Search only** 或 **Couldn’t verify**。结果不明确不等于不支持。
+- **Built-in** 展开 Tavily、DeepSeek、Serper 和 Exa。每个供应商均提供 `web_search` 与 `web_fetch`，且需要自己的 API key。列表区分 **Key required**、**Key saved** 与已收到明确拒绝的 **Key rejected**。在缺少或被拒绝的密钥所在行按 Enter，可直接输入或粘贴密钥（输入会遮盖），再按 Enter 保存并选择该供应商。保存密钥并不等于验证。与 `devo` 同目录的 `devo-web-mcp` 只在实际调用时启动，从用户凭据存储读取密钥，无需环境变量。调用可能消耗供应商额度或产生费用。
+- 如果仍使用配置文件，可在应用、provider 或模型的 `web_fetch` 配置中设置 `mode = "mcp"` 和 `mcp_provider = "deepseek"`、`"tavily"`、`"serper"` 或 `"exa"`。内置 MCP 抓取只支持 Markdown；失败不会回退到 Direct HTTP。
+- **My MCP tools** 只在可选时显示。选择一个能用单独字符串 `query` 调用的工具时，抓取仅使用同一服务器上可用的兼容 `web_fetch`（可用单独字符串 `url` 调用）；否则该选择仅支持搜索。保存的是服务器 ID 和工具原始名称。
+- 从源码构建 TUI 和内置 MCP 时，运行 `cargo build -p devo-cli -p devo-web-mcp --bins`。
 
 ## 2. 名称与调用链
 
@@ -99,11 +109,11 @@ rlm.web_fetch(url)    → host_request("web.fetch", ...)  → 权限检查 → W
 | --- | --- | --- |
 | `anthropic_messages` | 添加 `{"type":"web_search_20260209","name":"web_search"}` | 添加 `{"type":"web_fetch_20260209","name":"web_fetch"}` |
 | `openai_responses` | 添加 `{"type":"web_search"}` | 当前代码添加 `{"type":"web_fetch"}`；不能视为官方支持保证 |
-| `openai_chat_completions` | core 层不添加 hosted search | 当前代码写顶层 `web_fetch_options: {}`；不能视为官方支持保证 |
+| `openai_chat_completions` | 正常 turn 不添加 | 正常 turn 不添加 |
 
 重要边界：
 
-- **协议兼容不等于能力兼容。** 没有按 endpoint、模型或账户自动探测原生 web 能力，兼容代理可能拒绝、忽略或自行实现这些字段。
+- **协议兼容不等于能力兼容。** 即使选了 MCP，Devo 也会为可用的 Messages / Responses 连接分别检查原生搜索与抓取。添加连接、切换模型、启动或恢复会话时会尝试，联网能力完全关闭时不从该会话启动新检查。检查会实际调用选定的模型和服务端工具，只使用固定的公开查询及 URL，不发送会话内容，但可能产生供应商费用。对 Responses，优先在同一请求验证搜索及 `open_page`；尚未验证时先单独尝试打开页面，再尝试独立 `web_fetch`，任一路径已验证就跳过其余尝试。Devo 将证据保存到本地用户状态，按连接、协议、账号或密钥、模型和请求设置区分，重启也能复用；明确结果保留 7 天，无法验证的结果保留 1 小时。如果没有缓存则在后台启动检查，不阻塞菜单。无法验证不等于不支持。已验证的 `open_page` 可以在同一供应商执行抓取，不会改选后端或回退到 Direct HTTP。
 - Chat Completions 的底层适配器能序列化 `web_search_options`，但正常 core turn 的 search gate 只允许 Responses 和 Anthropic，因此不能照旧 README 描述期待它自动启用。官方 Chat Completions 搜索需要适配的模型，这与当前 Devo 正常路径是否发送参数是两件事。
 - OpenAI 官方 Web Search 文档描述了搜索过程中的 `open_page` / `find_in_page`，不能据此推导出独立 `web_fetch` 工具或 `web_fetch_options` 受支持。对普通 OpenAI 接入点保留 `fetch = local` 更稳妥；只有接入点明确提供相应扩展且经过验证时才使用当前 provider fetch 序列化。
 - Anthropic 的版本化工具需与模型、平台及账户匹配。当前 Devo 固定使用上述 20260209 版本，不会自动回退到旧版，也不会自动跟随官方新版。官方动态过滤功能有模型要求；不能仅看 `anthropic_messages` 就认定可用。
@@ -246,35 +256,22 @@ mode = "local"
 
 403、登录墙、验证码、JS-only 页面不会自动交给浏览器或第三方抓取服务。返回成功也应检查正文是否实际上是登录页面。`allowed_domains` 等 hosted 内部字段不约束本地 HTTP fetch；访问限制要在权限/网络层落实。
 
-## 7. Serper 技能回退与通用 MCP
+## 7. 内置搜索供应商与通用 MCP
 
-### Serper 是另一条技能路径
+### 显式选择 Serper 或 Exa
 
-bundled `websearch` 技能实现 `websearch.run(...)`，与 `tools.web_search.local_providers` 不是同一种配置：
+1. 从 [Serper](https://serper.dev) 或 [Exa](https://exa.ai) 获取 API key。在 `/web` → **Built-in** 选择供应商，按 Enter 在原地输入并保存密钥。也可使用 `/login` → **MCP Connections**。用户级 `auth.json` 中已有的 `serper` 或 `exa` API key 不必重录。
+2. 在 `/web` → **Built-in** 选择 **Serper** 或 **Exa**，同时启用该供应商的搜索和抓取。不使用会话选择时，仍可独立配置默认抓取（用 Exa 时将供应商改为 `"exa"`）：
 
-1. 先尝试 host `web.search`，即当前 turn 的本地搜索配置（包括 Parallel）。函数名称中的 hosted 不表示调用 provider 原生搜索。
-2. 只有捕获到“未配置 / needs configuration”类错误，或没有得到可用文本时，才尝试 Serper；一般网络错误、认证错误不构成自动切换条件。
-3. 无 key 时给配置提示，不生成伪造结果。
-
-配置入口：TUI `/login` → **MCP Connections** → **Serper (web search)**；它是 service credential，名称出现在 MCP 分类不代表启动了 MCP server。源码在 auth flow 中单独注册了它。也可将以下条目合并到用户 auth.json：
-
-```json
-{
-  "serper": {"type": "api_key", "key": "REPLACE_WITH_SERPER_KEY"}
-}
+```toml
+[tools.web_fetch]
+mode = "mcp"
+mcp_provider = "serper"
 ```
 
-技能调用示例（技能已加载且内核运行）：
+`devo-web-mcp` 使用 [Serper Search 和 Scrape API](https://serper.dev/playground) 或 [Exa Search](https://exa.ai/docs/reference/search) 和 [Contents](https://exa.ai/docs/reference/get-contents)。两者沿用现有凭据存储和 `[provider_http]` 代理配置。不会在请求失败时自动切换供应商。现有 `mode = "local"` 的 Exa 配置也可以继续使用。
 
-```python
-print(await websearch.run("Rust 最新发布", max_output=8192, timeout=45, num_results=5))
-```
-
-技能 POST 到 `https://google.serper.dev/search`，header 为 `X-API-KEY`，body 为 `{"q": query}`。`num_results` 限制本地输出中的 organic 条目，不控制请求的搜索结果数量；还可能输出 knowledge graph 与最多三个相关问答。`max_output` 默认 8192 字符，超出会截断。
-
-Serper key 查找顺序为 `SERPER_API_KEY` 环境变量，然后 auth.json 的 `serper.type/key`。技能配置目录依次看 `DEVO_CODING_AGENT_DIR`、`DEVO_HOME`、`PI_CODING_AGENT_DIR`，最后 `~/.devo`；这与 Rust host 目录要保持一致。可选环境覆盖 `DEVO_WEBSEARCH_TIMEOUT`（默认 45）和 `DEVO_WEBSEARCH_NUM_RESULTS`（默认 5），显式函数参数优先。一般用户用 `/login` 即可，无需设置环境变量。获取 key 见 [Serper 官网](https://serper.dev)。
-
-技能依赖 bundled skill 与 Python/httpx 可用；禁用或不加载技能时不会凭空出现这条回退。它的 HTTP 客户端不同于 Rust 网络代理客户端，不应假定 `[provider_http]` 会自动套用到 Serper。
+bundled `websearch` 技能只使用当前 turn 提供的能力。搜索用模型直接可调用的 `web_search` 或已启用的 `rlm.web_search(query)`；读取页面用原生 `web_fetch`、当前 turn 指定的 `web_search.open_page`，或已启用的 `rlm.web_fetch(url)`。`websearch.run(query, max_output=8192)` 仍只封装 Python 搜索并返回截断文本；旧的 `timeout` 和 `num_results` 参数仍可传入，但不覆盖后端设置。关闭、无配置、拒绝或错误均不会触发回退。
 
 ### 通用 MCP 可以接其他搜索/抓取服务
 
@@ -313,7 +310,7 @@ no_proxy = "localhost,127.0.0.1"
 - 原生模式：查询/对话与工具执行交给模型接入点及其搜索基础设施。
 - 本地搜索：查询和必要认证发给所选服务；Parallel 额外带 session_id。结果进入模型上下文，可能进入会话记录。
 - 本地 fetch：目标网站/代理接收 URL、IP 和 HTTP 请求元数据，响应进入模型上下文。
-- Serper / MCP：分别遵守各自客户端与服务的数据处理规则。
+- 内置 MCP 将查询或 URL 发送给选定的供应商；自定义 MCP 遵守其客户端与服务的数据处理规则。
 
 匿名、read-only 或 local 都不代表离线、免费无限、零留存或无需权限。不要发送秘密、私有 URL token 或不必要的个人数据；不要把认证文件提交到仓库。日志中的 HTTP 错误可能含服务返回正文，分享排障材料前应脱敏。网页、搜索摘要和 MCP 返回内容属于外部不可信数据，不应被当成操作授权或系统指令。
 
@@ -334,7 +331,7 @@ no_proxy = "localhost,127.0.0.1"
 | `invalid JSON` / MCP schema 错误 | base_url 是否完整正确、网关是否返回 HTML、服务是否改了返回协议 |
 | fetch 超时/过大/内容乱码 | 网络与代理、1–120 秒超时、5 MiB、JS 页面或不支持的文档格式 |
 | 有配置但没有工具可用 | RLM 是否启动、execution_surface 是否 discrete、权限是否拒绝、模型是否支持客户端工具调用 |
-| Serper 已登录仍提示配置 | 技能目录与 host 目录是否一致、auth key 是否为 serper、技能/内核是否可用 |
+| Serper 已登录仍提示配置 | 核对 `/web` 的搜索后端、服务端用户级 `auth.json` 的 `serper` 条目及 `devo-web-mcp` 是否与 `devo` 同目录 |
 
 不要通过“隐藏错误后编答案”验证搜索；成功标准包括真实请求路径、可读结果、可核对的来源。没有对所有 provider/model 做付费真实服务测试时，应明确区分源码与 mock 测试覆盖和线上可用性。
 
@@ -351,7 +348,7 @@ no_proxy = "localhost,127.0.0.1"
 - [RLM helpers](../crates/kernel/rlm-runtime/src/rlm/__init__.py) / [host bridge 与权限](../crates/server/src/runtime/kernel_host_bridge.rs)
 - [内置搜索实现及测试](../crates/core/src/tools/handlers/websearch.rs) / [Parallel 实现](../crates/core/src/tools/handlers/websearch/parallel.rs)
 - [本地抓取实现及测试](../crates/core/src/tools/handlers/webfetch.rs)
-- [Serper 技能实现](../crates/skills/assets/bundled/websearch/src/websearch/websearch.py) / [登录入口](../apps/tui/lib/coding-agent/src/modes/interactive/auth-flows.ts)
+- [内置 `websearch` 技能](../crates/skills/assets/bundled/websearch/SKILL.md) / [登录入口](../apps/tui/lib/coding-agent/src/modes/interactive/auth-flows.ts)
 - [MCP 配置结构](../crates/config/src/mcp.rs) / [HTTP header 解析](../crates/rmcp-client/src/utils.rs)
 - [共享代理逻辑](../crates/network-proxy/src/lib.rs)
 

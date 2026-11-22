@@ -2739,6 +2739,19 @@ impl ReplayState {
                         session.native.settings.python_cell_first_wait_ms = Some(ms);
                     }
                 }
+                SessionSettingsField::WebSearch => {
+                    use devo_protocol::native::session::WebSearchChoice;
+
+                    match serde_json::from_value::<Option<WebSearchChoice>>(value) {
+                        Ok(Some(WebSearchChoice::Inherit)) | Ok(None) => {
+                            session.native.settings.web_search = None;
+                        }
+                        Ok(choice) => session.native.settings.web_search = choice,
+                        Err(error) => {
+                            tracing::warn!(session_id = %session_id, %error, "ignoring damaged webSearch settings line")
+                        }
+                    }
+                }
             }
         }
     }

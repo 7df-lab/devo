@@ -4687,6 +4687,177 @@ async fn metadata_update_auto_refine_settings_reach_live_actor() -> Result<()> {
 }
 
 #[tokio::test]
+async fn metadata_update_web_search_persists_replays_and_clears() -> Result<()> {
+    let env = NativeEnv::connect().await?;
+    let session_id = env.session().await?;
+    use devo_protocol::native::session::{WebBackendChoice, WebSearchChoice};
+    let choice = WebSearchChoice::Unified {
+        backend: WebBackendChoice::Mcp {
+            server_id: "devo:builtin:exa".into(),
+            tool_name: "web_search".into(),
+        },
+    };
+
+    let response = env
+        .rpc(
+            7,
+            "session/metadata/update",
+            serde_json::json!({
+                "sessionId": session_id.to_string(),
+                "expectedVersion": 1,
+                "settings": { "webSearch": choice },
+            }),
+        )
+        .await;
+    let result: devo_protocol::native::rpc_session::SessionMetadataUpdateResult =
+        json_result(&response, "rpc");
+    assert_eq!(result.session.settings.web_search.as_ref(), Some(&choice));
+
+    let handle = env
+        .runtime
+        .session(session_id)
+        .await
+        .expect("session actor must be live for session/new");
+    assert_eq!(
+        handle
+            .native_session()
+            .await
+            .expect("actor session")
+            .settings
+            .web_search,
+        Some(choice.clone())
+    );
+    let rollout_path = env
+        .runtime
+        .rollout_store
+        .find_rollout_by_session_id(&session_id)?
+        .expect("rollout exists");
+    assert_eq!(
+        devo_core::read_canonical_history(&rollout_path)?
+            .session
+            .expect("session")
+            .settings
+            .web_search,
+        Some(choice.clone())
+    );
+
+    // Force an actor reload so the assertion exercises server rollout restore,
+    // not only the live metadata notification.
+    if let Some(handle) = env.runtime.remove_session_actor(session_id).await {
+        handle.shutdown().await;
+    }
+    let restored = env
+        .runtime
+        .get_or_load_parent_session(session_id)
+        .await
+        .expect("restore session actor");
+    assert_eq!(
+        restored
+            .native_session()
+            .await
+            .expect("restored actor session")
+            .settings
+            .web_search,
+        Some(choice.clone())
+    );
+    let status: devo_protocol::native::rpc_session::SessionWebStatusReadResult = json_result(
+        &env.rpc(
+            9,
+            "session/web/status/read",
+            serde_json::json!({"sessionId": session_id}),
+        )
+        .await,
+        "web status",
+    );
+    assert_eq!(status.active_choice, Some(choice));
+    assert_eq!(
+        (
+            status.search.backend.as_str(),
+            status.fetch.backend.as_str()
+        ),
+        ("Exa · Built-in", "Exa · Built-in")
+    );
+    assert_eq!(status.current_backend, None);
+    assert!(status.configured_backend.is_some());
+
+    let cleared = env
+        .rpc(
+            8,
+            "session/metadata/update",
+            serde_json::json!({
+                "sessionId": session_id.to_string(),
+                "expectedVersion": 2,
+                "settings": { "webSearch": { "kind": "inherit" } },
+            }),
+        )
+        .await;
+    let cleared: devo_protocol::native::rpc_session::SessionMetadataUpdateResult =
+        json_result(&cleared, "rpc");
+    assert_eq!(cleared.session.settings.web_search, None);
+    assert_eq!(
+        devo_core::read_canonical_history(&rollout_path)?
+            .session
+            .expect("session")
+            .settings
+            .web_search,
+        None
+    );
+    Ok(())
+}
+
+#[tokio::test]
+async fn web_search_updated_during_a_turn_survives_its_merge() -> Result<()> {
+    let (env, open, started) = NativeEnv::gated().await?;
+    let session_id = env.session().await?;
+    let turn_id = start_turn(&env.runtime, env.connection_id, session_id, "hold the turn").await?;
+    wait_flag(&started, "turn should start streaming").await;
+    let response = env
+        .rpc(
+            7,
+            "session/metadata/update",
+            serde_json::json!({
+                "sessionId": session_id.to_string(), "expectedVersion": 1,
+                "settings": { "webSearch": { "kind": "unified", "backend": { "kind": "off" } } },
+            }),
+        )
+        .await;
+    let result: devo_protocol::native::rpc_session::SessionMetadataUpdateResult =
+        json_result(&response, "rpc");
+    assert!(!result.applied_to_active_turn);
+    open.store(true, std::sync::atomic::Ordering::SeqCst);
+    tokio::time::timeout(
+        Duration::from_secs(10),
+        env.runtime
+            .active_turns
+            .wait_for_turn_release(session_id, turn_id),
+    )
+    .await?;
+    let status = env
+        .rpc(
+            8,
+            "session/web/status/read",
+            serde_json::json!({"sessionId": session_id.to_string()}),
+        )
+        .await;
+    let status: devo_protocol::native::rpc_session::SessionWebStatusReadResult =
+        json_result(&status, "rpc");
+    use devo_protocol::native::session::{WebBackendChoice, WebSearchChoice};
+    let expected = WebSearchChoice::Unified {
+        backend: WebBackendChoice::Off,
+    };
+    assert_eq!(status.search_choice, expected);
+    assert_eq!(status.active_choice, Some(expected));
+    assert_eq!(
+        (
+            status.search.backend.as_str(),
+            status.fetch.backend.as_str()
+        ),
+        ("Off", "Off")
+    );
+    Ok(())
+}
+
+#[tokio::test]
 async fn native_metadata_update_during_active_turn() -> Result<()> {
     let (env, open, started) = NativeEnv::gated().await?;
     let session_id = env.session().await?;

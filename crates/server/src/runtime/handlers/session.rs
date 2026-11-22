@@ -104,7 +104,10 @@ pub(crate) enum RuntimeSessionToolRegistryUpdate {
 }
 
 impl ServerRuntime {
-    fn session_missing(&self, request_id: serde_json::Value) -> serde_json::Value {
+    pub(in crate::runtime) fn session_missing(
+        &self,
+        request_id: serde_json::Value,
+    ) -> serde_json::Value {
         self.error_response(
             request_id,
             ProtocolErrorCode::SessionNotFound,
@@ -112,7 +115,7 @@ impl ServerRuntime {
         )
     }
 
-    fn parse_rpc_params<T: serde::de::DeserializeOwned>(
+    pub(in crate::runtime) fn parse_rpc_params<T: serde::de::DeserializeOwned>(
         &self,
         request_id: serde_json::Value,
         params: serde_json::Value,
@@ -255,6 +258,7 @@ impl ServerRuntime {
                 auto_refine_enabled: None,
                 auto_refine_turn_interval: None,
                 python_cell_first_wait_ms: None,
+                web_search: None,
             },
             git_info: None,
             preview: String::new(),
@@ -892,6 +896,7 @@ impl ServerRuntime {
         let mut overlay_python_cell_first_wait_ms: Option<u64> = None;
         let mut overlay_auto_refine_enabled: Option<bool> = None;
         let mut overlay_auto_refine_turn_interval: Option<u32> = None;
+        let mut overlay_web_search: Option<devo_protocol::native::session::WebSearchChoice> = None;
         let mut applied_window: Option<u64> = None;
         let mut settings_changes = Vec::new();
         let live_permission_profile = if let Some(handle) = session_handle.as_ref() {
@@ -1085,6 +1090,26 @@ impl ServerRuntime {
                 }
                 overlay_python_cell_first_wait_ms = Some(ms);
             }
+            if let Some(choice) = settings.web_search.as_ref()
+                && current.web_search.as_ref() != Some(choice)
+            {
+                current.web_search = match choice {
+                    devo_protocol::native::session::WebSearchChoice::Inherit => None,
+                    choice => Some(choice.clone()),
+                };
+                if rollout_path.is_some() {
+                    let value = match choice {
+                        devo_protocol::native::session::WebSearchChoice::Inherit => {
+                            serde_json::Value::Null
+                        }
+                        choice => {
+                            serde_json::to_value(choice).expect("serialize web search setting")
+                        }
+                    };
+                    settings_changes.push((SessionSettingsField::WebSearch, value));
+                }
+                overlay_web_search = Some(choice.clone());
+            }
         }
         if let Some(binding) = &params.model {
             let mut model_selection = native_model_slug(binding);
@@ -1191,13 +1216,15 @@ impl ServerRuntime {
         // actor snapshot, not the rollout.
         if (overlay_auto_refine_enabled.is_some()
             || overlay_auto_refine_turn_interval.is_some()
-            || overlay_python_cell_first_wait_ms.is_some())
+            || overlay_python_cell_first_wait_ms.is_some()
+            || overlay_web_search.is_some())
             && let Some(handle) = session_handle.as_ref()
         {
             handle.notify_native_session_settings(
                 overlay_auto_refine_enabled,
                 overlay_auto_refine_turn_interval,
                 overlay_python_cell_first_wait_ms,
+                overlay_web_search.clone(),
             );
         }
         // One consolidated metadata notification carrying every field's new
@@ -1345,6 +1372,13 @@ impl ServerRuntime {
                 index_session.settings.reasoning_effort = Some(effort.clone());
                 touched = true;
             }
+            if let Some(choice) = &overlay_web_search {
+                index_session.settings.web_search = match choice {
+                    devo_protocol::native::session::WebSearchChoice::Inherit => None,
+                    choice => Some(choice.clone()),
+                };
+                touched = true;
+            }
             if let Some(mode) = overlay_mode {
                 index_session.settings.mode = serde_json::to_value(mode)
                     .ok()
@@ -1394,6 +1428,12 @@ impl ServerRuntime {
             if let Some(effort) = &overlay_effort {
                 session.settings.reasoning_effort = Some(effort.clone());
             }
+            if let Some(choice) = &overlay_web_search {
+                session.settings.web_search = match choice {
+                    devo_protocol::native::session::WebSearchChoice::Inherit => None,
+                    choice => Some(choice.clone()),
+                };
+            }
             if let Some(mode) = overlay_mode {
                 session.settings.mode = serde_json::to_value(mode)
                     .ok()
@@ -1410,6 +1450,10 @@ impl ServerRuntime {
             };
             index_session.clone()
         };
+        if overlay_model.is_some() || model_binding_update.is_some() || overlay_web_search.is_some()
+        {
+            self.enqueue_hosted_web_checks(legacy_session_id);
+        }
         // Echo applied model effective window for older clients. Do not fan out
         // a global compaction preference — that product surface is removed.
         if let Some(applied) = applied_window {
@@ -1476,6 +1520,7 @@ impl ServerRuntime {
                 .lock()
                 .await
                 .insert(params.idempotency_key, session_id);
+            self.enqueue_hosted_web_checks(session_id);
             if let Some(result) = self
                 .native_session_snapshot_response(request_id, session_id)
                 .await
@@ -1945,6 +1990,8 @@ impl ServerRuntime {
         self.runtime_arc()
             .reissue_pending_controls_if_subscribed(connection_id, &params.session_id)
             .await;
+        self.runtime_arc()
+            .enqueue_hosted_web_checks(legacy_session_id);
         self.native_session_resume_response(request_id, legacy_session_id)
             .await
             .unwrap_or(response)

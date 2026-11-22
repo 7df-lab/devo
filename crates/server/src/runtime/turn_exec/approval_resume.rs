@@ -799,9 +799,13 @@ impl ServerRuntime {
                     devo_core::ResolvedWebSearchConfig::Local(config) => {
                         serde_json::to_value(config).ok()
                     }
-                    devo_core::ResolvedWebSearchConfig::Disabled
-                    | devo_core::ResolvedWebSearchConfig::Provider => None,
+                    _ => None,
                 },
+                web_routes: super::super::kernel_host_bridge::WebRoutes::for_turn(
+                    &working.state.runtime_context,
+                    &turn_config.web_search,
+                    &turn_config.web_fetch,
+                ),
                 network_proxy: None,
                 network_no_proxy: None,
                 runtime: Arc::downgrade(&runtime),
@@ -853,8 +857,7 @@ impl ServerRuntime {
                 file_read_ledger: Arc::clone(&working.state.file_read_ledger),
                 local_web_search: match &turn_config.web_search {
                     devo_core::ResolvedWebSearchConfig::Local(config) => Some(config.clone()),
-                    devo_core::ResolvedWebSearchConfig::Disabled
-                    | devo_core::ResolvedWebSearchConfig::Provider => None,
+                    _ => None,
                 },
                 hooks: ServerRuntime::hook_context_from_actor_state(&working.state, session_id),
                 network_proxy: None,

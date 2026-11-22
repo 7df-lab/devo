@@ -49,6 +49,7 @@ class HostedInferenceLoginHeader implements Component {
 		return [
 			centeredLine(theme.fg("text", "Hosted Inference"), safeWidth),
 			centeredLine(theme.fg("muted", "Connect your account to enable hosted models."), safeWidth),
+			centeredLine(theme.fg("muted", "Automatic web-tool checks may incur provider charges."), safeWidth),
 		];
 	}
 }
@@ -100,7 +101,7 @@ export class LoginDialogComponent extends Container implements Focusable {
 
 		const panel = new MenuPanel({
 			title: this.isPrimeInference ? "" : title,
-			subtitle: this.isPrimeInference ? undefined : "Complete this step to continue setup.",
+			subtitle: this.isPrimeInference ? undefined : "Automatic web-tool checks may incur provider charges.",
 		});
 		this.addChild(panel);
 

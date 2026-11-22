@@ -100,17 +100,17 @@ jobs:
       - name: Build release binary (Linux)
         if: runner.os == 'Linux'
         run: |
-          cargo zigbuild --release --target ${{ matrix.target }} -p devo-cli
+          cargo zigbuild --release --target ${{ matrix.target }} -p devo-cli -p devo-web-mcp
 
       - name: Build release binary (macOS)
         if: runner.os == 'macOS'
         run: |
-          cargo build --release --target ${{ matrix.target }} -p devo-cli
+          cargo build --release --target ${{ matrix.target }} -p devo-cli -p devo-web-mcp
 
       - name: Build release binary (Windows)
         if: runner.os == 'Windows'
         run: |
-          cargo build --release --target ${{ matrix.target }} -p devo-cli -p devo-windows-sandbox --bins
+          cargo build --release --target ${{ matrix.target }} -p devo-cli -p devo-web-mcp -p devo-windows-sandbox --bins
 
       - name: Strip symbols (macOS)
         if: runner.os == 'macOS'

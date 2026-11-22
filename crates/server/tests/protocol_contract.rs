@@ -57,6 +57,7 @@ fn sample_native_session(
             auto_refine_enabled: None,
             auto_refine_turn_interval: None,
             python_cell_first_wait_ms: None,
+            web_search: None,
         },
         git_info: None,
         preview: String::new(),

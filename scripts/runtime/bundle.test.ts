@@ -28,6 +28,7 @@ test("Windows bundles reject either missing sandbox helper before downloads", as
   try {
     const output = join(root, "bundle");
     writeFileSync(join(root, "devo.exe"), "backend");
+    writeFileSync(join(root, "devo-web-mcp.exe"), "MCP companion");
     writeFileSync(join(root, "rg.exe"), "ripgrep");
     for (const helper of WINDOWS_SANDBOX_HELPERS) {
       await expect(bundleRuntime("x86_64-pc-windows-msvc", output, join(root, "rg.exe"), root))

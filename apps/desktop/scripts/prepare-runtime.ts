@@ -110,6 +110,9 @@ export function stageRuntime(options: StageRuntimeOptions): void {
 	copyExecutable(devoSource, devoDest, targetPlatform)
 	copyExecutable(rgSource, rgDest, targetPlatform)
 	for (const name of helpers) copyExecutable(join(dirname(devoSource), name), join(runtimeBinDir, name), targetPlatform)
+	const webMcpName = runtimeBinaryName("devo-web-mcp", targetPlatform)
+	const webMcpSource = join(dirname(devoSource), webMcpName)
+	if (existsSync(webMcpSource)) copyExecutable(webMcpSource, join(runtimeBinDir, webMcpName), targetPlatform)
 
 	console.log(`Prepared Desktop runtime: ${devoDest}`)
 	console.log(`Prepared ripgrep sidecar: ${rgDest}`)

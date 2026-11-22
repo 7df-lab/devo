@@ -560,6 +560,9 @@ function Install-DevoBundle {
     $backup = Join-Path $stage "old"
     New-Item -ItemType Directory -Path $fresh, $backup -Force | Out-Null
     $names = @("runtime", "tui", "rg.exe")
+    if (Test-Path -LiteralPath (Join-Path $Source "devo-web-mcp.exe") -PathType Leaf) {
+        $names += "devo-web-mcp.exe"
+    }
     $names += @("devo.exe", "devo-windows-sandbox-setup.exe", "devo-command-runner.exe")
     $changed = @()
     try {

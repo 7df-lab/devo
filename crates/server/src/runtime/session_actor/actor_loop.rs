@@ -517,6 +517,7 @@ pub(super) async fn run_session_actor(
                 auto_refine_enabled,
                 auto_refine_turn_interval,
                 python_cell_first_wait_ms,
+                web_search,
                 reply,
             } => {
                 if let Some(enabled) = auto_refine_enabled {
@@ -527,6 +528,12 @@ pub(super) async fn run_session_actor(
                 }
                 if let Some(ms) = python_cell_first_wait_ms {
                     state.summary.settings.python_cell_first_wait_ms = Some(ms);
+                }
+                if let Some(choice) = web_search {
+                    state.summary.settings.web_search = match choice {
+                        devo_protocol::native::session::WebSearchChoice::Inherit => None,
+                        choice => Some(choice),
+                    };
                 }
                 state.summary.updated_at = Utc::now();
                 // Keep the actor version aligned with the settings-epoch bump

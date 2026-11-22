@@ -213,6 +213,7 @@ pub(crate) enum SessionCommand {
         auto_refine_enabled: Option<bool>,
         auto_refine_turn_interval: Option<u32>,
         python_cell_first_wait_ms: Option<u64>,
+        web_search: Option<devo_protocol::native::session::WebSearchChoice>,
         reply: oneshot::Sender<()>,
     },
     ApplyPermissionProfile {

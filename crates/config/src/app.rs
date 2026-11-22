@@ -308,6 +308,11 @@ impl AppConfigStore {
             .expect("user config file should have a parent directory")
     }
 
+    /// Workspace whose configuration overlays this store, if present.
+    pub fn workspace_root(&self) -> Option<&Path> {
+        self.workspace_root.as_deref()
+    }
+
     /// Returns the standalone user provider/model configuration path.
     pub fn user_provider_config_file(&self) -> PathBuf {
         self.user_config_dir()

@@ -261,6 +261,7 @@ import {
 	type PermissionProfile,
 } from "./components/permission-selector.js";
 import { ThinkingSelectorComponent } from "./components/thinking-selector.js";
+import { WebSearchSelectorComponent } from "./components/web-search-selector.js";
 import { ThemeSelectorComponent } from "./components/theme-selector.js";
 import {
 	selectLatestToolExpandHint,
@@ -742,6 +743,7 @@ export class InteractiveMode {
 
 	private lastStatusSpacer: Spacer | undefined = undefined;
 	private lastStatusText: Text | undefined = undefined;
+	private webFeedback?: { text: Text; timeout: ReturnType<typeof setTimeout> };
 	private lastGoalAnnouncement: GoalAnnouncementSnapshot | undefined = undefined;
 	private readonly goalElapsedClock = new GoalElapsedClock();
 	private goalTrayTimer: NodeJS.Timeout | undefined = undefined;
@@ -4834,6 +4836,15 @@ export class InteractiveMode {
 					this.echoLocalCommand(text);
 					await this.handleSystemPromptCommand();
 					this.editor.setText("");
+					return;
+				}
+				if (commandName === "web") {
+					this.editor.setText("");
+					if (commandArgs) {
+						this.showWebFeedback("Usage: /web", "warning");
+					} else {
+						await this.handleWebCommand();
+					}
 					return;
 				}
 				if (commandName === "traces") {
@@ -9755,6 +9766,107 @@ export class InteractiveMode {
 		const component = new SystemPromptComponent(prompt, this.toolOutputExpanded);
 		this.chatContainer.addChild(component);
 		this.ui.requestRender();
+	}
+
+	private showWebFeedback(message: string, tone: "dim" | "warning" = "dim"): void {
+		if (this.webFeedback) {
+			clearTimeout(this.webFeedback.timeout);
+			this.statusContainer.removeChild(this.webFeedback.text);
+		}
+		const cleanMessage = message.replace(/[\x00-\x1f\x7f-\x9f]/g, " ");
+		const text = new Text(theme.fg(tone, cleanMessage), 1, 0);
+		this.statusContainer.addChild(text);
+		const timeout = setTimeout(() => {
+			this.statusContainer.removeChild(text);
+			if (this.webFeedback?.text === text) this.webFeedback = undefined;
+			this.ui.requestRender();
+		}, 2800);
+		timeout.unref();
+		this.webFeedback = { text, timeout };
+		this.ui.requestRender();
+	}
+
+	private async handleWebCommand(): Promise<void> {
+		const connection = this.agentConnection;
+		const generation = this.sessionEventGeneration;
+		const sessionId = this.connectionState?.sessionId;
+		if (!sessionId) return;
+
+		const isCurrent = () =>
+			this.isCurrentConnectionGeneration(connection, generation) && this.connectionState?.sessionId === sessionId;
+		try {
+			const status = await connection.getWebStatus();
+			if (!status || !isCurrent()) return;
+			const searchChoices = status.searchChoices;
+			if (!searchChoices?.length) {
+				const formatRow = (label: string, value: { backend: string; note?: string }) =>
+					`${label}: ${value.backend}${value.note ? ` — ${value.note}` : ""}`;
+				this.showWebFeedback(`${formatRow("Search", status.search)} · ${formatRow("Fetch", status.fetch)}`);
+				return;
+			}
+
+			this.showSelector((done) => {
+				let open = true;
+				let busy = false;
+				let probeAttempts = 0;
+				let probeTimer: ReturnType<typeof setTimeout> | undefined;
+				const close = () => {
+					open = false;
+					if (probeTimer) clearTimeout(probeTimer);
+					done();
+				};
+				const selector = new WebSearchSelectorComponent(
+					status.searchChoice,
+					searchChoices,
+					status,
+					(choice, label) => {
+						if (busy || !open || !isCurrent()) return;
+						busy = true;
+						void connection.setWebSearchChoice(choice).then(() => {
+							if (!isCurrent() || !open) return;
+							close();
+							this.showWebFeedback(`Web: ${label}`);
+						}).catch((error: unknown) => {
+							if (isCurrent() && open) this.showWebFeedback(error instanceof Error ? error.message : String(error), "warning");
+						}).finally(() => {
+							busy = false;
+						});
+					},
+					close,
+					(message) => this.showWebFeedback(message, "warning"),
+					{
+						save: async (credentialId, key) => {
+							if (!open || !isCurrent()) return undefined;
+							// Use the same user store and Native sync as service login, without
+							// starting a model login flow or printing credential feedback to chat.
+							this.modelRegistry.authStorage.set(credentialId, { type: "api_key", key });
+							await this.options.onProviderAuthenticated?.(credentialId, "api_key", "service");
+							return open && isCurrent() ? connection.getWebStatus() : undefined;
+						},
+						requestRender: () => this.ui.requestRender(),
+					},
+				);
+				const refreshProbe = async () => {
+					// Search, page opening and standalone fetch may run in sequence.
+					if (!open || !isCurrent() || probeAttempts >= 40 || !selector.hasPendingProbe()) return;
+					probeAttempts++;
+					try {
+						const updated = await connection.getWebStatus();
+						if (updated && open && isCurrent()) {
+							selector.updateStatus(updated);
+							this.ui.requestRender();
+						}
+					} catch {
+						// Probe refresh is informational; selection remains available on failure.
+					}
+					if (open && isCurrent() && selector.hasPendingProbe()) probeTimer = setTimeout(refreshProbe, 1000);
+				};
+				if (selector.hasPendingProbe()) probeTimer = setTimeout(refreshProbe, 1000);
+				return { component: selector, focus: selector };
+			});
+		} catch {
+			if (isCurrent()) this.showWebFeedback("Couldn't read web settings.", "warning");
+		}
 	}
 
 	private formatTraceUploadResult(result: AgentTraceUploadResult): string {
