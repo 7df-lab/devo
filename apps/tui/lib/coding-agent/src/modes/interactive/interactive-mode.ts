@@ -9820,7 +9820,7 @@ export class InteractiveMode {
 					searchChoices,
 					status,
 					(choice, label) => {
-						if (busy || !isCurrent()) return;
+						if (busy || !open || !isCurrent()) return;
 						busy = true;
 						void connection.setWebSearchChoice(choice).then(() => {
 							if (!isCurrent() || !open) return;
@@ -9832,8 +9832,19 @@ export class InteractiveMode {
 							busy = false;
 						});
 					},
-					() => { if (!busy) close(); },
+					close,
 					(message) => this.showWebFeedback(message, "warning"),
+					{
+						save: async (credentialId, key) => {
+							if (!open || !isCurrent()) return undefined;
+							// Use the same user store and Native sync as service login, without
+							// starting a model login flow or printing credential feedback to chat.
+							this.modelRegistry.authStorage.set(credentialId, { type: "api_key", key });
+							await this.options.onProviderAuthenticated?.(credentialId, "api_key", "service");
+							return open && isCurrent() ? connection.getWebStatus() : undefined;
+						},
+						requestRender: () => this.ui.requestRender(),
+					},
 				);
 				const refreshProbe = async () => {
 					if (!open || !isCurrent() || probeAttempts >= 14 || !selector.hasPendingProbe()) return;

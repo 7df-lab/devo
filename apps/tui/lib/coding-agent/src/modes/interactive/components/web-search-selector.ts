@@ -1,8 +1,9 @@
-import { Container, type Focusable, truncateToWidth, visibleWidth } from "@earendil-works/pi-tui";
+import { Container, CURSOR_MARKER, type Focusable, Input, matchesKey, truncateToWidth, visibleWidth } from "@earendil-works/pi-tui";
 import stripAnsi from "strip-ansi";
+import { BUILTIN_WEB_CREDENTIAL_IDS, type BuiltinWebCredentialId } from "../../../core/websearch-credential.js";
 import type { AgentConnectionWebSearchChoice, AgentConnectionWebStatus, WebSearchChoice } from "../../agent-connection/types.js";
 import { theme } from "../theme/theme.js";
-import { keyHint } from "./keybinding-hints.js";
+import { keyHint, rawKeyHint } from "./keybinding-hints.js";
 
 function sameChoice(left: WebSearchChoice | undefined, right: WebSearchChoice): boolean {
 	if (!left || left.kind === "inherit" || right.kind === "inherit") return left?.kind === right.kind;
@@ -27,6 +28,21 @@ interface WebMenuRow {
 	active?: boolean;
 }
 
+interface WebKeyEntry {
+	input: Input;
+	choice: WebSearchChoice;
+	credentialId: BuiltinWebCredentialId;
+	label: string;
+	saving: boolean;
+	error?: string;
+}
+
+interface WebKeyEntryActions {
+	// undefined means the panel/session was closed before the save could select a backend.
+	save: (credentialId: BuiltinWebCredentialId, apiKey: string) => Promise<AgentConnectionWebStatus | undefined>;
+	requestRender: () => void;
+}
+
 /** Borderless inline /web picker. Nested menus keep the slash command out of chat. */
 export class WebSearchSelectorComponent extends Container implements Focusable {
 	private menu: WebMenu = "root";
@@ -34,6 +50,7 @@ export class WebSearchSelectorComponent extends Container implements Focusable {
 	private isFocused = false;
 	private choices: AgentConnectionWebSearchChoice[];
 	private status: AgentConnectionWebStatus;
+	private keyEntry?: WebKeyEntry;
 
 	constructor(
 		private currentChoice: WebSearchChoice | undefined,
@@ -42,6 +59,7 @@ export class WebSearchSelectorComponent extends Container implements Focusable {
 		private readonly onSelect: (choice: WebSearchChoice, label: string) => void,
 		private readonly onCancel: () => void,
 		private readonly onUnavailable: (message: string) => void = () => {},
+		private readonly keyEntryActions?: WebKeyEntryActions,
 	) {
 		super();
 		this.choices = choices;
@@ -74,9 +92,20 @@ export class WebSearchSelectorComponent extends Container implements Focusable {
 	}
 
 	handleInput(data: string): void {
-		if (data === "\x1b" || data === "\x1b[5~") {
-			if (this.menu === "root") this.onCancel();
-			else {
+		if (matchesKey(data, "escape")) {
+			this.keyEntry = undefined;
+			this.onCancel();
+			return;
+		}
+		if (this.keyEntry) {
+			if (!this.keyEntry.saving) {
+				if (matchesKey(data, "left") && !this.keyEntry.input.getValue()) this.keyEntry = undefined;
+				else this.keyEntry.input.handleInput(data);
+			}
+			return;
+		}
+		if (matchesKey(data, "left")) {
+			if (this.menu !== "root") {
 				const submenu = this.menu;
 				this.menu = "root";
 				this.selectedIndex = Math.max(0, this.getRows().findIndex((row) => row.submenu === submenu));
@@ -85,16 +114,17 @@ export class WebSearchSelectorComponent extends Container implements Focusable {
 		}
 		const rows = this.getRows();
 		if (rows.length === 0) return;
-		if (data === "\x1b[A" || data === "k") {
+		if (matchesKey(data, "up") || data === "k") {
 			this.selectedIndex = (this.selectedIndex - 1 + rows.length) % rows.length;
-		} else if (data === "\x1b[B" || data === "j") {
+		} else if (matchesKey(data, "down") || data === "j") {
 			this.selectedIndex = (this.selectedIndex + 1) % rows.length;
-		} else if (data === "\r" || data === "\n") {
+		} else if (matchesKey(data, "enter") || data === "\n") {
 			this.activate(rows[this.selectedIndex]);
 		}
 	}
 
 	render(width: number): string[] {
+		if (this.keyEntry) return this.renderKeyEntry(this.keyEntry, width);
 		const rows = this.getRows();
 		const lines: string[] = [];
 		if (this.menu !== "root") {
@@ -116,10 +146,11 @@ export class WebSearchSelectorComponent extends Container implements Focusable {
 			lines.push(truncateToWidth(text, Math.max(1, width), "…"));
 		}
 		lines.push("");
-		const keyHintRow = this.keySetupHint(rows[this.selectedIndex]);
-		if (keyHintRow) lines.push(theme.fg("warning", keyHintRow));
-		const action = this.menu === "root" ? "close" : "back";
-		lines.push(theme.fg("dim", `↑↓ move  ${keyHint("tui.select.confirm", "select", { primaryOnly: true })}  ${keyHint("tui.select.cancel", action, { primaryOnly: true })}`));
+		const selected = rows[this.selectedIndex];
+		const keyAction = selected?.keyStatus === "rejected" ? "replace key" : "add key";
+		const confirm = keyHint("tui.select.confirm", this.credentialToConfigure(selected) ? keyAction : "select", { primaryOnly: true });
+		const back = this.menu === "root" ? "" : `  ${rawKeyHint("left", "back")}`;
+		lines.push(theme.fg("dim", `↑↓ move  ${confirm}${back}  ${rawKeyHint("esc", "close")}`));
 		return lines.map((line) => truncateToWidth(line, Math.max(1, width), "…"));
 	}
 
@@ -184,10 +215,59 @@ export class WebSearchSelectorComponent extends Container implements Focusable {
 		return entry.label.replace(/ · Built-in(?: MCP)?$/, "");
 	}
 
-	private keySetupHint(row: WebMenuRow | undefined): string | undefined {
-		if (row?.keyStatus === "required") return `Save a ${singleLine(row.label)} key in /login to use it.`;
-		if (row?.keyStatus === "rejected") return `Replace the ${singleLine(row.label)} key in /login.`;
-		return undefined;
+	private credentialToConfigure(row: WebMenuRow | undefined): BuiltinWebCredentialId | undefined {
+		if (!row?.choice || (row.keyStatus !== "required" && row.keyStatus !== "rejected")) return undefined;
+		const backend = this.backendOf(row.choice);
+		if (backend?.kind !== "mcp") return undefined;
+		return BUILTIN_WEB_CREDENTIAL_IDS.find((id) => backend.serverId === `devo:builtin:${id}`);
+	}
+
+	private renderKeyEntry(entry: WebKeyEntry, width: number): string[] {
+		// Never render the Input component itself: it displays plaintext. Use
+		// its editing and paste handling, and render only bullets and a cursor.
+		const available = Math.max(1, Math.min(width, 82) - 3);
+		const position = entry.input.getCursor();
+		const before = Math.min(position, available - 1);
+		const after = Math.min(entry.input.getValue().length - position, available - before - 1);
+		const cursor = this.focused && !entry.saving ? CURSOR_MARKER : "";
+		const field = `${theme.fg("accent", "›")} ${"•".repeat(before)}${cursor}${"•".repeat(after)}`;
+		const lines = [theme.fg("text", `${entry.label} API key`), "", field, ""];
+		if (entry.error) lines.push(theme.fg("warning", entry.error));
+		const back = entry.input.getValue() ? "" : `  ${rawKeyHint("left", "back")}`;
+		lines.push(entry.saving ? theme.fg("dim", "Saving key…") :
+			`${keyHint("tui.input.submit", "save and select", { primaryOnly: true })}${back}  ${rawKeyHint("esc", "close")}`);
+		return lines.map((line) => truncateToWidth(line, Math.max(1, width), "…"));
+	}
+
+	private async saveKey(entry: WebKeyEntry, value: string): Promise<void> {
+		const actions = this.keyEntryActions;
+		if (!actions || entry.saving || this.keyEntry !== entry) return;
+		const key = value.trim();
+		if (!/^[\x21-\x7e]{1,1024}$/.test(key) || key.startsWith("!")) {
+			entry.error = "Enter a single API key.";
+			return;
+		}
+		entry.saving = true;
+		entry.error = undefined;
+		try {
+			const updated = await actions.save(entry.credentialId, key);
+			if (this.keyEntry !== entry || !updated) return;
+			entry.input.setValue("");
+			this.keyEntry = undefined;
+			this.updateStatus(updated);
+			const choice = this.choices.find((candidate) => sameChoice(candidate.choice, entry.choice));
+			if (choice?.keyStatus === "saved" && !choice.unavailable) {
+				this.onSelect(choice.choice, entry.label);
+			} else {
+				this.onUnavailable(choice?.note ? `Key saved. ${choice.note}` : "Key saved, but the backend is not ready.");
+			}
+		} catch {
+			// Avoid rendering a storage/RPC error that may contain the credential.
+			if (this.keyEntry === entry) entry.error = "Couldn’t save the key. Try again.";
+		} finally {
+			entry.saving = false;
+			actions.requestRender();
+		}
 	}
 
 	private renderKeyStatus(status: NonNullable<AgentConnectionWebSearchChoice["keyStatus"]>): string {
@@ -205,7 +285,15 @@ export class WebSearchSelectorComponent extends Container implements Focusable {
 			this.selectedIndex = Math.max(0, this.getRows().findIndex((entry) => entry.active));
 			return;
 		}
-		if (this.keySetupHint(row)) return;
+		const credentialId = this.credentialToConfigure(row);
+		if (credentialId && row.choice) {
+			if (!this.keyEntryActions) return;
+			const input = new Input();
+			const entry: WebKeyEntry = { input, choice: row.choice, credentialId, label: singleLine(row.label), saving: false };
+			input.onSubmit = (value) => { void this.saveKey(entry, value); };
+			this.keyEntry = entry;
+			return;
+		}
 		if (!row.choice || row.unavailable) {
 			if (row.unavailable) this.onUnavailable(row.note ?? `${row.label} is unavailable.`);
 			return;

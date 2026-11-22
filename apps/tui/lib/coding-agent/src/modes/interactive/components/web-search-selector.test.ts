@@ -37,9 +37,8 @@ test("web picker offers provider and nested built-in/custom menus with key statu
 	selector.handleInput("\r");
 	assert.match(text(selector), /Serper.*Key required/);
 	assert.match(text(selector), /Exa.*Key saved/);
-	selector.handleInput("\r");
-	assert.equal(selected, undefined, "required key must not be saved");
-	selector.handleInput("\x1b");
+	assert.equal(selected, undefined, "moving through the picker does not select anything");
+	selector.handleInput("\x1b[D");
 	selector.handleInput("\x1b[B");
 	selector.handleInput("\r");
 	assert.match(text(selector), /Local search/);
@@ -63,7 +62,8 @@ test("the active supplier is visible on both levels without repeating the group 
 	selector.handleInput("\r");
 	assert.match(text(selector), /› ✓ Exa.*Key saved/);
 	selector.handleInput("\x1b[A");
-	assert.match(text(selector), /Save a Serper key in \/login to use it\./);
+	assert.match(text(selector), /Enter add key/);
+	assert.doesNotMatch(text(selector), /\/login/);
 	assert.match(text(selector), /  ✓ Exa.*Key saved/);
 });
 
@@ -74,30 +74,95 @@ test("configured backend is previewed only for an explicit saved override", () =
 	assert.doesNotMatch(text(inherited), /Use configured backend/);
 });
 
-test("escape returns from a submenu, then closes the picker", () => {
-	let cancelled = false;
-	const selector = new WebSearchSelectorComponent(undefined, choices, status, () => {}, () => { cancelled = true; });
-	selector.handleInput("\x1b[B");
-	selector.handleInput("\r");
-	selector.handleInput("\x1b");
-	assert.match(text(selector), /Built-in/);
-	assert.equal(cancelled, false);
-	selector.handleInput("\x1b");
-	assert.equal(cancelled, true);
+test("Left restores focus on the parent row, and Escape closes from either level", () => {
+	for (const escapeFromSubmenu of [false, true]) {
+		let closed = false;
+		const selector = new WebSearchSelectorComponent(undefined, choices, status, () => {}, () => { closed = true; });
+		selector.handleInput("\x1b[B");
+		selector.handleInput("\r");
+		assert.match(text(selector), /← back.*Esc close/);
+		if (!escapeFromSubmenu) {
+			selector.handleInput("\x1b[D");
+			assert.match(text(selector), /›\s+Built-in.+›/);
+			assert.doesNotMatch(text(selector), /Key required/);
+			assert.equal(closed, false);
+		}
+		selector.handleInput("\x1b");
+		assert.equal(closed, true);
+	}
 });
 
-test("unknown provider probes do not disable a choice and rejected keys are surfaced", () => {
+test("Enter on a missing key opens a masked field and selects only after the saved status returns", async () => {
+	const calls: unknown[] = [];
+	const updated = { ...status, searchChoices: choices.map((choice, index) => index === 1 ? { ...choice, keyStatus: "saved" as const } : choice) };
+	const selector = new WebSearchSelectorComponent(undefined, choices, status,
+		(choice) => { calls.push(choice); }, () => assert.fail("unexpected close"), assert.fail, {
+			save: async (id, key) => { calls.push({ id, key }); return updated; },
+			requestRender: () => {},
+		});
+	selector.handleInput("\x1b[B");
+	selector.handleInput("\r");
+	selector.handleInput("\r");
+	assert.match(text(selector), /Serper API key/);
+	selector.handleInput("\x1b[D");
+	assert.match(text(selector), /›\s+Serper.*Key required/);
+	selector.handleInput("\r");
+	selector.handleInput("\r");
+	assert.match(text(selector), /Enter a single API key/);
+	selector.handleInput("\x1b[200~test-placeholder\x1b[201~");
+	assert.match(text(selector), /••••/);
+	assert.doesNotMatch(text(selector), /test-placeholder/);
+	assert.deepEqual(calls, []);
+	selector.handleInput("\r");
+	await new Promise<void>((resolve) => setImmediate(resolve));
+	assert.deepEqual(calls, [{ id: "serper", key: "test-placeholder" }, choices[1]?.choice]);
+	assert.doesNotMatch(text(selector), /test-placeholder/);
+});
+
+test("Escape from key entry discards unsubmitted input, and save errors never expose it", async () => {
+	let closed = false;
+	let saves = 0;
+	const selector = new WebSearchSelectorComponent(undefined, choices, status,
+		() => assert.fail("unexpected selection"), () => { closed = true; }, assert.fail, {
+			save: async (_id, key) => { saves++; throw new Error(key); },
+			requestRender: () => {},
+		});
+	selector.handleInput("\x1b[B");
+	selector.handleInput("\r");
+	selector.handleInput("\r");
+	selector.handleInput("test-placeholder");
+	selector.handleInput("\x1b");
+	assert.equal(saves, 0);
+	assert.equal(closed, true);
+
+	selector.handleInput("\r");
+	selector.handleInput("test-placeholder");
+	selector.handleInput("\r");
+	await new Promise<void>((resolve) => setImmediate(resolve));
+	assert.equal(saves, 1);
+	assert.match(text(selector), /Couldn’t save the key/);
+	assert.doesNotMatch(text(selector), /test-placeholder/);
+});
+
+test("unknown provider probes do not disable a choice and rejected keys can be replaced", () => {
 	let selected = false;
 	const pendingChoices = [
 		{ label: "Model provider", choice: { kind: "provider" } as const, note: "Checking…" },
 		{ label: "Exa", choice: { kind: "unified", backend: { kind: "mcp", serverId: "devo:builtin:exa", toolName: "search" } } as const, group: "builtin" as const, keyStatus: "rejected" as const },
 	];
 	const pendingStatus: AgentConnectionWebStatus = { ...status, searchChoices: pendingChoices, searchChoice: { kind: "inherit" } };
-	const selector = new WebSearchSelectorComponent(undefined, pendingChoices, pendingStatus, () => { selected = true; }, () => {});
+	const selector = new WebSearchSelectorComponent(undefined, pendingChoices, pendingStatus,
+		() => { selected = true; }, () => {}, assert.fail, {
+			save: async () => assert.fail("should not have saved yet"),
+			requestRender: () => {},
+		});
 	selector.handleInput("\r");
 	assert.equal(selected, true);
 	assert.match(text(selector), /Checking/);
 	selector.handleInput("\x1b[B");
 	selector.handleInput("\r");
 	assert.match(text(selector), /Key rejected/);
+	assert.match(text(selector), /Enter replace key/);
+	selector.handleInput("\r");
+	assert.match(text(selector), /Exa API key/);
 });

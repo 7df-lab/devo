@@ -20,10 +20,10 @@
 
 ### 终端：选择本会话的联网后端
 
-在 TUI 输入 `/web`，用方向键移动，按 Enter 选择，Esc 返回上一层或关闭。命令与保存确认不进入对话记录。显式选择同时作用于搜索与抓取；不支持的能力不会换服务，**Off** 关闭两项能力。选择从下一轮起生效，重启或切换模型后仍保留。**Use configured backend** 清除会话选择，并预览将恢复的配置。旧会话的仅搜索选择及已有的独立配置不会静默改动。
+在 TUI 输入 `/web`，用上下方向键移动，按 Enter 选择，左方向键返回上一层，Esc 关闭菜单。命令与保存确认不进入对话记录。显式选择同时作用于搜索与抓取；不支持的能力不会换服务，**Off** 关闭两项能力。选择从下一轮起生效，重启或切换模型后仍保留。**Use configured backend** 清除会话选择，并预览将恢复的配置。旧会话的仅搜索选择及已有的独立配置不会静默改动。
 
 - **Model provider** 会显示当前模型连接的自动检查结果，例如 **Search + fetch**、**Search only** 或 **Couldn’t verify**。结果不明确不等于不支持。
-- **Built-in** 展开 Tavily、DeepSeek、Serper 和 Exa。每个供应商均提供 `web_search` 与 `web_fetch`，且需要自己的 API key。列表区分 **Key required**、**Key saved** 与已收到明确拒绝的 **Key rejected**。保存密钥并不等于验证；详情见 `/login`。与 `devo` 同目录的 `devo-web-mcp` 只在实际调用时启动，从用户凭据存储读取密钥，无需环境变量。调用可能消耗供应商额度或产生费用。
+- **Built-in** 展开 Tavily、DeepSeek、Serper 和 Exa。每个供应商均提供 `web_search` 与 `web_fetch`，且需要自己的 API key。列表区分 **Key required**、**Key saved** 与已收到明确拒绝的 **Key rejected**。在缺少或被拒绝的密钥所在行按 Enter，可直接输入或粘贴密钥（输入会遮盖），再按 Enter 保存并选择该供应商。保存密钥并不等于验证。与 `devo` 同目录的 `devo-web-mcp` 只在实际调用时启动，从用户凭据存储读取密钥，无需环境变量。调用可能消耗供应商额度或产生费用。
 - 如果仍使用配置文件，可在应用、provider 或模型的 `web_fetch` 配置中设置 `mode = "mcp"` 和 `mcp_provider = "deepseek"`、`"tavily"`、`"serper"` 或 `"exa"`。内置 MCP 抓取只支持 Markdown；失败不会回退到 Direct HTTP。
 - **My MCP tools** 只在可选时显示。选择一个能用单独字符串 `query` 调用的工具时，抓取仅使用同一服务器上可用的兼容 `web_fetch`（可用单独字符串 `url` 调用）；否则该选择仅支持搜索。保存的是服务器 ID 和工具原始名称。
 - 从源码构建 TUI 和内置 MCP 时，运行 `cargo build -p devo-cli -p devo-web-mcp --bins`。
@@ -260,7 +260,7 @@ mode = "local"
 
 ### 显式选择 Serper 或 Exa
 
-1. 从 [Serper](https://serper.dev) 或 [Exa](https://exa.ai) 获取 API key。在 TUI 用 `/login` → **MCP Connections** → **Serper (web search and fetch)** 或 **Exa (web search and fetch)** 保存。用户级 `auth.json` 中已有的 `serper` 或 `exa` API key 不必重录；此前只通过环境变量提供 key 的用户需要用 `/login` 保存。
+1. 从 [Serper](https://serper.dev) 或 [Exa](https://exa.ai) 获取 API key。在 `/web` → **Built-in** 选择供应商，按 Enter 在原地输入并保存密钥。也可使用 `/login` → **MCP Connections**。用户级 `auth.json` 中已有的 `serper` 或 `exa` API key 不必重录。
 2. 在 `/web` → **Built-in** 选择 **Serper** 或 **Exa**，同时启用该供应商的搜索和抓取。不使用会话选择时，仍可独立配置默认抓取（用 Exa 时将供应商改为 `"exa"`）：
 
 ```toml
