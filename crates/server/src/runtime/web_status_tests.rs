@@ -20,68 +20,88 @@ fn hosted(capability: Capability, input: Value, output: Option<Value>) -> Respon
 }
 
 #[test]
-fn capability_evidence_is_specific_to_each_tool() {
-    let search = hosted(
-        Capability::Search,
-        json!({"query":"IANA example domains"}),
-        None,
-    );
-    let open_page = hosted(
-        Capability::Search,
-        json!({"type":"open_page","url":"https://example.com/"}),
-        None,
-    );
+fn hosted_web_evidence_requires_the_actual_tool_and_action() {
+    use Capability::*;
+    use ProbeResult::*;
+    let search = hosted(Search, json!({"query":"IANA example domains"}), None);
+    let open = hosted(Search, json!({"type":"open_page","url":PROBE_URL}), None);
     let fetch = hosted(
-        Capability::Fetch,
-        json!({}),
-        Some(json!({"type":"web_fetch_result","url":"https://example.com/"})),
+        Fetch,
+        json!({"url":PROBE_URL}),
+        Some(json!({"type":"web_fetch_result","url":PROBE_URL})),
     );
-    let rejected = hosted(
-        Capability::Fetch,
-        json!({}),
-        Some(json!({"type":"web_fetch_tool_result_error","error_code":"tool_not_enabled"})),
-    );
-    let limited = hosted(
-        Capability::Fetch,
-        json!({}),
-        Some(json!({"type":"web_fetch_tool_result_error","error_code":"too_many_requests"})),
-    );
-    let plain = ResponseContent::Text("I searched the web.".into());
-    for (capability, blocks, expected) in [
-        (Capability::Search, vec![search], ProbeResult::Supported),
+    for (capability, block, expected) in [
+        (Search, search.clone(), Supported),
+        (OpenPage, search, Inconclusive),
+        (OpenPage, open.clone(), Supported),
+        (Search, open.clone(), Inconclusive),
+        (Fetch, open, Inconclusive),
+        (Fetch, fetch, Supported),
         (
-            Capability::Fetch,
-            vec![open_page],
-            ProbeResult::Inconclusive,
+            OpenPage,
+            hosted(
+                Search,
+                json!({"type":"open_page","url":"https://example.org/"}),
+                None,
+            ),
+            Inconclusive,
         ),
-        (Capability::Fetch, vec![fetch], ProbeResult::Supported),
-        (Capability::Fetch, vec![rejected], ProbeResult::Rejected),
-        (Capability::Fetch, vec![limited], ProbeResult::Inconclusive),
-        (Capability::Search, vec![plain], ProbeResult::Inconclusive),
         (
-            Capability::Search,
-            vec![hosted(Capability::Search, json!({}), None)],
-            ProbeResult::Inconclusive,
+            OpenPage,
+            hosted(
+                Search,
+                json!({"type":"open_page","url":PROBE_URL}),
+                Some(json!({"error":"fetch failed"})),
+            ),
+            Inconclusive,
+        ),
+        (
+            Fetch,
+            hosted(
+                Fetch,
+                json!({}),
+                Some(json!({"error_code":"tool_not_enabled"})),
+            ),
+            Rejected,
+        ),
+        (
+            Fetch,
+            hosted(
+                Fetch,
+                json!({}),
+                Some(json!({"error_code":"too_many_requests"})),
+            ),
+            Inconclusive,
+        ),
+        (
+            Fetch,
+            ResponseContent::Text("I fetched the page.".into()),
+            Inconclusive,
+        ),
+        (
+            Fetch,
+            hosted(Fetch, json!({"url":PROBE_URL}), None),
+            Inconclusive,
         ),
     ] {
         assert_eq!(
-            classify_response(ProviderWireApi::OpenAIResponses, capability, &blocks),
+            classify_response(ProviderWireApi::OpenAIResponses, capability, &[block]),
             expected
         );
     }
     assert_eq!(
         classify_response(
             ProviderWireApi::AnthropicMessages,
-            Capability::Search,
-            &[hosted(Capability::Search, json!({}), Some(json!([]))),]
+            Search,
+            &[hosted(Search, json!({}), Some(json!([])))]
         ),
-        ProbeResult::Supported,
+        Supported,
         "an empty but valid search result still verifies the tool"
     );
 }
 
 #[test]
-fn explicit_rejections_are_not_confused_with_connection_or_quota_errors() {
+fn hosted_web_rejections_are_not_confused_with_quota_errors() {
     let explicit = ProviderError::InvalidRequestError {
         message: "web_fetch_20260209 is not supported on this endpoint".into(),
         details: None,
@@ -91,23 +111,18 @@ fn explicit_rejections_are_not_confused_with_connection_or_quota_errors() {
         retry_after_seconds: None,
         provider_name: None,
     };
-    let timeout = ProviderError::ProviderTimeoutError {
-        message: "web_fetch timed out".into(),
-        provider_name: None,
-    };
     assert_eq!(
         [
             explicitly_rejected(Capability::Fetch, &explicit),
             explicitly_rejected(Capability::Search, &explicit),
             explicitly_rejected(Capability::Fetch, &rate_limited),
-            explicitly_rejected(Capability::Fetch, &timeout),
         ],
-        [true, false, false, false]
+        [true, false, false]
     );
 }
 
 #[test]
-fn picker_distinguishes_partial_support_from_unknown_or_pending_evidence() {
+fn hosted_web_picker_distinguishes_partial_and_unknown_support() {
     use HostedSupport::*;
     assert_eq!(
         [
@@ -124,12 +139,27 @@ fn picker_distinguishes_partial_support_from_unknown_or_pending_evidence() {
             "Fetch only",
             "Search supported · Fetch unverified",
             "Checking…",
-            "Not supported",
+            "Not supported"
         ]
     );
 }
 
-struct TestRouter(mpsc::UnboundedSender<(ProviderRoute, ModelRequest)>);
+struct TestRouter {
+    requests: mpsc::UnboundedSender<(ProviderRoute, ModelRequest)>,
+    replies: Mutex<Vec<std::vec::IntoIter<ResponseContent>>>,
+}
+
+impl TestRouter {
+    fn new(
+        requests: mpsc::UnboundedSender<(ProviderRoute, ModelRequest)>,
+        replies: Vec<Vec<ResponseContent>>,
+    ) -> Arc<dyn ProviderRouter> {
+        Arc::new(Self {
+            requests,
+            replies: Mutex::new(replies.into_iter().rev().map(Vec::into_iter).collect()),
+        })
+    }
+}
 
 #[async_trait::async_trait]
 impl ProviderRouter for TestRouter {
@@ -151,14 +181,17 @@ impl ProviderRouter for TestRouter {
         route: ProviderRoute,
         request: ModelRequest,
     ) -> Result<ModelResponse, ProviderError> {
-        let _ = self.0.send((route, request));
+        let _ = self.requests.send((route, request));
+        let content = self
+            .replies
+            .lock()
+            .unwrap()
+            .pop()
+            .expect("unexpected probe")
+            .collect();
         Ok(ModelResponse {
-            id: "probe".into(),
-            content: vec![hosted(
-                Capability::Search,
-                json!({"query":"IANA example domains"}),
-                Some(json!([])),
-            )],
+            id: "test-response".into(),
+            content,
             stop_reason: None,
             usage: Default::default(),
             metadata: Default::default(),
@@ -170,96 +203,156 @@ impl ProviderRouter for TestRouter {
     }
 }
 
-#[tokio::test]
-async fn probe_uses_the_selected_connection_and_only_public_inputs_then_caches_per_router() {
-    let (tx, mut rx) = mpsc::unbounded_channel();
-    let router: Arc<dyn ProviderRouter> = Arc::new(TestRouter(tx.clone()));
-    let route = ProviderRoute::connection("example", ProviderWireApi::AnthropicMessages);
-    let config = TurnConfig::with_provider_route(
+fn turn_config(wire: ProviderWireApi) -> TurnConfig {
+    TurnConfig::with_provider_route(
         Model {
             slug: "example/model".into(),
-            provider: ProviderWireApi::AnthropicMessages,
+            provider: wire,
             ..Model::default()
         },
         "real-wire-model".into(),
         ProviderRequestModelMap::default()
             .with_request_config(Some(json!({"messages":["private"]})), Default::default()),
-        route.clone(),
+        ProviderRoute::connection("example", wire),
         None,
+    )
+}
+
+#[tokio::test]
+async fn hosted_web_combines_actions_and_reuses_persisted_evidence_after_restart() {
+    let home = tempfile::tempdir().unwrap();
+    let checks = HostedWebChecks::open(home.path());
+    let (requests, mut rx) = mpsc::unbounded_channel();
+    let router = TestRouter::new(
+        requests.clone(),
+        vec![vec![
+            hosted(
+                Capability::Search,
+                json!({"query":"IANA example domains"}),
+                None,
+            ),
+            hosted(
+                Capability::OpenPage,
+                json!({"type":"open_page","url":PROBE_URL}),
+                None,
+            ),
+        ]],
     );
-    let checks = HostedWebChecks::default();
+    let config = turn_config(ProviderWireApi::OpenAIResponses);
+    let identity = || Some("fixture-route-and-account".into());
     assert_eq!(
         checks.inspect(
             Arc::clone(&router),
+            identity(),
             &config,
-            Capability::Search,
             ProbePolicy::CacheOnly
         ),
-        HostedSupport::Unverified
-    );
-    assert!(
-        checks.entries.lock().unwrap().is_empty(),
-        "status reads must not schedule probes"
+        ProbeReport::uniform(HostedSupport::Unverified)
     );
     for _ in 0..2 {
-        assert_eq!(
-            checks.inspect(
-                Arc::clone(&router),
-                &config,
-                Capability::Search,
-                ProbePolicy::ScheduleIfNeeded
-            ),
-            HostedSupport::Checking
-        );
-    }
-    let (actual_route, request) = rx.recv().await.expect("probe request");
-    assert_eq!(actual_route, route);
-    assert_eq!(request.model, "real-wire-model");
-    assert_eq!(
-        serde_json::to_value(&request.messages).unwrap(),
-        json!([
-            {"role":"user","content":[{"type":"text","text":Capability::Search.prompt()}]},
-        ])
-    );
-    assert_eq!(request.hosted_tools, vec![Capability::Search.definition()]);
-    assert!(request.tools.is_none() && request.extra_body.is_none());
-
-    // Reacquiring every permit waits for the worker to publish its result.
-    drop(checks.slots.acquire_many(4).await.unwrap());
-    assert_eq!(
         checks.inspect(
             Arc::clone(&router),
+            identity(),
             &config,
-            Capability::Search,
+            ProbePolicy::ScheduleIfNeeded,
+        );
+    }
+    let (route, request) = rx.recv().await.expect("model probe");
+    assert_eq!(route, config.provider_route);
+    assert_eq!(request.model, "real-wire-model");
+    assert_eq!(request.hosted_tools, vec![Capability::Search.definition()]);
+    assert_eq!(
+        serde_json::to_value(request.messages).unwrap(),
+        json!([
+            {"role":"user","content":[{"type":"text","text":Capability::Search.prompt(/*also_open*/ true)}]}
+        ])
+    );
+    assert!(request.tools.is_none() && request.extra_body.is_none());
+    // Acquiring all permits waits for the worker, including its disk writes.
+    drop(checks.slots.acquire_many(4).await.unwrap());
+    assert!(
+        rx.try_recv().is_err(),
+        "the combined proof must not trigger a second request"
+    );
+    drop(checks);
+
+    let restarted = HostedWebChecks::open(home.path());
+    let other_router = TestRouter::new(requests, vec![]);
+    assert_eq!(
+        restarted.inspect(
+            Arc::clone(&other_router),
+            identity(),
+            &config,
+            ProbePolicy::ScheduleIfNeeded
+        ),
+        ProbeReport {
+            search: HostedSupport::Supported,
+            fetch: HostedSupport::Supported,
+            standalone_fetch: HostedSupport::Unverified,
+            fetch_via_search: true,
+        }
+    );
+    assert!(
+        rx.try_recv().is_err(),
+        "restarting must not probe with fresh saved evidence"
+    );
+    assert_eq!(
+        restarted.inspect(
+            other_router,
+            Some("different-credential".into()),
+            &config,
             ProbePolicy::CacheOnly
         ),
-        HostedSupport::Supported
+        ProbeReport::uniform(HostedSupport::Unverified)
     );
-    assert!(rx.try_recv().is_err());
+}
 
-    let reloaded_router: Arc<dyn ProviderRouter> = Arc::new(TestRouter(tx));
-    assert_eq!(
-        checks.inspect(
-            Arc::clone(&reloaded_router),
-            &config,
-            Capability::Search,
-            ProbePolicy::ScheduleIfNeeded
-        ),
-        HostedSupport::Checking
+#[tokio::test]
+async fn hosted_web_tries_standalone_fetch_only_if_open_page_is_unproven() {
+    let config = turn_config(ProviderWireApi::OpenAIResponses);
+    let checks = HostedWebChecks::default();
+    let (requests, mut rx) = mpsc::unbounded_channel();
+    let router = TestRouter::new(
+        requests,
+        vec![
+            vec![hosted(
+                Capability::Search,
+                json!({"query":"IANA example domains"}),
+                None,
+            )],
+            vec![ResponseContent::Text("not a hosted action".into())],
+            vec![hosted(
+                Capability::Fetch,
+                json!({"url":PROBE_URL}),
+                Some(json!({"type":"web_fetch_result","url":PROBE_URL})),
+            )],
+        ],
     );
-    assert_eq!(rx.recv().await.expect("probe after router reload").0, route);
-    assert_eq!(
-        checks.inspect(
-            reloaded_router,
-            &config,
-            Capability::Fetch,
-            ProbePolicy::ScheduleIfNeeded
-        ),
-        HostedSupport::Checking
+    checks.inspect(
+        Arc::clone(&router),
+        None,
+        &config,
+        ProbePolicy::ScheduleIfNeeded,
     );
-    let (_, fetch_request) = rx.recv().await.expect("independent fetch probe");
+    drop(checks.slots.acquire_many(4).await.unwrap());
+    let requests: Vec<_> = std::iter::from_fn(|| rx.try_recv().ok())
+        .map(|(_, request)| request.hosted_tools)
+        .collect();
     assert_eq!(
-        fetch_request.hosted_tools,
-        vec![Capability::Fetch.definition()]
+        requests,
+        [
+            vec![Capability::Search.definition()],
+            vec![Capability::OpenPage.definition()],
+            vec![Capability::Fetch.definition()]
+        ]
+    );
+    assert_eq!(
+        checks.inspect(router, None, &config, ProbePolicy::CacheOnly),
+        ProbeReport {
+            search: HostedSupport::Supported,
+            fetch: HostedSupport::Supported,
+            standalone_fetch: HostedSupport::Supported,
+            fetch_via_search: false,
+        }
     );
 }

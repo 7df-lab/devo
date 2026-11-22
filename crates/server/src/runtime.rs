@@ -168,6 +168,7 @@ mod turn_exec;
 mod turn_lifecycle;
 mod turn_reservation;
 mod user_input;
+mod web_probe_persistence;
 mod web_search_builtin;
 mod web_search_mcp;
 mod web_status;
@@ -516,7 +517,7 @@ impl ServerRuntime {
             title_generation_in_flight: Mutex::new(HashSet::new()),
             title_polish_pending: Mutex::new(HashMap::new()),
             auxiliary_model_slots: Arc::new(Semaphore::new(1)),
-            hosted_web_checks: web_status::HostedWebChecks::default(),
+            hosted_web_checks: web_status::HostedWebChecks::open(&server_home),
             self_weak: self_weak.clone(),
             session_lru: Mutex::new(session_cache::ParentSessionLru::new(
                 session_cache::PARENT_SESSION_LRU_CAPACITY,

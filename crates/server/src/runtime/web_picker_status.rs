@@ -13,7 +13,7 @@ use devo_protocol::native::rpc_session::{
 use devo_protocol::native::session::{WebBackendChoice, WebSearchChoice};
 use serde_json::Value;
 
-use super::{Capability, HostedSupport, ProbePolicy, hosted_picker_note, hosted_status_note};
+use super::{HostedSupport, hosted_picker_note, hosted_status_note, web_probe_policy};
 use crate::SuccessResponse;
 use crate::runtime::{ServerRuntime, web_search_builtin as builtin, web_search_mcp as mcp};
 use crate::session_context::SessionRuntimeContext;
@@ -72,22 +72,8 @@ impl ServerRuntime {
                 .unwrap_or_else(|_| "Unavailable".into())
         };
 
-        let router = context.provider_router();
-        // Route snapshots can change between launch and opening the picker.
-        // On a cache miss, enqueue a deduplicated check; never await network I/O.
-        let policy = if matches!(config.web_search, ResolvedWebSearchConfig::Disabled)
-            && matches!(config.web_fetch, ResolvedWebFetchConfig::Disabled)
-        {
-            ProbePolicy::CacheOnly
-        } else {
-            ProbePolicy::ScheduleIfNeeded
-        };
-        let hosted = |capability| {
-            self.hosted_web_checks
-                .inspect(Arc::clone(&router), &config, capability, policy)
-        };
-        let hosted_search = hosted(Capability::Search);
-        let hosted_fetch = hosted(Capability::Fetch);
+        // Reuse saved evidence or enqueue a deduplicated check; never await network I/O.
+        let hosted = self.hosted_web_report(&context, &config, web_probe_policy(&config));
         let statuses = context.mcp_manager.statuses().await.unwrap_or_default();
         let active_choice = match &search_choice {
             WebSearchChoice::Unified { .. } => Some(search_choice.clone()),
@@ -101,11 +87,11 @@ impl ServerRuntime {
             &context,
             &statuses,
             active_choice.as_ref(),
-            hosted_search,
-            hosted_fetch,
+            hosted.search,
+            hosted.fetch,
         );
         let search_note = match &config.web_search {
-            ResolvedWebSearchConfig::Provider => hosted_status_note(hosted_search),
+            ResolvedWebSearchConfig::Provider => hosted_status_note(hosted.search),
             ResolvedWebSearchConfig::Mcp { server_id, tool_name } => {
                 search_choices.iter().find(|entry| {
                     matches!(&entry.choice, WebSearchChoice::Unified { backend: WebBackendChoice::Mcp { server_id: id, tool_name: name }} if id == server_id && name == tool_name)
@@ -118,7 +104,12 @@ impl ServerRuntime {
             ResolvedWebSearchConfig::Local(_) | ResolvedWebSearchConfig::Disabled => None,
         };
         let fetch_note = match &config.web_fetch {
-            ResolvedWebFetchConfig::Provider => hosted_status_note(hosted_fetch),
+            ResolvedWebFetchConfig::Provider if !config.web_search.is_provider() => {
+                hosted_status_note(hosted.standalone_fetch)
+            }
+            ResolvedWebFetchConfig::Provider | ResolvedWebFetchConfig::ProviderViaSearch => {
+                hosted_status_note(hosted.fetch)
+            }
             ResolvedWebFetchConfig::Mcp { provider } => builtin::status_note(&context, *provider),
             ResolvedWebFetchConfig::CustomMcp { server_id, .. } => {
                 mcp::compatible_fetch_tool(&statuses, &McpServerId(server_id.clone()))
@@ -166,7 +157,9 @@ fn search_label(search: &ResolvedWebSearchConfig) -> String {
 
 fn fetch_label(fetch: &ResolvedWebFetchConfig) -> String {
     match fetch {
-        ResolvedWebFetchConfig::Provider => PROVIDER.into(),
+        ResolvedWebFetchConfig::Provider | ResolvedWebFetchConfig::ProviderViaSearch => {
+            PROVIDER.into()
+        }
         ResolvedWebFetchConfig::Disabled => OFF.into(),
         ResolvedWebFetchConfig::Local => "Direct HTTP".into(),
         ResolvedWebFetchConfig::Mcp { provider } => builtin::label(*provider).into(),

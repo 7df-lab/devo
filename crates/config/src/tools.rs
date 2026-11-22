@@ -169,6 +169,8 @@ impl ResolvedWebSearchConfig {
 pub enum ResolvedWebFetchConfig {
     Disabled,
     Provider,
+    /// Reuse OpenAI Responses hosted `web_search` for explicit page opens.
+    ProviderViaSearch,
     #[default]
     Local,
     Mcp {
@@ -187,6 +189,10 @@ impl ResolvedWebFetchConfig {
 
     pub fn is_provider(&self) -> bool {
         matches!(self, Self::Provider)
+    }
+
+    pub fn is_provider_via_search(&self) -> bool {
+        matches!(self, Self::ProviderViaSearch)
     }
 }
 

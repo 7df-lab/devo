@@ -68,42 +68,25 @@ test("the active supplier is visible on both levels without repeating the group 
 	assert.match(text(selector), /  ✓ Exa.*Key saved/);
 });
 
-test("split defaults appear as an active Default setup without exposing routes", () => {
-	let closed = false;
-	const inherited = new WebSearchSelectorComponent({ kind: "inherit" }, choices, status,
-		() => assert.fail("unchanged defaults must not be saved again"), () => { closed = true; });
-	assert.match(text(inherited), /›\s+Model provider.*Automatic/);
-	assert.match(text(inherited), /✓ Default setup/);
-	assert.doesNotMatch(text(inherited), /Current:|Direct HTTP|Use default setup/);
-	inherited.handleInput("\x1b[A");
-	inherited.handleInput("\r");
-	assert.equal(closed, true);
-});
-
-test("reset hides split routing while preserving a simple named-backend preview", () => {
-	const active = choices[2]?.choice;
-	const explicitStatus = { ...status, searchChoice: active, activeChoice: active, currentBackend: undefined };
-	let submitted: unknown;
-	const explicit = new WebSearchSelectorComponent(active, choices, explicitStatus,
-		(choice, label) => { submitted = { choice, label }; }, () => {});
-	assert.match(text(explicit), /Use default setup/);
-	assert.doesNotMatch(text(explicit), /Direct HTTP|→/);
-	explicit.handleInput("\x1b[B");
-	explicit.handleInput("\x1b[B");
-	explicit.handleInput("\x1b[B");
-	explicit.handleInput("\r");
-	assert.deepEqual(submitted, { choice: { kind: "inherit" }, label: "Default setup" });
-
-	explicit.updateStatus({ ...explicitStatus, configuredBackend: "Model provider" });
-	assert.match(text(explicit), /Use default setup.*→ Model provider/);
-});
-
-test("legacy search-only overrides appear as Existing setup, not as defaults", () => {
-	const legacy = { kind: "provider" } as const;
-	const selector = new WebSearchSelectorComponent(legacy, choices, { ...status, searchChoice: legacy }, () => {}, () => {});
-	assert.match(text(selector), /✓ Existing setup/);
-	assert.match(text(selector), /Use default setup/);
-	assert.doesNotMatch(text(selector), /Direct HTTP|✓ Model provider|✓ Default setup/);
+test("the picker has only explicit choices, even when server settings are inherited or legacy", () => {
+	for (const searchChoice of [{ kind: "inherit" } as const, { kind: "provider" } as const, choices[2]!.choice]) {
+		const activeChoice = searchChoice.kind === "unified" ? searchChoice : undefined;
+		let submitted: unknown;
+		const selector = new WebSearchSelectorComponent(searchChoice, choices, { ...status, searchChoice, activeChoice },
+			(choice) => { submitted = choice; }, () => {});
+		assert.doesNotMatch(text(selector), /default|Existing setup|Current:|Direct HTTP/i);
+		if (activeChoice) {
+			assert.match(text(selector), /› ✓ Built-in · Exa/);
+			selector.handleInput("\x1b[B");
+			selector.handleInput("\x1b[B");
+		} else {
+			assert.match(text(selector), /›\s+Model provider.*Automatic/);
+			assert.doesNotMatch(text(selector), /✓/);
+			selector.handleInput("\x1b[A");
+		}
+		selector.handleInput("\r");
+		assert.deepEqual(submitted, choices[4]?.choice, "Off is the last action with no hidden default row");
+	}
 });
 
 test("Left restores focus on the parent row, and Escape closes from either level", () => {

@@ -118,9 +118,11 @@ fn hosted_tools_for_web_capabilities(
     wire_api: ProviderWireApi,
 ) -> Vec<HostedToolDefinition> {
     let mut hosted_tools = Vec::new();
-    if matches!(web_search, devo_config::ResolvedWebSearchConfig::Provider)
-        && supports_provider_hosted_web_tools(wire_api)
-    {
+    let provider_search = matches!(web_search, devo_config::ResolvedWebSearchConfig::Provider)
+        && supports_provider_hosted_web_tools(wire_api);
+    let fetch_via_search =
+        web_fetch.is_provider_via_search() && wire_api == ProviderWireApi::OpenAIResponses;
+    if provider_search || fetch_via_search {
         hosted_tools.push(HostedToolDefinition::WebSearch(HostedWebSearchTool::new()));
     }
     if web_fetch.is_provider() && supports_provider_hosted_web_tools(wire_api) {
@@ -638,7 +640,15 @@ pub async fn query(
                     "Configured web search is available through Python as `await rlm.web_search(query)`. Use it for current information when needed.",
                 );
             }
-            if turn_config.web_fetch.is_local() {
+            if turn_config.web_fetch.is_provider_via_search()
+                && provider_route_wire_api(&turn_config.provider_route)
+                    == Some(ProviderWireApi::OpenAIResponses)
+            {
+                if !system.trim().is_empty() {
+                    system.push_str("\n\n");
+                }
+                system.push_str("To read a specific URL, use the OpenAI Responses hosted web_search `open_page` action. Do not use Python, direct HTTP, or another fetch backend. Keep the configured provider and supplier unchanged.");
+            } else if turn_config.web_fetch.is_local() {
                 if !system.trim().is_empty() {
                     system.push_str("\n\n");
                 }

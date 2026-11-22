@@ -81,6 +81,9 @@ impl WebRoutes {
             ResolvedWebFetchConfig::Provider => WebFetchRoute::Unavailable(
                 "This turn uses model-hosted web fetch, not the Python helper.",
             ),
+            ResolvedWebFetchConfig::ProviderViaSearch => WebFetchRoute::Unavailable(
+                "This turn uses OpenAI Responses hosted web_search open_page, not the Python helper.",
+            ),
             ResolvedWebFetchConfig::Local => WebFetchRoute::Direct,
         };
         Self { search, fetch }

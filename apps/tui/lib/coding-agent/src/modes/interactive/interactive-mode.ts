@@ -9847,7 +9847,8 @@ export class InteractiveMode {
 					},
 				);
 				const refreshProbe = async () => {
-					if (!open || !isCurrent() || probeAttempts >= 14 || !selector.hasPendingProbe()) return;
+					// Search, page opening and standalone fetch may run in sequence.
+					if (!open || !isCurrent() || probeAttempts >= 40 || !selector.hasPendingProbe()) return;
 					probeAttempts++;
 					try {
 						const updated = await connection.getWebStatus();

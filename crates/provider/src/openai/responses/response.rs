@@ -205,6 +205,12 @@ fn parse_hosted_web_search_call(item: &Value) -> ResponseContent {
 }
 
 fn hosted_web_search_input(item: &Value) -> Value {
+    if let Some(action) = item.get("action")
+        && action.get("type").and_then(Value::as_str) == Some("open_page")
+        && action.get("url").and_then(Value::as_str).is_some()
+    {
+        return action.clone();
+    }
     if let Some(query) = item
         .get("action")
         .and_then(|action| action.get("query"))
