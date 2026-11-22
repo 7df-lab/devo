@@ -150,7 +150,7 @@ struct TestRouter {
 }
 
 impl TestRouter {
-    fn new(
+    fn with_replies(
         requests: mpsc::UnboundedSender<(ProviderRoute, ModelRequest)>,
         replies: Vec<Vec<ResponseContent>>,
     ) -> Arc<dyn ProviderRouter> {
@@ -223,7 +223,7 @@ async fn hosted_web_combines_actions_and_reuses_persisted_evidence_after_restart
     let home = tempfile::tempdir().unwrap();
     let checks = HostedWebChecks::open(home.path());
     let (requests, mut rx) = mpsc::unbounded_channel();
-    let router = TestRouter::new(
+    let router = TestRouter::with_replies(
         requests.clone(),
         vec![vec![
             hosted(
@@ -277,7 +277,7 @@ async fn hosted_web_combines_actions_and_reuses_persisted_evidence_after_restart
     drop(checks);
 
     let restarted = HostedWebChecks::open(home.path());
-    let other_router = TestRouter::new(requests, vec![]);
+    let other_router = TestRouter::with_replies(requests, vec![]);
     assert_eq!(
         restarted.inspect(
             Arc::clone(&other_router),
@@ -312,7 +312,7 @@ async fn hosted_web_tries_standalone_fetch_only_if_open_page_is_unproven() {
     let config = turn_config(ProviderWireApi::OpenAIResponses);
     let checks = HostedWebChecks::default();
     let (requests, mut rx) = mpsc::unbounded_channel();
-    let router = TestRouter::new(
+    let router = TestRouter::with_replies(
         requests,
         vec![
             vec![hosted(
