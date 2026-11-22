@@ -743,6 +743,7 @@ export class InteractiveMode {
 
 	private lastStatusSpacer: Spacer | undefined = undefined;
 	private lastStatusText: Text | undefined = undefined;
+	private webFeedback?: { text: Text; timeout: ReturnType<typeof setTimeout> };
 	private lastGoalAnnouncement: GoalAnnouncementSnapshot | undefined = undefined;
 	private readonly goalElapsedClock = new GoalElapsedClock();
 	private goalTrayTimer: NodeJS.Timeout | undefined = undefined;
@@ -4838,14 +4839,12 @@ export class InteractiveMode {
 					return;
 				}
 				if (commandName === "web") {
-					this.echoLocalCommand(text);
+					this.editor.setText("");
 					if (commandArgs) {
-						this.chatContainer.addChild(new Text("Usage: /web", 1, 0));
-						this.ui.requestRender();
+						this.showWebFeedback("Usage: /web", "warning");
 					} else {
 						await this.handleWebCommand();
 					}
-					this.editor.setText("");
 					return;
 				}
 				if (commandName === "traces") {
@@ -9769,6 +9768,24 @@ export class InteractiveMode {
 		this.ui.requestRender();
 	}
 
+	private showWebFeedback(message: string, tone: "dim" | "warning" = "dim"): void {
+		if (this.webFeedback) {
+			clearTimeout(this.webFeedback.timeout);
+			this.statusContainer.removeChild(this.webFeedback.text);
+		}
+		const cleanMessage = message.replace(/[\x00-\x1f\x7f-\x9f]/g, " ");
+		const text = new Text(theme.fg(tone, cleanMessage), 1, 0);
+		this.statusContainer.addChild(text);
+		const timeout = setTimeout(() => {
+			this.statusContainer.removeChild(text);
+			if (this.webFeedback?.text === text) this.webFeedback = undefined;
+			this.ui.requestRender();
+		}, 2800);
+		timeout.unref();
+		this.webFeedback = { text, timeout };
+		this.ui.requestRender();
+	}
+
 	private async handleWebCommand(): Promise<void> {
 		const connection = this.agentConnection;
 		const generation = this.sessionEventGeneration;
@@ -9783,44 +9800,60 @@ export class InteractiveMode {
 			const searchChoices = status.searchChoices;
 			if (!searchChoices?.length) {
 				const formatRow = (label: string, value: { backend: string; note?: string }) =>
-					`${theme.fg("dim", `${label}:`)} ${value.backend}${value.note ? ` — ${value.note}` : ""}`;
-				this.chatContainer.addChild(
-					new Text(`${formatRow("Search", status.search)}\n${formatRow("Fetch", status.fetch)}`, 1, 0),
-				);
-				this.ui.requestRender();
+					`${label}: ${value.backend}${value.note ? ` — ${value.note}` : ""}`;
+				this.showWebFeedback(`${formatRow("Search", status.search)} · ${formatRow("Fetch", status.fetch)}`);
 				return;
 			}
 
 			this.showSelector((done) => {
 				let open = true;
 				let busy = false;
+				let probeAttempts = 0;
+				let probeTimer: ReturnType<typeof setTimeout> | undefined;
 				const close = () => {
 					open = false;
+					if (probeTimer) clearTimeout(probeTimer);
 					done();
 				};
 				const selector = new WebSearchSelectorComponent(
 					status.searchChoice,
 					searchChoices,
 					status,
-					(choice) => {
+					(choice, label) => {
 						if (busy || !isCurrent()) return;
 						busy = true;
 						void connection.setWebSearchChoice(choice).then(() => {
 							if (!isCurrent() || !open) return;
 							close();
-							this.showStatus("Web search updated for the next turn.");
+							this.showWebFeedback(`Web: ${label}`);
 						}).catch((error: unknown) => {
-							if (isCurrent() && open) this.showError(error instanceof Error ? error.message : String(error));
+							if (isCurrent() && open) this.showWebFeedback(error instanceof Error ? error.message : String(error), "warning");
 						}).finally(() => {
 							busy = false;
 						});
 					},
-					close,
+					() => { if (!busy) close(); },
+					(message) => this.showWebFeedback(message, "warning"),
 				);
-				return { component: selector, focus: selector.getSelectList() };
+				const refreshProbe = async () => {
+					if (!open || !isCurrent() || probeAttempts >= 14 || !selector.hasPendingProbe()) return;
+					probeAttempts++;
+					try {
+						const updated = await connection.getWebStatus();
+						if (updated && open && isCurrent()) {
+							selector.updateStatus(updated);
+							this.ui.requestRender();
+						}
+					} catch {
+						// Probe refresh is informational; selection remains available on failure.
+					}
+					if (open && isCurrent() && selector.hasPendingProbe()) probeTimer = setTimeout(refreshProbe, 1000);
+				};
+				if (selector.hasPendingProbe()) probeTimer = setTimeout(refreshProbe, 1000);
+				return { component: selector, focus: selector };
 			});
 		} catch {
-			if (isCurrent()) this.showError("Couldn't read web settings.");
+			if (isCurrent()) this.showWebFeedback("Couldn't read web settings.", "warning");
 		}
 	}
 

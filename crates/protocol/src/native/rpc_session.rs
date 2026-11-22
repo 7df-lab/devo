@@ -672,6 +672,35 @@ pub struct SessionWebStatusReadResult {
     pub fetch: WebBackendStatus,
     pub search_choice: WebSearchChoice,
     pub search_choices: Vec<WebSearchPickerEntry>,
+    /// Configured backend(s) without an explicit session choice, for reset preview.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    #[ts(optional)]
+    pub configured_backend: Option<String>,
+    /// The current picker entry, if the configured route matches one entry.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    #[ts(optional)]
+    pub active_choice: Option<WebSearchChoice>,
+    /// Current mixed or legacy configuration when it has no exact picker entry.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    #[ts(optional)]
+    pub current_backend: Option<String>,
+}
+
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize, Deserialize, JsonSchema, TS)]
+#[serde(rename_all = "camelCase")]
+pub enum WebPickerGroup {
+    Builtin,
+    Custom,
+}
+
+/// Local credential presence or an explicit rejection of the current key.
+/// `Saved` is not evidence that the credential has been tested.
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize, Deserialize, JsonSchema, TS)]
+#[serde(rename_all = "camelCase")]
+pub enum WebApiKeyStatus {
+    Required,
+    Saved,
+    Rejected,
 }
 
 #[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize, JsonSchema, TS)]
@@ -682,4 +711,13 @@ pub struct WebSearchPickerEntry {
     #[serde(default, skip_serializing_if = "Option::is_none")]
     #[ts(optional)]
     pub note: Option<String>,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    #[ts(optional)]
+    pub group: Option<WebPickerGroup>,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    #[ts(optional)]
+    pub key_status: Option<WebApiKeyStatus>,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    #[ts(optional)]
+    pub unavailable: Option<bool>,
 }

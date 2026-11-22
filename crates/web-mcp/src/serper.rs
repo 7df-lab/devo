@@ -19,13 +19,20 @@ pub(super) async fn search(
             None,
         ));
     }
-    let value = upstream::request_json(
+    let value = match upstream::request_json(
         "Serper",
         http.post(SEARCH_ENDPOINT)
             .header("X-API-KEY", api_key)
             .json(&json!({ "q": query })),
     )
-    .await?;
+    .await
+    {
+        Ok(value) => value,
+        Err(upstream::UpstreamError::AuthRejected) => {
+            return Ok(upstream::auth_rejected_result("Serper"));
+        }
+        Err(upstream::UpstreamError::Other(error)) => return Err(error),
+    };
     search_result(value, api_key)
 }
 
@@ -55,13 +62,20 @@ pub(super) async fn fetch(
             None,
         ));
     }
-    let value = upstream::request_json(
+    let value = match upstream::request_json(
         "Serper",
         http.post(FETCH_ENDPOINT)
             .header("X-API-KEY", api_key)
             .json(&json!({ "url": url, "includeMarkdown": true })),
     )
-    .await?;
+    .await
+    {
+        Ok(value) => value,
+        Err(upstream::UpstreamError::AuthRejected) => {
+            return Ok(upstream::auth_rejected_result("Serper"));
+        }
+        Err(upstream::UpstreamError::Other(error)) => return Err(error),
+    };
     fetch_result(&value, api_key)
 }
 

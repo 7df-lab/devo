@@ -20,8 +20,8 @@ use uuid::Uuid;
 use super::ServerRuntime;
 use super::web_search_mcp::WebFetchRoute;
 pub(crate) use super::web_search_mcp::WebRoutes;
-use devo_core::McpManager;
 use devo_core::tools::contracts::ToolBudgets;
+use devo_core::{McpManager, McpStartupState};
 mod factory;
 pub(crate) use factory::handle_factory;
 mod harness;
@@ -685,15 +685,23 @@ pub(crate) async fn handle_web_fetch(bridge: &HostBridge, params: &Value) -> Val
     if url.is_empty() {
         return error_reply("web.fetch requires url");
     }
-    let mcp = match &bridge.web_routes.fetch {
+    let (mcp, custom_mcp) = match &bridge.web_routes.fetch {
         WebFetchRoute::Unavailable(reason) => return error_reply(*reason),
-        WebFetchRoute::Mcp { server_id, manager } => Some((server_id, manager)),
-        WebFetchRoute::Direct => None,
+        WebFetchRoute::Mcp { server_id, manager } => {
+            (Some((server_id, "web_fetch", manager)), false)
+        }
+        WebFetchRoute::CustomMcp {
+            server_id,
+            tool_name,
+            manager,
+        } => (Some((server_id, tool_name.as_str(), manager)), true),
+        WebFetchRoute::Direct => (None, false),
     };
     if mcp.is_some() && !(url.starts_with("http://") || url.starts_with("https://")) {
         return error_reply("URL must start with http:// or https://");
     }
     if mcp.is_some()
+        && !custom_mcp
         && params
             .get("format")
             .is_some_and(|format| format.as_str() != Some("markdown"))
@@ -717,11 +725,48 @@ pub(crate) async fn handle_web_fetch(bridge: &HostBridge, params: &Value) -> Val
     if let Err(reply) = check_or_error(bridge, req).await {
         return reply;
     }
-    if let Some((server_id, manager)) = mcp {
+    if let Some((server_id, tool_name, manager)) = mcp {
+        if custom_mcp {
+            if plan_mode_denies_mutation(bridge) {
+                return deny_plan_mutation("mcp.call");
+            }
+            let qualified = format!("{}/{tool_name}", server_id.0);
+            let req = permission_request(
+                bridge,
+                synthetic_tool_call_id("mcp"),
+                "mcp.call",
+                json!({"server": server_id.0, "tool": tool_name, "arguments": {"url": url}}),
+                ResourceKind::Custom("mcp.call".into()),
+                format!("Call MCP fetch tool {qualified}"),
+                /*path*/ None,
+                Some(qualified),
+            );
+            if let Err(reply) = check_or_error(bridge, req).await {
+                return reply;
+            }
+        }
         let manager = match manager {
             Ok(manager) => manager,
             Err(reason) => return error_reply(reason.clone()),
         };
+        if custom_mcp {
+            let ready = manager.statuses().await.ok().is_some_and(|statuses| {
+                super::web_search_mcp::compatible_fetch_tool(&statuses, server_id).is_some()
+            });
+            if !ready {
+                return error_reply(
+                    "The selected MCP server has no ready compatible web_fetch tool. Check /web or your MCP configuration.",
+                );
+            }
+        } else if !manager
+            .refresh(server_id)
+            .await
+            .is_ok_and(|status| status.startup_state == McpStartupState::Ready)
+        {
+            return error_reply(
+                "The selected built-in web fetch is unavailable. Check /web and the supplier configuration.",
+            );
+        }
         let timeout = std::time::Duration::from_secs(
             params
                 .get("timeout")
@@ -731,13 +776,15 @@ pub(crate) async fn handle_web_fetch(bridge: &HostBridge, params: &Value) -> Val
         );
         let result = tokio::time::timeout(
             timeout,
-            manager.invoke_tool(server_id, "web_fetch", json!({"url": url})),
+            manager.invoke_tool(server_id, tool_name, json!({"url": url})),
         )
         .await;
         return match result {
             Ok(Ok(result)) if result.get("isError").and_then(Value::as_bool) != Some(true) => {
                 json!({"status": "ok", "result": result})
             }
+            Ok(_) if custom_mcp => error_reply("The selected MCP web fetch failed."),
+            Err(_) if custom_mcp => error_reply("The selected MCP web fetch timed out."),
             Ok(_) => error_reply("The selected built-in web fetch failed."),
             Err(_) => error_reply("The selected built-in web fetch timed out."),
         };

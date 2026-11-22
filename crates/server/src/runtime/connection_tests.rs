@@ -4690,9 +4690,12 @@ async fn metadata_update_auto_refine_settings_reach_live_actor() -> Result<()> {
 async fn metadata_update_web_search_persists_replays_and_clears() -> Result<()> {
     let env = NativeEnv::connect().await?;
     let session_id = env.session().await?;
-    let choice = devo_protocol::native::session::WebSearchChoice::Mcp {
-        server_id: "search-server".into(),
-        tool_name: "search_tool".into(),
+    use devo_protocol::native::session::{WebBackendChoice, WebSearchChoice};
+    let choice = WebSearchChoice::Unified {
+        backend: WebBackendChoice::Mcp {
+            server_id: "devo:builtin:exa".into(),
+            tool_name: "web_search".into(),
+        },
     };
 
     let response = env
@@ -4755,8 +4758,27 @@ async fn metadata_update_web_search_persists_replays_and_clears() -> Result<()> 
             .expect("restored actor session")
             .settings
             .web_search,
-        Some(choice)
+        Some(choice.clone())
     );
+    let status: devo_protocol::native::rpc_session::SessionWebStatusReadResult = json_result(
+        &env.rpc(
+            9,
+            "session/web/status/read",
+            serde_json::json!({"sessionId": session_id}),
+        )
+        .await,
+        "web status",
+    );
+    assert_eq!(status.active_choice, Some(choice));
+    assert_eq!(
+        (
+            status.search.backend.as_str(),
+            status.fetch.backend.as_str()
+        ),
+        ("Exa · Built-in", "Exa · Built-in")
+    );
+    assert_eq!(status.current_backend, None);
+    assert!(status.configured_backend.is_some());
 
     let cleared = env
         .rpc(
@@ -4795,7 +4817,7 @@ async fn web_search_updated_during_a_turn_survives_its_merge() -> Result<()> {
             "session/metadata/update",
             serde_json::json!({
                 "sessionId": session_id.to_string(), "expectedVersion": 1,
-                "settings": { "webSearch": { "kind": "off" } },
+                "settings": { "webSearch": { "kind": "unified", "backend": { "kind": "off" } } },
             }),
         )
         .await;
@@ -4819,11 +4841,19 @@ async fn web_search_updated_during_a_turn_survives_its_merge() -> Result<()> {
         .await;
     let status: devo_protocol::native::rpc_session::SessionWebStatusReadResult =
         json_result(&status, "rpc");
+    use devo_protocol::native::session::{WebBackendChoice, WebSearchChoice};
+    let expected = WebSearchChoice::Unified {
+        backend: WebBackendChoice::Off,
+    };
+    assert_eq!(status.search_choice, expected);
+    assert_eq!(status.active_choice, Some(expected));
     assert_eq!(
-        status.search_choice,
-        devo_protocol::native::session::WebSearchChoice::Off
+        (
+            status.search.backend.as_str(),
+            status.fetch.backend.as_str()
+        ),
+        ("Off", "Off")
     );
-    assert_eq!(status.search.backend, "Off");
     Ok(())
 }
 

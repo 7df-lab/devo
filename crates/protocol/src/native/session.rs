@@ -188,8 +188,8 @@ pub enum SessionParent {
     },
 }
 
-/// Session-level web-search backend selection. `Inherit` clears the explicit
-/// session override so provider defaults apply again.
+/// Session web preference. Legacy values change only search; keeping their
+/// original meaning prevents upgrades from silently rerouting page URLs.
 #[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize, JsonSchema, TS)]
 #[serde(
     tag = "kind",
@@ -197,7 +197,28 @@ pub enum SessionParent {
     rename_all_fields = "camelCase"
 )]
 pub enum WebSearchChoice {
+    /// Clear the explicit override and use the configured settings again.
     Inherit,
+    Provider,
+    Off,
+    Mcp {
+        server_id: String,
+        tool_name: String,
+    },
+    Unified {
+        backend: WebBackendChoice,
+    },
+}
+
+/// One backend for both capabilities. Each capability still requires support
+/// by that backend; an unavailable capability does not fall back.
+#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize, JsonSchema, TS)]
+#[serde(
+    tag = "kind",
+    rename_all = "camelCase",
+    rename_all_fields = "camelCase"
+)]
+pub enum WebBackendChoice {
     Provider,
     Off,
     Mcp {

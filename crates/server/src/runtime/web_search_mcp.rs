@@ -3,11 +3,9 @@
 use std::sync::Arc;
 
 use devo_core::{
-    McpManager, McpServerId, McpServerStatus, McpStartupState, ResolvedWebFetchConfig,
-    ResolvedWebSearchConfig,
+    McpManager, McpServerId, McpServerStatus, McpStartupState, McpToolDescriptor,
+    ResolvedWebFetchConfig, ResolvedWebSearchConfig,
 };
-use devo_protocol::native::rpc_session::WebSearchPickerEntry;
-use devo_protocol::native::session::WebSearchChoice;
 use serde_json::Value;
 
 use super::web_search_builtin as builtin;
@@ -30,27 +28,53 @@ pub(super) enum WebFetchRoute {
         server_id: McpServerId,
         manager: Result<Arc<dyn McpManager>, String>,
     },
+    CustomMcp {
+        server_id: McpServerId,
+        tool_name: String,
+        manager: Result<Arc<dyn McpManager>, String>,
+    },
 }
 
 impl WebRoutes {
     pub(super) fn for_turn(
         context: &SessionRuntimeContext,
         search: &ResolvedWebSearchConfig,
-        fetch: ResolvedWebFetchConfig,
+        fetch: &ResolvedWebFetchConfig,
     ) -> Self {
         let search = McpWebSearchRoute::for_turn(context, search);
         let fetch = match fetch {
             ResolvedWebFetchConfig::Mcp { provider } => {
-                let server_id = McpServerId(builtin::server_id(provider).into());
+                let server_id = McpServerId(builtin::server_id(*provider).into());
                 let manager = search
                     .as_ref()
                     .filter(|route| route.server_id == server_id)
                     .map_or_else(
-                        || builtin::manager(context, provider).map_err(|error| error.to_string()),
+                        || builtin::manager(context, *provider).map_err(|error| error.to_string()),
                         |route| route.manager.clone(),
                     );
                 WebFetchRoute::Mcp { server_id, manager }
             }
+            ResolvedWebFetchConfig::CustomMcp {
+                server_id,
+                tool_name,
+            } if tool_name == "web_fetch" => {
+                let server_id = McpServerId(server_id.clone());
+                let manager = search
+                    .as_ref()
+                    .filter(|route| route.server_id == server_id)
+                    .map_or_else(
+                        || Ok(Arc::clone(&context.mcp_manager)),
+                        |route| route.manager.clone(),
+                    );
+                WebFetchRoute::CustomMcp {
+                    server_id,
+                    tool_name: tool_name.clone(),
+                    manager,
+                }
+            }
+            ResolvedWebFetchConfig::CustomMcp { .. } => WebFetchRoute::Unavailable(
+                "Custom MCP fetch must use the canonical web_fetch tool.",
+            ),
             ResolvedWebFetchConfig::Disabled => {
                 WebFetchRoute::Unavailable("Web fetch is off for this turn.")
             }
@@ -105,15 +129,19 @@ impl McpWebSearchRoute {
 /// V1 supports a simple query-only call. Unsupported structural combinators
 /// require a future explicit field mapping rather than guessed tool arguments.
 pub(super) fn supports_query_input(schema: &Value) -> bool {
+    supports_single_string_input(schema, "query")
+}
+
+fn supports_single_string_input(schema: &Value, field: &str) -> bool {
     schema.get("type").and_then(Value::as_str) == Some("object")
         && schema
-            .pointer("/properties/query/type")
+            .pointer(&format!("/properties/{field}/type"))
             .and_then(Value::as_str)
             == Some("string")
         && schema.get("required").is_none_or(|required| {
             required
                 .as_array()
-                .is_some_and(|fields| fields.iter().all(|name| name == "query"))
+                .is_some_and(|fields| fields.iter().all(|name| name == field))
         })
         && [
             "$ref",
@@ -136,6 +164,31 @@ pub(super) fn supports_query_input(schema: &Value) -> bool {
         && schema
             .get("maxProperties")
             .is_none_or(|v| v.as_u64().is_some_and(|n| n >= 1))
+}
+
+pub(super) fn supports_url_input(schema: &Value) -> bool {
+    supports_single_string_input(schema, "url")
+}
+
+/// Returns the canonical fetch tool only when it is ready and can be invoked
+/// unambiguously with `{ "url": ... }` on this exact MCP server.
+pub(super) fn compatible_fetch_tool<'a>(
+    statuses: &'a [McpServerStatus],
+    server_id: &McpServerId,
+) -> Option<&'a McpToolDescriptor> {
+    let mut matching_servers = statuses
+        .iter()
+        .filter(|status| status.server_id == *server_id);
+    let server = matching_servers.next()?;
+    if matching_servers.next().is_some() || server.startup_state != McpStartupState::Ready {
+        return None;
+    }
+    let mut named_tools = server
+        .tools
+        .iter()
+        .filter(|tool| tool.server_id == *server_id && tool.name == "web_fetch");
+    let tool = named_tools.next()?;
+    (named_tools.next().is_none() && supports_url_input(&tool.input_schema)).then_some(tool)
 }
 
 pub(super) fn selected_tool_note(
@@ -194,102 +247,72 @@ pub(super) async fn invoke(route: &McpWebSearchRoute, query: &str) -> Result<Val
     Ok(result)
 }
 
-pub(super) fn picker_entries(
-    context: &SessionRuntimeContext,
-    statuses: &[McpServerStatus],
-    selected: &WebSearchChoice,
-    hosted_note: Option<String>,
-) -> Vec<WebSearchPickerEntry> {
-    let mut entries = vec![
-        WebSearchPickerEntry {
-            label: "Follow defaults".into(),
-            choice: WebSearchChoice::Inherit,
-            note: None,
-        },
-        WebSearchPickerEntry {
-            label: "Model provider".into(),
-            choice: WebSearchChoice::Provider,
-            note: hosted_note,
-        },
-    ];
-    entries.extend(builtin::SUPPLIERS.into_iter().map(|supplier| {
-        mcp_picker_entry(
-            context,
-            statuses,
-            builtin::server_id(supplier),
-            builtin::SEARCH_TOOL,
-        )
-    }));
-    let mut discovered: Vec<_> = statuses
-        .iter()
-        .filter(|status| {
-            builtin::supplier_for_server_id(&status.server_id.0).is_none()
-                && status.startup_state == McpStartupState::Ready
-        })
-        .flat_map(|status| {
-            status.tools.iter().filter(move |tool| {
-                tool.server_id == status.server_id && supports_query_input(&tool.input_schema)
-            })
-        })
-        .map(|tool| mcp_picker_entry(context, statuses, &tool.server_id.0, &tool.name))
-        .collect();
-    discovered.sort_by(|left, right| left.label.cmp(&right.label));
-    discovered.dedup_by(|left, right| left.choice == right.choice);
-    entries.extend(discovered);
-    if let WebSearchChoice::Mcp {
-        server_id,
-        tool_name,
-    } = selected
-        && !entries.iter().any(|entry| &entry.choice == selected)
-    {
-        entries.push(mcp_picker_entry(context, statuses, server_id, tool_name));
-    }
-    entries.push(WebSearchPickerEntry {
-        label: "Off".into(),
-        choice: WebSearchChoice::Off,
-        note: None,
-    });
-    entries
-}
-
-pub(super) fn mcp_picker_entry(
-    context: &SessionRuntimeContext,
-    statuses: &[McpServerStatus],
-    server_id: &str,
-    tool_name: &str,
-) -> WebSearchPickerEntry {
-    let (label, note) = if let Some(supplier) = builtin::supplier_for_server_id(server_id) {
-        let note = if tool_name == builtin::SEARCH_TOOL {
-            builtin::status_note(context, supplier)
-        } else {
-            Some("Built-in search tool not found".into())
-        };
-        (builtin::label(supplier).into(), note)
-    } else {
-        let status = statuses
-            .iter()
-            .find(|status| status.server_id.0 == server_id);
-        (
-            format!("{server_id} / {tool_name}"),
-            selected_tool_note(status, tool_name).map(str::to_owned),
-        )
-    };
-    WebSearchPickerEntry {
-        label,
-        choice: WebSearchChoice::Mcp {
-            server_id: server_id.into(),
-            tool_name: tool_name.into(),
-        },
-        note,
-    }
-}
-
 #[cfg(test)]
 mod tests {
     use pretty_assertions::assert_eq;
     use serde_json::json;
 
     use super::*;
+
+    #[test]
+    fn canonical_fetch_requires_ready_same_server_and_compatible_url_schema() {
+        let server_id = McpServerId("docs".into());
+        let status = |startup_state: McpStartupState,
+                      tool_server_id: McpServerId,
+                      name: &str,
+                      input_schema: Value| McpServerStatus {
+            server_id: server_id.clone(),
+            startup_state,
+            auth_state: devo_core::McpAuthState::Authenticated,
+            tools: vec![McpToolDescriptor {
+                server_id: tool_server_id,
+                name: name.into(),
+                description: String::new(),
+                input_schema,
+            }],
+            resources: Vec::new(),
+            resource_templates: Vec::new(),
+            last_refreshed_at: None,
+        };
+        let compatible = status(
+            McpStartupState::Ready,
+            server_id.clone(),
+            "web_fetch",
+            json!({"type":"object","properties":{"url":{"type":"string"}},"required":["url"]}),
+        );
+        assert_eq!(
+            compatible_fetch_tool(std::slice::from_ref(&compatible), &server_id),
+            compatible.tools.first(),
+        );
+        let mut duplicate_tool = compatible.clone();
+        duplicate_tool.tools.extend(compatible.tools.clone());
+        assert_eq!(compatible_fetch_tool(&[duplicate_tool], &server_id), None);
+        assert_eq!(
+            compatible_fetch_tool(&[compatible.clone(), compatible.clone()], &server_id),
+            None,
+        );
+        let unsupported_schema = status(
+            McpStartupState::Ready,
+            server_id.clone(),
+            "web_fetch",
+            json!({"type":"object","properties":{"url":{"type":"string"}},"required":["url","token"]}),
+        );
+        let wrong_server = status(
+            McpStartupState::Ready,
+            McpServerId("other".into()),
+            "web_fetch",
+            json!({"type":"object","properties":{"url":{"type":"string"}}}),
+        );
+        let not_ready = status(
+            McpStartupState::AuthRequired,
+            server_id.clone(),
+            "web_fetch",
+            json!({"type":"object","properties":{"url":{"type":"string"}}}),
+        );
+        for status in [unsupported_schema, wrong_server, not_ready] {
+            assert_eq!(compatible_fetch_tool(&[status], &server_id), None);
+        }
+    }
 
     #[test]
     fn only_tools_that_can_be_called_with_just_query_are_eligible() {

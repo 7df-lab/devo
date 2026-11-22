@@ -6,7 +6,7 @@ use serde_json::{Value, json};
 const SEARCH_ENDPOINT: &str = "https://api.deepseek.com/v1/tools/search";
 const FETCH_ENDPOINT: &str = "https://api.deepseek.com/v1/tools/fetch";
 const MAX_SEARCH_QUERY_CHARS: usize = 128;
-use super::valid_fetch_url;
+use super::{upstream, valid_fetch_url};
 const MAX_RESPONSE_BYTES: usize = 1024 * 1024;
 
 pub(super) async fn search(
@@ -21,7 +21,13 @@ pub(super) async fn search(
         ));
     }
 
-    request(http, api_key, SEARCH_ENDPOINT, json!({ "query": query })).await
+    match request(http, api_key, SEARCH_ENDPOINT, json!({ "query": query })).await {
+        Ok(result) => Ok(result),
+        Err(upstream::UpstreamError::AuthRejected) => {
+            Ok(upstream::auth_rejected_result("DeepSeek"))
+        }
+        Err(upstream::UpstreamError::Other(error)) => Err(error),
+    }
 }
 
 pub(super) async fn fetch(
@@ -36,7 +42,13 @@ pub(super) async fn fetch(
         ));
     }
 
-    request(http, api_key, FETCH_ENDPOINT, json!({ "url": url })).await
+    match request(http, api_key, FETCH_ENDPOINT, json!({ "url": url })).await {
+        Ok(result) => Ok(result),
+        Err(upstream::UpstreamError::AuthRejected) => {
+            Ok(upstream::auth_rejected_result("DeepSeek"))
+        }
+        Err(upstream::UpstreamError::Other(error)) => Err(error),
+    }
 }
 
 async fn request(
@@ -44,7 +56,7 @@ async fn request(
     api_key: &str,
     endpoint: &str,
     payload: Value,
-) -> Result<CallToolResult, ErrorData> {
+) -> Result<CallToolResult, upstream::UpstreamError> {
     let mut response = http
         .post(endpoint)
         .bearer_auth(api_key)
@@ -53,15 +65,17 @@ async fn request(
         .await
         .map_err(|_| ErrorData::internal_error("DeepSeek request failed", None))?;
 
+    if response.status() == reqwest::StatusCode::UNAUTHORIZED {
+        return Err(upstream::UpstreamError::AuthRejected);
+    }
     if !response.status().is_success() {
         let message = match response.status().as_u16() {
-            401 => "DeepSeek rejected the API key",
             402 => "DeepSeek account has insufficient balance",
             403 => "DeepSeek denied the request",
             429 => "DeepSeek rate limit exceeded",
             _ => "DeepSeek service returned an error",
         };
-        return Err(ErrorData::internal_error(message, None));
+        return Err(ErrorData::internal_error(message, None).into());
     }
 
     let mut body = Vec::new();
@@ -74,7 +88,8 @@ async fn request(
             return Err(ErrorData::internal_error(
                 "DeepSeek response exceeded the size limit",
                 None,
-            ));
+            )
+            .into());
         }
         body.extend_from_slice(&chunk);
     }

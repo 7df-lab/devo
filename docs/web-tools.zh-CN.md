@@ -12,19 +12,20 @@
 | 已确认接入点支持 Anthropic 原生抓取 | `web_fetch.mode = "provider"` | 模型服务端 |
 | 不提供对应的常规工具入口 | `mode = "disabled"` | 不在该能力的常规入口启用 |
 
-**当前没有 `auto` 模式，也没有“探测 provider 不支持 → 自动切换 Exa/Tavily/Parallel”的逻辑。** 原生工具报错不会触发第三方重试；配置多个搜索服务也不构成轮询或故障转移列表。搜索与抓取独立选择，可以“原生搜索 + 本地抓取”，也可以两者都走本地。
+**没有自动切换供应商的逻辑。** 原生工具报错不会触发第三方重试；配置多个搜索服务也不构成轮询或故障转移列表。配置文件仍可独立设置搜索与抓取（例如“原生搜索 + 本地抓取”）；在 `/web` 显式选择后，则由同一个后端提供两项能力，不支持的能力不会回退到其他服务。
 
 默认值是 **search = provider，fetch = local**。对于 Ollama、LM Studio、vLLM 等只有兼容推理 API 的接入点，通常应显式配置本地搜索，不要把“支持 function calling”理解为“服务端自带联网搜索”。本地搜索中的“本地”指调用代码在 Devo 一侧，**仍会联网发送查询**。
 
 `disabled` 是功能配置，不是断网或安全隔离开关。独立 MCP、技能或其他获准的联网路径不随之关闭。RLM 的 `web.fetch` 检查该轮的 fetch mode；选择 provider 或 disabled 时不会偷偷执行 Direct HTTP。需要禁止联网时，应使用权限和网络隔离策略，不能只依赖这些 mode。
 
-### 终端：选择本会话的搜索后端
+### 终端：选择本会话的联网后端
 
-在 TUI 输入 `/web`，用方向键选中搜索后端并按 Enter 保存；Esc 不保存。Fetch 只显示当前设置，不在此处编辑。**Follow defaults** 使用当前模型、provider 和应用的默认设置；显式选择 **Model provider**、MCP 工具或 **Off** 会保存在当前会话，重启或切换模型后仍保留，从下一轮起生效。失败不会自动换后端。
+在 TUI 输入 `/web`，用方向键移动，按 Enter 选择，Esc 返回上一层或关闭。命令与保存确认不进入对话记录。显式选择同时作用于搜索与抓取；不支持的能力不会换服务，**Off** 关闭两项能力。选择从下一轮起生效，重启或切换模型后仍保留。**Use configured backend** 清除会话选择，并预览将恢复的配置。旧会话的仅搜索选择及已有的独立配置不会静默改动。
 
-- **Tavily / DeepSeek / Serper / Exa · Built-in**：每个供应商都需要自己的 API key，保存在用户级 `auth.json` 中相应的 `tavily`、`deepseek`、`serper` 或 `exa` 条目。与 `devo` 同目录的 `devo-web-mcp` 独立进程只在实际调用时启动，从现有凭据存储读取选定供应商的 key；不需要环境变量。四个供应商均提供 `web_search` 与 `web_fetch`，实际调用可能消耗供应商额度或产生费用。
-- 在应用、provider 或模型的 `web_fetch` 配置中设置 `mode = "mcp"` 和 `mcp_provider = "deepseek"`、`"tavily"`、`"serper"` 或 `"exa"`，即可使用对应供应商的内置 MCP 抓取。MCP 抓取只支持 Markdown；未配置供应商或调用错误时不会回退到 Direct HTTP。
-- **自定义 MCP**：先用现有 MCP 设置连接服务器。`/web` 中可选择能只接收一个字符串 `query` 的工具。保存的是服务器 ID 和工具原始名称，而不是显示名称。
+- **Model provider** 会显示当前模型连接的自动检查结果，例如 **Search + fetch**、**Search only** 或 **Couldn’t verify**。结果不明确不等于不支持。
+- **Built-in** 展开 Tavily、DeepSeek、Serper 和 Exa。每个供应商均提供 `web_search` 与 `web_fetch`，且需要自己的 API key。列表区分 **Key required**、**Key saved** 与已收到明确拒绝的 **Key rejected**。保存密钥并不等于验证；详情见 `/login`。与 `devo` 同目录的 `devo-web-mcp` 只在实际调用时启动，从用户凭据存储读取密钥，无需环境变量。调用可能消耗供应商额度或产生费用。
+- 如果仍使用配置文件，可在应用、provider 或模型的 `web_fetch` 配置中设置 `mode = "mcp"` 和 `mcp_provider = "deepseek"`、`"tavily"`、`"serper"` 或 `"exa"`。内置 MCP 抓取只支持 Markdown；失败不会回退到 Direct HTTP。
+- **My MCP tools** 只在可选时显示。选择一个能用单独字符串 `query` 调用的工具时，抓取仅使用同一服务器上可用的兼容 `web_fetch`（可用单独字符串 `url` 调用）；否则该选择仅支持搜索。保存的是服务器 ID 和工具原始名称。
 - 从源码构建 TUI 和内置 MCP 时，运行 `cargo build -p devo-cli -p devo-web-mcp --bins`。
 
 ## 2. 名称与调用链
@@ -108,11 +109,11 @@ rlm.web_fetch(url)    → host_request("web.fetch", ...)  → 权限检查 → W
 | --- | --- | --- |
 | `anthropic_messages` | 添加 `{"type":"web_search_20260209","name":"web_search"}` | 添加 `{"type":"web_fetch_20260209","name":"web_fetch"}` |
 | `openai_responses` | 添加 `{"type":"web_search"}` | 当前代码添加 `{"type":"web_fetch"}`；不能视为官方支持保证 |
-| `openai_chat_completions` | core 层不添加 hosted search | 当前代码写顶层 `web_fetch_options: {}`；不能视为官方支持保证 |
+| `openai_chat_completions` | 正常 turn 不添加 | 正常 turn 不添加 |
 
 重要边界：
 
-- **协议兼容不等于能力兼容。** Devo 会为已配置的 Messages / Responses 连接在后台分别检查 hosted search 和 hosted fetch（设为 `disabled` 的能力不检查）。添加连接、切换模型、启动或恢复会话时会尝试检查；结果按运行中的连接、协议及具体模型缓存。检查使用固定的公开查询或 URL，不发送会话内容，但可能产生供应商费用。协议不受 Devo 支持、供应商明确拒绝和无法验证是不同情况；超时或未调用工具不等于不支持。`/web` 显示当前选择及必要提示。检查仅用于提示，不自动修改设置、路由或切换搜索服务。
+- **协议兼容不等于能力兼容。** 即使选了 MCP，Devo 也会为可用的 Messages / Responses 连接分别检查原生搜索与抓取。添加连接、切换模型、启动或恢复会话时会尝试，联网能力完全关闭时不从该会话启动新检查。检查结果按连接、协议及具体模型缓存；打开 `/web` 时如果没有缓存，则在后台启动检查，不阻塞菜单。检查使用固定的公开查询或 URL，不发送会话内容，但可能产生供应商费用。仅在已知不支持时不在模型请求中附加该工具；无法验证不等于不支持。检查不修改用户设置或切换后端。
 - Chat Completions 的底层适配器能序列化 `web_search_options`，但正常 core turn 的 search gate 只允许 Responses 和 Anthropic，因此不能照旧 README 描述期待它自动启用。官方 Chat Completions 搜索需要适配的模型，这与当前 Devo 正常路径是否发送参数是两件事。
 - OpenAI 官方 Web Search 文档描述了搜索过程中的 `open_page` / `find_in_page`，不能据此推导出独立 `web_fetch` 工具或 `web_fetch_options` 受支持。对普通 OpenAI 接入点保留 `fetch = local` 更稳妥；只有接入点明确提供相应扩展且经过验证时才使用当前 provider fetch 序列化。
 - Anthropic 的版本化工具需与模型、平台及账户匹配。当前 Devo 固定使用上述 20260209 版本，不会自动回退到旧版，也不会自动跟随官方新版。官方动态过滤功能有模型要求；不能仅看 `anthropic_messages` 就认定可用。
@@ -260,7 +261,7 @@ mode = "local"
 ### 显式选择 Serper 或 Exa
 
 1. 从 [Serper](https://serper.dev) 或 [Exa](https://exa.ai) 获取 API key。在 TUI 用 `/login` → **MCP Connections** → **Serper (web search and fetch)** 或 **Exa (web search and fetch)** 保存。用户级 `auth.json` 中已有的 `serper` 或 `exa` API key 不必重录；此前只通过环境变量提供 key 的用户需要用 `/login` 保存。
-2. 在 `/web` 选择 **Serper · Built-in** 或 **Exa · Built-in** 启用当前会话的搜索。抓取独立配置（用 Exa 时将供应商改为 `"exa"`）：
+2. 在 `/web` → **Built-in** 选择 **Serper** 或 **Exa**，同时启用该供应商的搜索和抓取。不使用会话选择时，仍可独立配置默认抓取（用 Exa 时将供应商改为 `"exa"`）：
 
 ```toml
 [tools.web_fetch]

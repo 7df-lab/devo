@@ -9,9 +9,8 @@ use std::sync::{Arc, Mutex, Weak};
 use std::time::{Duration, Instant};
 
 use devo_core::{ResolvedWebFetchConfig, ResolvedWebSearchConfig, TurnConfig};
-use devo_protocol::native::rpc_session::{
-    SessionWebStatusReadParams, SessionWebStatusReadResult, WebBackendStatus,
-};
+#[path = "web_picker_status.rs"]
+mod picker;
 use devo_protocol::{
     HostedToolDefinition, HostedWebFetchTool, HostedWebSearchTool, ModelProfileKey, ModelRequest,
     ProviderWireApi, RequestContent, RequestMessage, ResponseContent,
@@ -21,7 +20,6 @@ use devo_provider::{ProviderRoute, ProviderRouter};
 use lru::LruCache;
 use tokio::sync::Semaphore;
 
-use crate::SuccessResponse;
 use crate::runtime::ServerRuntime;
 use crate::session_context::SessionRuntimeContext;
 
@@ -83,6 +81,14 @@ enum ProbeResult {
     Inconclusive,
 }
 
+#[derive(Clone, Copy, Debug, PartialEq, Eq)]
+enum HostedSupport {
+    Supported,
+    Unavailable,
+    Checking,
+    Unverified,
+}
+
 #[derive(Clone, Copy)]
 enum ProbePolicy {
     ScheduleIfNeeded,
@@ -130,17 +136,19 @@ impl HostedWebChecks {
         config: &TurnConfig,
         capability: Capability,
         policy: ProbePolicy,
-    ) -> Option<ProbeResult> {
-        let ProviderRoute::Connection { wire_api, .. } = &config.provider_route else {
-            // There is no explicit endpoint/credential binding for the bootstrap route.
-            return None;
+    ) -> HostedSupport {
+        let wire = match &config.provider_route {
+            ProviderRoute::Connection { wire_api, .. } => *wire_api,
+            ProviderRoute::Default => config.model.provider,
         };
-        let wire = *wire_api;
         if !Capability::can_verify(wire) {
-            return None;
+            return HostedSupport::Unavailable;
         }
-        if !router.has_available_route(&config.provider_route) {
-            return None;
+        if matches!(config.provider_route, ProviderRoute::Default)
+            || !router.has_available_route(&config.provider_route)
+        {
+            // No explicit endpoint or usable credential binding for this route.
+            return HostedSupport::Unverified;
         }
         let reasoning = config
             .model
@@ -158,13 +166,20 @@ impl HostedWebChecks {
         if let Some(entry) = entries.get(&key)
             && entry.expires_at > now
         {
-            return entry.result;
+            return match entry.result {
+                Some(ProbeResult::Supported) => HostedSupport::Supported,
+                Some(ProbeResult::Rejected) => HostedSupport::Unavailable,
+                Some(ProbeResult::Inconclusive) => HostedSupport::Unverified,
+                None => HostedSupport::Checking,
+            };
         }
         if matches!(policy, ProbePolicy::CacheOnly) {
-            return None;
+            return HostedSupport::Unverified;
         }
         // Do not accumulate background requests if users switch many models quickly.
-        let slot = Arc::clone(&self.slots).try_acquire_owned().ok()?;
+        let Ok(slot) = Arc::clone(&self.slots).try_acquire_owned() else {
+            return HostedSupport::Unverified;
+        };
         entries.put(
             key.clone(),
             Entry {
@@ -223,7 +238,7 @@ impl HostedWebChecks {
                     };
             }
         });
-        None
+        HostedSupport::Checking
     }
 }
 
@@ -307,48 +322,77 @@ fn explicitly_rejected(capability: Capability, error: &ProviderError) -> bool {
         .any(|reason| message.contains(reason))
 }
 
-fn hosted_status_note(
-    wire: ProviderWireApi,
-    capability: Capability,
-    result: Option<ProbeResult>,
-) -> Option<String> {
-    match result {
-        Some(ProbeResult::Supported) => None,
-        Some(ProbeResult::Rejected) => Some("Not supported or enabled on this connection".into()),
-        Some(ProbeResult::Inconclusive) => {
-            Some("Couldn’t verify hosted support on this connection".into())
+fn hosted_status_note(state: HostedSupport) -> Option<String> {
+    match state {
+        HostedSupport::Supported => None,
+        HostedSupport::Unavailable => Some("Not supported".into()),
+        HostedSupport::Checking => Some("Checking…".into()),
+        HostedSupport::Unverified => Some("Couldn’t verify".into()),
+    }
+}
+
+fn hosted_picker_note(search: HostedSupport, fetch: HostedSupport) -> String {
+    use HostedSupport::*;
+    match (search, fetch) {
+        (Supported, Supported) => "Search + fetch".into(),
+        (Supported, Unavailable) => "Search only".into(),
+        (Unavailable, Supported) => "Fetch only".into(),
+        (Unavailable, Unavailable) => "Not supported".into(),
+        (Checking, Checking) => "Checking…".into(),
+        (Unverified, Unverified) => "Couldn’t verify".into(),
+        _ => {
+            let label = |capability, state| match state {
+                Supported => format!("{capability} supported"),
+                Unavailable => format!("{capability} unavailable"),
+                Checking => format!("{capability} checking…"),
+                Unverified => format!("{capability} unverified"),
+            };
+            format!("{} · {}", label("Search", search), label("Fetch", fetch))
         }
-        None if wire == ProviderWireApi::GoogleGenerativeAi
-            || (wire == ProviderWireApi::OpenAIChatCompletions
-                && capability == Capability::Search) =>
-        {
-            Some("Devo does not offer this hosted tool on this protocol".into())
-        }
-        None if !Capability::can_verify(wire) => {
-            Some("Devo can’t verify hosted support on this protocol".into())
-        }
-        None => None,
     }
 }
 
 impl ServerRuntime {
     pub(super) fn check_hosted_web(&self, context: &SessionRuntimeContext, config: &TurnConfig) {
+        // Even when an MCP backend is selected, users need to know what the
+        // current model can do. When web is fully off, don't start network probes.
+        if matches!(config.web_search, ResolvedWebSearchConfig::Disabled)
+            && matches!(config.web_fetch, ResolvedWebFetchConfig::Disabled)
+        {
+            return;
+        }
         let router = context.provider_router();
-        if !matches!(config.web_search, ResolvedWebSearchConfig::Disabled) {
+        for capability in [Capability::Search, Capability::Fetch] {
             self.hosted_web_checks.inspect(
                 Arc::clone(&router),
                 config,
-                Capability::Search,
+                capability,
                 ProbePolicy::ScheduleIfNeeded,
             );
         }
-        if !matches!(config.web_fetch, ResolvedWebFetchConfig::Disabled) {
+    }
+
+    pub(in crate::runtime) fn suppress_rejected_hosted_tools(
+        &self,
+        context: &SessionRuntimeContext,
+        config: &mut TurnConfig,
+    ) {
+        let router = context.provider_router();
+        let unavailable = |capability, config: &TurnConfig| {
             self.hosted_web_checks.inspect(
-                router,
+                Arc::clone(&router),
                 config,
-                Capability::Fetch,
-                ProbePolicy::ScheduleIfNeeded,
-            );
+                capability,
+                ProbePolicy::CacheOnly,
+            ) == HostedSupport::Unavailable
+        };
+        // Avoid sending a known rejected tool (it can reject the whole model
+        // request). Unknown and pending probes never disable a selected tool.
+        if config.web_search.is_provider() && unavailable(Capability::Search, config) {
+            config.web_search = ResolvedWebSearchConfig::Disabled;
+        }
+        if config.web_fetch.is_provider() && unavailable(Capability::Fetch, config) {
+            config.web_fetch = ResolvedWebFetchConfig::Disabled;
         }
     }
 
@@ -377,119 +421,5 @@ impl ServerRuntime {
                 runtime.check_hosted_web(&context, &config);
             }
         });
-    }
-
-    pub(super) async fn handle_native_session_web_status_read(
-        self: &Arc<Self>,
-        id: serde_json::Value,
-        params: serde_json::Value,
-    ) -> serde_json::Value {
-        let params: SessionWebStatusReadParams =
-            match self.parse_rpc_params(id.clone(), params, "session/web/status/read") {
-                Ok(params) => params,
-                Err(error) => return error,
-            };
-        let Some(handle) = self.session(params.session_id).await else {
-            return self.session_missing(id);
-        };
-        let (Some(summary), Some(context)) =
-            (handle.summary().await, handle.runtime_context().await)
-        else {
-            return self.session_missing(id);
-        };
-        let config = match context.resolve_session_turn_config(
-            &summary,
-            summary.model_selection(),
-            summary.settings.reasoning_effort.clone(),
-        ) {
-            Ok(config) => config,
-            Err(error) => {
-                return self.error_response(
-                    id,
-                    crate::ProtocolErrorCode::InvalidParams,
-                    error.to_string(),
-                );
-            }
-        };
-        let router = context.provider_router();
-        let wire = match &config.provider_route {
-            ProviderRoute::Connection { wire_api, .. } => *wire_api,
-            ProviderRoute::Default => config.model.provider,
-        };
-        let hosted = |capability| WebBackendStatus {
-            backend: "Model provider".into(),
-            note: hosted_status_note(
-                wire,
-                capability,
-                self.hosted_web_checks.inspect(
-                    Arc::clone(&router),
-                    &config,
-                    capability,
-                    ProbePolicy::CacheOnly,
-                ),
-            ),
-        };
-        use devo_protocol::native::session::WebSearchChoice;
-        let search_choice = summary
-            .settings
-            .web_search
-            .clone()
-            .unwrap_or(WebSearchChoice::Inherit);
-        let statuses = context.mcp_manager.statuses().await.unwrap_or_default();
-        let hosted_search = hosted(Capability::Search);
-        let search_choices = super::web_search_mcp::picker_entries(
-            &context,
-            &statuses,
-            &search_choice,
-            hosted_search.note.clone(),
-        );
-        let search = match &config.web_search {
-            ResolvedWebSearchConfig::Provider => hosted_search,
-            ResolvedWebSearchConfig::Mcp {
-                server_id,
-                tool_name,
-            } => {
-                let entry = super::web_search_mcp::mcp_picker_entry(
-                    &context, &statuses, server_id, tool_name,
-                );
-                WebBackendStatus {
-                    backend: entry.label,
-                    note: entry.note,
-                }
-            }
-            ResolvedWebSearchConfig::Local(local) => WebBackendStatus {
-                backend: local.provider_id.clone(),
-                note: None,
-            },
-            ResolvedWebSearchConfig::Disabled => WebBackendStatus {
-                backend: "Off".into(),
-                note: None,
-            },
-        };
-        let fetch = match config.web_fetch {
-            ResolvedWebFetchConfig::Provider => hosted(Capability::Fetch),
-            ResolvedWebFetchConfig::Mcp { provider } => WebBackendStatus {
-                backend: super::web_search_builtin::label(provider).into(),
-                note: super::web_search_builtin::status_note(&context, provider),
-            },
-            ResolvedWebFetchConfig::Local => WebBackendStatus {
-                backend: "Direct HTTP".into(),
-                note: None,
-            },
-            ResolvedWebFetchConfig::Disabled => WebBackendStatus {
-                backend: "Off".into(),
-                note: None,
-            },
-        };
-        serde_json::to_value(SuccessResponse {
-            id,
-            result: SessionWebStatusReadResult {
-                search,
-                fetch,
-                search_choice,
-                search_choices,
-            },
-        })
-        .expect("serialize session web status")
     }
 }

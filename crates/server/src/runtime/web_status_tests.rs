@@ -106,6 +106,29 @@ fn explicit_rejections_are_not_confused_with_connection_or_quota_errors() {
     );
 }
 
+#[test]
+fn picker_distinguishes_partial_support_from_unknown_or_pending_evidence() {
+    use HostedSupport::*;
+    assert_eq!(
+        [
+            hosted_picker_note(Supported, Supported),
+            hosted_picker_note(Supported, Unavailable),
+            hosted_picker_note(Unavailable, Supported),
+            hosted_picker_note(Supported, Unverified),
+            hosted_picker_note(Checking, Checking),
+            hosted_picker_note(Unavailable, Unavailable),
+        ],
+        [
+            "Search + fetch",
+            "Search only",
+            "Fetch only",
+            "Search supported · Fetch unverified",
+            "Checking…",
+            "Not supported",
+        ]
+    );
+}
+
 struct TestRouter(mpsc::UnboundedSender<(ProviderRoute, ModelRequest)>);
 
 #[async_trait::async_trait]
@@ -172,7 +195,7 @@ async fn probe_uses_the_selected_connection_and_only_public_inputs_then_caches_p
             Capability::Search,
             ProbePolicy::CacheOnly
         ),
-        None
+        HostedSupport::Unverified
     );
     assert!(
         checks.entries.lock().unwrap().is_empty(),
@@ -186,7 +209,7 @@ async fn probe_uses_the_selected_connection_and_only_public_inputs_then_caches_p
                 Capability::Search,
                 ProbePolicy::ScheduleIfNeeded
             ),
-            None
+            HostedSupport::Checking
         );
     }
     let (actual_route, request) = rx.recv().await.expect("probe request");
@@ -210,7 +233,7 @@ async fn probe_uses_the_selected_connection_and_only_public_inputs_then_caches_p
             Capability::Search,
             ProbePolicy::CacheOnly
         ),
-        Some(ProbeResult::Supported)
+        HostedSupport::Supported
     );
     assert!(rx.try_recv().is_err());
 
@@ -222,7 +245,7 @@ async fn probe_uses_the_selected_connection_and_only_public_inputs_then_caches_p
             Capability::Search,
             ProbePolicy::ScheduleIfNeeded
         ),
-        None
+        HostedSupport::Checking
     );
     assert_eq!(rx.recv().await.expect("probe after router reload").0, route);
     assert_eq!(
@@ -232,7 +255,7 @@ async fn probe_uses_the_selected_connection_and_only_public_inputs_then_caches_p
             Capability::Fetch,
             ProbePolicy::ScheduleIfNeeded
         ),
-        None
+        HostedSupport::Checking
     );
     let (_, fetch_request) = rx.recv().await.expect("independent fetch probe");
     assert_eq!(

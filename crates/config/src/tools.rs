@@ -164,7 +164,7 @@ impl ResolvedWebSearchConfig {
 }
 
 /// Fully resolved web fetch behavior for one model invocation.
-#[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize, Deserialize, Default)]
+#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize, Default)]
 #[serde(tag = "mode", rename_all = "snake_case")]
 pub enum ResolvedWebFetchConfig {
     Disabled,
@@ -174,14 +174,18 @@ pub enum ResolvedWebFetchConfig {
     Mcp {
         provider: BuiltinWebSupplier,
     },
+    CustomMcp {
+        server_id: String,
+        tool_name: String,
+    },
 }
 
 impl ResolvedWebFetchConfig {
-    pub fn is_local(self) -> bool {
+    pub fn is_local(&self) -> bool {
         matches!(self, Self::Local)
     }
 
-    pub fn is_provider(self) -> bool {
+    pub fn is_provider(&self) -> bool {
         matches!(self, Self::Provider)
     }
 }

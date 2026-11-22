@@ -19,7 +19,7 @@ pub(super) async fn search(
             None,
         ));
     }
-    let value = upstream::request_json(
+    let value = match upstream::request_json(
         "Exa",
         http.post(SEARCH_ENDPOINT)
             .header("x-api-key", api_key)
@@ -29,7 +29,14 @@ pub(super) async fn search(
                 "contents": { "highlights": true },
             })),
     )
-    .await?;
+    .await
+    {
+        Ok(value) => value,
+        Err(upstream::UpstreamError::AuthRejected) => {
+            return Ok(upstream::auth_rejected_result("Exa"));
+        }
+        Err(upstream::UpstreamError::Other(error)) => return Err(error),
+    };
     if !value.get("results").is_some_and(Value::is_array) {
         return Err(ErrorData::internal_error(
             "Exa search returned an invalid result",
@@ -52,7 +59,7 @@ pub(super) async fn fetch(
             None,
         ));
     }
-    let value = upstream::request_json(
+    let value = match upstream::request_json(
         "Exa",
         http.post(FETCH_ENDPOINT)
             .header("x-api-key", api_key)
@@ -61,7 +68,14 @@ pub(super) async fn fetch(
                 "text": { "maxCharacters": 100_000 },
             })),
     )
-    .await?;
+    .await
+    {
+        Ok(value) => value,
+        Err(upstream::UpstreamError::AuthRejected) => {
+            return Ok(upstream::auth_rejected_result("Exa"));
+        }
+        Err(upstream::UpstreamError::Other(error)) => return Err(error),
+    };
     fetch_result(&value, api_key)
 }
 

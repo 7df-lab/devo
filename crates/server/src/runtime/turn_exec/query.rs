@@ -58,6 +58,8 @@ impl ServerRuntime {
         let agent_tool_policy = state.agent_tool_policy;
         let session_tool_registry = self.tool_registry_for_actor_state(state);
         let runtime_context = Arc::clone(&state.runtime_context);
+        let mut turn_config = turn_config.clone();
+        self.suppress_rejected_hosted_tools(&runtime_context, &mut turn_config);
         let turn_goal = match &input_mode {
             super::super::TurnInputMode::VisibleUserMessage
             | super::super::TurnInputMode::HostMessage(_) => {
@@ -345,7 +347,7 @@ impl ServerRuntime {
                 web_routes: super::super::kernel_host_bridge::WebRoutes::for_turn(
                     &runtime_context,
                     &turn_config.web_search,
-                    turn_config.web_fetch,
+                    &turn_config.web_fetch,
                 ),
                 network_proxy: provider_http.proxy_url.clone(),
                 network_no_proxy: provider_http.no_proxy.clone(),
@@ -467,7 +469,7 @@ impl ServerRuntime {
             );
             let mut query_future = std::pin::pin!(query(
                 &mut state.core,
-                turn_config,
+                &turn_config,
                 provider,
                 registry,
                 &runtime,

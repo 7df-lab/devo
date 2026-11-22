@@ -239,6 +239,7 @@ pub fn generate_protocol_typescript() -> String {
     push_decl::<native::session::SessionParent>(&cfg, &mut output);
     push_decl::<native::session::SessionStatus>(&cfg, &mut output);
     push_decl::<native::session::SessionFlag>(&cfg, &mut output);
+    push_decl::<native::session::WebBackendChoice>(&cfg, &mut output);
     push_decl::<native::session::WebSearchChoice>(&cfg, &mut output);
     push_decl::<native::session::SessionSettings>(&cfg, &mut output);
     push_decl::<native::session::SessionActivity>(&cfg, &mut output);
@@ -256,6 +257,8 @@ pub fn generate_protocol_typescript() -> String {
     push_decl::<native::rpc_session::SessionForkResult>(&cfg, &mut output);
     push_decl::<native::rpc_session::SessionWebStatusReadParams>(&cfg, &mut output);
     push_decl::<native::rpc_session::WebBackendStatus>(&cfg, &mut output);
+    push_decl::<native::rpc_session::WebPickerGroup>(&cfg, &mut output);
+    push_decl::<native::rpc_session::WebApiKeyStatus>(&cfg, &mut output);
     push_decl::<native::rpc_session::WebSearchPickerEntry>(&cfg, &mut output);
     push_decl::<native::rpc_session::SessionWebStatusReadResult>(&cfg, &mut output);
     push_decl::<native::event::SubscriptionReplay>(&cfg, &mut output);

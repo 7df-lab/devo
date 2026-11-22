@@ -381,7 +381,9 @@ export type SessionStatus = "idle" | "active";
 
 export type SessionFlag = "waitingApproval" | "waitingUserInput" | "compacting" | "updatingGoal";
 
-export type WebSearchChoice = { "kind": "inherit" } | { "kind": "provider" } | { "kind": "off" } | { "kind": "mcp", serverId: string, toolName: string, };
+export type WebBackendChoice = { "kind": "provider" } | { "kind": "off" } | { "kind": "mcp", serverId: string, toolName: string, };
+
+export type WebSearchChoice = { "kind": "inherit" } | { "kind": "provider" } | { "kind": "off" } | { "kind": "mcp", serverId: string, toolName: string, } | { "kind": "unified", backend: WebBackendChoice, };
 
 export type SessionSettings = { permissionProfile: PermissionProfile,
 /**
@@ -576,9 +578,25 @@ export type SessionWebStatusReadParams = { sessionId: SessionId, };
 
 export type WebBackendStatus = { backend: string, note?: string, };
 
-export type WebSearchPickerEntry = { label: string, choice: WebSearchChoice, note?: string, };
+export type WebPickerGroup = "builtin" | "custom";
 
-export type SessionWebStatusReadResult = { search: WebBackendStatus, fetch: WebBackendStatus, searchChoice: WebSearchChoice, searchChoices: Array<WebSearchPickerEntry>, };
+export type WebApiKeyStatus = "required" | "saved" | "rejected";
+
+export type WebSearchPickerEntry = { label: string, choice: WebSearchChoice, note?: string, group?: WebPickerGroup, keyStatus?: WebApiKeyStatus, unavailable?: boolean, };
+
+export type SessionWebStatusReadResult = { search: WebBackendStatus, fetch: WebBackendStatus, searchChoice: WebSearchChoice, searchChoices: Array<WebSearchPickerEntry>,
+/**
+ * Configured backend(s) without an explicit session choice, for reset preview.
+ */
+configuredBackend?: string,
+/**
+ * The current picker entry, if the configured route matches one entry.
+ */
+activeChoice?: WebSearchChoice,
+/**
+ * Current mixed or legacy configuration when it has no exact picker entry.
+ */
+currentBackend?: string, };
 
 export type SubscriptionReplay = "fromCursor" | "snapshotOnly";
 

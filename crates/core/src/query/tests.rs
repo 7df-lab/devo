@@ -118,7 +118,7 @@ fn hosted_tool_schemas_follow_provider_capabilities() {
     assert!(
         super::hosted_tools_for_web_capabilities(
             &devo_config::ResolvedWebSearchConfig::Provider,
-            devo_config::ResolvedWebFetchConfig::Disabled,
+            &devo_config::ResolvedWebFetchConfig::Disabled,
             devo_protocol::ProviderWireApi::OpenAIChatCompletions,
         )
         .is_empty()
@@ -126,11 +126,31 @@ fn hosted_tool_schemas_follow_provider_capabilities() {
     assert!(matches!(
         super::hosted_tools_for_web_capabilities(
             &devo_config::ResolvedWebSearchConfig::Provider,
-            devo_config::ResolvedWebFetchConfig::Disabled,
+            &devo_config::ResolvedWebFetchConfig::Disabled,
             devo_protocol::ProviderWireApi::OpenAIResponses,
         )
         .as_slice(),
         [devo_protocol::HostedToolDefinition::WebSearch(_)]
+    ));
+    assert!(
+        super::hosted_tools_for_web_capabilities(
+            &devo_config::ResolvedWebSearchConfig::Provider,
+            &devo_config::ResolvedWebFetchConfig::Provider,
+            devo_protocol::ProviderWireApi::OpenAIChatCompletions,
+        )
+        .is_empty()
+    );
+    assert!(matches!(
+        super::hosted_tools_for_web_capabilities(
+            &devo_config::ResolvedWebSearchConfig::Provider,
+            &devo_config::ResolvedWebFetchConfig::Provider,
+            devo_protocol::ProviderWireApi::OpenAIResponses,
+        )
+        .as_slice(),
+        [
+            devo_protocol::HostedToolDefinition::WebSearch(_),
+            devo_protocol::HostedToolDefinition::WebFetch(_)
+        ]
     ));
 }
 

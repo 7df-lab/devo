@@ -306,6 +306,64 @@ async fn web_fetch_uses_only_the_selected_supplier_and_url() {
 }
 
 #[tokio::test]
+async fn custom_web_fetch_requires_compatible_tool_and_mcp_permission() {
+    let id = McpServerId("docs".into());
+    let mut fake = FakeMcpManager::new();
+    fake.observed_statuses.push(McpServerStatus {
+        server_id: id.clone(),
+        startup_state: McpStartupState::Ready,
+        auth_state: McpAuthState::Authenticated,
+        tools: vec![McpToolDescriptor {
+            server_id: id.clone(),
+            name: "web_fetch".into(),
+            description: "Fetch a URL".into(),
+            input_schema: json!({
+                "type":"object",
+                "properties":{"url":{"type":"string"}},
+                "required":["url"]
+            }),
+        }],
+        resources: Vec::new(),
+        resource_templates: Vec::new(),
+        last_refreshed_at: None,
+    });
+    fake.successful_call = Some((
+        id.clone(),
+        "web_fetch".into(),
+        json!({"url":"https://example.com/"}),
+    ));
+    let manager = Arc::new(fake);
+    let mut bridge = test_bridge(Arc::clone(&manager));
+    bridge.web_routes.fetch = WebFetchRoute::CustomMcp {
+        server_id: id,
+        tool_name: "web_fetch".into(),
+        manager: Ok(manager.clone()),
+    };
+    assert_eq!(
+        handle_web_fetch(
+            &bridge,
+            &json!({"url":"https://example.com/", "format":"html"})
+        )
+        .await["status"],
+        "ok"
+    );
+    bridge.permission = PermissionChecker::new(|request| {
+        Box::pin(async move {
+            if request.tool_name == "mcp.call" {
+                Err("MCP tool denied".into())
+            } else {
+                Ok(PermissionGrant::default())
+            }
+        })
+    });
+    assert_eq!(
+        handle_web_fetch(&bridge, &json!({"url":"https://example.com/"})).await["status"],
+        "error"
+    );
+    assert_eq!(manager.invocations.load(Ordering::SeqCst), 1);
+}
+
+#[tokio::test]
 async fn list_tools_requires_server_before_refreshing() {
     let manager = Arc::new(FakeMcpManager::new());
     let bridge = test_bridge(manager.clone());

@@ -452,16 +452,23 @@ export interface AgentConnectionResourceSnapshot {
 	diagnostics: AgentConnectionResourceDiagnostics;
 }
 
-export type WebSearchChoice =
-	| { kind: "inherit" }
+export type WebBackendChoice =
 	| { kind: "provider" }
 	| { kind: "off" }
 	| { kind: "mcp"; serverId: string; toolName: string };
+
+export type WebSearchChoice =
+	| { kind: "inherit" }
+	| WebBackendChoice
+	| { kind: "unified"; backend: WebBackendChoice };
 
 export interface AgentConnectionWebSearchChoice {
 	label: string;
 	choice: WebSearchChoice;
 	note?: string;
+	group?: "builtin" | "custom";
+	keyStatus?: "saved" | "required" | "rejected";
+	unavailable?: boolean;
 }
 
 export interface AgentConnectionWebStatus {
@@ -469,6 +476,9 @@ export interface AgentConnectionWebStatus {
 	fetch: { backend: string; note?: string };
 	searchChoice?: WebSearchChoice;
 	searchChoices?: AgentConnectionWebSearchChoice[];
+	configuredBackend?: string;
+	currentBackend?: string;
+	activeChoice?: WebSearchChoice;
 }
 
 export interface AgentConnectionToolDefinition {

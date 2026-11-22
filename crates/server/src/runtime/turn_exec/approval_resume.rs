@@ -804,7 +804,7 @@ impl ServerRuntime {
                 web_routes: super::super::kernel_host_bridge::WebRoutes::for_turn(
                     &working.state.runtime_context,
                     &turn_config.web_search,
-                    turn_config.web_fetch,
+                    &turn_config.web_fetch,
                 ),
                 network_proxy: None,
                 network_no_proxy: None,

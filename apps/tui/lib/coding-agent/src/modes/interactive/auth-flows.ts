@@ -293,6 +293,11 @@ export class ProviderAuthFlows {
 		for (const [id, name] of WEB_SERVICE_CREDENTIALS) {
 			options.push({ id, name, authType: "api_key", category: "service" });
 		}
+		// DeepSeek shares its model-provider credential. Keep one login entry,
+		// including when the model catalog has not loaded or is offline.
+		if (!options.some((option) => option.id === "deepseek")) {
+			options.push({ id: "deepseek", name: "DeepSeek (web search and fetch)", authType: "api_key", category: "service" });
+		}
 
 		const filteredOptions = authType ? options.filter((option) => option.authType === authType) : options;
 		const excluded = new Set(this.host.excludedLoginProviderIds ?? []);
