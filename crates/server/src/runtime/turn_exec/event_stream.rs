@@ -32,6 +32,10 @@ use tokio::sync::mpsc;
 pub(crate) const QUERY_EVENT_CHANNEL_CAPACITY: usize = 8192;
 
 #[derive(Debug)]
+#[allow(
+    clippy::large_enum_variant,
+    reason = "Nearly every queue entry is a query event. Keeping it inline avoids a heap allocation for each streamed token delta; history barriers are rare."
+)]
 pub(crate) enum TurnStreamEvent {
     Query(devo_core::QueryEvent),
     /// Acknowledge all prior transcript projections before servicing a live history read.
