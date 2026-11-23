@@ -400,6 +400,7 @@ pub fn compaction_snapshot_line(
         // and made compactions with a preserved suffix fail their snapshot
         // persist after the summary item was already appended.
         preserved_item_ids: snapshot.preserved_item_ids.clone(),
+        prompt_messages: snapshot.prompt_messages.clone(),
         context_occupancy: snapshot.context_occupancy.clone(),
     })
 }
@@ -562,6 +563,7 @@ mod tests {
             turn_id: TurnId::new(),
             summary_item_id: ItemId::new(),
             preserved_item_ids: preserved.clone(),
+            prompt_messages: None,
             context_occupancy: None,
         };
         let line = compaction_snapshot_line(snapshot.timestamp, &snapshot)

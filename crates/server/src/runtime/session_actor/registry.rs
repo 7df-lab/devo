@@ -169,6 +169,7 @@ impl ServerRuntime {
         self.active_turns
             .spawn_snapshot_for_session(session_id)
             .await
+            .map(|snapshot| (*snapshot).clone())
     }
 
     pub(crate) async fn register_active_stream(

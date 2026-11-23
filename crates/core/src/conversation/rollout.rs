@@ -154,6 +154,8 @@ pub enum RolloutLine {
         summary_item_id: ItemId,
         preserved_item_ids: Vec<ItemId>,
         #[serde(default, skip_serializing_if = "Option::is_none")]
+        prompt_messages: Option<Vec<crate::Message>>,
+        #[serde(default, skip_serializing_if = "Option::is_none")]
         context_occupancy: Option<devo_protocol::native::item::ContextOccupancy>,
     },
     /// An append-only rollback marker: the retained turns/items after the

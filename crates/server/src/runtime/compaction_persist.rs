@@ -36,8 +36,8 @@ use crate::persistence::RolloutStore;
 /// unique call id, text by exact role+text — and aligned backwards. Anchorless
 /// entries (`Reason`) and shape shifts are tolerated; a suffix that cannot be
 /// aligned monotonically still yields an empty list (previous behavior).
-pub(crate) fn preserved_item_ids_from_compacted(
-    persisted_turn_items: &[PersistedTurnItem],
+pub(crate) fn preserved_item_ids_from_compacted<'a>(
+    persisted_turn_items: impl IntoIterator<Item = &'a PersistedTurnItem>,
     compacted_items: &[ResponseItem],
 ) -> Vec<devo_protocol::native::ids::ItemId> {
     let preserved = compacted_items.get(1..).unwrap_or(&[]);
@@ -249,6 +249,7 @@ pub(crate) fn build_compaction_snapshot_line(
     turn_id: &TurnId,
     summary_item_id: &ItemId,
     preserved_item_ids: Vec<ItemId>,
+    compacted_items: &[ResponseItem],
     context_occupancy: Option<ContextOccupancy>,
 ) -> CompactionSnapshotLine {
     CompactionSnapshotLine {
@@ -256,7 +257,10 @@ pub(crate) fn build_compaction_snapshot_line(
         session_id: *session_id,
         turn_id: *turn_id,
         summary_item_id: *summary_item_id,
-        preserved_item_ids: preserved_item_ids.clone(),
+        preserved_item_ids,
+        prompt_messages: Some(devo_core::history::response_items_to_messages(
+            compacted_items,
+        )),
         context_occupancy,
     }
 }
@@ -352,12 +356,10 @@ impl ServerRuntime {
             return None;
         };
 
-        let spawn_stable_items = self
+        let spawn = self
             .active_turns
             .spawn_snapshot_for_session(session_id)
-            .await
-            .map(|snapshot| snapshot.stable_items)
-            .unwrap_or_default();
+            .await;
 
         let rollout = {
             let mut stream = stream.lock().await;
@@ -379,9 +381,11 @@ impl ServerRuntime {
                 return None;
             }
 
-            let mut journal = spawn_stable_items;
-            journal.extend(inline.persisted_turn_items.iter().cloned());
-            let preserved_item_ids = preserved_item_ids_from_compacted(&journal, compacted_items);
+            let journal = spawn
+                .iter()
+                .flat_map(|s| &s.stable_items)
+                .chain(&inline.persisted_turn_items);
+            let preserved_item_ids = preserved_item_ids_from_compacted(journal, compacted_items);
             let mut summary_item = summary_item_from_compacted(
                 compacted_items,
                 devo_protocol::native::item::CompactionTrigger::AutoThreshold,
@@ -449,6 +453,7 @@ impl ServerRuntime {
                 &turn_id,
                 &summary_item_id,
                 preserved_item_ids,
+                compacted_items,
                 Some(occupancy),
             );
             inline.latest_compaction_snapshot = Some(snapshot.clone());

@@ -159,6 +159,8 @@ example, `rlm.repl.host_request(data)` returns the raw reply dict, while
 `rlm.host_request(type, payload)` wraps the `{status, result}` envelope and
 raises `RuntimeError` on failure.
 
+Use `await rlm.history.search(query)` and `await rlm.history.read(item_id)` for recorded evidence in the current session. See [session history and compaction](../../../docs/python-kernel-compaction.md) for paging, tool references and branch behavior.
+
 The main groups are:
 
 | API | Purpose |

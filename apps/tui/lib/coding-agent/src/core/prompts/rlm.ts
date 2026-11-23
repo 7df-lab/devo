@@ -77,7 +77,7 @@ export function buildChildAgentDoctrine(options: ChildAgentDoctrineOptions): str
 }
 
 export function buildRlmPrompt(options: RlmPromptOptions): string {
-	const { cwd, skillsDir, messagesPath } = options;
+	const { cwd, skillsDir } = options;
 	const installedSkills = options.installedSkills ?? [];
 	const hasAgentMessage = installedSkills.includes("agent_message");
 	const hasAgentObserve = installedSkills.includes("agent_observe");
@@ -97,7 +97,7 @@ export function buildRlmPrompt(options: RlmPromptOptions): string {
 		SIMPLIFIED_TECHNICAL_ENGLISH_PROMPT,
 		"",
 		`Working directory: ${cwd}`,
-		`Conversation log: ${messagesPath}`,
+		...(hasIpython ? ["When available, use await rlm.history.search('literal text') and await rlm.history.read(item_id) to recover evidence from this session's active branch."] : []),
 		`Recursive agent depth: ${depth}`,
 		`Pre-installed Python packages: ${DEFAULT_RLM_EXTRA_IMPORT_LABELS.join(", ")}.`,
 		"Install additional packages with `uv pip install <pkg>` (this is a uv-managed venv with no pip module).",

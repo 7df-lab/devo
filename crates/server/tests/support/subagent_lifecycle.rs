@@ -121,8 +121,12 @@ impl ScriptedProvider {
     }
 
     pub fn ipython_code_tool_call(code: &str) -> StreamScript {
+        Self::ipython_call("ipython-code-call", code)
+    }
+
+    pub fn ipython_call(call_id: &str, code: &str) -> StreamScript {
         let input = serde_json::json!({ "code": code });
-        let tool_call_id = "ipython-code-call".to_string();
+        let tool_call_id = call_id.to_string();
         StreamScript::Events(vec![
             StreamEvent::ToolCallStart {
                 index: 0,

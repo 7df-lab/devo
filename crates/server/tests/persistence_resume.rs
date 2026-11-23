@@ -1053,6 +1053,54 @@ async fn session_compact_runs_asynchronously_and_emits_lifecycle_events() -> Res
 }
 
 #[tokio::test]
+async fn repeated_manual_compact_summarizes_the_current_model_history() -> Result<()> {
+    let data_root = TempDir::new()?;
+    let provider = Arc::new(CapturingProvider::default());
+    let runtime = build_runtime_with_provider(data_root.path(), provider.clone())?;
+    let (connection_id, mut notifications) = initialize_connection(&runtime).await?;
+    let session = create_native_session(
+        &runtime,
+        connection_id,
+        1,
+        data_root.path(),
+        "repeated-checkpoint",
+        Some("Repeated checkpoint"),
+        /*model*/ None,
+    )
+    .await?;
+    for (request_id, input) in [
+        (2, "ARCHIVED_TOOL_EVIDENCE".repeat(6000)),
+        (3, "Current objective".into()),
+    ] {
+        start_turn_and_wait(
+            &runtime,
+            connection_id,
+            request_id,
+            &session.id,
+            &input,
+            &mut notifications,
+        )
+        .await?;
+    }
+    for request_id in [4, 5] {
+        compact_session(&runtime, connection_id, request_id, &session.id).await?;
+        wait_for_notification_method(&mut notifications, "context/compactionCompleted").await?;
+        wait_for_turn_completed(&mut notifications).await?;
+    }
+    let requests = provider.requests.lock().expect("summary requests");
+    let checkpoints = requests.iter()
+        .filter(|req| req.messages.iter().any(|msg| msg.content.iter().any(|block|
+            matches!(block, devo_protocol::RequestContent::Text { text } if text.contains("CONTEXT CHECKPOINT COMPACTION")))))
+        .map(|req| {
+            let text = serde_json::to_string(&req.messages).unwrap();
+            (text.contains("ARCHIVED_TOOL_EVIDENCE"), text.contains("<compaction_summary>"))
+        })
+        .collect::<Vec<_>>();
+    assert_eq!(checkpoints, vec![(true, false), (false, true)]);
+    Ok(())
+}
+
+#[tokio::test]
 async fn compacted_session_resume_keeps_full_transcript_after_restart() -> Result<()> {
     let data_root = TempDir::new()?;
     let runtime = build_runtime(data_root.path())?;
@@ -1128,9 +1176,7 @@ async fn compacted_session_next_query_uses_compaction_summary_after_restart() ->
     .await?;
     let session_id = session.id;
 
-    // Distinct payloads per turn: the compaction snapshot preserves the last
-    // complete turn verbatim, so only the earlier turns are guaranteed to be
-    // compacted away — the assertions below key on "a"/"b", not "c".
+    // Earlier turns should be summarized while the current user input stays verbatim.
     let large_prompts = ["a".repeat(30_000), "b".repeat(30_000), "c".repeat(30_000)];
     for (offset, large_prompt) in large_prompts.iter().enumerate() {
         start_turn_and_wait(

@@ -31,6 +31,13 @@ use tokio::sync::mpsc;
 
 pub(crate) const QUERY_EVENT_CHANNEL_CAPACITY: usize = 8192;
 
+#[derive(Debug)]
+pub(crate) enum TurnStreamEvent {
+    Query(devo_core::QueryEvent),
+    /// Acknowledge all prior transcript projections before servicing a live history read.
+    HistoryBarrier(tokio::sync::oneshot::Sender<()>),
+}
+
 /// Enqueue a query event into the turn event stream.
 ///
 /// Token deltas and lifecycle/control events must not be dropped: when the
@@ -38,15 +45,15 @@ pub(crate) const QUERY_EVENT_CHANNEL_CAPACITY: usize = 8192;
 /// progress and provisional usage updates remain best effort so they cannot wedge the turn
 /// forever on a stalled consumer.
 pub(super) async fn enqueue_query_event(
-    event_tx: &mpsc::Sender<devo_core::QueryEvent>,
+    event_tx: &mpsc::Sender<TurnStreamEvent>,
     event: devo_core::QueryEvent,
 ) {
     let kind = query_event_trace_kind(&event);
     if query_event_delivery_policy(&event) == QueryEventDeliveryPolicy::MustDeliver {
-        let _ = event_tx.send(event).await;
+        let _ = event_tx.send(TurnStreamEvent::Query(event)).await;
         return;
     }
-    match event_tx.try_send(event) {
+    match event_tx.try_send(TurnStreamEvent::Query(event)) {
         Ok(()) => {}
         Err(tokio::sync::mpsc::error::TrySendError::Full(_)) => {
             tracing::warn!(
@@ -69,7 +76,7 @@ pub(crate) fn spawn_turn_event_stream(
     event_tool_registry: Arc<devo_core::tools::ToolRegistry>,
     _usage_parent_session_id: Option<SessionId>,
     usage_context_window: Option<u64>,
-    mut event_rx: tokio::sync::mpsc::Receiver<devo_core::QueryEvent>,
+    mut event_rx: tokio::sync::mpsc::Receiver<TurnStreamEvent>,
 ) -> tokio::task::JoinHandle<TurnEventStreamSummary> {
     let turn_for_events = turn;
     tokio::spawn(async move {
@@ -103,6 +110,13 @@ pub(crate) fn spawn_turn_event_stream(
         let mut context_compaction = ContextCompactionLifecycle::default();
         let mut last_context_breakdown: Option<devo_core::RawContextBreakdown> = None;
         while let Some(event) = event_rx.recv().await {
+            let event = match event {
+                TurnStreamEvent::Query(event) => event,
+                TurnStreamEvent::HistoryBarrier(reply) => {
+                    let _ = reply.send(());
+                    continue;
+                }
+            };
             log_dequeued_query_event(&event);
             let usage_delivery = match query_event_delivery_policy(&event) {
                 QueryEventDeliveryPolicy::MustDeliver => {
@@ -966,9 +980,11 @@ mod usage_delivery_tests {
     #[tokio::test]
     async fn final_usage_waits_for_a_full_queue_while_provisional_usage_can_drop() {
         let (tx, mut rx) = mpsc::channel(1);
-        tx.send(devo_core::QueryEvent::TextDelta("busy".into()))
-            .await
-            .unwrap();
+        tx.send(TurnStreamEvent::Query(devo_core::QueryEvent::TextDelta(
+            "busy".into(),
+        )))
+        .await
+        .unwrap();
         let usage = devo_protocol::Usage {
             reported: true,
             input_tokens: 100,
@@ -990,9 +1006,11 @@ mod usage_delivery_tests {
         assert!(!sender.is_finished());
         assert!(matches!(
             rx.recv().await,
-            Some(devo_core::QueryEvent::TextDelta(_))
+            Some(TurnStreamEvent::Query(devo_core::QueryEvent::TextDelta(_)))
         ));
-        let Some(devo_core::QueryEvent::Usage { usage: got }) = rx.recv().await else {
+        let Some(TurnStreamEvent::Query(devo_core::QueryEvent::Usage { usage: got })) =
+            rx.recv().await
+        else {
             panic!("final usage lost")
         };
         assert_eq!(got, usage);

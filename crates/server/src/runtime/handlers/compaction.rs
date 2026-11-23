@@ -627,7 +627,7 @@ impl ServerRuntime {
             let core_session = runtime_session.core_session.lock().await;
 
             let items: Vec<ResponseItem> = core_session
-                .messages
+                .prompt_source_messages()
                 .iter()
                 .flat_map(|msg| message_to_response_items(msg.clone()))
                 .collect();
@@ -721,14 +721,16 @@ impl ServerRuntime {
             Some(turn.turn_id()),
             devo_protocol::native::usage::UsagePurpose::Compaction,
         );
-        let summarizer =
-            DefaultHistorySummarizer::with_models(provider, model_slug, request_model, max_tokens);
-
         let config = CompactionConfig {
             budget,
-            // Proactive: user-requested /compact; preserve latest user suffix.
             kind: CompactionKind::Proactive,
         };
+        let summarizer = DefaultHistorySummarizer::with_models(
+            provider,
+            model_slug,
+            request_model,
+            config.summary_output_limit(max_tokens),
+        );
 
         let result = compact_history(
             &items,
@@ -830,6 +832,7 @@ impl ServerRuntime {
                                 &runtime_session.persisted_turn_items,
                                 &compacted_items,
                             ),
+                            &compacted_items,
                             runtime_session.summary.last_context_occupancy.clone(),
                         ),
                         parent_id,
@@ -1025,6 +1028,7 @@ impl ServerRuntime {
                         &turn_id,
                         &item_id,
                         preserved_item_ids.clone(),
+                        &compacted_items,
                         runtime_session.summary.last_context_occupancy.clone(),
                     );
                     runtime_session.latest_compaction_snapshot = Some(snapshot.clone());

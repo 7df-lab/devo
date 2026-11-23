@@ -1,5 +1,7 @@
 //! Unit tests for the query loop and its submodules.
 
+mod rolling_compaction;
+
 use devo_protocol::Usage;
 use std::collections::HashMap;
 use std::pin::Pin;
@@ -201,13 +203,11 @@ fn local_model_accounting_errors_never_retry_remote_calls() {
             super::ErrorClass::Unretryable
         );
         let mut retries = 0;
-        let mut compacted = false;
         assert!(matches!(
-            super::provider_retry_decision(&error, &mut retries, &mut compacted),
+            super::provider_retry_decision(&error, &mut retries),
             super::ProviderRetryDecision::Fail
         ));
         assert_eq!(retries, 0);
-        assert!(!compacted);
         assert!(
             error.chain().count() > 1,
             "storage cause must remain available"
@@ -244,13 +244,11 @@ fn error_classification_and_retry_policy() {
             super::ErrorClass::NetworkError
         );
         let mut retry_count = 0;
-        let mut context_compacted = false;
         assert!(matches!(
-            super::provider_retry_decision(&error, &mut retry_count, &mut context_compacted),
+            super::provider_retry_decision(&error, &mut retry_count),
             super::ProviderRetryDecision::RetryAfter(_)
         ));
         assert_eq!(retry_count, 1);
-        assert!(!context_compacted);
     }
 
     let stream_400 = anyhow::anyhow!(
@@ -262,9 +260,8 @@ fn error_classification_and_retry_policy() {
         "400 Bad Request inside a stream error wrapper must not retry"
     );
     let mut retry_count = 0;
-    let mut context_compacted = false;
     assert!(matches!(
-        super::provider_retry_decision(&stream_400, &mut retry_count, &mut context_compacted),
+        super::provider_retry_decision(&stream_400, &mut retry_count),
         super::ProviderRetryDecision::Fail
     ));
     assert_eq!(retry_count, 0);
@@ -275,13 +272,11 @@ fn error_classification_and_retry_policy() {
         super::ErrorClass::AuthenticationFailure
     );
     let mut retry_count = 0;
-    let mut context_compacted = false;
     assert!(matches!(
-        super::provider_retry_decision(&auth_error, &mut retry_count, &mut context_compacted),
+        super::provider_retry_decision(&auth_error, &mut retry_count),
         super::ProviderRetryDecision::Fail
     ));
     assert_eq!(retry_count, 0);
-    assert!(!context_compacted);
 }
 
 #[test]
@@ -1133,6 +1128,7 @@ fn compaction_req<'a>(
     provider: &'a Arc<dyn ModelProviderSDK>,
 ) -> super::CompactionModelRequest<'a> {
     super::CompactionModelRequest {
+        turn_user_inputs: &[],
         journal: None,
         provider,
         model_slug: "compaction-model",
@@ -1241,6 +1237,7 @@ fn recording_callback(events: &Arc<Mutex<Vec<QueryEvent>>>) -> EventCallback {
 fn compaction_test_session(total_input_tokens: usize) -> SessionState {
     let mut session = SessionState::new(SessionConfig::default(), std::env::temp_dir());
     session.push_message(Message::user("x".repeat(80_004)));
+    session.push_message(Message::assistant_text("earlier response"));
     session.push_message(Message::user("latest"));
     session.total_input_tokens = total_input_tokens;
     session
@@ -1298,7 +1295,7 @@ async fn compaction_events_follow_outcome() {
             &mut session,
             &on_event,
             compaction_req(&provider_sdk),
-            kind,
+            [kind],
             /*cancel_token*/ None,
         )
         .await;
@@ -1319,7 +1316,11 @@ async fn compaction_events_follow_outcome() {
             };
             assert_eq!(
                 session.prompt_source_messages(),
-                &[expected_summary, Message::user("latest")]
+                &[
+                    expected_summary,
+                    Message::assistant_text("earlier response"),
+                    Message::user("latest"),
+                ]
             );
         } else {
             assert_eq!(session.prompt_source_messages(), original_messages);

@@ -4,6 +4,7 @@
 //! token estimates, stream consumption, and model-turn continuation quirks
 //! from the orchestration loop in this file.
 
+mod context_recovery;
 mod event;
 mod kernel_brief;
 mod pending_input;
@@ -36,9 +37,7 @@ pub(crate) use turn_continuation::TurnContinuation;
 pub(crate) use turn_continuation::TurnContinuationPolicy;
 pub(crate) use turn_continuation::assistant_content_has_visible_content;
 
-#[cfg(test)]
 pub(crate) use provider_retry::ErrorClass;
-#[cfg(test)]
 pub(crate) use provider_retry::classify_error;
 #[cfg(test)]
 pub(crate) use turn_continuation::DEEPSEEK_THINKING_ONLY_CONTINUATION_PROMPT;
@@ -71,6 +70,10 @@ use crate::tools::ToolRegistry;
 use crate::tools::ToolRuntime;
 use devo_provider::ModelProviderSDK;
 
+use self::context_recovery::CompactionModelRequest;
+use self::context_recovery::OVERFLOW_COMPACTION_KINDS;
+use self::context_recovery::summarize_and_compact;
+
 use crate::AgentError;
 use crate::ContentBlock;
 use crate::Message;
@@ -88,13 +91,7 @@ use crate::context::turn_aborted::TurnAborted;
 use crate::history::ContextView;
 use crate::history::History;
 use crate::history::TokenInfo;
-use crate::history::compaction::CompactAction;
-use crate::history::compaction::CompactionConfig;
-use crate::history::compaction::CompactionKind;
-use crate::history::compaction::compact_history;
-use crate::history::summarizer::DefaultHistorySummarizer;
 use crate::response_item::ResponseItem;
-use crate::response_item::message_to_response_items;
 
 const SUBAGENT_MODE_REMINDER: &str = include_str!("../../prompts/subagent_mode_reminder.md");
 
@@ -140,113 +137,6 @@ fn hosted_tools_for_web_search(
         &devo_config::ResolvedWebFetchConfig::Disabled,
         ProviderWireApi::AnthropicMessages,
     )
-}
-
-/// Compact session messages using LLM-backed summarization.
-///
-/// `kind` selects the preserve strategy inside [`compact_history`]:
-/// - [`CompactionKind::Auto`]: preventive compaction when the session token
-///   budget is high; keeps a tail token window.
-/// - [`CompactionKind::Proactive`]: forced compaction after provider
-///   `context_too_long`; keeps from the latest user message onward.
-struct CompactionModelRequest<'a> {
-    journal: Option<&'a dyn crate::durable_execution::ToolIntentJournal>,
-    provider: &'a Arc<dyn ModelProviderSDK>,
-    model_slug: &'a str,
-    request_model: &'a str,
-    max_tokens: usize,
-}
-
-async fn summarize_and_compact(
-    session: &mut SessionState,
-    on_event: &Option<EventCallback>,
-    model: CompactionModelRequest<'_>,
-    kind: CompactionKind,
-    cancel_token: Option<&CancellationToken>,
-) {
-    let items: Vec<ResponseItem> = session
-        .prompt_source_messages()
-        .iter()
-        .cloned()
-        .flat_map(message_to_response_items)
-        .collect();
-
-    let token_info = TokenInfo {
-        input_tokens: session.total_input_tokens,
-        cached_input_tokens: session.total_cache_read_tokens,
-        output_tokens: session.total_output_tokens,
-    };
-
-    let config = CompactionConfig {
-        budget: session.config.token_budget.clone(),
-        kind,
-    };
-
-    let summarizer = DefaultHistorySummarizer::with_models(
-        Arc::clone(model.provider),
-        model.model_slug,
-        model.request_model,
-        model.max_tokens,
-    );
-
-    emit_query_event(on_event, QueryEvent::ContextCompactionStarted).await;
-    match compact_history(&items, &token_info, &summarizer, &config, cancel_token).await {
-        Ok(CompactAction::Replaced(compacted_items)) => {
-            if let Some(journal) = model.journal
-                && let Err(error) = journal
-                    .commit(
-                        crate::durable_execution::ExecutionRecord::PromptCheckpoint {
-                            counters: Some(crate::durable_execution::ExecutionCounters::capture(
-                                session,
-                            )),
-                            items: compacted_items.clone(),
-                        },
-                    )
-                    .await
-            {
-                emit_query_event(
-                    on_event,
-                    QueryEvent::ContextCompactionFailed {
-                        message: format!("failed to persist compaction checkpoint: {error}"),
-                    },
-                )
-                .await;
-                return;
-            }
-            let new_messages = crate::history::response_items_to_messages(&compacted_items);
-            let removed = session
-                .prompt_source_messages()
-                .len()
-                .saturating_sub(new_messages.len());
-            info!("LLM compaction removed {removed} messages");
-            session.set_prompt_messages(new_messages);
-            emit_query_event(
-                on_event,
-                QueryEvent::ContextCompactionCompleted { compacted_items },
-            )
-            .await;
-        }
-        Ok(CompactAction::Skipped) => {
-            debug!("LLM compaction skipped, nothing to compact");
-            emit_query_event(
-                on_event,
-                QueryEvent::ContextCompactionFailed {
-                    message: "Context compaction skipped: nothing to compact".to_string(),
-                },
-            )
-            .await;
-        }
-        Err(e) => {
-            warn!("LLM compaction failed: {e}");
-            emit_query_event(
-                on_event,
-                QueryEvent::ContextCompactionFailed {
-                    message: e.to_string(),
-                },
-            )
-            .await;
-        }
-    }
 }
 
 // ---------------------------------------------------------------------------
@@ -434,6 +324,11 @@ pub async fn query(
     on_event: Option<EventCallback>,
     options: QueryOptions,
 ) -> Result<(), AgentError> {
+    let mut turn_user_inputs: Vec<_> = options
+        .turn_user_inputs
+        .into_iter()
+        .flat_map(crate::response_item::message_to_response_items)
+        .collect();
     if let Some(journal) = &options.journal {
         let replay = journal.replay().await.map_err(AgentError::Provider)?;
         if let Some(counters) = &replay.counters {
@@ -446,6 +341,36 @@ pub async fn query(
             }
             session.end_turn();
             return Ok(());
+        }
+        if !replay.turn_input_indices.is_empty() {
+            turn_user_inputs = replay
+                .turn_input_indices
+                .iter()
+                .map(|&index| {
+                    replay.items.get(index).cloned().ok_or_else(|| {
+                        AgentError::Provider(anyhow::anyhow!(
+                            "invalid user input position {index} in prompt checkpoint"
+                        ))
+                    })
+                })
+                .collect::<Result<_, _>>()?;
+        }
+    }
+    if turn_user_inputs.is_empty() {
+        // Standalone callers can enter the loop with several user parts followed by tool results.
+        let messages = session.prompt_source_messages();
+        let is_human = crate::history::compaction::is_user_message;
+        if let Some(last) = messages.iter().rposition(is_human) {
+            let first = messages[..last]
+                .iter()
+                .rposition(|msg| !is_human(msg))
+                .map_or(0, |i| i + 1);
+            turn_user_inputs.extend(
+                messages[first..=last]
+                    .iter()
+                    .cloned()
+                    .flat_map(crate::response_item::message_to_response_items),
+            );
         }
     }
     let compaction_provider = options
@@ -499,7 +424,8 @@ pub async fn query(
     let prefetched_user_inputs = session_context.prefix_user_inputs();
 
     let mut retry_count: usize = 0;
-    let mut context_compacted = false;
+    let mut pending_usage = Some(session.last_turn_tokens);
+    let mut overflow_compactions = OVERFLOW_COMPACTION_KINDS.into_iter();
     let mut budget_steer_injected = false;
     // Loop guard: a model emitting the same tool batch over and over
     // (observed in the wild: 100+ identical ToolSearch calls in one turn)
@@ -538,7 +464,7 @@ pub async fn query(
         }
         let pending = session.take_turn_pending_input();
 
-        pending_input::push_pending_input(session, &pending);
+        turn_user_inputs.extend(pending_input::push_pending_input(session, &pending));
 
         // Host goal changes must reach the checked-out working copy before
         // assembling another request, including after a Python completion call.
@@ -565,49 +491,6 @@ pub async fn query(
                 applied_live_generation = live.generation;
             }
         }
-        if session.last_turn_tokens > 0
-            && session
-                .config
-                .token_budget
-                .should_compact(session.last_turn_tokens)
-        {
-            if !budget_steer_injected {
-                if let Some(turn) = session.turn_state.as_mut() {
-                    turn.push_pending_input(devo_protocol::PendingInputItem::new(
-                        devo_protocol::PendingInputKind::BudgetLimitSteering,
-                        None,
-                        chrono::Utc::now(),
-                    ));
-                }
-                budget_steer_injected = true;
-            }
-            info!("token budget threshold exceeded, running LLM compaction");
-            let live_compaction_model_slug = active_turn_config
-                .model
-                .resolve_reasoning_effort_selection(
-                    active_turn_config.reasoning_effort_selection.as_deref(),
-                )
-                .request_model;
-            let live_compaction_request_model =
-                active_turn_config.provider_request_model(&live_compaction_model_slug);
-            // Auto: preserve tail items up to COMPACT_USER_MESSAGE_MAX_TOKENS.
-            // Example: [user1, asst1, user2, asst2, user3] -> [summary, asst2, user3].
-            summarize_and_compact(
-                session,
-                &on_event,
-                CompactionModelRequest {
-                    journal: options.journal.as_deref(),
-                    provider: &compaction_provider,
-                    model_slug: &live_compaction_model_slug,
-                    request_model: &live_compaction_request_model,
-                    max_tokens: active_turn_config.model.max_tokens.unwrap_or(4096) as usize,
-                },
-                CompactionKind::Auto,
-                options.cancel_token.as_ref(),
-            )
-            .await;
-        }
-
         session.turn_count += 1;
         let turn_span = info_span!(
             "turn",
@@ -713,12 +596,7 @@ pub async fn query(
         );
 
         let prompt_source_message_count = session.prompt_source_messages().len();
-        let history_items = session
-            .prompt_source_messages()
-            .iter()
-            .cloned()
-            .flat_map(message_to_response_items)
-            .collect::<Vec<_>>();
+        let history_items = session.prompt_items();
         let prompt_source_item_count = history_items.len();
         let history = History {
             items: history_items,
@@ -769,7 +647,7 @@ pub async fn query(
             active_turn_config.model.provider,
         );
         let mut request = ModelRequest {
-            model_slug: devo_protocol::ModelProfileKey::CatalogSlug(catalog_request_model),
+            model_slug: devo_protocol::ModelProfileKey::CatalogSlug(catalog_request_model.clone()),
             model: provider_request_model,
             system: request_system,
             messages,
@@ -792,11 +670,7 @@ pub async fn query(
         };
         // Auto-review and cell-watch reuse this prefix after Python may have
         // changed state. Keep the live observation exclusive to this attempt.
-        if let Some(slot) = &options.last_model_request
-            && let Ok(mut last) = slot.lock()
-        {
-            *last = Some(request.clone());
-        }
+        let reusable_request = options.last_model_request.as_ref().map(|_| request.clone());
         kernel_brief::insert_live_brief(
             &history,
             runtime.context().kernel.as_deref(),
@@ -804,6 +678,64 @@ pub async fn query(
         )
         .await;
         let breakdown = estimate_request_context_breakdown(&request);
+        if !overflow_compactions.as_slice().is_empty() {
+            let budget = &session.config.token_budget;
+            let estimated_input = usize::try_from(breakdown.total()).unwrap_or(usize::MAX);
+            let wire_api = provider_route_wire_api(&active_turn_config.provider_route)
+                .unwrap_or(active_turn_config.model.provider);
+            let output_reserve = context_recovery::requested_output_tokens(&request, wire_api);
+            // Consume each provider sample once, even if consecutive calls report the same total.
+            let usage_pressure = pending_usage
+                .take()
+                .is_some_and(|tokens| budget.should_compact(tokens));
+            if usage_pressure
+                || budget.should_compact(estimated_input)
+                || estimated_input.saturating_add(output_reserve) > budget.context_window
+            {
+                // Re-estimate each replacement before dispatch. Each pressure
+                // level can run only once before the next successful model call.
+                let compacted = summarize_and_compact(
+                    session,
+                    &on_event,
+                    CompactionModelRequest {
+                        turn_user_inputs: &turn_user_inputs,
+                        journal: options.journal.as_deref(),
+                        provider: &compaction_provider,
+                        model_slug: &catalog_request_model,
+                        request_model: &request.model,
+                        max_tokens: request.max_tokens,
+                    },
+                    overflow_compactions.by_ref(),
+                    options.cancel_token.as_ref(),
+                )
+                .await;
+                if options
+                    .cancel_token
+                    .as_ref()
+                    .is_some_and(CancellationToken::is_cancelled)
+                {
+                    return Err(AgentError::Aborted);
+                }
+                if compacted {
+                    session.turn_count -= 1;
+                    continue;
+                }
+                if !budget_steer_injected && let Some(turn) = session.turn_state.as_mut() {
+                    turn.push_pending_input(devo_protocol::PendingInputItem::new(
+                        devo_protocol::PendingInputKind::BudgetLimitSteering,
+                        /*metadata*/ None,
+                        chrono::Utc::now(),
+                    ));
+                    budget_steer_injected = true;
+                }
+            }
+        }
+        if let (Some(slot), Some(reusable_request)) =
+            (&options.last_model_request, reusable_request)
+            && let Ok(mut last) = slot.lock()
+        {
+            *last = Some(reusable_request);
+        }
         tracing::debug!(
             tool_count = request_tools.len(),
             names = ?request_tools.iter().map(|t| t.name.clone()).collect::<Vec<_>>(),
@@ -826,19 +758,11 @@ pub async fn query(
 
         if let Some(journal) = &options.journal {
             journal
-                .commit(
-                    crate::durable_execution::ExecutionRecord::PromptCheckpoint {
-                        counters: Some(crate::durable_execution::ExecutionCounters::capture(
-                            session,
-                        )),
-                        items: session
-                            .prompt_source_messages()
-                            .iter()
-                            .cloned()
-                            .flat_map(message_to_response_items)
-                            .collect(),
-                    },
-                )
+                .commit(context_recovery::prompt_checkpoint(
+                    session,
+                    history.items,
+                    &turn_user_inputs,
+                ))
                 .await
                 .map_err(AgentError::Provider)?;
         }
@@ -855,7 +779,7 @@ pub async fn query(
         {
             Ok(assembled) => {
                 retry_count = 0;
-                context_compacted = false;
+                overflow_compactions = OVERFLOW_COMPACTION_KINDS.into_iter();
                 assembled
             }
             Err(ProviderAttemptError::Fatal(error)) => {
@@ -869,15 +793,8 @@ pub async fn query(
                         unreachable!("fatal errors handled above")
                     }
                 };
-                match provider_retry_decision(
-                    &retry_error,
-                    &mut retry_count,
-                    &mut context_compacted,
-                ) {
+                match provider_retry_decision(&retry_error, &mut retry_count) {
                     ProviderRetryDecision::CompactAndRetry => {
-                        warn!("context_too_long - compacting and retrying");
-                        // Proactive: must compact even if token estimates disagree
-                        // with the provider; preserve from latest user only.
                         let retry_compaction_model_slug = active_turn_config
                             .model
                             .resolve_reasoning_effort_selection(
@@ -886,10 +803,11 @@ pub async fn query(
                             .request_model;
                         let retry_compaction_request_model =
                             active_turn_config.provider_request_model(&retry_compaction_model_slug);
-                        summarize_and_compact(
+                        let compacted = summarize_and_compact(
                             session,
                             &on_event,
                             CompactionModelRequest {
+                                turn_user_inputs: &turn_user_inputs,
                                 journal: options.journal.as_deref(),
                                 provider: &compaction_provider,
                                 model_slug: &retry_compaction_model_slug,
@@ -897,10 +815,20 @@ pub async fn query(
                                 max_tokens: active_turn_config.model.max_tokens.unwrap_or(4096)
                                     as usize,
                             },
-                            CompactionKind::Proactive,
+                            overflow_compactions.by_ref(),
                             options.cancel_token.as_ref(),
                         )
                         .await;
+                        if options
+                            .cancel_token
+                            .as_ref()
+                            .is_some_and(CancellationToken::is_cancelled)
+                        {
+                            return Err(AgentError::Aborted);
+                        }
+                        if !compacted {
+                            return Err(AgentError::Provider(retry_error));
+                        }
                         session.turn_count -= 1;
                         continue;
                     }
@@ -956,7 +884,9 @@ pub async fn query(
             has_hosted_tool_uses,
             has_provider_reasoning,
             has_visible_assistant_text,
+            reported_context_tokens,
         } = assembled;
+        pending_usage = reported_context_tokens;
 
         let continuation = continuation_policy.decide(ModelTurnSnapshot {
             stop_reason,
@@ -988,19 +918,11 @@ pub async fn query(
 
         if let Some(journal) = &options.journal {
             journal
-                .commit(
-                    crate::durable_execution::ExecutionRecord::PromptCheckpoint {
-                        counters: Some(crate::durable_execution::ExecutionCounters::capture(
-                            session,
-                        )),
-                        items: session
-                            .prompt_source_messages()
-                            .iter()
-                            .cloned()
-                            .flat_map(message_to_response_items)
-                            .collect(),
-                    },
-                )
+                .commit(context_recovery::prompt_checkpoint(
+                    session,
+                    session.prompt_items(),
+                    &turn_user_inputs,
+                ))
                 .await
                 .map_err(AgentError::Provider)?;
         }
@@ -1046,12 +968,7 @@ pub async fn query(
                 {
                     journal
                         .commit(crate::durable_execution::ExecutionRecord::ModelCompleted {
-                            items: session
-                                .prompt_source_messages()
-                                .iter()
-                                .cloned()
-                                .flat_map(message_to_response_items)
-                                .collect(),
+                            items: session.prompt_items(),
                             stop_reason: stop_reason.clone(),
                         })
                         .await
@@ -1328,19 +1245,11 @@ pub async fn query(
         }
         if let Some(journal) = &options.journal {
             journal
-                .commit(
-                    crate::durable_execution::ExecutionRecord::PromptCheckpoint {
-                        items: session
-                            .prompt_source_messages()
-                            .iter()
-                            .cloned()
-                            .flat_map(message_to_response_items)
-                            .collect(),
-                        counters: Some(crate::durable_execution::ExecutionCounters::capture(
-                            session,
-                        )),
-                    },
-                )
+                .commit(context_recovery::prompt_checkpoint(
+                    session,
+                    session.prompt_items(),
+                    &turn_user_inputs,
+                ))
                 .await
                 .map_err(AgentError::Provider)?;
         }

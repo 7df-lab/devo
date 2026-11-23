@@ -782,6 +782,7 @@ impl ServerRuntime {
         if let Some(ref kernel) = kernel {
             let host_bridge = Arc::new(super::super::kernel_host_bridge::HostBridge {
                 session_id,
+                history_events: None,
                 turn_id: Some(turn_id),
                 cwd: working.state.core.cwd.clone(),
                 session_dir: session_dir.clone(),

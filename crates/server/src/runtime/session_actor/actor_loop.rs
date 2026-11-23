@@ -438,6 +438,7 @@ pub(super) async fn run_session_actor(
                             )
                         })
                         .unwrap_or(rebuilt_messages);
+                    state.latest_compaction_snapshot = compaction_snapshot;
                     state.core.set_prompt_messages(prompt_messages);
                 }
             }

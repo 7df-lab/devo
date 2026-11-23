@@ -25,27 +25,23 @@ Devo 从多种来源构建 context：
 - tool-call 和 tool-result records；
 - 当前 user turn。
 
-不是每一条可见 transcript line 对未来 turns 都同等有用。例如，compaction 会在总结旧 history 前过滤掉 reasoning items。
+## 自动压缩
 
-## 自动 Compaction
+即使用户只发了一句话，一轮任务也可能需要多次调用模型。每次调用前，Devo 检查已组装请求的输入估算、当前接口指定的输出额度以及最近一次用量。上一条响应的用量很低时，新返回的大段工具结果也能触发压缩。
 
-当 Devo 判断 session 超过配置 token budget 时，会运行 automatic compaction。如果 session 仍在 budget 内，则跳过。
+自动压缩会原样保留发起当前任务的用户输入，以及用户在这一轮中途补充的指令。当前轮已经完成的工作，包括工具调用参数和结果，都可以进入摘要。通常会原样保留一小段近期记录，其上限取配置输入预算的四分之一和估算 20,000 tokens 中较小的值。切分点落在完整工具批次之间。并行调用尚未全部返回时，整批原样保留，包括已经返回的结果。
 
-Compaction 运行时，Devo 会：
+选中的历史会被一份摘要替换。模型用这份摘要和保留的原文继续当前轮。再次压缩时，上一份摘要会纳入新摘要。原始聊天和工具记录仍可在会话记录中查看。
 
-1. 将 history 过滤成适合 summarization 的形式；
-2. 将要 compact 的旧 items 与要保留的 recent items 分开；
-3. 请求模型总结旧 history；
-4. 创建 compaction summary item；
-5. 保留 summary 加 preserved recent items 作为 model-facing history。
+### 压缩后回查原文
 
-用户可见 transcript 仍会为 resume 和 review 保留。Summary 用于未来 model context，不替代可见 history。
+在持久化会话中，模型可以用 `await rlm.history.search("错误原文", kind="tool_result")` 搜索当前分支，再用 `await rlm.history.read(item_id, offset=offset)` 读取命中位置。新摘要最多附带六个可回查的工具引用。工具调用的参数和较长的原始输出按需读取，当前轮刚刚完成的调用也可以查到。分支回退后，被舍弃的记录随即退出可查询范围。
 
 ## 手动 Compaction
 
 主动 compact 当前 session 时使用 `/compact`。
 
-Manual compaction 总是尝试运行，即使当前 context 没超过自动阈值。已有 turn 正在进行时，Devo 会阻止 compaction。
+手动命令在会话空闲时运行，使用模型当前的历史。一轮任务进行中，Devo 会在两次模型调用之间按需自动压缩。
 
 TUI 会报告 compaction lifecycle events：
 
@@ -55,9 +51,9 @@ TUI 会报告 compaction lifecycle events：
 
 ## Failure 和 Retry
 
-Compaction summarizer 是另一次 model call。如果 summarizer 达到自己的 context limit，Devo 会通过保留更多 recent items 缩小 summarizer input 并重试。临时失败会用 backoff 重试。
+服务端仍然拒绝请求时，Devo 可以继续总结近期保留的已完成工作，再自动重试。只有估算的历史变小才会应用自动压缩。如果仅用户原文、未完成的调用或固定指令就超过窗口，恢复仍可能失败。
 
-如果 compaction 仍失败，session 会继续使用现有 history。你可以稍后重试、缩小任务范围，或开始新 session。
+摘要请求自身超限时，Devo 把选中的历史按时间顺序分块，带着上一块的摘要处理下一块。单条很长的文本工具结果也可以拆分。所有分块成功后才替换历史。中途取消、遇到无法拆分的输入或用完重试额度时，会保留最近一次完整的上下文。
 
 ## 实用建议
 

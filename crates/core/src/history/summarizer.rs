@@ -112,9 +112,7 @@ impl HistorySummarizer for DefaultHistorySummarizer {
             Ok(r) => r,
             Err(e) => {
                 let err_msg = e.to_string();
-                if err_msg.contains("context_length_exceeded")
-                    || err_msg.contains("maximum context length")
-                {
+                if crate::query::classify_error(&e) == crate::query::ErrorClass::ContextTooLong {
                     return Err(CompactionError::ContextTooLong);
                 }
                 return Err(CompactionError::SummarizationFailed { message: err_msg });

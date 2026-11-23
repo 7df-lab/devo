@@ -3293,6 +3293,7 @@ mod tests {
             turn_id: turn_b,
             summary_item_id: ItemId::new(),
             preserved_item_ids: Vec::new(),
+            prompt_messages: None,
             context_occupancy: Some(occupancy_b.clone()),
         };
         let (got, usage, compact) =
@@ -3309,6 +3310,7 @@ mod tests {
             turn_id: turn_b,
             summary_item_id: ItemId::new(),
             preserved_item_ids: Vec::new(),
+            prompt_messages: None,
             context_occupancy: Some(compact_occupancy.clone()),
         };
         let (got, usage, compact) =

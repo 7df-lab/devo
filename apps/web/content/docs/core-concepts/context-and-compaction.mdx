@@ -31,35 +31,34 @@ Devo builds context from multiple sources:
 - tool-call and tool-result records;
 - the current user turn.
 
-Not every visible transcript line is equally useful for future turns. For
-example, compaction filters out reasoning items before summarizing older
-history.
-
 ## Automatic Compaction
 
-Automatic compaction runs when Devo decides the session is over the configured
-token budget. If the session is still within budget, automatic compaction is
-skipped.
+A single user turn can contain many model calls. Before sending the next call,
+Devo checks the assembled input estimate, the requested output allowance for
+the active API, and the latest reported usage. A large tool result can trigger
+a checkpoint even when the preceding model response reported little usage.
 
-When compaction runs, Devo:
+Automatic checkpoints preserve the current task's original user input and its mid-turn human corrections verbatim. Completed work, including
+tool arguments and results from the current turn, can enter the summary. Devo
+normally keeps a recent tail of up to one quarter of the configured input
+budget, capped at 20,000 estimated tokens. It cuts at the end of a complete
+tool batch. An unfinished batch stays together, including results already
+received for parallel calls.
 
-1. filters history into a form suitable for summarization;
-2. separates older items to compact from recent items to preserve;
-3. asks a model to summarize the older history;
-4. creates a compaction summary item;
-5. keeps the summary plus the preserved recent items as the model-facing
-   history.
+Devo replaces the selected model history with one checkpoint. The next model
+call continues the same turn with that checkpoint and the preserved items.
+Later checkpoints incorporate the previous one. The original conversation and
+tool records remain available in the transcript.
 
-The user-visible transcript is still preserved for resume and review. The
-summary is for future model context, not a replacement for your visible history.
+In a persistent session the model can use `await rlm.history.search('error text', kind='tool_result')` and `await rlm.history.read(item_id, offset=offset)` to recover recorded evidence from the active branch. A checkpoint includes up to six tool references. Reads are paged, include completed work from the running turn, and follow branch navigation.
 
 ## Manual Compaction
 
 Use `/compact` when you want to compact the current session proactively.
 
-Manual compaction always attempts to run, even if the current context is not
-over the automatic threshold. Devo blocks compaction while a turn is already in
-progress.
+The command operates on the current model-facing history while the session is
+idle. During an active turn, Devo can checkpoint automatically between model
+calls.
 
 The TUI reports compaction lifecycle events:
 
@@ -69,12 +68,16 @@ The TUI reports compaction lifecycle events:
 
 ## Failure And Retry
 
-The compaction summarizer is another model call. If the summarizer hits its own
-context limit, Devo shrinks the summarizer input by preserving more recent items
-and retrying. Transient failures are retried with backoff.
+If the provider still rejects the rebuilt request, Devo can summarize the
+remaining completed work and retry. Automatic recovery only installs a
+checkpoint that reduces estimated history size. The original user input,
+unfinished tool calls and fixed instructions can still exceed a provider limit.
 
-If compaction still fails, the session continues with the existing history. You
-can retry later, reduce the task scope, or start a fresh session.
+If the summarizer's request is too large, Devo splits the selected history
+into ordered fragments and carries each partial summary into the next. A single
+large text result can span several fragments. Only a completed checkpoint
+replaces history. Cancellation, an indivisible input, or exhaustion of the
+bounded recovery attempts leaves the last committed checkpoint available.
 
 ## Practical Guidance
 

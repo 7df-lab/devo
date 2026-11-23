@@ -196,8 +196,22 @@ impl ServerRuntime {
         // The rollout's latest compaction snapshot rides along so a navigate
         // that keeps the summary on-branch also keeps the compacted prompt.
         if let Some(handle) = self.session(params.session_id).await {
-            let compaction_snapshot =
-                crate::persistence::latest_compaction_snapshot_from_rollout(&rollout_path);
+            let active: std::collections::HashSet<_> =
+                scoped_item_ids.iter().flatten().copied().collect();
+            let summary_ids = history
+                .items
+                .iter()
+                .filter(|row| {
+                    active.contains(&row.id) && matches!(row.item, Item::ContextCompaction { .. })
+                })
+                .map(|row| row.id)
+                .collect();
+            let compaction_snapshot = crate::persistence::active_compaction_snapshot(
+                &rollout_path,
+                params.session_id,
+                summary_ids,
+            )
+            .await;
             handle
                 .set_transcript_leaf(leaf_id, leaf_epoch, scoped_item_ids, compaction_snapshot)
                 .await;

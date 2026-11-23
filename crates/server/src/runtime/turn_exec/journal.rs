@@ -104,6 +104,7 @@ fn encode_prompt_checkpoint(
         ExecutionRecord::PromptCheckpoint {
             ref items,
             ref counters,
+            turn_input_indices,
         } if previous.items.len() <= items.len()
             && items.starts_with(previous.items.as_slice()) =>
         {
@@ -111,6 +112,7 @@ fn encode_prompt_checkpoint(
                 from: previous.items.len(),
                 items: items[previous.items.len()..].to_vec(),
                 counters: counters.clone(),
+                turn_input_indices,
             }
         }
         record => record,
@@ -134,6 +136,7 @@ mod tests {
         let mut replay = ExecutionReplay::default();
         replay
             .apply(&ExecutionRecord::PromptCheckpoint {
+                turn_input_indices: Vec::new(),
                 items,
                 counters: None,
             })
@@ -149,6 +152,7 @@ mod tests {
         let encoded = encode_prompt_checkpoint(
             &previous,
             ExecutionRecord::PromptCheckpoint {
+                turn_input_indices: Vec::new(),
                 items: vec![call_item("a"), call_item("b"), call_item("c")],
                 counters: None,
             },
@@ -156,6 +160,7 @@ mod tests {
         assert_eq!(
             encoded,
             ExecutionRecord::LegCheckpoint {
+                turn_input_indices: Vec::new(),
                 from: 2,
                 items: vec![call_item("c")],
                 counters: None,
@@ -172,6 +177,7 @@ mod tests {
         let encoded = encode_prompt_checkpoint(
             &previous,
             ExecutionRecord::PromptCheckpoint {
+                turn_input_indices: Vec::new(),
                 items: vec![call_item("a"), call_item("b"), call_item("c")],
                 counters: None,
             },
@@ -188,6 +194,7 @@ mod tests {
     fn rewriting_checkpoint_keeps_full_encoding() {
         let previous = checkpoint_replay(vec![call_item("a"), call_item("b")]);
         let rewritten = ExecutionRecord::PromptCheckpoint {
+            turn_input_indices: Vec::new(),
             items: vec![call_item("b"), call_item("a")],
             counters: None,
         };

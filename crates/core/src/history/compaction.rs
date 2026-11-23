@@ -1,30 +1,14 @@
-//! Compaction — summarise conversation history via a separate LLM call
-//! when the token budget is exceeded.
-//!
-//! Two compaction modes (`CompactionKind`) choose different preserve strategies:
-//!
-//! * **Auto** — token-budget threshold in the query loop (`query.rs`).
-//!   Preserves a tail window of roughly `COMPACT_USER_MESSAGE_MAX_TOKENS`
-//!   estimated tokens via `split_by_user_message_budget`, regardless of user
-//!   message boundaries. Example: `[user1, asst1, user2, asst2, user3]` may
-//!   become `[summary, asst2, user3]` when `asst2` and `user3` fit the tail
-//!   budget but `user2` does not.
-//! * **Proactive** — `/compact` or provider `context_too_long` retry.
-//!   Preserves from the latest user message onward via
-//!   `preserve_suffix_from_latest_user_message`. Example: the same history
-//!   becomes `[summary, user3]` only.
-//!
-//! The compaction flow:
-//!
-//! 1. Filter out `Reason` items (reasoning text is not useful for summaries).
-//! 2. Separate items into a "to‑compact" prefix and "to‑preserve" suffix.
-//!    Auto uses a tail token budget; Proactive uses the latest-user suffix.
-//! 3. Call the summarizer LLM with the `prompt.md` template appended as the
-//!    last developer message after the to-compact history.
-//! 4. Wrap the returned summary with the `summary_prefix.md` template.
-//! 5. Build a new history: `[summary_msg, …preserved_items]`.
-//! 6. If the summarizer LLM call fails with a context‑length error, move the
-//!    newest to‑compact item back into the preserve set and retry.
+//! Replace completed history with a checkpoint at a model-call boundary.
+//! Rolling compaction keeps the latest user input and a budgeted recent tail.
+//! If the provider still rejects the request, release the completed tail too.
+
+mod chunks;
+#[cfg(test)]
+mod long_turn_tests;
+mod overflow;
+mod references;
+use overflow::is_user_input;
+pub(crate) use overflow::is_user_message;
 
 use devo_protocol::approx_tokens_from_byte_count;
 use std::time::Duration;
@@ -48,9 +32,8 @@ use devo_protocol::normalize_tool_result_messages;
 use super::TokenInfo;
 
 const SUMMARIZATION_PROMPT: &str = include_str!("../../prompts/compact/prompt.md");
-/// Tail preserve budget for [`CompactionKind::Auto`]: walk backward from the
-/// end of history and keep items until this estimated-token budget is full.
-const COMPACT_USER_MESSAGE_MAX_TOKENS: usize = 20_000;
+/// Upper bound for the verbatim recent history in a rolling checkpoint.
+const MAX_RECENT_TOKENS: usize = 20_000;
 
 // ---------------------------------------------------------------------------
 // CompactionError
@@ -120,6 +103,15 @@ pub struct CompactionConfig {
     pub kind: CompactionKind,
 }
 
+impl CompactionConfig {
+    /// Reserve a bounded generation for the checkpoint itself.
+    pub fn summary_output_limit(&self, model_limit: usize) -> usize {
+        model_limit
+            .min(4096)
+            .min((self.budget.context_window / 8).max(1))
+    }
+}
+
 impl Default for CompactionConfig {
     fn default() -> Self {
         Self {
@@ -133,25 +125,15 @@ impl Default for CompactionConfig {
 // CompactionKind — how compaction was triggered
 // ---------------------------------------------------------------------------
 
-/// Whether compaction was triggered automatically or proactively.
-///
-/// Call-site mapping:
-/// - [`CompactionKind::Auto`]: `query.rs` token-budget threshold before a turn.
-/// - [`CompactionKind::Proactive`]: `/compact` (`server/.../compaction.rs`) and
-///   provider `context_too_long` retry in `query.rs`.
+/// Select the pressure check and the amount of recent work to keep.
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 pub enum CompactionKind {
-    /// Automatic compaction when context pressure is high.
-    ///
-    /// Skips when [`should_compact`] says the session is already within budget.
-    /// Preserve strategy: `split_by_user_message_budget` over the tail
-    /// `COMPACT_USER_MESSAGE_MAX_TOKENS` window (items, not user turns).
+    /// Use the reported usage threshold and keep a budgeted recent tail.
     Auto,
-    /// Forced compaction that always runs.
-    ///
-    /// Preserve strategy: `preserve_suffix_from_latest_user_message` — from
-    /// the last `Role::User` item through the end of history.
+    /// Make a rolling checkpoint when requested or when preflight detects pressure.
     Proactive,
+    /// Keep the current input and incomplete tool batches only.
+    OverflowRecovery,
 }
 
 // ---------------------------------------------------------------------------
@@ -191,93 +173,107 @@ pub async fn compact_history(
     config: &CompactionConfig,
     cancel_token: Option<&CancellationToken>,
 ) -> Result<CompactAction, CompactionError> {
+    compact_history_with_inputs(items, token_info, summarizer, config, &[], cancel_token).await
+}
+
+/// Locate the exact resolved parts, in chronological order, in this checkpoint.
+pub(crate) fn turn_input_indices(
+    items: &[ResponseItem],
+    inputs: &[ResponseItem],
+) -> std::collections::BTreeSet<usize> {
+    let mut pinned = std::collections::BTreeSet::new();
+    let mut end = items.len();
+    for input in inputs.iter().rev() {
+        if let Some(i) = items[..end].iter().rposition(|item| item == input) {
+            pinned.insert(i);
+            end = i;
+        }
+    }
+    pinned
+}
+
+/// Protect the running turn's original user input and subsequently delivered human steers.
+pub(crate) async fn compact_history_with_inputs(
+    items: &[ResponseItem],
+    token_info: &TokenInfo,
+    summarizer: &dyn HistorySummarizer,
+    config: &CompactionConfig,
+    turn_user_inputs: &[ResponseItem],
+    cancel_token: Option<&CancellationToken>,
+) -> Result<CompactAction, CompactionError> {
     // For auto compaction, skip if already within budget.
     // Proactive compaction always proceeds regardless of budget.
     if config.kind == CompactionKind::Auto && !should_compact(token_info, &config.budget) {
         return Ok(CompactAction::Skipped);
     }
 
-    // Never normalize away pending intents or sever a completed tool batch.
-    let proposed = if config.kind == CompactionKind::Proactive {
-        items.len() - preserve_suffix_from_latest_user_message(items).len()
-    } else {
-        split_by_user_message_budget(items, COMPACT_USER_MESSAGE_MAX_TOKENS)
-            .0
-            .len()
+    let mut pinned = turn_input_indices(items, turn_user_inputs);
+    if pinned.is_empty() {
+        pinned
+            .extend(overflow::latest_user_input_range(items).filter(|&i| is_user_input(&items[i])));
+    }
+    let safe_boundaries = super::transactions::completed_boundaries(items);
+    let complete_end = *safe_boundaries.last().expect("zero is a safe boundary");
+    let boundary = match config.kind {
+        CompactionKind::OverflowRecovery => complete_end,
+        CompactionKind::Auto | CompactionKind::Proactive => {
+            let tail_budget = (config.budget.input_budget() / 4).min(MAX_RECENT_TOKENS);
+            let mut desired = recent_tail_start(items, tail_budget);
+            if config.kind == CompactionKind::Proactive {
+                // A forced checkpoint can always incorporate earlier turns.
+                // A long current turn may advance the cut beyond this minimum.
+                desired = desired.max(pinned.first().copied().unwrap_or(0));
+            }
+            // A completed batch larger than the tail allowance is summarized in
+            // full. An open batch must stay verbatim, however large it is.
+            if desired == 0 && config.kind == CompactionKind::Proactive {
+                // Under real provider pressure even a locally small tail may be too large.
+                // Keep the newest complete batch when an older prefix can be summarized.
+                let last_batch = safe_boundaries
+                    .iter()
+                    .rev()
+                    .copied()
+                    .find(|&i| i < items.len())
+                    .unwrap_or(0);
+                if (0..last_batch).any(|i| !pinned.contains(&i)) {
+                    last_batch
+                } else {
+                    complete_end
+                }
+            } else {
+                safe_boundaries
+                    .iter()
+                    .copied()
+                    .find(|&i| i >= desired)
+                    .unwrap_or(complete_end)
+            }
+        }
     };
-    let boundary = super::transactions::preserve_boundary(items, proposed);
-    let mut to_compact = items[..boundary].to_vec();
-    let mut preserved = items[boundary..].to_vec();
-
-    if to_compact.is_empty() {
-        // Nothing to compact — everything is within the preserve budget.
+    let keep = |index: usize| index >= boundary || pinned.contains(&index);
+    if (0..boundary).all(keep) {
         return Ok(CompactAction::Skipped);
     }
-
-    // 3. Attempt compaction with retry.
-    //
-    //    * The summarizer LLM may fail with `ContextTooLong` when the
-    //      formatted history text exceeds its context window.  In that case
-    //      we move the newest to‑compact item into the preserve set
-    //      (reducing what the summarizer has to process) and retry
-    //      immediately — this always converges because `to_compact`
-    //      shrinks with each iteration.
-    //    * Other errors (network blips, rate limits) are retried with
-    //      exponential backoff up to 5 attempts.
-    let mut transient_retries = 0u32;
-    const MAX_TRANSIENT_RETRIES: u32 = 5;
-
-    loop {
-        if cancel_token.is_some_and(CancellationToken::is_cancelled) {
-            return Err(CompactionError::Canceled);
-        }
-
-        let messages = summarizer_request_messages(&to_compact);
-
-        let summary = match summarizer.summarize(messages, cancel_token).await {
-            Ok(s) => s,
-            Err(CompactionError::Canceled) => return Err(CompactionError::Canceled),
-            Err(CompactionError::ContextTooLong) => {
-                if to_compact.is_empty() {
-                    // All items were moved to preserve — nothing to compact.
-                    return Ok(CompactAction::Skipped);
-                }
-                // Move the newest to‑compact item into the preserve set
-                // so the summarizer receives less input on the next try.
-                let boundary =
-                    super::transactions::preserve_boundary(&to_compact, to_compact.len() - 1);
-                let mut moved = to_compact.split_off(boundary);
-                moved.append(&mut preserved);
-                preserved = moved;
-                if to_compact.is_empty() {
-                    return Ok(CompactAction::Skipped);
-                }
-                continue;
-            }
-            Err(e) => {
-                transient_retries += 1;
-                if transient_retries >= MAX_TRANSIENT_RETRIES {
-                    return Err(e);
-                }
-                // Exponential backoff: 2^(retries) * 100ms
-                let delay = Duration::from_millis(100 * (1 << transient_retries));
-                sleep_cancellable(delay, cancel_token).await?;
-                continue;
-            }
-        };
-
-        if summary.trim().is_empty() {
-            return Err(CompactionError::EmptyResponse);
-        }
-
-        // Build the compacted items using CompactionSummary.
-        let summary_fragment = CompactionSummary::new(summary);
-        let mut compacted = Vec::with_capacity(preserved.len().saturating_add(1));
-        compacted.push(summary_fragment.to_response_item());
-        compacted.extend(preserved);
-
-        return Ok(CompactAction::Replaced(compacted));
+    // Include the original instruction when it lies in the selected prefix so
+    // the summarizer can tell which results matter. It also survives verbatim.
+    let summary = chunks::summarize(
+        summarizer,
+        summarizer_request_messages(&items[..boundary]),
+        cancel_token,
+    )
+    .await?;
+    if cancel_token.is_some_and(CancellationToken::is_cancelled) {
+        return Err(CompactionError::Canceled);
     }
+    let summary = references::attach(summary, &items[..boundary]);
+    let mut compacted = vec![CompactionSummary::new(summary).to_response_item()];
+    compacted.extend(
+        items
+            .iter()
+            .enumerate()
+            .filter(|(i, _)| keep(*i))
+            .map(|(_, item)| item.clone()),
+    );
+    Ok(CompactAction::Replaced(compacted))
 }
 
 async fn sleep_cancellable(
@@ -299,55 +295,16 @@ async fn sleep_cancellable(
 // Internal helpers
 // ---------------------------------------------------------------------------
 
-/// Splits items into a "to compact" prefix and a "to preserve" suffix.
-///
-/// Used by [`CompactionKind::Auto`]. Walks backward from the end, accumulating
-/// per-item token estimates until `budget_tokens` would be exceeded.
-///
-/// # Example
-///
-/// History `[user1, asst1, user2, asst2(large), user3]` with a small budget
-/// that fits only `asst2` and `user3`:
-/// - `to_compact` = `[user1, asst1, user2]`
-/// - `preserve` = `[asst2, user3]`
-/// - result after compaction = `[summary, asst2, user3]`
-///
-/// Items are [`ResponseItem`] records (messages, tool calls, tool outputs), not
-/// whole turns. At least the last item is preserved when history is non-empty.
-fn split_by_user_message_budget(
-    items: &[ResponseItem],
-    budget_tokens: usize,
-) -> (Vec<ResponseItem>, Vec<ResponseItem>) {
-    if items.is_empty() {
-        return (Vec::new(), Vec::new());
-    }
-
-    let mut used_tokens: usize = 0;
-    let mut preserve_from: usize = 0;
-
-    for i in (0..items.len()).rev() {
-        let item_tokens = estimate_item_tokens(&items[i]);
-
-        if used_tokens + item_tokens > budget_tokens && i + 1 < items.len() {
-            // Budget exhausted — split after this item.
-            // Only split if there would still be something to preserve.
-            preserve_from = i + 1;
-            break;
+/// Returns the start of the newest suffix that fits the raw-history allowance.
+fn recent_tail_start(items: &[ResponseItem], mut remaining: usize) -> usize {
+    for (index, item) in items.iter().enumerate().rev() {
+        let size = estimate_item_tokens(item);
+        if size > remaining {
+            return index + 1;
         }
-
-        used_tokens += item_tokens;
-        preserve_from = i;
+        remaining -= size;
     }
-
-    if preserve_from == 0 {
-        // Everything fits in the preserve budget (or the budget is very
-        // large) — nothing to compact.
-        (Vec::new(), items.to_vec())
-    } else {
-        let compact = items[..preserve_from].to_vec();
-        let preserve = items[preserve_from..].to_vec();
-        (compact, preserve)
-    }
+    0
 }
 
 fn summarizer_request_messages(to_compact: &[ResponseItem]) -> Vec<RequestMessage> {
@@ -363,29 +320,6 @@ fn summarizer_request_messages(to_compact: &[ResponseItem]) -> Vec<RequestMessag
         }],
     });
     messages
-}
-
-/// Preserves history from the latest user message through the end.
-///
-/// Used by [`CompactionKind::Proactive`] (`/compact` and `context_too_long`
-/// retry). Assistant and tool items after that user are kept; everything
-/// before the user is summarized.
-///
-/// # Example
-///
-/// History `[user1, asst1, user2, asst2, user3]` always yields:
-/// - `preserve` = `[user3]`
-/// - result after compaction = `[summary, user3]`
-///
-/// Returns an empty vector when no user message exists.
-fn preserve_suffix_from_latest_user_message(items: &[ResponseItem]) -> Vec<ResponseItem> {
-    let Some(latest_user_index) = items.iter().rposition(
-        |item| matches!(item, ResponseItem::Message(msg) if msg.role == devo_protocol::Role::User),
-    ) else {
-        return Vec::new();
-    };
-
-    items[latest_user_index..].to_vec()
 }
 
 /// Merges consecutive assistant `RequestMessage`s into a single message by
@@ -424,6 +358,11 @@ impl std::io::Write for JsonByteCounter {
     }
 }
 
+/// Estimates model-facing history size for comparing compaction results.
+pub(crate) fn estimated_history_tokens(items: &[ResponseItem]) -> usize {
+    items.iter().map(estimate_item_tokens).sum()
+}
+
 /// Estimates the byte-length-based token count for a single item.
 fn estimate_item_tokens(item: &ResponseItem) -> usize {
     let bytes = match item {
@@ -439,7 +378,14 @@ fn estimate_item_tokens(item: &ResponseItem) -> usize {
                     | devo_protocol::ContentBlock::ToolUse { .. }
                     | devo_protocol::ContentBlock::HostedToolUse { .. }
                     | devo_protocol::ContentBlock::ToolResult { .. }
-                    | devo_protocol::ContentBlock::Image { .. } => continue,
+                    | devo_protocol::ContentBlock::Image { .. } => {
+                        let mut counter = JsonByteCounter { bytes: 0 };
+                        serde_json::to_writer(&mut counter, block).expect(
+                            "serializing a content block to a byte counter should not fail",
+                        );
+                        bytes += counter.bytes;
+                        continue;
+                    }
                 };
                 if text_blocks > 0 {
                     bytes += 1;
@@ -578,7 +524,7 @@ mod tests {
             ResponseItem::Message(Message::user("short")),
             ResponseItem::Message(Message::assistant_text("ok")),
         ];
-        let (compact, preserve) = split_by_user_message_budget(&items, 10_000);
+        let (compact, preserve) = items.split_at(recent_tail_start(&items, 10_000));
         assert!(compact.is_empty());
         assert_eq!(preserve.len(), 2);
     }
@@ -593,7 +539,7 @@ mod tests {
         ];
 
         // Budget enough for about 2 items.
-        let (compact, preserve) = split_by_user_message_budget(&items, 200);
+        let (compact, preserve) = items.split_at(recent_tail_start(&items, 200));
         assert!(!preserve.is_empty());
 
         // The preserved part should be the tail.
@@ -619,9 +565,10 @@ mod tests {
         let items = vec![
             ResponseItem::Message(Message::user("old user")),
             ResponseItem::Message(Message::assistant_text("old assistant")),
-            ResponseItem::Message(Message::user(large_tail.clone())),
-            ResponseItem::Message(Message::assistant_text(large_tail)),
             ResponseItem::Message(Message::user("latest user")),
+            ResponseItem::Message(Message::assistant_text(large_tail.clone())),
+            ResponseItem::Message(Message::assistant_text(large_tail)),
+            ResponseItem::Message(Message::assistant_text("last observation")),
         ];
         let token_info = TokenInfo {
             input_tokens: 200,
@@ -660,36 +607,16 @@ mod tests {
         .await
         .expect("proactive compaction should succeed");
 
-        match (action, proactive_action) {
-            (
-                CompactAction::Replaced(auto_compacted),
-                CompactAction::Replaced(proactive_compacted),
-            ) => {
-                assert_eq!(
-                    proactive_compacted[1..],
-                    [ResponseItem::Message(Message::user("latest user"))]
-                );
-                assert!(
-                    auto_compacted.len() > proactive_compacted.len(),
-                    "auto compaction should preserve more tail items than proactive latest-user suffix"
-                );
-                assert_eq!(
-                    auto_compacted.last(),
-                    Some(&ResponseItem::Message(Message::user("latest user")))
-                );
-                assert!(
-                    auto_compacted.iter().any(|item| {
-                        matches!(
-                            item,
-                            ResponseItem::Message(msg)
-                                if msg.role == devo_protocol::Role::Assistant
-                        )
-                    }),
-                    "auto compaction should preserve assistant tail items beyond the latest user message"
-                );
-            }
-            _ => panic!("expected both compaction modes to replace history"),
-        }
+        let (CompactAction::Replaced(auto), CompactAction::Replaced(forced)) =
+            (action, proactive_action)
+        else {
+            panic!("expected both modes to replace history");
+        };
+        assert_eq!(auto, forced);
+        assert_eq!(
+            auto[1..],
+            [items[2].clone(), items[4].clone(), items[5].clone()]
+        );
     }
 
     /// Verifies: cancel token aborts an in-flight history summarizer.
@@ -827,6 +754,85 @@ mod tests {
                 );
             }
             CompactAction::Skipped => panic!("expected proactive compaction to replace history"),
+        }
+    }
+
+    #[tokio::test]
+    async fn checkpoint_keeps_a_partially_returned_parallel_batch_out_of_the_summary() {
+        struct CaptureSummary(std::sync::Mutex<Vec<RequestMessage>>);
+        #[async_trait]
+        impl HistorySummarizer for CaptureSummary {
+            async fn summarize(
+                &self,
+                messages: Vec<RequestMessage>,
+                _cancel_token: Option<&CancellationToken>,
+            ) -> Result<String, CompactionError> {
+                *self.0.lock().unwrap() = messages;
+                Ok("completed work".into())
+            }
+        }
+        let input = ResponseItem::Message(Message::user("Track this job"));
+        let in_flight = [
+            ResponseItem::Reason {
+                text: "pending-thought".into(),
+            },
+            ResponseItem::Message(Message {
+                role: devo_protocol::Role::Assistant,
+                content: vec![devo_protocol::ContentBlock::ProviderReasoning {
+                    provider: "test".into(),
+                    payload: serde_json::json!({"signature":"pending-signed"}),
+                }],
+            }),
+            ResponseItem::Message(Message::assistant_text("pending-step")),
+            ResponseItem::ToolCall {
+                id: "pending-a".into(),
+                name: "read".into(),
+                input: serde_json::json!({}),
+            },
+            ResponseItem::ToolCall {
+                id: "pending-b".into(),
+                name: "read".into(),
+                input: serde_json::json!({}),
+            },
+            ResponseItem::ToolCallOutput {
+                tool_use_id: "pending-b".into(),
+                content: "partial result".into(),
+                is_error: false,
+            },
+        ];
+        let mut items = vec![
+            input.clone(),
+            ResponseItem::Message(Message::assistant_text("Earlier observation")),
+        ];
+        items.extend_from_slice(&in_flight);
+        for kind in [CompactionKind::Proactive, CompactionKind::OverflowRecovery] {
+            let summarizer = CaptureSummary(Default::default());
+            let action = compact_history(
+                &items,
+                &TokenInfo::default(),
+                &summarizer,
+                &CompactionConfig {
+                    kind,
+                    ..Default::default()
+                },
+                /*cancel_token*/ None,
+            )
+            .await
+            .unwrap();
+            let CompactAction::Replaced(retained) = action else {
+                panic!("expected checkpoint");
+            };
+            let mut expected = vec![
+                CompactionSummary::new("completed work").to_response_item(),
+                input.clone(),
+            ];
+            expected.extend_from_slice(&in_flight);
+            assert_eq!(retained, expected);
+            let captured = serde_json::to_string(&*summarizer.0.lock().unwrap()).unwrap();
+            assert!(
+                captured.contains("Earlier observation") && captured.contains("Track this job")
+            );
+            assert!(!captured.contains("pending-"));
         }
     }
 

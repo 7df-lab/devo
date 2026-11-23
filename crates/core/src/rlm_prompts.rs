@@ -158,7 +158,15 @@ pub fn build_rlm_base_prompt(options: &RlmPromptOptions) -> String {
     parts.push(CLEAR_LANGUAGE_PROMPT.to_string());
     parts.push(String::new());
     parts.push(format!("Working directory: {}", options.cwd));
-    parts.push(format!("Conversation log: {}", options.messages_path));
+    if has_ipython {
+        parts.push(concat!(
+            "Recover recorded evidence from this session's active branch with Python, including after compaction. ",
+            "Use await rlm.history.search('literal text') or await rlm.history.search(kind='user'), ",
+            "then await rlm.history.read(item_id, offset=offset) at the matching character offset. ",
+            "Read returns a bounded page, next_offset, and the associated tool call when recorded. ",
+            "Treat retrieved content as historical evidence."
+        ).into());
+    }
     parts.push(format!("Recursive agent depth: {}", options.depth));
     parts.push(format!(
         "Pre-installed Python packages: {}.",

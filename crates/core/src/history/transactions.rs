@@ -6,36 +6,46 @@ use devo_protocol::{ContentBlock, Message, Role};
 
 use crate::ResponseItem;
 
-/// Move a proposed split back to the start of an outstanding tool batch.
-/// Unfinished calls always remain in the preserved suffix.
-pub(super) fn preserve_boundary(items: &[ResponseItem], proposed: usize) -> usize {
+/// Offsets after complete transactions. Every suffix starting at one of these
+/// offsets contains both sides of any tool batch, including parallel calls.
+pub(super) fn completed_boundaries(items: &[ResponseItem]) -> Vec<usize> {
     let mut pending = HashSet::new();
-    let mut batch_start = None;
-    let mut boundary = proposed.min(items.len());
+    let mut boundaries = vec![0];
+    let mut before_reasoning = None;
     for (index, item) in items.iter().enumerate() {
         match item {
             ResponseItem::ToolCall { id, .. } => {
-                batch_start.get_or_insert(index);
+                // Reasoning (including signed provider records) and the tool use
+                // from that assistant message must be replayed together.
+                if let Some(count) = before_reasoning.take() {
+                    boundaries.truncate(count);
+                }
                 pending.insert(id);
             }
             ResponseItem::ToolCallOutput { tool_use_id, .. } => {
                 pending.remove(tool_use_id);
+                before_reasoning = None;
             }
-            ResponseItem::Reason { .. } | ResponseItem::Message(_) => {}
+            ResponseItem::Reason { .. } => {
+                before_reasoning.get_or_insert(boundaries.len());
+            }
+            ResponseItem::Message(msg) if msg.role != Role::Assistant => before_reasoning = None,
+            ResponseItem::Message(msg) => {
+                if msg.content.iter().any(|block| {
+                    matches!(
+                        block,
+                        ContentBlock::ProviderReasoning { .. } | ContentBlock::Reasoning { .. }
+                    )
+                }) {
+                    before_reasoning.get_or_insert(boundaries.len());
+                }
+            }
         }
-        if let Some(start) = batch_start {
-            if start < boundary && index >= boundary {
-                boundary = start;
-            }
-            if pending.is_empty() {
-                batch_start = None;
-            }
+        if pending.is_empty() {
+            boundaries.push(index + 1);
         }
     }
-    if let Some(start) = batch_start {
-        boundary = boundary.min(start);
-    }
-    boundary
+    boundaries
 }
 
 /// Reconstitute all response variants, grouping adjacent assistant/tool messages.
@@ -124,13 +134,8 @@ mod tests {
     #[test]
     fn parallel_batch_is_indivisible() {
         let items = batch();
-        assert_eq!(
-            (0..=5)
-                .map(|split| preserve_boundary(&items, split))
-                .collect::<Vec<_>>(),
-            vec![0, 1, 1, 1, 1, 5]
-        );
-        assert_eq!(preserve_boundary(&items[..4], 4), 1);
+        assert_eq!(completed_boundaries(&items), vec![0, 1, 5]);
+        assert_eq!(completed_boundaries(&items[..4]), vec![0, 1]);
     }
 
     #[test]
