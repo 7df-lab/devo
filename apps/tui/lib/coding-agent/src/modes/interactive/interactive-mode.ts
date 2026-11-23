@@ -132,6 +132,7 @@ import { parseCommandArgs } from "../../core/prompt-templates.js";
 import { formatMissingSessionCwdPrompt, MissingSessionCwdError } from "../../core/session-cwd.js";
 import { SessionImportFileNotFoundError } from "../../core/session-import-errors.js";
 import { resolveSessionPath, SessionSelectorError, SessionSelectorNotFoundError } from "../../core/session-resolver.js";
+import type { ConversationDetailSetting } from "../../core/settings-manager.js";
 import { measureAsync, printTimings, resetTimings } from "../../core/timings.js";
 import { parseSkillBlock } from "../../core/skill-blocks.js";
 import {
@@ -803,10 +804,20 @@ export class InteractiveMode {
 	private rlmNodeId: string | undefined;
 	private rosterBar: { summaries(): SessionSummary[]; dispose(): Promise<void> } | undefined;
 
-	private toolOutputExpanded = false;
-	private editDiffsExpanded = true;
+	private conversationDetail: ConversationDetailSetting = "collapsed";
 
-	private hideThinkingBlock = false;
+	private get toolOutputExpanded(): boolean {
+		return this.conversationDetail === "expanded";
+	}
+
+	private get editDiffsExpanded(): boolean {
+		return this.conversationDetail !== "collapsed";
+	}
+
+	private get hideThinkingBlock(): boolean {
+		return this.conversationDetail === "collapsed";
+	}
+
 	private readonly mermaidMarkdownTransform = createMermaidMarkdownTransform({
 		getMode: () => this.settingsManager.getMermaidRenderingMode(),
 		theme,
@@ -2768,6 +2779,10 @@ export class InteractiveMode {
 		this.rosterBar = undefined;
 		if (this.localSessionHost) {
 			this.uiServices = this.localSessionHost.createUiServices();
+		}
+		const detail = this.settingsManager.readConversationDetail();
+		if (detail !== this.conversationDetail) {
+			this.setChatDetail(detail);
 		}
 		this.toolDefinitionCache.clear();
 		this.applyRuntimeSettings();
@@ -7654,18 +7669,22 @@ export class InteractiveMode {
 	}
 
 	private toggleToolOutputExpansion(): void {
-		this.setChatDetail(this.toolOutputExpanded ? "overview" : this.editDiffsExpanded ? "all" : "details");
+		const detail = this.toolOutputExpanded ? "collapsed" : this.editDiffsExpanded ? "expanded" : "details";
+		this.setChatDetail(detail);
+		try {
+			this.settingsManager.setConversationDetail(detail);
+		} catch {
+			this.showWarning("Could not save the conversation display mode to settings.json.");
+		}
 	}
 
 	private setToolsExpanded(expanded: boolean): void {
-		this.setChatDetail(expanded ? "all" : "overview");
+		this.setChatDetail(expanded ? "expanded" : "collapsed");
 	}
 
 	/** Presentation only: never rewrite messages, settings, or the session trace. */
-	private setChatDetail(detail: "overview" | "details" | "all"): void {
-		this.toolOutputExpanded = detail === "all";
-		this.editDiffsExpanded = detail !== "overview";
-		this.hideThinkingBlock = detail === "overview";
+	private setChatDetail(detail: ConversationDetailSetting): void {
+		this.conversationDetail = detail;
 		this.applyChatExpansion();
 	}
 
