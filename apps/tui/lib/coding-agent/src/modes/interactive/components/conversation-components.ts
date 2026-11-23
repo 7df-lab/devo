@@ -65,17 +65,20 @@ export function isCompactAgentMessageNeighbor(component: Component | undefined):
 export interface ConversationSpacing {
 	precededByToolActivity: () => boolean;
 	shouldAddLeadingSpace: (expanded: boolean) => boolean;
+	shouldAddToolLeadingSpace: () => boolean;
 }
 
 /** Keep spacing responsive to hidden thinking and late shell attachment without rendering prior blocks again. */
 export function createConversationSpacing(previous: readonly Component[]): ConversationSpacing {
 	const last = previous.at(-1);
 	let lastIndex = previous.length - 1;
+	const getLastIndex = (): number => {
+		if (last && previous[lastIndex] !== last) lastIndex = previous.indexOf(last);
+		return lastIndex;
+	};
 	const getPrevious = (): { component: Component; trailingSpace: boolean } | undefined => {
-		if (!last) return undefined;
-		if (previous[lastIndex] !== last) lastIndex = previous.indexOf(last);
 		let toolSeparator: AssistantMessageComponent | undefined;
-		for (let index = lastIndex; index >= 0; index--) {
+		for (let index = getLastIndex(); index >= 0; index--) {
 			const component = previous[index]!;
 			if (component instanceof AssistantMessageComponent) {
 				const content = component.getSpacingContent();
@@ -103,23 +106,21 @@ export function createConversationSpacing(previous: readonly Component[]): Conve
 			if (preceding?.trailingSpace) return false;
 			return expanded ? preceding !== undefined : !isCompactAgentMessageNeighbor(preceding?.component);
 		},
+		shouldAddToolLeadingSpace: () => {
+			for (let index = getLastIndex(); index >= 0; index--) {
+				const component = previous[index]!;
+				if (component instanceof AssistantMessageComponent) {
+					if (component.getSpacingContent() === "visible") return true;
+					continue;
+				}
+				if (component instanceof ShellCompletionComponent && !component.isVisible()) continue;
+				if (isCompactAgentMessageNeighbor(component)) return false;
+				break;
+			}
+			const preceding = getPrevious();
+			return preceding !== undefined && !preceding.trailingSpace;
+		},
 	};
-}
-
-/** Returns whether a tool should start after a standalone blank row. */
-export function shouldAddLeadingSpaceBeforeToolExecution(previous: readonly Component[]): boolean {
-	for (let index = previous.length - 1; index >= 0; index--) {
-		const component = previous[index]!;
-		if (component instanceof AssistantMessageComponent) {
-			const content = component.getSpacingContent();
-			if (content === "hidden" || content === "tool-only") continue;
-			return true;
-		}
-		if (component instanceof ShellCompletionComponent && !component.isVisible()) continue;
-		if (isCompactAgentMessageNeighbor(component)) return false;
-		return createConversationSpacing(previous).shouldAddLeadingSpace(true);
-	}
-	return createConversationSpacing(previous).shouldAddLeadingSpace(true);
 }
 
 function readUserText(content: string | Array<{ type: string; text?: string }>): string {
@@ -197,7 +198,6 @@ export function buildConversationComponents(
 				if (content.type !== "toolCall") {
 					continue;
 				}
-				const addLeadingSpace = shouldAddLeadingSpaceBeforeToolExecution(components);
 				const tool = new ToolExecutionComponent(
 					content.name,
 					content.id,
@@ -205,6 +205,7 @@ export function buildConversationComponents(
 					{
 						...options.toolOptions,
 						includeImageDimensions: false,
+						shouldAddLeadingSpace: createConversationSpacing(components).shouldAddToolLeadingSpace,
 					},
 					options.getToolDefinition(content.name),
 					options.ui,
@@ -215,7 +216,6 @@ export function buildConversationComponents(
 				tool.markExecutionStarted();
 				tool.setArgsComplete();
 				selectLatestToolExpandHint(components, tool);
-				if (addLeadingSpace) components.push(new Spacer(1));
 				components.push(tool);
 				if (message.stopReason === "aborted" || message.stopReason === "error") {
 					tool.updateResult({

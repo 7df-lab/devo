@@ -209,7 +209,6 @@ import { formatContextTree } from "./components/context-tree-format.js";
 import {
 	createConversationSpacing,
 	createShellCompletionComponent,
-	shouldAddLeadingSpaceBeforeToolExecution,
 } from "./components/conversation-components.js";
 import { CountdownTimer } from "./components/countdown-timer.js";
 import { CustomEditor } from "./components/custom-editor.js";
@@ -3058,13 +3057,13 @@ export class InteractiveMode {
 				return componentAfterLoad;
 			}
 
-			const addLeadingSpace = shouldAddLeadingSpaceBeforeToolExecution(this.chatContainer.children);
 			const component = new ToolExecutionComponent(
 				latestToolCall.name,
 				latestToolCall.id,
 				latestToolCall.arguments,
 				{
 					showImages: this.settingsManager.getShowImages(),
+					shouldAddLeadingSpace: createConversationSpacing(this.chatContainer.children).shouldAddToolLeadingSpace,
 				},
 				toolDefinition,
 				this.ui,
@@ -3076,7 +3075,6 @@ export class InteractiveMode {
 				component.markExecutionStarted();
 			}
 			selectLatestToolExpandHint(this.chatContainer.children, component);
-			if (addLeadingSpace) this.chatContainer.addChild(new Spacer(1));
 			this.chatContainer.addChild(component);
 			this.pendingTools.set(latestToolCall.id, component);
 			this.registerIpythonToolComponent(latestToolCall.name, latestToolCall.id, component);
@@ -6829,13 +6827,13 @@ export class InteractiveMode {
 				// Render tool call components
 				for (const content of message.content) {
 					if (content.type === "toolCall") {
-						const addLeadingSpace = shouldAddLeadingSpaceBeforeToolExecution(this.chatContainer.children);
 						const component = new ToolExecutionComponent(
 							content.name,
 							content.id,
 							content.arguments,
 							{
 								showImages: this.settingsManager.getShowImages(),
+								shouldAddLeadingSpace: createConversationSpacing(this.chatContainer.children).shouldAddToolLeadingSpace,
 								includeImageDimensions: false,
 							},
 							this.getCachedToolDefinition(content.name),
@@ -6847,7 +6845,6 @@ export class InteractiveMode {
 						component.setExpanded(this.toolOutputExpanded);
 						component.setEditDiffsExpanded(this.editDiffsExpanded);
 						selectLatestToolExpandHint(this.chatContainer.children, component);
-						if (addLeadingSpace) this.chatContainer.addChild(new Spacer(1));
 						this.chatContainer.addChild(component);
 						this.registerIpythonToolComponent(content.name, content.id, component);
 
