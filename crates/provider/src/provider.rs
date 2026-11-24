@@ -104,6 +104,12 @@ pub type UsageObserver = Arc<dyn Fn(&Usage) + Send + Sync>;
 #[allow(clippy::double_must_use)]
 #[async_trait]
 pub trait ModelProviderSDK: Send + Sync {
+    /// Transparent metering wrappers may expose the underlying provider instance
+    /// so an auxiliary request can reuse a prefix only on the same backend.
+    fn prompt_cache_backend(&self) -> Option<&Arc<dyn ModelProviderSDK>> {
+        None
+    }
+
     /// Whether this adapter is locally configured for requests. This never probes
     /// the service; unavailable placeholders must override it to return false.
     fn is_available(&self) -> bool {

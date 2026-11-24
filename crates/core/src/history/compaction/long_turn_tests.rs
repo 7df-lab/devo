@@ -55,6 +55,7 @@ async fn ten_thousand_tool_steps_keep_one_checkpoint_and_both_human_instructions
                 &Checkpoint,
                 &config,
                 &pins,
+                /*prefix*/ None,
                 /*cancel_token*/ None,
             )
             .await

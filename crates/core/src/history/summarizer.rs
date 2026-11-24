@@ -88,6 +88,16 @@ impl HistorySummarizer for DefaultHistorySummarizer {
             reasoning_effort: None,
             extra_body: None,
         };
+        self.complete(request, cancel_token).await
+    }
+}
+
+impl DefaultHistorySummarizer {
+    pub(crate) async fn complete(
+        &self,
+        request: ModelRequest,
+        cancel_token: Option<&CancellationToken>,
+    ) -> Result<String, CompactionError> {
         debug!(
             model = %self.request_model,
             message_count = request.messages.len(),
@@ -118,6 +128,20 @@ impl HistorySummarizer for DefaultHistorySummarizer {
                 return Err(CompactionError::SummarizationFailed { message: err_msg });
             }
         };
+
+        debug!(
+            input_tokens = response.usage.input_tokens,
+            cached_input_tokens = ?response.usage.cache_read_input_tokens,
+            "compaction provider usage"
+        );
+        if response.content.iter().any(|block| {
+            matches!(
+                block,
+                ResponseContent::ToolUse { .. } | ResponseContent::HostedToolUse { .. }
+            )
+        }) {
+            return Err(CompactionError::EmptyResponse);
+        }
 
         let mut text = String::new();
         let mut saw_text = false;

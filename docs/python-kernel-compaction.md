@@ -1,5 +1,13 @@
 # Session history and Python after compaction
 
+## Rolling compaction during a tool turn
+
+Before the next model call, Devo budgets for both the assembled input and the requested output. A completed tool batch can trigger compaction during the same user turn. The ordinary cut keeps recent history within a target of one quarter of the input budget, capped at 20,000 tokens. The user's current instructions and incomplete tool batches survive verbatim.
+
+When the main model and summarizer share a backend, Devo can summarize a prefix of the last successful request in that turn. The request keeps the original system prompt, local tool definitions, locked inputs and matching history, followed by a text-only summary instruction. The summary output allowance is reserved in the window. A local estimate or a provider context error can move the cut to an earlier complete tool batch. Only records covered by the successful summary are replaced. Newer records remain available to the next main request.
+
+The isolated summarizer handles cold starts, manual compaction, different backends, hosted tools, incompatible request overrides and history that cannot be folded with a usable prefix. It can split oversized evidence and install the checkpoint after every fragment succeeds. Inference servers decide which prefix blocks are resident. The compaction call's provider usage supplies the cached input count when available.
+
 ## Read earlier messages and tool results
 
 In the Python kernel, `await rlm.history.search("error text", kind="tool_result")` returns literal, case-sensitive matches on the current session's active branch, newest first. Omit the query to browse a kind. Supported kinds are `user`, `host`, `assistant`, `tool_call`, `tool_result`, `command`, `file_change`, `hosted_tool`, `plan` and `summary`. Each match has a stable `item_id`, a preview and a Unicode character offset. Use `before=next_before` to fetch older matches. The default page contains up to six matches, with a maximum of 20.

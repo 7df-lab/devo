@@ -91,6 +91,7 @@ use crate::context::turn_aborted::TurnAborted;
 use crate::history::ContextView;
 use crate::history::History;
 use crate::history::TokenInfo;
+use crate::history::compaction::prefix::AcceptedPrefix;
 use crate::response_item::ResponseItem;
 
 const SUBAGENT_MODE_REMINDER: &str = include_str!("../../prompts/subagent_mode_reminder.md");
@@ -378,6 +379,12 @@ pub async fn query(
         .as_ref()
         .unwrap_or(&provider)
         .clone();
+    let same_compaction_backend = Arc::ptr_eq(
+        provider.prompt_cache_backend().unwrap_or(&provider),
+        compaction_provider
+            .prompt_cache_backend()
+            .unwrap_or(&compaction_provider),
+    );
     let restricted_runtime = registry.model_tool_allowlist().map(|names| {
         let names = names.iter().map(String::as_str).collect::<Vec<_>>();
         runtime.restricted_to_specs(&names)
@@ -422,6 +429,9 @@ pub async fn query(
         .clone()
         .expect("session context should be initialized");
     let prefetched_user_inputs = session_context.prefix_user_inputs();
+    let mut locked_messages = Vec::new();
+    crate::history::prepend_user_inputs(&mut locked_messages, &prefetched_user_inputs);
+    let mut accepted_prefix = None;
 
     let mut retry_count: usize = 0;
     let mut pending_usage = Some(session.last_turn_tokens);
@@ -482,6 +492,7 @@ pub async fn query(
             let live = live.lock().expect("live settings mutex poisoned");
             if live.generation != applied_live_generation {
                 if let Some(config) = &live.turn_config {
+                    accepted_prefix = None;
                     active_turn_config = config.clone();
                 }
                 if let Some(limit) = live.auto_compact_token_limit {
@@ -614,10 +625,8 @@ pub async fn query(
                 session_context.environment.cwd.display().to_string(),
             ),
         };
-        let mut messages = history.for_prompt_with_prefix(
-            &prefetched_user_inputs,
-            &active_turn_config.model.input_modalities,
-        );
+        let mut messages = history.for_prompt(&active_turn_config.model.input_modalities);
+        messages.splice(..0, locked_messages.iter().cloned());
         // Internal registries may retain handlers for server-side operations, but
         // only the Python kernel schema is ever sent to a model provider.
         let model_registry = registry.restricted_to_specs(&["ipython"]);
@@ -701,6 +710,7 @@ pub async fn query(
                         turn_user_inputs: &turn_user_inputs,
                         journal: options.journal.as_deref(),
                         provider: &compaction_provider,
+                        accepted_prefix: accepted_prefix.as_ref(),
                         model_slug: &catalog_request_model,
                         request_model: &request.model,
                         max_tokens: request.max_tokens,
@@ -717,6 +727,7 @@ pub async fn query(
                     return Err(AgentError::Aborted);
                 }
                 if compacted {
+                    accepted_prefix = None;
                     session.turn_count -= 1;
                     continue;
                 }
@@ -767,6 +778,11 @@ pub async fn query(
                 .map_err(AgentError::Provider)?;
         }
 
+        let candidate = if same_compaction_backend {
+            AcceptedPrefix::capture(&request, &locked_messages)
+        } else {
+            None
+        };
         let assembled = match run_provider_attempt(
             provider.as_ref(),
             request,
@@ -778,6 +794,7 @@ pub async fn query(
         .await
         {
             Ok(assembled) => {
+                accepted_prefix = candidate;
                 retry_count = 0;
                 overflow_compactions = OVERFLOW_COMPACTION_KINDS.into_iter();
                 assembled
@@ -810,6 +827,7 @@ pub async fn query(
                                 turn_user_inputs: &turn_user_inputs,
                                 journal: options.journal.as_deref(),
                                 provider: &compaction_provider,
+                                accepted_prefix: accepted_prefix.as_ref(),
                                 model_slug: &retry_compaction_model_slug,
                                 request_model: &retry_compaction_request_model,
                                 max_tokens: active_turn_config.model.max_tokens.unwrap_or(4096)
@@ -829,6 +847,7 @@ pub async fn query(
                         if !compacted {
                             return Err(AgentError::Provider(retry_error));
                         }
+                        accepted_prefix = None;
                         session.turn_count -= 1;
                         continue;
                     }

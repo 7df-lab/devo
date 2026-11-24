@@ -295,6 +295,14 @@ struct InstrumentedProvider {
 
 #[async_trait]
 impl ModelProviderSDK for InstrumentedProvider {
+    fn prompt_cache_backend(&self) -> Option<&Arc<dyn ModelProviderSDK>> {
+        Some(
+            self.provider
+                .prompt_cache_backend()
+                .unwrap_or(&self.provider),
+        )
+    }
+
     async fn completion(&self, request: ModelRequest) -> Result<ModelResponse> {
         let mut attempt = CallAttemptGuard::new(
             self.ledger.clone(),

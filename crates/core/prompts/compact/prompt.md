@@ -1,4 +1,4 @@
-You are performing a CONTEXT CHECKPOINT COMPACTION. Create a handoff summary for another LLM that will resume the task.
+You are performing a CONTEXT CHECKPOINT COMPACTION. Create a text-only handoff summary for another LLM that will resume the task. Summarize the historical evidence already provided. Do not call tools or continue the task.
 
 Include:
 - The current task, progress and decisions. Distinguish completed actions from plans.

@@ -493,14 +493,15 @@ impl ServerRuntime {
         // turn cleanly.  The tool-execution cancel guard already handles the
         // "cancel during tools" case.
         let result = {
+            let backend = runtime_context.provider_for_route(turn_config.provider_route.clone());
             let provider = self.usage_ledger.instrumented_provider(
-                runtime_context.provider_for_route(turn_config.provider_route.clone()),
+                Arc::clone(&backend),
                 session_id,
                 Some(turn_id),
                 devo_protocol::native::usage::UsagePurpose::TurnQuery,
             );
             let compaction_provider = self.usage_ledger.instrumented_provider(
-                runtime_context.provider_for_route(turn_config.provider_route.clone()),
+                backend,
                 session_id,
                 Some(turn_id),
                 devo_protocol::native::usage::UsagePurpose::Compaction,

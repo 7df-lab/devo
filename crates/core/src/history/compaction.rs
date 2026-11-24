@@ -6,6 +6,7 @@ mod chunks;
 #[cfg(test)]
 mod long_turn_tests;
 mod overflow;
+pub(crate) mod prefix;
 mod references;
 use overflow::is_user_input;
 pub(crate) use overflow::is_user_message;
@@ -173,7 +174,16 @@ pub async fn compact_history(
     config: &CompactionConfig,
     cancel_token: Option<&CancellationToken>,
 ) -> Result<CompactAction, CompactionError> {
-    compact_history_with_inputs(items, token_info, summarizer, config, &[], cancel_token).await
+    compact_history_with_inputs(
+        items,
+        token_info,
+        summarizer,
+        config,
+        &[],
+        /*prefix*/ None,
+        cancel_token,
+    )
+    .await
 }
 
 /// Locate the exact resolved parts, in chronological order, in this checkpoint.
@@ -199,6 +209,7 @@ pub(crate) async fn compact_history_with_inputs(
     summarizer: &dyn HistorySummarizer,
     config: &CompactionConfig,
     turn_user_inputs: &[ResponseItem],
+    prefix: Option<prefix::PrefixAttempt<'_>>,
     cancel_token: Option<&CancellationToken>,
 ) -> Result<CompactAction, CompactionError> {
     // For auto compaction, skip if already within budget.
@@ -249,18 +260,34 @@ pub(crate) async fn compact_history_with_inputs(
             }
         }
     };
-    let keep = |index: usize| index >= boundary || pinned.contains(&index);
-    if (0..boundary).all(keep) {
+    let Some(first_replaced) = (0..boundary).find(|i| !pinned.contains(i)) else {
         return Ok(CompactAction::Skipped);
-    }
+    };
     // Include the original instruction when it lies in the selected prefix so
     // the summarizer can tell which results matter. It also survives verbatim.
-    let summary = chunks::summarize(
-        summarizer,
-        summarizer_request_messages(&items[..boundary]),
-        cancel_token,
-    )
-    .await?;
+    let messages = summarizer_request_messages(&items[..boundary]);
+    let cached = match prefix {
+        Some(prefix) => {
+            prefix
+                .summarize(
+                    items,
+                    &safe_boundaries,
+                    boundary,
+                    first_replaced,
+                    &messages,
+                    cancel_token,
+                )
+                .await?
+        }
+        None => None,
+    };
+    let (boundary, summary) = match cached {
+        Some(result) => result,
+        None => (
+            boundary,
+            chunks::summarize(summarizer, messages, cancel_token).await?,
+        ),
+    };
     if cancel_token.is_some_and(CancellationToken::is_cancelled) {
         return Err(CompactionError::Canceled);
     }
@@ -270,7 +297,7 @@ pub(crate) async fn compact_history_with_inputs(
         items
             .iter()
             .enumerate()
-            .filter(|(i, _)| keep(*i))
+            .filter(|(i, _)| *i >= boundary || pinned.contains(i))
             .map(|(_, item)| item.clone()),
     );
     Ok(CompactAction::Replaced(compacted))

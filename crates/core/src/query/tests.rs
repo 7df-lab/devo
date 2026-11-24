@@ -1,5 +1,6 @@
 //! Unit tests for the query loop and its submodules.
 
+mod compaction_prefix;
 mod rolling_compaction;
 
 use devo_protocol::Usage;
@@ -1131,6 +1132,7 @@ fn compaction_req<'a>(
         turn_user_inputs: &[],
         journal: None,
         provider,
+        accepted_prefix: None,
         model_slug: "compaction-model",
         request_model: "compaction-request-model",
         max_tokens: 4096,

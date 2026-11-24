@@ -10,6 +10,7 @@ use tracing::{info, warn};
 use crate::SessionState;
 use crate::durable_execution::{ExecutionCounters, ExecutionRecord, ToolIntentJournal};
 use crate::history::TokenInfo;
+use crate::history::compaction::prefix::{AcceptedPrefix, PrefixAttempt};
 use crate::history::compaction::{
     CompactAction, CompactionConfig, CompactionKind, compact_history_with_inputs,
     estimated_history_tokens,
@@ -51,6 +52,7 @@ pub(super) fn requested_output_tokens(request: &ModelRequest, wire: ProviderWire
 pub(super) struct CompactionModelRequest<'a> {
     pub(super) turn_user_inputs: &'a [crate::ResponseItem],
     pub(super) journal: Option<&'a dyn ToolIntentJournal>,
+    pub(super) accepted_prefix: Option<&'a AcceptedPrefix>,
     pub(super) provider: &'a Arc<dyn ModelProviderSDK>,
     pub(super) model_slug: &'a str,
     pub(super) request_model: &'a str,
@@ -112,6 +114,12 @@ pub(super) async fn summarize_and_compact(
             &summarizer,
             &config,
             model.turn_user_inputs,
+            model.accepted_prefix.map(|source| PrefixAttempt {
+                source,
+                summarizer: &summarizer,
+                config: &config,
+                max_tokens,
+            }),
             cancel_token,
         )
         .await
