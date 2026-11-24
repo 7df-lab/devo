@@ -12,6 +12,7 @@ from .bash import BashChunk, BashHandle, BashRead, BashResult, bash
 from .shell import shell
 from .harness import HarnessEntry, HarnessScope, HarnessState, RefinementEvent, get_harness_state
 from .factory import FactoryNamespace
+from . import history
 
 _NOT_CALLABLE_MESSAGE = "'rlm' is not callable; spawn a child with: handle = await rlm.spawn('sub-task', name='worker')"
 _RENAMED_RUN_MESSAGE = "rlm.run was renamed; spawn a child with: handle = await rlm.spawn('sub-task', name='worker')"
@@ -454,6 +455,7 @@ factory = FactoryNamespace()
 
 
 class _RLMNamespace:
+    history = history
     shell = staticmethod(shell)
     harness = _harness_state
     factory = factory
@@ -535,6 +537,7 @@ class _NotCallableModule(types.ModuleType):
 sys.modules[__name__].__class__ = _NotCallableModule
 
 __all__ = [
+    "history",
     "BashHandle",
     "BashResult",
     "BashRead",

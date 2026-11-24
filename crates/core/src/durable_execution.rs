@@ -33,6 +33,9 @@ pub enum ExecutionRecord {
     },
     PromptCheckpoint {
         items: Vec<ResponseItem>,
+        /// Absolute indices of resolved human input parts in the resulting prompt.
+        #[serde(default, skip_serializing_if = "Vec::is_empty")]
+        turn_input_indices: Vec<usize>,
         #[serde(default)]
         counters: Option<ExecutionCounters>,
     },
@@ -45,6 +48,9 @@ pub enum ExecutionRecord {
     LegCheckpoint {
         from: usize,
         items: Vec<ResponseItem>,
+        /// Absolute indices of resolved human input parts in the resulting prompt.
+        #[serde(default, skip_serializing_if = "Vec::is_empty")]
+        turn_input_indices: Vec<usize>,
         #[serde(default)]
         counters: Option<ExecutionCounters>,
     },
@@ -131,6 +137,7 @@ pub struct ExecutionReplay {
     pub recovery: Option<RecoveryState>,
     pub items: Vec<ResponseItem>,
     pub has_checkpoint: bool,
+    pub turn_input_indices: Vec<usize>,
     committed: std::collections::HashMap<String, ResponseItem>,
 }
 
@@ -181,7 +188,12 @@ impl ExecutionReplay {
             }
             ExecutionRecord::IntentBatch { calls } => ("call", calls),
             ExecutionRecord::Outcomes { results } => ("result", results),
-            ExecutionRecord::PromptCheckpoint { items, counters } => {
+            ExecutionRecord::PromptCheckpoint {
+                items,
+                counters,
+                turn_input_indices,
+            } => {
+                self.turn_input_indices.clone_from(turn_input_indices);
                 self.counters.clone_from(counters);
                 self.items.clone_from(items);
                 self.has_checkpoint = true;
@@ -191,13 +203,15 @@ impl ExecutionReplay {
                 from,
                 items,
                 counters,
+                turn_input_indices,
             } => {
-                self.counters.clone_from(counters);
                 anyhow::ensure!(
                     *from <= self.items.len(),
                     "leg checkpoint base {from} exceeds replay length {}",
                     self.items.len()
                 );
+                self.turn_input_indices.clone_from(turn_input_indices);
+                self.counters.clone_from(counters);
                 self.items.truncate(*from);
                 self.items.extend(items.iter().cloned());
                 self.has_checkpoint = true;
@@ -480,16 +494,19 @@ mod tests {
         let tail = vec![call_item("c")];
         let delta_replay = replay_of(&[
             ExecutionRecord::PromptCheckpoint {
+                turn_input_indices: Vec::new(),
                 items: prompt_a.clone(),
                 counters: None,
             },
             ExecutionRecord::LegCheckpoint {
+                turn_input_indices: Vec::new(),
                 from: prompt_a.len(),
                 items: tail,
                 counters: None,
             },
         ]);
         let full_replay = replay_of(&[ExecutionRecord::PromptCheckpoint {
+            turn_input_indices: Vec::new(),
             items: vec![call_item("a"), call_item("b"), call_item("c")],
             counters: None,
         }]);
@@ -502,10 +519,12 @@ mod tests {
     fn leg_checkpoint_replaces_tail_not_appends() {
         let replay = replay_of(&[
             ExecutionRecord::PromptCheckpoint {
+                turn_input_indices: Vec::new(),
                 items: vec![call_item("a"), call_item("b"), call_item("c")],
                 counters: None,
             },
             ExecutionRecord::LegCheckpoint {
+                turn_input_indices: Vec::new(),
                 from: 1,
                 items: vec![call_item("x")],
                 counters: None,
@@ -519,10 +538,12 @@ mod tests {
     #[test]
     fn leg_checkpoint_beyond_replay_length_is_rejected() {
         let mut replay = replay_of(&[ExecutionRecord::PromptCheckpoint {
+            turn_input_indices: Vec::new(),
             items: vec![call_item("a")],
             counters: None,
         }]);
         let result = replay.apply(&ExecutionRecord::LegCheckpoint {
+            turn_input_indices: Vec::new(),
             from: 5,
             items: vec![call_item("b")],
             counters: None,
@@ -594,6 +615,7 @@ mod tests {
                 calls: vec![call_item("a")],
             },
             ExecutionRecord::PromptCheckpoint {
+                turn_input_indices: Vec::new(),
                 items: vec![call_item("a"), call_item("b")],
                 counters: Some(ExecutionCounters {
                     turn_count: 1,
@@ -607,6 +629,7 @@ mod tests {
                 }),
             },
             ExecutionRecord::LegCheckpoint {
+                turn_input_indices: Vec::new(),
                 from: 1,
                 items: vec![call_item("x")],
                 counters: Some(ExecutionCounters {
@@ -701,15 +724,18 @@ mod tests {
                 calls: vec![call_item("before")],
             },
             ExecutionRecord::PromptCheckpoint {
+                turn_input_indices: Vec::new(),
                 items: vec![call_item("first"), call_item("second")],
                 counters: Some(counters(2)),
             },
             ExecutionRecord::LegCheckpoint {
+                turn_input_indices: Vec::new(),
                 from: 1,
                 items: vec![call_item("delta")],
                 counters: Some(counters(3)),
             },
             ExecutionRecord::PromptCheckpoint {
+                turn_input_indices: Vec::new(),
                 items: vec![call_item("final")],
                 counters: Some(counters(4)),
             },
@@ -804,6 +830,7 @@ mod tests {
             last_turn_tokens: total,
         };
         let checkpoint = |names: &[&str], total: usize| ExecutionRecord::PromptCheckpoint {
+            turn_input_indices: Vec::new(),
             items: names.iter().map(|name| call_item(name)).collect(),
             counters: Some(counters(total)),
         };
@@ -832,6 +859,7 @@ mod tests {
             turn_id: other,
             summary_item_id: devo_protocol::native::ids::ItemId::new(),
             preserved_item_ids: Vec::new(),
+            prompt_messages: None,
             context_occupancy: None,
         };
 
@@ -910,6 +938,7 @@ mod tests {
                 seq: 0,
                 entry: InternalRecord::Execution {
                     record: ExecutionRecord::PromptCheckpoint {
+                        turn_input_indices: Vec::new(),
                         items: vec![call_item("a")],
                         counters: None,
                     },
@@ -922,6 +951,7 @@ mod tests {
                 turn_id: TurnId::new(),
                 summary_item_id: ItemId::new(),
                 preserved_item_ids: Vec::new(),
+                prompt_messages: None,
                 context_occupancy: None,
             },
         ];

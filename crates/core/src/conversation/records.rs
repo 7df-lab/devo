@@ -511,7 +511,7 @@ pub struct SessionTitleUpdatedLine {
 }
 
 /// Stores one compaction snapshot reference in the rollout file.
-#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
+#[derive(Debug, Clone, PartialEq, Serialize, Deserialize)]
 pub struct CompactionSnapshotLine {
     /// The time when this rollout line was persisted.
     pub timestamp: DateTime<Utc>,
@@ -523,6 +523,9 @@ pub struct CompactionSnapshotLine {
     pub summary_item_id: ItemId,
     /// The pre-existing item ids that remain after compaction, in prompt order.
     pub preserved_item_ids: Vec<ItemId>,
+    /// Exact installed prompt, including resolved input and provider-specific blocks.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub prompt_messages: Option<Vec<crate::Message>>,
     /// Post-compaction context occupancy, when computed.
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub context_occupancy: Option<devo_protocol::native::item::ContextOccupancy>,
@@ -1174,6 +1177,7 @@ mod tests {
             turn_id: TurnId::new(),
             summary_item_id: ItemId::new(),
             preserved_item_ids: vec![ItemId::new(), ItemId::new(), ItemId::new()],
+            prompt_messages: None,
             context_occupancy: Some(
                 devo_protocol::native::item::ContextOccupancy::from_category_tokens(
                     /*context_window_tokens*/ 80_000, /*base*/ 8_000,
@@ -1196,6 +1200,7 @@ mod tests {
             turn_id: TurnId::new(),
             summary_item_id: ItemId::new(),
             preserved_item_ids: vec![ItemId::new()],
+            prompt_messages: None,
             context_occupancy: None,
         };
         let mut value = serde_json::to_value(&snapshot).expect("serialize");

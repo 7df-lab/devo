@@ -49,6 +49,7 @@ const LOCAL_WEB_SEARCH_CONFIG_KEY: &str = "__devo_local_web_search";
 /// Per-turn host capability context shared by kernel `host_request` handlers.
 pub(crate) struct HostBridge {
     pub session_id: SessionId,
+    pub history_events: Option<tokio::sync::mpsc::WeakSender<super::turn_exec::TurnStreamEvent>>,
     pub turn_id: Option<TurnId>,
     pub cwd: PathBuf,
     /// Session artifact directory (parent of rollout JSONL); harness local store root.
@@ -81,6 +82,7 @@ impl HostBridge {
     pub(crate) fn for_tests(session_id: impl Into<SessionId>) -> Self {
         Self {
             session_id: session_id.into(),
+            history_events: None,
             turn_id: None,
             cwd: std::env::temp_dir(),
             session_dir: None,

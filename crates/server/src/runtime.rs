@@ -131,6 +131,7 @@ mod kernel_host_agent_message;
 mod kernel_host_bridge;
 mod kernel_host_controls;
 mod kernel_host_goal;
+mod kernel_host_history;
 mod kernel_host_models;
 mod kernel_host_schedule;
 mod kernel_host_session;

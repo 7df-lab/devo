@@ -1,9 +1,9 @@
-You are performing a CONTEXT CHECKPOINT COMPACTION. Create a handoff summary for another LLM that will resume the task.
+You are performing a CONTEXT CHECKPOINT COMPACTION. Create a text-only handoff summary for another LLM that will resume the task. Summarize the historical evidence already provided. Do not call tools or continue the task.
 
 Include:
-- Current progress and key decisions made
+- The current task, progress and decisions. Distinguish completed actions from plans.
 - Important context, constraints, or user preferences
 - What remains to be done (clear next steps)
-- Any critical data, examples, or references needed to continue
+- Tool actions already attempted, their observed effects or errors, and any file paths, job IDs or other references needed to verify or continue the work. Copy identifiers exactly when available. Include the call IDs for results worth revisiting, especially evidence for decisions and unresolved errors.
 
 Be concise, structured, and focused on helping the next LLM seamlessly continue the work.

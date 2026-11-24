@@ -41,7 +41,7 @@ fn assert_timeout(error: &anyhow::Error) {
         Some(ProviderError::ProviderTimeoutError { .. })
     ));
     assert!(matches!(
-        super::super::provider_retry_decision(error, &mut 0, &mut false),
+        super::super::provider_retry_decision(error, &mut 0),
         super::super::provider_retry::ProviderRetryDecision::RetryAfter(_)
     ));
 }

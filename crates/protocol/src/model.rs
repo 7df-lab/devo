@@ -70,7 +70,7 @@ pub struct SamplingControls {
 }
 
 /// A message in the request to the model.
-#[derive(Debug, Clone, Serialize, Deserialize)]
+#[derive(Debug, Clone, PartialEq, Serialize, Deserialize)]
 pub struct RequestMessage {
     pub role: String,
     pub content: Vec<RequestContent>,
@@ -125,7 +125,7 @@ pub struct ToolDefinition {
 }
 
 /// A content block within a message sent to the model.
-#[derive(Debug, Clone, Serialize, Deserialize)]
+#[derive(Debug, Clone, PartialEq, Serialize, Deserialize)]
 #[serde(tag = "type")]
 pub enum RequestContent {
     #[serde(rename = "text")]

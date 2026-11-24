@@ -86,6 +86,7 @@ pub fn legacy_compaction_line_from_native(
     turn_id: &CanonicalTurnId,
     summary_item_id: &CanonicalItemId,
     preserved_item_ids: &[CanonicalItemId],
+    prompt_messages: Option<Vec<crate::Message>>,
     context_occupancy: Option<devo_protocol::native::item::ContextOccupancy>,
 ) -> Result<LegacyRolloutLine, NativeReplayError> {
     Ok(LegacyRolloutLine::CompactionSnapshot(Box::new(
@@ -98,6 +99,7 @@ pub fn legacy_compaction_line_from_native(
                 .iter()
                 .map(legacy_item_id)
                 .collect::<Result<_, _>>()?,
+            prompt_messages,
             context_occupancy,
         },
     )))

@@ -7,8 +7,13 @@ use crate::Message;
 use crate::Role;
 use crate::SessionState;
 
-pub(super) fn push_pending_input(session: &mut SessionState, pending: &[PendingInputItem]) {
+pub(super) fn push_pending_input(
+    session: &mut SessionState,
+    pending: &[PendingInputItem],
+) -> Vec<crate::ResponseItem> {
+    let mut human = Vec::new();
     for item in pending {
+        let start = session.prompt_source_messages().len();
         if let Some(origin) = item.host_message_origin() {
             let text = match &item.kind {
                 devo_protocol::PendingInputKind::UserText { text } => text,
@@ -74,7 +79,20 @@ pub(super) fn push_pending_input(session: &mut SessionState, pending: &[PendingI
                 ));
             }
         }
+        if matches!(
+            item.kind,
+            devo_protocol::PendingInputKind::UserText { .. }
+                | devo_protocol::PendingInputKind::UserInput { .. }
+        ) {
+            human.extend(
+                session.prompt_source_messages()[start..]
+                    .iter()
+                    .cloned()
+                    .flat_map(crate::response_item::message_to_response_items),
+            );
+        }
     }
+    human
 }
 
 #[cfg(test)]

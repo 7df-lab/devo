@@ -171,18 +171,30 @@ impl ProviderError {
     }
 }
 
+/// Recognize context overflow reported as generic validation errors by compatible servers.
+pub fn is_context_limit_message(message: &str) -> bool {
+    let message = message.to_ascii_lowercase();
+    [
+        "maximum context length",
+        "context_length_exceeded",
+        "context_too_long",
+        "context limit exceeded",
+        "prompt is too long",
+        "prompt too long",
+        "input is too long",
+    ]
+    .iter()
+    .any(|marker| message.contains(marker))
+        || (message.contains("context window")
+            && (message.contains("exceeded") || message.contains("too long")))
+}
+
 pub(crate) fn context_limit_error(
     message: String,
     error_kind: Option<&str>,
     error_code: Option<&str>,
 ) -> Option<ProviderError> {
-    let normalized_message = message.to_ascii_lowercase();
-    let message_matches = normalized_message.contains("maximum context length")
-        || normalized_message.contains("context_length_exceeded")
-        || normalized_message.contains("context_too_long")
-        || (normalized_message.contains("context window")
-            && (normalized_message.contains("exceeded")
-                || normalized_message.contains("too long")));
+    let message_matches = is_context_limit_message(&message);
     let metadata_matches = [error_kind, error_code]
         .into_iter()
         .flatten()

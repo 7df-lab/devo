@@ -315,14 +315,10 @@ impl ActiveTurnRegistry {
     pub(crate) async fn spawn_snapshot_for_session(
         &self,
         session_id: SessionId,
-    ) -> Option<SpawnSnapshot> {
+    ) -> Option<Arc<SpawnSnapshot>> {
         let turns = self.turns.lock().await;
         let execution = turns.get(&session_id)?;
-        execution
-            .spawn_snapshots
-            .values()
-            .next()
-            .map(|snapshot| (**snapshot).clone())
+        execution.spawn_snapshots.values().next().cloned()
     }
 
     pub(crate) async fn register_stream(

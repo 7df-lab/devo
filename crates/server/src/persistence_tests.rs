@@ -261,6 +261,7 @@ fn replay_prefers_compaction_occupancy_over_prior_turn() {
                 turn_id,
                 summary_item_id: ItemId::new(),
                 preserved_item_ids: Vec::new(),
+                prompt_messages: None,
                 context_occupancy: Some(compact_occupancy.clone()),
             },
         )))
@@ -1301,18 +1302,17 @@ fn prompt_messages_rebuild_from_compaction_snapshot_without_trimming_transcript(
         ),
     ];
 
-    let prompt_messages = build_prompt_messages_from_snapshot(
-        &persisted_turn_items,
-        &CompactionSnapshotLine {
-            timestamp: Utc::now(),
-            session_id: SessionId::new(),
-            turn_id: TurnId::new(),
-            summary_item_id,
-            preserved_item_ids: vec![preserved_item_id],
-            context_occupancy: None,
-        },
-    )
-    .expect("prompt messages");
+    let snapshot = CompactionSnapshotLine {
+        timestamp: Utc::now(),
+        session_id: SessionId::new(),
+        turn_id: TurnId::new(),
+        summary_item_id,
+        preserved_item_ids: vec![preserved_item_id],
+        prompt_messages: None,
+        context_occupancy: None,
+    };
+    let prompt_messages =
+        build_prompt_messages_from_snapshot(&persisted_turn_items, &snapshot).unwrap();
 
     assert_eq!(
         prompt_messages,
@@ -1321,6 +1321,32 @@ fn prompt_messages_rebuild_from_compaction_snapshot_without_trimming_transcript(
             Message::user("latest user"),
             Message::assistant_text("latest assistant"),
         ]
+    );
+    let exact = vec![
+        Message::user("<compaction_summary>summary</compaction_summary>"),
+        Message::user("resolved input part one"),
+        Message::user("resolved input part two"),
+        Message {
+            role: devo_core::Role::Assistant,
+            content: vec![devo_core::ContentBlock::ProviderReasoning {
+                provider: "test".into(),
+                payload: serde_json::json!({"signature": "signed"}),
+            }],
+        },
+    ];
+    let snapshot = CompactionSnapshotLine {
+        prompt_messages: Some(exact.clone()),
+        ..snapshot
+    };
+    let mut expected = exact;
+    expected.push(Message::assistant_text("latest assistant"));
+    assert_eq!(
+        build_prompt_messages_from_snapshot(&persisted_turn_items, &snapshot),
+        Some(expected)
+    );
+    assert_eq!(
+        build_prompt_messages_from_snapshot(&persisted_turn_items[..1], &snapshot),
+        None
     );
 }
 
@@ -1439,6 +1465,7 @@ fn compaction_resume_rebuild_preserves_tool_request_with_its_result() {
             turn_id: TurnId::new(),
             summary_item_id,
             preserved_item_ids,
+            prompt_messages: None,
             context_occupancy: None,
         },
     )

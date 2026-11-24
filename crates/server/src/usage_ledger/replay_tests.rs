@@ -415,6 +415,7 @@ fn identical_query_counters_after_compaction_are_a_new_context_anchor() {
                 turn_id: TurnId::new(),
                 summary_item_id: devo_protocol::native::ids::ItemId::new(),
                 preserved_item_ids: Vec::new(),
+                prompt_messages: None,
                 context_occupancy: None,
             }],
         )

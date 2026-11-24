@@ -25,6 +25,7 @@ pub(crate) fn max_provider_retries() -> usize {
 
 const CONTEXT_TOO_LONG_MARKERS: &[&str] = &[
     "context_too_long",
+    "context_length_exceeded",
     "context length",
     "context window",
     "maximum context",
@@ -97,7 +98,13 @@ pub(crate) fn classify_error(e: &anyhow::Error) -> ErrorClass {
             ProviderError::ProviderServerError { .. } => return ErrorClass::ServerError,
             ProviderError::ContextLimitError { .. } => return ErrorClass::ContextTooLong,
             ProviderError::ModelNotFoundError { .. } => return ErrorClass::TaskNotFound,
-            ProviderError::InvalidRequestError { .. } => return ErrorClass::ParameterError,
+            ProviderError::InvalidRequestError { message, .. } => {
+                return if devo_provider::error::is_context_limit_message(message) {
+                    ErrorClass::ContextTooLong
+                } else {
+                    ErrorClass::ParameterError
+                };
+            }
             ProviderError::QuotaExceededError { .. }
             | ProviderError::ContentFilteredError { .. } => {
                 return ErrorClass::Unretryable;
@@ -146,7 +153,9 @@ pub(crate) fn classify_error(e: &anyhow::Error) -> ErrorClass {
     }
 
     let msg = e.to_string().to_lowercase();
-    if contains_any(&msg, CONTEXT_TOO_LONG_MARKERS) {
+    if e.chain()
+        .any(|cause| contains_any(&cause.to_string().to_lowercase(), CONTEXT_TOO_LONG_MARKERS))
+    {
         return ErrorClass::ContextTooLong;
     }
     if msg.contains("401")
@@ -263,17 +272,9 @@ pub(crate) fn classify_error(e: &anyhow::Error) -> ErrorClass {
 pub(crate) fn provider_retry_decision(
     error: &anyhow::Error,
     retry_count: &mut usize,
-    context_compacted: &mut bool,
 ) -> ProviderRetryDecision {
     match classify_error(error) {
-        ErrorClass::ContextTooLong => {
-            if *context_compacted {
-                ProviderRetryDecision::Fail
-            } else {
-                *context_compacted = true;
-                ProviderRetryDecision::CompactAndRetry
-            }
-        }
+        ErrorClass::ContextTooLong => ProviderRetryDecision::CompactAndRetry,
         ErrorClass::RateLimit => {
             if *retry_count >= MAX_RETRIES {
                 ProviderRetryDecision::Fail

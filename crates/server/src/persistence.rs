@@ -1492,6 +1492,25 @@ impl RolloutStore {
                 // rebuild is only the fallback for a snapshot that no longer
                 // resolves (e.g. a rollback dropped the summary item) — the
                 // same degradation `into_runtime_session` applies unscoped.
+                let compaction_snapshot = match compaction_snapshot {
+                    Some(snapshot) if path_ids.contains(&snapshot.summary_item_id) => {
+                        Some(snapshot)
+                    }
+                    _ => {
+                        let ids = recovered
+                            .persisted_turn_items
+                            .iter()
+                            .filter(|row| {
+                                matches!(
+                                    row.item,
+                                    devo_protocol::native::item::Item::ContextCompaction { .. }
+                                )
+                            })
+                            .map(|row| row.item_id)
+                            .collect();
+                        active_compaction_snapshot(rollout_path, session_id, ids).await
+                    }
+                };
                 let prompt_messages = compaction_snapshot
                     .as_ref()
                     .and_then(|snapshot| {
@@ -1501,6 +1520,7 @@ impl RolloutStore {
                         )
                     })
                     .unwrap_or(rebuilt_messages);
+                recovered.latest_compaction_snapshot = compaction_snapshot;
                 recovered
                     .core_session
                     .lock()
@@ -2580,6 +2600,7 @@ impl ReplayState {
                 turn_id,
                 summary_item_id,
                 preserved_item_ids,
+                prompt_messages,
                 context_occupancy,
                 ..
             } => self.apply_line(legacy_compaction_line_from_native(
@@ -2588,6 +2609,7 @@ impl ReplayState {
                 &turn_id,
                 &summary_item_id,
                 &preserved_item_ids,
+                prompt_messages,
                 context_occupancy,
             )?),
             RolloutLine::SessionRollback {
@@ -3519,6 +3541,22 @@ pub(crate) fn build_prompt_messages_from_snapshot(
             .is_some_and(|id| id == snapshot.summary_item_id)
     })?;
 
+    // The summary must be on the selected branch. Once located, restore the
+    // exact prompt and append only later active records. Native display rows
+    // cannot reconstruct multipart input, synthetic messages or signed reasoning.
+    if let Some(prompt) = &snapshot.prompt_messages {
+        let mut messages = prompt.clone();
+        let mut tool_names = HashMap::new();
+        let preserved: std::collections::HashSet<_> = snapshot.preserved_item_ids.iter().collect();
+        for row in &ordered_items[summary_index + 1..] {
+            if preserved.contains(&row.item_id) {
+                continue;
+            }
+            apply_prompt_native_item(&mut messages, &mut tool_names, row.item.clone());
+        }
+        return Some(messages);
+    }
+
     let mut by_item_id: HashMap<ItemId, PersistedTurnItem> = ordered_items
         .iter()
         .filter_map(|item| {
@@ -3565,47 +3603,62 @@ pub(crate) fn build_prompt_messages_from_snapshot(
 /// re-scope the transcript (tree navigate) read this so the compacted prompt
 /// survives the scope; a damaged or unreadable rollout yields `None` and the
 /// caller falls back to the linear rebuild.
-pub(crate) fn latest_compaction_snapshot_from_rollout(
+pub(crate) async fn active_compaction_snapshot(
     rollout_path: &Path,
+    session: SessionId,
+    summary_ids: HashSet<ItemId>,
 ) -> Option<CompactionSnapshotLine> {
-    let mut latest: Option<CompactionSnapshotLine> = None;
-    match visit_rollout_lines(rollout_path, "compaction snapshot scan", |line| {
-        if let RolloutLine::CompactionSnapshot {
-            timestamp,
-            session_id,
-            turn_id,
-            summary_item_id,
-            preserved_item_ids,
-            context_occupancy,
-            ..
-        } = line
-        {
-            latest = legacy_compaction_line_from_native(
-                timestamp,
-                &session_id,
-                &turn_id,
-                &summary_item_id,
-                &preserved_item_ids,
-                context_occupancy,
-            )
-            .ok()
-            .and_then(|line| match line {
-                LegacyRolloutLine::CompactionSnapshot(boxed) => Some(*boxed),
-                _ => None,
-            });
-        }
-        Ok(())
-    }) {
-        Ok(_) => latest,
-        Err(error) => {
-            tracing::warn!(
-                %error,
-                rollout = %rollout_path.display(),
-                "compaction snapshot scan failed; continuing without a snapshot"
-            );
-            None
-        }
+    if summary_ids.is_empty() {
+        return None;
     }
+    let rollout_path = rollout_path.to_path_buf();
+    tokio::task::spawn_blocking(move || {
+        let mut latest: Option<CompactionSnapshotLine> = None;
+        match visit_rollout_lines(&rollout_path, "compaction snapshot scan", |line| {
+            if let RolloutLine::CompactionSnapshot {
+                timestamp,
+                session_id,
+                turn_id,
+                summary_item_id,
+                preserved_item_ids,
+                prompt_messages,
+                context_occupancy,
+                ..
+            } = line
+                && session_id == session
+                && summary_ids.contains(&summary_item_id)
+            {
+                latest = legacy_compaction_line_from_native(
+                    timestamp,
+                    &session_id,
+                    &turn_id,
+                    &summary_item_id,
+                    &preserved_item_ids,
+                    prompt_messages,
+                    context_occupancy,
+                )
+                .ok()
+                .and_then(|line| match line {
+                    LegacyRolloutLine::CompactionSnapshot(boxed) => Some(*boxed),
+                    _ => None,
+                });
+            }
+            Ok(())
+        }) {
+            Ok(_) => latest,
+            Err(error) => {
+                tracing::warn!(
+                    %error,
+                    rollout = %rollout_path.display(),
+                    "compaction snapshot scan failed; continuing without a snapshot"
+                );
+                None
+            }
+        }
+    })
+    .await
+    .ok()
+    .flatten()
 }
 
 pub(crate) fn prompt_visible_persisted_turn_item(item: &PersistedTurnItem) -> bool {

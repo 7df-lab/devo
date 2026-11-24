@@ -49,6 +49,31 @@ pub async fn dispatch_host_request_with_bridge(bridge: &HostBridge, data: Value)
         action if action.starts_with("harness.") => {
             crate::runtime::kernel_host_bridge::handle_harness(bridge, action, &params).await
         }
+        "rlm.history.search" | "rlm.history.read" => {
+            let Some(runtime) = bridge.runtime() else {
+                return error_reply("session history is unavailable");
+            };
+            if let Some(events) = &bridge.history_events {
+                let Some(events) = events.upgrade() else {
+                    return error_reply("turn ended before history could be read");
+                };
+                let (tx, rx) = tokio::sync::oneshot::channel();
+                if events
+                    .send(super::turn_exec::TurnStreamEvent::HistoryBarrier(tx))
+                    .await
+                    .is_err()
+                    || rx.await.is_err()
+                {
+                    return error_reply("turn ended before history could be read");
+                }
+            }
+            match super::kernel_host_history::recall(&runtime, bridge.session_id, &action, params)
+                .await
+            {
+                Ok(result) => ok_result(result),
+                Err(message) => error_reply(message),
+            }
+        }
         "rlm.create_session" => super::kernel_host_session::create_session(bridge, &params).await,
         "rlm_schedule.list" => {
             let Some(runtime) = bridge.runtime() else {
@@ -547,6 +572,7 @@ mod tests {
         let bridge = HostBridge {
             session_id,
             turn_id: None,
+            history_events: None,
             cwd,
             session_dir: None,
             collaboration_mode: CollaborationMode::Build,

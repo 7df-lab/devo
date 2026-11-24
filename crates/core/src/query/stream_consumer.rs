@@ -40,6 +40,7 @@ pub(crate) struct AssembledModelTurn {
     pub has_hosted_tool_uses: bool,
     pub has_provider_reasoning: bool,
     pub has_visible_assistant_text: bool,
+    pub reported_context_tokens: Option<usize>,
 }
 
 /// Failure while creating or consuming a provider stream.
@@ -117,6 +118,7 @@ struct StreamAccumulation {
     emitted_hosted_tool_starts: HashSet<String>,
     emitted_hosted_tool_results: HashSet<String>,
     final_response: Option<ModelResponse>,
+    reported_context_tokens: Option<usize>,
     stop_reason: Option<StopReason>,
 }
 
@@ -142,6 +144,7 @@ async fn consume_provider_stream(
         emitted_hosted_tool_starts: HashSet::new(),
         emitted_hosted_tool_results: HashSet::new(),
         final_response: None,
+        reported_context_tokens: None,
         stop_reason: None,
     };
 
@@ -303,6 +306,7 @@ async fn consume_provider_stream(
                             }
                             if !missing.contains(&devo_protocol::native::usage::UsageField::TotalTokens) {
                                 session.last_turn_tokens = response.usage.display_total_tokens();
+                                acc.reported_context_tokens = Some(session.last_turn_tokens);
                             }
                         }
 
@@ -361,6 +365,7 @@ async fn assemble_model_turn(
         mut emitted_hosted_tool_starts,
         mut emitted_hosted_tool_results,
         final_response,
+        reported_context_tokens,
         stop_reason,
     } = acc;
     let mut response_assistant_content = Vec::new();
@@ -618,6 +623,7 @@ async fn assemble_model_turn(
     Ok(AssembledModelTurn {
         assistant_content,
         tool_calls,
+        reported_context_tokens,
         stop_reason,
         has_hosted_tool_uses,
         has_provider_reasoning: has_provider_reasoning_content,

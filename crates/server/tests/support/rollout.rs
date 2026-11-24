@@ -110,6 +110,7 @@ pub fn read_rollout_records(path: &Path) -> Result<Vec<LegacyRolloutLine>> {
                 turn_id,
                 summary_item_id,
                 preserved_item_ids,
+                prompt_messages,
                 context_occupancy,
                 ..
             } => out.push(legacy_compaction_line_from_native(
@@ -118,6 +119,7 @@ pub fn read_rollout_records(path: &Path) -> Result<Vec<LegacyRolloutLine>> {
                 &turn_id,
                 &summary_item_id,
                 &preserved_item_ids,
+                prompt_messages,
                 context_occupancy,
             )?),
             RolloutLine::SessionRollback {

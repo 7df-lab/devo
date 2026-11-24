@@ -5,7 +5,7 @@ use pretty_assertions::assert_eq;
 use std::collections::HashMap;
 
 use super::context_compaction::{completed_event, failed_item_notification, started_event};
-use super::event_stream::enqueue_query_event;
+use super::event_stream::{TurnStreamEvent, enqueue_query_event};
 use super::trace::QueryEventDeliveryPolicy;
 use super::trace::query_event_delivery_policy;
 use devo_protocol::native::event::ServerNotification;
@@ -275,9 +275,9 @@ fn live_only_apply_patch_start_item_stays_tool_call() {
 async fn provider_retry_status_waits_for_channel_capacity() {
     let (event_tx, mut event_rx) = tokio::sync::mpsc::channel(1);
     event_tx
-        .send(devo_core::QueryEvent::Usage {
+        .send(TurnStreamEvent::Query(devo_core::QueryEvent::Usage {
             usage: devo_protocol::Usage::default(),
-        })
+        }))
         .await
         .expect("fill event channel");
     let retry_status = devo_core::ProviderRetryStatus {
@@ -298,11 +298,11 @@ async fn provider_retry_status_waits_for_channel_capacity() {
     assert!(!enqueue.is_finished());
     assert!(matches!(
         event_rx.recv().await,
-        Some(devo_core::QueryEvent::Usage { .. })
+        Some(TurnStreamEvent::Query(devo_core::QueryEvent::Usage { .. }))
     ));
     enqueue.await.expect("enqueue retry event");
     let received_status = match event_rx.recv().await {
-        Some(devo_core::QueryEvent::ProviderRetryStatus(status)) => status,
+        Some(TurnStreamEvent::Query(devo_core::QueryEvent::ProviderRetryStatus(status))) => status,
         Some(_) | None => panic!("expected provider retry status"),
     };
     assert_eq!(received_status, retry_status);
@@ -399,7 +399,9 @@ fn high_volume_query_events_are_best_effort() {
 async fn terminal_usage_delta_waits_for_channel_capacity() {
     let (event_tx, mut event_rx) = tokio::sync::mpsc::channel(1);
     event_tx
-        .send(devo_core::QueryEvent::TextDelta("busy".into()))
+        .send(TurnStreamEvent::Query(devo_core::QueryEvent::TextDelta(
+            "busy".into(),
+        )))
         .await
         .unwrap();
     let usage = devo_protocol::Usage {
@@ -422,11 +424,13 @@ async fn terminal_usage_delta_waits_for_channel_capacity() {
     assert!(!enqueue.is_finished());
     assert!(matches!(
         event_rx.recv().await,
-        Some(devo_core::QueryEvent::TextDelta(_))
+        Some(TurnStreamEvent::Query(devo_core::QueryEvent::TextDelta(_)))
     ));
     enqueue.await.unwrap();
     match event_rx.recv().await {
-        Some(devo_core::QueryEvent::UsageDelta { usage }) => assert_eq!(usage, expected),
+        Some(TurnStreamEvent::Query(devo_core::QueryEvent::UsageDelta { usage })) => {
+            assert_eq!(usage, expected)
+        }
         other => panic!("expected terminal usage delta, got {other:?}"),
     }
 }
@@ -476,9 +480,11 @@ async fn failed_query_terminal_zero_replaces_earlier_sample_under_backpressure()
     };
     let expected = devo_protocol::native::usage::TurnUsage::from_provider_usage(&terminal);
     let (tx, rx) = tokio::sync::mpsc::channel(1);
-    tx.send(devo_core::QueryEvent::UsageDelta { usage: earlier })
-        .await
-        .unwrap();
+    tx.send(TurnStreamEvent::Query(devo_core::QueryEvent::UsageDelta {
+        usage: earlier,
+    }))
+    .await
+    .unwrap();
     let mut terminal_enqueue = Box::pin(enqueue_query_event(
         &tx,
         devo_core::QueryEvent::UsageDelta { usage: terminal },

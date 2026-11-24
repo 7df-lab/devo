@@ -429,6 +429,14 @@ impl SessionState {
             .unwrap_or(self.messages.as_slice())
     }
 
+    pub(crate) fn prompt_items(&self) -> Vec<crate::ResponseItem> {
+        self.prompt_source_messages()
+            .iter()
+            .cloned()
+            .flat_map(crate::message_to_response_items)
+            .collect()
+    }
+
     pub fn set_prompt_messages(&mut self, messages: Vec<Message>) {
         self.prompt_messages = Some(messages);
     }

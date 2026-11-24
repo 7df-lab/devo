@@ -24,7 +24,7 @@ pub(crate) struct TurnModelQueryParams<'a> {
     pub collaboration_mode: devo_protocol::CollaborationMode,
     pub input_mode: super::super::TurnInputMode,
     pub usage_parent_session_id: Option<devo_core::SessionId>,
-    pub event_tx: mpsc::Sender<QueryEvent>,
+    pub event_tx: mpsc::Sender<super::TurnStreamEvent>,
 }
 
 impl ServerRuntime {
@@ -89,6 +89,7 @@ impl ServerRuntime {
         } else if !matches!(input_mode, super::super::TurnInputMode::Recovery) {
             state.core.clear_active_goal();
         }
+        let input_start = state.core.prompt_source_messages().len();
         if input_mode.emits_user_message() {
             if let Some(origin) = input_mode.host_origin() {
                 state
@@ -97,6 +98,42 @@ impl ServerRuntime {
             } else {
                 push_resolved_user_input(&mut state.core, input, input_messages, input_images);
             }
+        }
+        let mut turn_user_inputs = Vec::new();
+        match input_mode {
+            super::super::TurnInputMode::VisibleUserMessage => {
+                turn_user_inputs
+                    .extend_from_slice(&state.core.prompt_source_messages()[input_start..]);
+            }
+            super::super::TurnInputMode::Recovery | super::super::TurnInputMode::ApprovalResume => {
+                // Older checkpoints lack resolved input positions. Native text is a
+                // fallback hint; current checkpoints restore the exact text and images.
+                let stream = state.stream.lock().await;
+                let live = stream
+                    .turn_inline
+                    .iter()
+                    .flat_map(|t| &t.persisted_turn_items);
+                let mut seen = std::collections::HashSet::new();
+                for record in state.persisted_turn_items.iter().chain(live) {
+                    if record.turn_id == turn_id
+                        && let devo_protocol::native::item::Item::UserMessage {
+                            origin: None,
+                            content,
+                            ..
+                        } = &record.item
+                        && seen.insert(record.item_id)
+                    {
+                        turn_user_inputs.extend(content.iter().filter_map(|part| match part {
+                            devo_protocol::native::item::UserInput::Text { text } => {
+                                Some(Message::user(text.clone()))
+                            }
+                            _ => None,
+                        }));
+                    }
+                }
+            }
+            super::super::TurnInputMode::HostMessage(_)
+            | super::super::TurnInputMode::HiddenGoalContinuation { .. } => {}
         }
         let event_callback_tx = event_tx.clone();
         let callback: devo_core::EventCallback = std::sync::Arc::new(move |event: QueryEvent| {
@@ -325,6 +362,7 @@ impl ServerRuntime {
         if let Some(ref kernel) = kernel {
             let host_bridge = Arc::new(super::super::kernel_host_bridge::HostBridge {
                 session_id,
+                history_events: Some(event_tx.downgrade()),
                 turn_id: Some(turn_id),
                 cwd: state.core.cwd.clone(),
                 session_dir: session_dir.clone(),
@@ -455,14 +493,15 @@ impl ServerRuntime {
         // turn cleanly.  The tool-execution cancel guard already handles the
         // "cancel during tools" case.
         let result = {
+            let backend = runtime_context.provider_for_route(turn_config.provider_route.clone());
             let provider = self.usage_ledger.instrumented_provider(
-                runtime_context.provider_for_route(turn_config.provider_route.clone()),
+                Arc::clone(&backend),
                 session_id,
                 Some(turn_id),
                 devo_protocol::native::usage::UsagePurpose::TurnQuery,
             );
             let compaction_provider = self.usage_ledger.instrumented_provider(
-                runtime_context.provider_for_route(turn_config.provider_route.clone()),
+                backend,
                 session_id,
                 Some(turn_id),
                 devo_protocol::native::usage::UsagePurpose::Compaction,
@@ -475,6 +514,7 @@ impl ServerRuntime {
                 &runtime,
                 Some(callback),
                 QueryOptions {
+                    turn_user_inputs,
                     inbox_boundary: Some({
                         let runtime = Arc::clone(self);
                         Arc::new(move || {
