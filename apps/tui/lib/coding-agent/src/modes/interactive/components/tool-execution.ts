@@ -34,6 +34,8 @@ export interface ToolExecutionOptions {
 	showImages?: boolean;
 	/** Whether image metadata may parse dimensions from base64 data. */
 	includeImageDimensions?: boolean;
+	/** Recheck transcript spacing when preceding thinking is shown or hidden. */
+	shouldAddLeadingSpace?: () => boolean;
 }
 
 export interface ToolExecutionRendererDefinition {
@@ -198,6 +200,7 @@ export class ToolExecutionComponent extends Container {
 	private showExpandHint = true;
 	private showImages: boolean;
 	private includeImageDimensions: boolean;
+	private readonly shouldAddLeadingSpace?: () => boolean;
 	private isPartial = true;
 	private toolDefinition?: ToolExecutionDefinition;
 	private builtInToolDefinition?: ToolDefinition<any, any>;
@@ -233,6 +236,7 @@ export class ToolExecutionComponent extends Container {
 		this.builtInToolDefinition = createReplayBuiltInToolDefinition(toolName, cwd, toolDefinition);
 		this.showImages = options.showImages ?? true;
 		this.includeImageDimensions = options.includeImageDimensions ?? true;
+		this.shouldAddLeadingSpace = options.shouldAddLeadingSpace;
 		this.ui = ui;
 		this.cwd = cwd;
 
@@ -506,7 +510,9 @@ export class ToolExecutionComponent extends Container {
 		if (this.isStatusAnimating() && !this.usesSelfRenderShell()) {
 			this.contentPanel.setHeader(this.panelHeader());
 		}
-		return super.render(width);
+		const lines = super.render(width);
+		if (lines.length && this.shouldAddLeadingSpace?.()) lines.unshift("");
+		return lines;
 	}
 
 	private isStatusAnimating(): boolean {

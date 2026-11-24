@@ -65,7 +65,9 @@ try {
   mux(["new-session", "-d", "-s", session, "-c", repo, "-x", "100", "-y", "30", "-e", `DEVO_HOME=${home}`, "-e", `DEVO_CODING_AGENT_DIR=${home}`, "-e", `PRIME_AGENT_CODING_AGENT_DIR=${home}`, "-e", "DEVO_PROTOCOL_TRACE=1", "-e", `DEVO_PROTOCOL_TRACE_FILE=${trace}`, "--", binary]);
   await waitFor("trust", text => text.includes("Trust this workspace?"));
   mux(["send-keys", "-t", session, "Down", "Enter"]);
-  await waitFor("default Details", text => text.includes("Details") && text.includes("Scheduled"));
+  await waitFor("default Collapsed", text => text.includes("Collapsed mode") && text.includes("Scheduled"));
+  mux(["send-keys", "-t", session, "C-o"]);
+  await waitFor("switch to Details for Python streaming", text => text.includes("Details mode"));
   for (const width of [100, 40]) {
     mux(["resize-window", "-t", session, "-x", String(width), "-y", "30"]);
     const before = requestCount;

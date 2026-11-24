@@ -74,6 +74,7 @@ export interface WarningSettings {
 }
 
 export type TransportSetting = Transport;
+export type ConversationDetailSetting = "collapsed" | "details" | "expanded";
 
 /**
  * Package source for npm/git packages.
@@ -163,6 +164,7 @@ export interface Settings {
 	images?: ImageSettings;
 	enabledModels?: string[]; // Model patterns for cycling (same format as --models CLI flag)
 	treeFilterMode?: "default" | "no-tools" | "user-only" | "labeled-only" | "all"; // Default: "user-only"
+	conversationDetail?: ConversationDetailSetting; // User-level TUI transcript detail preference; default: collapsed
 	thinkingBudgets?: ThinkingBudgetsSettings; // Custom token budgets for thinking levels
 	editorPaddingX?: number; // Horizontal padding for input editor (default: 0)
 	autocompleteMaxVisible?: number; // Max visible items in autocomplete dropdown (default: 5)
@@ -1254,6 +1256,21 @@ export class SettingsManager {
 		this.globalSettings.treeFilterMode = mode;
 		this.markModified("treeFilterMode");
 		this.save();
+	}
+
+	readConversationDetail(): ConversationDetailSetting {
+		const loaded = SettingsManager.tryLoadFromStorage(this.storage, "global");
+		if (!loaded.error) {
+			this.globalSettings.conversationDetail = loaded.settings.conversationDetail;
+		}
+		const detail = this.globalSettings.conversationDetail;
+		return detail === "details" || detail === "expanded" ? detail : "collapsed";
+	}
+
+	setConversationDetail(detail: ConversationDetailSetting): void {
+		// Save this field before another session can open, and report errors to the caller.
+		this.persistScopedSettings("global", { conversationDetail: detail }, new Set(["conversationDetail"]), new Map());
+		this.globalSettings.conversationDetail = detail;
 	}
 
 	getShowHardwareCursor(): boolean {
