@@ -48,7 +48,7 @@ for (stage of ["read", "resize"]) {
       pendingMessagesContainer: { clear: noop }, queuedMessagesContainer: { clear: noop },
       queueSelection: { reset: noop }, liveImageMarkerIds: () => new Set(),
       discardRefineLoader: noop, activityTracker: { reset: noop }, resetPendingToolState: noop,
-      agentRunFileChanges: new Map(), renderRecap: noop, ipythonToolComponents: new Map(),
+      renderRecap: noop, ipythonToolComponents: new Map(),
       lateIpythonSentAgentMessages: new Map(), resetSubagentSummary: noop,
       setGoalAnnouncementBaseline: noop, syncGoalTray: noop, getGoalState: () => null,
       renderInitialMessages: async () => {}, updatePendingMessagesDisplay: noop,
