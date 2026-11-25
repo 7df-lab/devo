@@ -2,6 +2,7 @@ import assert from "node:assert/strict";
 import { test } from "node:test";
 import type { AgentMessage } from "@earendil-works/pi-agent-core";
 import type { AssistantMessage } from "@earendil-works/pi-ai";
+import { Container } from "@earendil-works/pi-tui";
 import {
   createAgentSessionMessage,
   startsAgentRun,
@@ -10,6 +11,7 @@ import type { CustomMessage } from "../lib/coding-agent/src/core/messages.js";
 import type { AgentConnectionSessionEvent } from "../lib/coding-agent/src/modes/agent-connection/types.js";
 import { AgentActivityTracker } from "../lib/coding-agent/src/modes/interactive/agent-activity.js";
 import { InteractiveMode } from "../lib/coding-agent/src/modes/interactive/interactive-mode.js";
+import { initTheme } from "../lib/coding-agent/src/modes/interactive/theme/theme.js";
 import type { HostMessageDelivery, HostMessageSource } from "./generated/protocol/native.js";
 import { createStreamState, nativeNotificationToPiEvents } from "./native-to-pi/events.js";
 import { nativeItemToAgentMessages } from "./native-to-pi/messages.js";
@@ -44,7 +46,6 @@ function assistantMessage(timestamp: number, stopReason: AssistantMessage["stopR
 
 interface ActivityHarness {
   activityTracker: AgentActivityTracker;
-  agentRunFileChanges: Map<string, string>;
   turnStartedAt: number | undefined;
   workingStartedAt: number | undefined;
   displayedMessages: AgentMessage[];
@@ -62,7 +63,6 @@ function activityHarness(): ActivityHarness {
   Object.assign(mode, {
     isInitialized: true,
     activityTracker: tracker,
-    agentRunFileChanges: new Map([["previous.ts", "previous run"]]),
     turnStartedAt: undefined,
     workingStartedAt: 1500,
     displayedMessages: [],
@@ -79,6 +79,35 @@ function activityHarness(): ActivityHarness {
   });
   return mode;
 }
+
+test("workspace changes do not add a count row above the prompt", async () => {
+  initTheme("dark", false);
+  const mode = activityHarness();
+  const recapContainer = new Container();
+  const renderRecap = Object.getOwnPropertyDescriptor(InteractiveMode.prototype, "renderRecap")!.value;
+  Object.assign(mode, {
+    recapContainer,
+    renderRecap,
+    sessionRecap: "Session recap stays visible",
+    getPromptContextLabel: () => "Context status",
+  });
+  renderRecap.call(mode);
+  const before = recapContainer.render(100);
+  assert.match(before.join("\n"), /Recap: Session recap stays visible/);
+  assert.match(before.join("\n"), /Context status/);
+
+  await mode.handleEvent({
+    type: "workspace_file_changes",
+    changes: Array.from({ length: 55 }, (_, index) => ({
+      path: `file-${index}.ts`,
+      added: index === 0 ? 14 : 0,
+      removed: index === 0 ? 77729 : 1,
+    })),
+    replace: true,
+  });
+
+  assert.deepEqual(recapContainer.render(100), before);
+});
 
 for (const source of ["agent", "backgroundTask", "schedule"] as const) {
   for (const delivery of ["followUp", "steer"] as const) {
@@ -97,7 +126,6 @@ for (const source of ["agent", "backgroundTask", "schedule"] as const) {
       const followUp = delivery === "followUp";
       assert.deepEqual({
         status: mode.activityTracker.getStatus(),
-        fileChanges: [...mode.agentRunFileChanges],
         turnStartedAt: mode.turnStartedAt,
         workingStartedAt: mode.workingStartedAt,
         shortcutClears: mode.shortcutClears,
@@ -105,7 +133,6 @@ for (const source of ["agent", "backgroundTask", "schedule"] as const) {
         displayedMessages: mode.displayedMessages,
       }, {
         status: { activity: followUp ? "waiting" : "executing", direction: "up", tokens: followUp ? 0 : 64 },
-        fileChanges: followUp ? [] : [["previous.ts", "previous run"]],
         turnStartedAt: followUp ? 2000 : undefined,
         workingStartedAt: followUp ? 2000 : 1500,
         shortcutClears: followUp ? 1 : 0,

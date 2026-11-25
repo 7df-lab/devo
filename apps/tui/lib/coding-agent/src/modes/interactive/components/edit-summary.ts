@@ -121,12 +121,3 @@ export function formatFileChangeSummaryLine(
 	const path = truncateToWidth(displayPath, available, "…");
 	return truncateToWidth(`${prefix}${theme.fg("muted", path)}${counts}`, safeWidth, "");
 }
-
-export function formatTotalChangeSummary(changes: readonly FileChangeSummary[]): string {
-	const totals = changes.reduce(
-		(sum, change) => ({ added: sum.added + change.added, removed: sum.removed + change.removed }),
-		{ added: 0, removed: 0 },
-	);
-	const files = `${changes.length} file${changes.length === 1 ? "" : "s"} changed`;
-	return `${theme.fg("muted", files)}${theme.fg("dim", " | ")}${formatChangeCounts(totals)}`;
-}

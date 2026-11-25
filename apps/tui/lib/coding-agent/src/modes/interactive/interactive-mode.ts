@@ -44,7 +44,6 @@ import {
 	Spacer,
 	setKeybindings,
 	Text,
-	TruncatedText,
 	TUI,
 	truncateToWidth,
 	visibleWidth,
@@ -216,7 +215,6 @@ import { CustomMessageComponent } from "./components/custom-message.js";
 import { DaxnutsComponent } from "./components/daxnuts.js";
 import { DynamicBorder } from "./components/dynamic-border.js";
 import { EarendilAnnouncementComponent } from "./components/earendil-announcement.js";
-import { type FileChangeSummary, formatTotalChangeSummary } from "./components/edit-summary.js";
 import { ExtensionDialogQueue } from "./components/extension-dialog-queue.js";
 import { ExtensionEditorComponent } from "./components/extension-editor.js";
 import { ExtensionInputComponent } from "./components/extension-input.js";
@@ -788,7 +786,6 @@ export class InteractiveMode {
 	private startedToolCalls = new Set<string>();
 	private pendingToolGeneration = 0;
 	private toolDefinitionCache = new Map<string, ToolExecutionDefinition | undefined>();
-	private agentRunFileChanges = new Map<string, FileChangeSummary>();
 
 	// One summary line below the editor, backed by the existing child-status stream.
 	private subagentSummaryLine: SubagentSummaryLine;
@@ -2911,7 +2908,6 @@ export class InteractiveMode {
 		this.pendingBashComponents = [];
 		this.activityTracker.reset();
 		this.resetPendingToolState();
-		this.agentRunFileChanges.clear();
 		this.renderRecap();
 		this.ipythonToolComponents.clear();
 		this.lateIpythonSentAgentMessages.clear();
@@ -3544,13 +3540,6 @@ export class InteractiveMode {
 	private renderRecap(): void {
 		if (!this.recapContainer) return;
 		this.recapContainer.clear();
-		// Show as soon as tools report file changes (not only after agent_end).
-		const showChanges = this.agentRunFileChanges.size > 0;
-		if (showChanges) {
-			this.recapContainer.addChild(
-				new TruncatedText(formatTotalChangeSummary([...this.agentRunFileChanges.values()]), 1, 0),
-			);
-		}
 		this.recapContainer.addChild(
 			new PromptContextLine(
 				() => this.sessionRecap,
@@ -5550,7 +5539,6 @@ export class InteractiveMode {
 				isHostFollowUpMessage(event.message))
 		) {
 			this.clearShortcutGuide();
-			this.agentRunFileChanges.clear();
 			this.renderRecap();
 		}
 		this.activityTracker.handleEvent(event);
@@ -5852,34 +5840,11 @@ export class InteractiveMode {
 			case "tool_execution_end": {
 				const component = this.pendingTools.get(event.toolCallId);
 				if (component) {
-					// Per-tool file diffs live on the component result (ipython details.diffs /
-					// edit details.diff). Do NOT merge into agentRunFileChanges — that map is
-					// workspace-level only (turn/uncommitted), updated via workspace_file_changes.
 					component.updateResult({ ...event.result, isError: event.isError });
 					this.pendingTools.delete(event.toolCallId);
 					this.startedToolCalls.delete(event.toolCallId);
 					this.ui.requestRender();
 				}
-				break;
-			}
-
-			case "workspace_file_changes": {
-				// Workspace-level accumulated view (turn baseline or uncommitted).
-				if (event.replace) {
-					this.agentRunFileChanges.clear();
-				}
-				for (const change of event.changes) {
-					if (change.added === 0 && change.removed === 0) continue;
-					const existing = this.agentRunFileChanges.get(change.path);
-					if (existing) {
-						existing.added = change.added;
-						existing.removed = change.removed;
-					} else {
-						this.agentRunFileChanges.set(change.path, { ...change });
-					}
-				}
-				this.renderRecap();
-				this.ui.requestRender();
 				break;
 			}
 
@@ -5893,12 +5858,6 @@ export class InteractiveMode {
 				this.ui.requestRender();
 				break;
 			}
-
-			case "turn_end":
-				// Workspace-level recap is owned exclusively by `workspace_file_changes`
-				// (turn / uncommitted reads). Do not fold per-tool diffs into that map —
-				// those stay on the tool result (`details.diffs` / `details.diff`).
-				break;
 
 			case "agent_end":
 				if (this.settingsManager.getShowTerminalProgress()) {
